@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub struct ReduceCharacterization {
     pub terminal: TerminalID,
     pub nonterminal: NonTerminalID,
-    // (revealed_state, pop_n, nonterminal)
+    // (revealed_state, len, nonterminal)
     pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
     // (revealed_state, goto_state, shift_state)
     pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
@@ -18,8 +18,8 @@ impl Display for ReduceCharacterization {
         writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
         if !self.reveal_and_rereduces.is_empty() {
             writeln!(f, "      Reveal-and-rereduces:")?;
-            for (revealed, pop, nt) in &self.reveal_and_rereduces {
-                writeln!(f, "        - revealed: {}, pop: {}, reduce_nt: {}", revealed.0, pop, nt.0)?;
+            for (revealed, len, nt) in &self.reveal_and_rereduces {
+                writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?;
             }
         }
         if !self.reveal_goto_shift_escapes.is_empty() {
@@ -37,7 +37,7 @@ pub struct BelowBottomCharacterization {
     pub terminal: TerminalID,
     // (initial_state, shift_state)
     pub initial_shifts: BTreeSet<(StateID, StateID)>,
-    // (initial_state, pop_n, nonterminal)
+    // (initial_state, len, nonterminal)
     pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
     pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
 }

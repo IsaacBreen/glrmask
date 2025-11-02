@@ -160,9 +160,9 @@ pub fn build_augmented_nwa_from_characterization(
             .get(nt)
             .expect("reduce_characterizations only contains existing nonterminals");
 
-        // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
+        // Reveal-and-rereduces: chain of `len` transitions. The first is on `revealed_state`,
         // and the rest are default.
-        for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
+        for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
             let ch = encode_symbol(revealed_state)?;
             let dst_nt = *nt_nodes
                 .get(&reduce_nt)
@@ -170,13 +170,13 @@ pub fn build_augmented_nwa_from_characterization(
             let mut from = src_nt;
 
             // The first transition is on the specific character.
-            let next_state = if pop_n == 0 { dst_nt } else { nwa.add_state() };
+            let next_state = if len == 0 { dst_nt } else { nwa.add_state() };
             nwa.add_transition(from, ch, next_state, w_all.clone());
             from = next_state;
 
             // The rest are default transitions.
-            for i in 0..pop_n {
-                let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };
+            for i in 0..len {
+                let to = if i == len - 1 { dst_nt } else { nwa.add_state() };
                 nwa.add_default_transition(from, to, w_all.clone());
                 from = to;
             }

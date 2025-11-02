@@ -2,7 +2,11 @@ local_system:
   attached_files:
     - src/weighted_automata.rs
     - src/precompute4/augmented_nwa.rs
-  conversation_file: conversation.yaml
+    - src/precompute4/characterize.rs
+    - src/precompute4/conversion.rs
+    - src/precompute4/full_nwa.rs
+    - src/precompute4/mod.rs
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/weighted_automata.rs: |
@@ -1788,8 +1792,10 @@ local_system:
       ///   - from start, on symbol (initial_state), go to end_state; add
       ///     [initial_state, shift_state] into end_map[end_state].
       /// - For initial reduces (initial_state, len, nt):
-      ///   - create a chain of (len - 1) edges labeled (initial_state) ending at the `nt` node.
-      ///     If len == 1, go directly to the `nt` node.
+      ///   - create a chain of `len` transitions from `start` to the `nt` node.
+      ///   - The first transition is on `initial_state`.
+      ///   - The following `len - 1` transitions are unconditional (default) transitions
+      ///     through intermediate states.
       /// - For each nonterminal’s reduce characterization:
       ///   - For reveal-and-rereduces (revealed_state, pop_n, reduce_nt):
       ///     create a chain of pop_n edges labeled (revealed_state) from the `nt` node to `reduce_nt` node.
@@ -1822,20 +1828,24 @@ local_system:
               end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
           }
 
-          // Initial reduces: chain of (len - 1) edges labeled by the initial_state, ending at the nt node.
+          // Initial reduces: create a chain of `len` transitions. The first is on `initial_state`,
+          // and the rest are default transitions. The chain ends at the `nt` node.
           for &(initial_state, len, nt) in &bb.initial_reduces {
               let ch = encode_symbol(initial_state)?;
               let target_nt = *nt_nodes
                   .get(&nt)
                   .expect("nonterminal node must exist (created from parser.non_terminal_map)");
               let mut from = start;
-              for i in 0..=len {
-                  let to = if i == len {
-                      target_nt
-                  } else {
-                      nwa.add_state()
-                  };
-                  nwa.add_transition(from, ch, to, w_all.clone());
+
+              // The first transition is on the specific character.
+              let next_state = if len == 0 { target_nt } else { nwa.add_state() };
+              nwa.add_transition(from, ch, next_state, w_all.clone());
+              from = next_state;
+
+              // The rest are default transitions.
+              for i in 0..len {
+                  let to = if i == len - 1 { target_nt } else { nwa.add_state() };
+                  nwa.add_default_transition(from, to, w_all.clone());
                   from = to;
               }
           }
@@ -1846,21 +1856,24 @@ local_system:
                   .get(nt)
                   .expect("reduce_characterizations only contains existing nonterminals");
 
-              // Reveal-and-rereduces: chain of `pop_n` edges from `src_nt` to the node for `reduce_nt`,
-              // all labeled with `revealed_state`.
+              // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
+              // and the rest are default.
               for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
                   let ch = encode_symbol(revealed_state)?;
                   let dst_nt = *nt_nodes
                       .get(&reduce_nt)
                       .expect("reduce target nonterminal must exist");
                   let mut from = src_nt;
-                  for i in 0..=pop_n {
-                      let to = if i == pop_n {
-                          dst_nt
-                      } else {
-                          nwa.add_state()
-                      };
-                      nwa.add_transition(from, ch, to, w_all.clone());
+
+                  // The first transition is on the specific character.
+                  let next_state = if pop_n == 0 { dst_nt } else { nwa.add_state() };
+                  nwa.add_transition(from, ch, next_state, w_all.clone());
+                  from = next_state;
+
+                  // The rest are default transitions.
+                  for i in 0..pop_n {
+                      let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };
+                      nwa.add_default_transition(from, to, w_all.clone());
                       from = to;
                   }
               }
@@ -2398,6 +2411,403 @@ local_system:
               assert_eq!(self_nwa, expected_aug_nwa);
           }
       }
+    src/precompute4/characterize.rs: |
+      use crate::glr::parser::GLRParser;
+      use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
+      use std::fmt::{Display, Formatter};
+      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      pub struct ReduceCharacterization {
+          pub terminal: TerminalID,
+          pub nonterminal: NonTerminalID,
+          // (revealed_state, pop_n, nonterminal)
+          pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
+          // (revealed_state, goto_state, shift_state)
+          pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
+      }
+
+      impl Display for ReduceCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
+              if !self.reveal_and_rereduces.is_empty() {
+                  writeln!(f, "      Reveal-and-rereduces:")?;
+                  for (revealed, pop, nt) in &self.reveal_and_rereduces {
+                      writeln!(f, "        - revealed: {}, pop: {}, reduce_nt: {}", revealed.0, pop, nt.0)?;
+                  }
+              }
+              if !self.reveal_goto_shift_escapes.is_empty() {
+                  writeln!(f, "      Reveal-goto-shift escapes:")?;
+                  for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
+                      writeln!(f, "        - revealed: {}, goto: {}, shift: {}", revealed.0, goto.0, shift.0)?;
+                  }
+              }
+              Ok(())
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct BelowBottomCharacterization {
+          pub terminal: TerminalID,
+          // (initial_state, shift_state)
+          pub initial_shifts: BTreeSet<(StateID, StateID)>,
+          // (initial_state, pop_n, nonterminal)
+          pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
+          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+      }
+
+      impl Display for BelowBottomCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
+              if !self.initial_shifts.is_empty() {
+                  writeln!(f, "  Initial Shifts:")?;
+                  for (initial, shift) in &self.initial_shifts {
+                      writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
+                  }
+              }
+              if !self.initial_reduces.is_empty() {
+                  writeln!(f, "  Initial Reduces:")?;
+                  for (initial, len, nt) in &self.initial_reduces {
+                      writeln!(f, "    - initial: {}, len: {}, nt: {}", initial.0, len, nt.0)?;
+                  }
+              }
+              if !self.reduce_characterizations.is_empty() {
+                  writeln!(f, "  Reduce Characterizations:")?;
+                  for rc in self.reduce_characterizations.values() {
+                      write!(f, "{}", rc)?;
+                  }
+              }
+              Ok(())
+          }
+      }
+
+      pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
+          let mut all_chars = BTreeMap::new();
+          for &terminal_id in parser.terminal_map.right_values() {
+              all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
+          }
+          all_chars
+      }
+
+      pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
+          let mut char = BelowBottomCharacterization {
+              terminal: terminal_id,
+              initial_shifts: BTreeSet::new(),
+              initial_reduces: BTreeSet::new(),
+              reduce_characterizations: BTreeMap::new(),
+          };
+
+          // --- 1. Compute initial actions ---
+          for (&initial_state, row) in &parser.table {
+              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
+                  match action {
+                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
+                          char.initial_shifts.insert((initial_state, *shift_state));
+                      }
+                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                          if *len > 0 {
+                              char.initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                          }
+                      }
+                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                          if let Some(shift_state) = shift {
+                              char.initial_shifts.insert((initial_state, *shift_state));
+                          }
+                          for (len, nts) in reduces {
+                              if *len > 0 {
+                                  for (nt_id, _) in nts {
+                                      char.initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // --- 2. Compute reduce characterizations ---
+          for &nt_id in parser.non_terminal_map.right_values() {
+              let mut reduce_char = ReduceCharacterization {
+                  terminal: terminal_id,
+                  nonterminal: nt_id,
+                  reveal_and_rereduces: BTreeSet::new(),
+                  reveal_goto_shift_escapes: BTreeSet::new(),
+              };
+
+              // Iterate over all possible revealed states
+              for (&revealed_state, row) in &parser.table {
+                  // Check if this state has a GOTO for our non-terminal
+                  if let Some(goto) = row.gotos.get(&nt_id) {
+                      if let Some(goto_state) = goto.state_id {
+                          // This is a valid starting point for a chain.
+                          let mut worklist: VecDeque<StateID> = VecDeque::new();
+                          worklist.push_back(goto_state);
+                          let mut visited: BTreeSet<StateID> = BTreeSet::new();
+                          visited.insert(goto_state);
+
+                          while let Some(current_state) = worklist.pop_front() {
+                              if let Some(action) = parser.table.get(&current_state).and_then(|r| r.shifts_and_reduces_full.get(&terminal_id)) {
+                                  match action {
+                                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
+                                          reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
+                                      }
+                                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
+                                          if *len == 1 {
+                                              // Unit reduction chain
+                                              if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
+                                                  if let Some(next_goto_state) = next_goto.state_id {
+                                                      if visited.insert(next_goto_state) {
+                                                          worklist.push_back(next_goto_state);
+                                                      }
+                                                  }
+                                              }
+                                          } else if *len > 1 {
+                                              // Pop below revealed state
+                                              reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
+                                          }
+                                      }
+                                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                          if let Some(shift_state) = shift {
+                                              reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
+                                          }
+                                          for (len, nts) in reduces {
+                                              for (reduce_nt, _) in nts {
+                                                  if *len == 1 {
+                                                      if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
+                                                          if let Some(next_goto_state) = next_goto.state_id {
+                                                              if visited.insert(next_goto_state) {
+                                                                  worklist.push_back(next_goto_state);
+                                                              }
+                                                          }
+                                                      }
+                                                  } else if *len > 1 {
+                                                      reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              if !reduce_char.reveal_and_rereduces.is_empty() || !reduce_char.reveal_goto_shift_escapes.is_empty() {
+                  char.reduce_characterizations.insert(nt_id, reduce_char);
+              }
+          }
+
+          char
+      }
+    src/precompute4/conversion.rs: |
+      // src/precompute4/conversion.rs
+      use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
+      use crate::datastructures::trie::Trie;
+      use crate::weighted_automata::{DWA, StateID as WaStateID, Weight as WaWeight};
+      use std::collections::BTreeMap;
+
+      pub fn dwa_to_precompute3(
+          dwa: &DWA,
+          trie3_god: &Trie3GodWrapper,
+          _internal_max_llm_token: usize,
+          max_parser_state_id: usize,
+      ) -> PrecomputeNode3Index {
+          let mut dwa_state_to_trie_node: BTreeMap<WaStateID, PrecomputeNode3Index> = BTreeMap::new();
+          let all_parser_states = StateIDBV::ones(max_parser_state_id + 1);
+
+          // Create all nodes first
+          for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+              let live_tokens = LLMTokenBV::from(dwa_state.weight.0.clone());
+              // All nodes from DWA states are internal; a shared 'end_node' will represent final states.
+              let contents = PrecomputedNodeContents { end: false, live_tokens };
+              let trie_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(contents)));
+              dwa_state_to_trie_node.insert(dwa_id, trie_node);
+          }
+
+          let end_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::leaf())));
+
+          // Create edges
+          for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+              let src_trie_node = *dwa_state_to_trie_node.get(&dwa_id).unwrap();
+
+              // Edge to the shared end node for final states
+              if let Some(final_weight) = &dwa_state.final_weight {
+                  let final_weight_bv = LLMTokenBV::from(final_weight.0.clone());
+                  if !final_weight_bv.is_empty() {
+                      let edge_key = (0, final_weight_bv); // pop 0
+                      let edge_val = all_parser_states.clone();
+                      trie3_god.insert_edge_simple(src_trie_node, end_node, edge_key, edge_val);
+                  }
+              }
+
+              let mut handled_exceptions = StateIDBV::zeros();
+
+              // Exception transitions
+              for (&char_code, &target_dwa_id) in &dwa_state.transitions.exceptions {
+                  let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
+                  let parser_state_id = char_code as usize;
+                  handled_exceptions.insert(parser_state_id);
+
+                  let trans_weight = dwa_state.trans_weights_exceptions.get(&char_code).cloned().unwrap_or_else(WaWeight::zeros);
+                  let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
+
+                  if !trans_weight_bv.is_empty() {
+                      let edge_key = (1, trans_weight_bv); // pop 1
+                      let mut edge_val = StateIDBV::zeros();
+                      edge_val.insert(parser_state_id);
+                      trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
+                  }
+              }
+
+              // Default transition
+              if let Some(target_dwa_id) = dwa_state.transitions.default {
+                  let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
+                  let trans_weight = dwa_state.trans_weight_default.as_ref().cloned().unwrap_or_else(WaWeight::zeros);
+                  let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
+
+                  if !trans_weight_bv.is_empty() {
+                      let edge_key = (1, trans_weight_bv); // pop 1
+                      let edge_val = &all_parser_states - &handled_exceptions;
+                      if !edge_val.is_empty() {
+                          trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
+                      }
+                  }
+              }
+          }
+
+          *dwa_state_to_trie_node.get(&dwa.start_state).unwrap()
+      }
+    src/precompute4/full_nwa.rs: |
+      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
+      use crate::glr::parser::{ExpectElse, GLRParser};
+      use crate::tokenizer::TokenizerStateID;
+      use crate::weighted_automata::{DWA, NWA as WaNWA, Weight as WaWeight};
+      use std::collections::{BTreeMap, BTreeSet};
+      use crate::datastructures::trie::Trie;
+      use crate::precompute4::augmented_nwa::AugmentedNwa;
+      use crate::glr::table::TerminalID;
+
+      pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
+
+      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
+          // 1. Build augmented NWAs for all terminals.
+          let augmented_nwas = match crate::precompute4::augmented_nwa::build_augmented_nwas(parser) {
+              Ok(nwas) => nwas,
+              Err(e) => panic!("Failed to build augmented NWAs: {:?}", e),
+          };
+
+          let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
+
+          println!("\n--- Augmented NWA Generation ---");
+          for (tid, aug_nwa) in &augmented_nwas {
+              println!("Terminal ID {:?}:\n{}", tid, aug_nwa);
+          }
+          println!("--- End Augmented NWA Generation ---\n");
+
+          // 2. Reverse the precompute1 trie.
+          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+
+          let leaf_node = all_nodes.iter().find_map(|&idx| {
+              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+          }).expect("Precompute1 trie must have a single leaf node.");
+
+          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+          let reversed_trie_root = leaf_node;
+              let options = crate::datastructures::trie::PrettyPrintOptions::default()
+                  .omit_depth()
+                  ;
+          println!("\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+
+          // 3. Traverse the reversed trie.
+          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
+              .expect("Failed to compute traversal data for reversed trie1");
+
+          let mut initial_nwa = WaNWA::new();
+          let initial_state = initial_nwa.start_state;
+          initial_nwa.set_final_weight(initial_state, WaWeight::all());
+          let initial_aug_nwa = AugmentedNwa {
+              nwa: initial_nwa,
+              nt_nodes: BTreeMap::new(),
+              end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+          };
+
+          let initial_values = vec![(reversed_trie_root, initial_aug_nwa)];
+
+          let mut final_nwas: BTreeMap<TokenizerStateID, AugmentedNwa> = BTreeMap::new();
+          let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
+
+          Trie::special_map_grouped(
+              &reversed_trie1_god,
+              &traversal_data,
+              initial_values,
+              // step function
+              |current_aug_nwa, edge_terminal_opt, dest_map| {
+                  let mut results: Vec<(PrecomputeNode1Index, AugmentedNwa)> = Vec::new();
+
+                  let aug_nwa;
+                  if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                      let terminal_id = edge_terminal_opt.unwrap();
+                      aug_nwa = augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id));
+                  } else {
+                      // Epsilon-like edge in grammar trie. Just propagate the current NWA.
+                      aug_nwa = &ignore_nwa;
+                  }
+                  println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+                  println!("--- RIGHT: Incoming aug_nwa ---\n{}", current_aug_nwa);
+                  println!("--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
+                  for (dest_idx, llm_token_bv) in dest_map.iter() {
+                      let mut new_aug_nwa = aug_nwa.clone();
+                      let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                      new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
+                          .expect("Combine failed");
+                      println!("For dest_idx {:?} with token bv (WEIGHT) {:?}:", dest_idx, llm_token_bv);
+                      println!("--- COMBINED: Resulting aug_nwa ---\n{}", new_aug_nwa);
+                      results.push((*dest_idx, new_aug_nwa));
+                  }
+                  results
+              },
+              // merge function
+              |aug_nwa1, aug_nwa2| {
+                  aug_nwa1.union_with(&aug_nwa2);
+              },
+              // process function
+              |node_data, node_idx, aug_nwa| {
+                  if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
+                      final_nwas.insert(*tokenizer_state_id, aug_nwa.clone());
+                  }
+                  true // continue traversal
+              },
+          );
+
+          println!("\n--- Final NWAs Before Determinization ---");
+          for (sid, aug_nwa) in &final_nwas {
+              println!("Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
+          }
+          println!("--- End Final NWAs Before Determinization ---\n");
+
+          // 4. Convert final NWAs to DWAs and simplify.
+          let mut precomputed4: Precomputed4 = BTreeMap::new();
+          for (sid, aug_nwa) in final_nwas {
+              let mut dwa = aug_nwa.nwa.determinize();
+              dwa.simplify();
+              precomputed4.insert(sid, dwa);
+          }
+
+          println!("\n--- Final DWAs After Determinization and Simplification ---");
+          for (sid, dwa) in &precomputed4 {
+              println!("Tokenizer State ID {:?}:\n{}", sid, dwa);
+          }
+          println!("--- End Final DWAs After Determinization and Simplification ---\n");
+
+          precomputed4
+      }
+    src/precompute4/mod.rs: |
+      pub mod characterize;
+      pub mod augmented_nwa;
+      pub mod full_nwa;
+      pub mod conversion;
   prev_file_contents:
     src/weighted_automata.rs: |
       // src/weighted_automata.rs
@@ -4221,9 +4631,6 @@ local_system:
           // Initial reduces: create a chain of `len` transitions. The first is on `initial_state`,
           // and the rest are default transitions. The chain ends at the `nt` node.
           for &(initial_state, len, nt) in &bb.initial_reduces {
-              if len == 0 {
-                  continue; // A reduce of length 0 consumes no stack.
-              }
               let ch = encode_symbol(initial_state)?;
               let target_nt = *nt_nodes
                   .get(&nt)
@@ -4231,13 +4638,13 @@ local_system:
               let mut from = start;
 
               // The first transition is on the specific character.
-              let next_state = if len == 1 { *target_nt } else { nwa.add_state() };
+              let next_state = if len == 0 { target_nt } else { nwa.add_state() };
               nwa.add_transition(from, ch, next_state, w_all.clone());
               from = next_state;
 
               // The rest are default transitions.
-              for i in 1..len {
-                  let to = if i == len - 1 { *target_nt } else { nwa.add_state() };
+              for i in 0..len {
+                  let to = if i == len - 1 { target_nt } else { nwa.add_state() };
                   nwa.add_default_transition(from, to, w_all.clone());
                   from = to;
               }
@@ -4249,12 +4656,9 @@ local_system:
                   .get(nt)
                   .expect("reduce_characterizations only contains existing nonterminals");
 
-              // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
+              // Reveal-and-rereduces: chain of `len` transitions. The first is on `revealed_state`,
               // and the rest are default.
-              for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
-                  if pop_n == 0 {
-                      continue;
-                  }
+              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
                   let ch = encode_symbol(revealed_state)?;
                   let dst_nt = *nt_nodes
                       .get(&reduce_nt)
@@ -4262,13 +4666,13 @@ local_system:
                   let mut from = src_nt;
 
                   // The first transition is on the specific character.
-                  let next_state = if pop_n == 1 { *dst_nt } else { nwa.add_state() };
+                  let next_state = if len == 0 { dst_nt } else { nwa.add_state() };
                   nwa.add_transition(from, ch, next_state, w_all.clone());
                   from = next_state;
 
                   // The rest are default transitions.
-                  for i in 1..pop_n {
-                      let to = if i == pop_n - 1 { *dst_nt } else { nwa.add_state() };
+                  for i in 0..len {
+                      let to = if i == len - 1 { dst_nt } else { nwa.add_state() };
                       nwa.add_default_transition(from, to, w_all.clone());
                       from = to;
                   }
@@ -4807,6 +5211,403 @@ local_system:
               assert_eq!(self_nwa, expected_aug_nwa);
           }
       }
+    src/precompute4/characterize.rs: |
+      use crate::glr::parser::GLRParser;
+      use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
+      use std::fmt::{Display, Formatter};
+      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      pub struct ReduceCharacterization {
+          pub terminal: TerminalID,
+          pub nonterminal: NonTerminalID,
+          // (revealed_state, len, nonterminal)
+          pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
+          // (revealed_state, goto_state, shift_state)
+          pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
+      }
+
+      impl Display for ReduceCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
+              if !self.reveal_and_rereduces.is_empty() {
+                  writeln!(f, "      Reveal-and-rereduces:")?;
+                  for (revealed, len, nt) in &self.reveal_and_rereduces {
+                      writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?;
+                  }
+              }
+              if !self.reveal_goto_shift_escapes.is_empty() {
+                  writeln!(f, "      Reveal-goto-shift escapes:")?;
+                  for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
+                      writeln!(f, "        - revealed: {}, goto: {}, shift: {}", revealed.0, goto.0, shift.0)?;
+                  }
+              }
+              Ok(())
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct BelowBottomCharacterization {
+          pub terminal: TerminalID,
+          // (initial_state, shift_state)
+          pub initial_shifts: BTreeSet<(StateID, StateID)>,
+          // (initial_state, len, nonterminal)
+          pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
+          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+      }
+
+      impl Display for BelowBottomCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
+              if !self.initial_shifts.is_empty() {
+                  writeln!(f, "  Initial Shifts:")?;
+                  for (initial, shift) in &self.initial_shifts {
+                      writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
+                  }
+              }
+              if !self.initial_reduces.is_empty() {
+                  writeln!(f, "  Initial Reduces:")?;
+                  for (initial, len, nt) in &self.initial_reduces {
+                      writeln!(f, "    - initial: {}, len: {}, nt: {}", initial.0, len, nt.0)?;
+                  }
+              }
+              if !self.reduce_characterizations.is_empty() {
+                  writeln!(f, "  Reduce Characterizations:")?;
+                  for rc in self.reduce_characterizations.values() {
+                      write!(f, "{}", rc)?;
+                  }
+              }
+              Ok(())
+          }
+      }
+
+      pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
+          let mut all_chars = BTreeMap::new();
+          for &terminal_id in parser.terminal_map.right_values() {
+              all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
+          }
+          all_chars
+      }
+
+      pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
+          let mut char = BelowBottomCharacterization {
+              terminal: terminal_id,
+              initial_shifts: BTreeSet::new(),
+              initial_reduces: BTreeSet::new(),
+              reduce_characterizations: BTreeMap::new(),
+          };
+
+          // --- 1. Compute initial actions ---
+          for (&initial_state, row) in &parser.table {
+              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
+                  match action {
+                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
+                          char.initial_shifts.insert((initial_state, *shift_state));
+                      }
+                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                          if *len > 0 {
+                              char.initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                          }
+                      }
+                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                          if let Some(shift_state) = shift {
+                              char.initial_shifts.insert((initial_state, *shift_state));
+                          }
+                          for (len, nts) in reduces {
+                              if *len > 0 {
+                                  for (nt_id, _) in nts {
+                                      char.initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // --- 2. Compute reduce characterizations ---
+          for &nt_id in parser.non_terminal_map.right_values() {
+              let mut reduce_char = ReduceCharacterization {
+                  terminal: terminal_id,
+                  nonterminal: nt_id,
+                  reveal_and_rereduces: BTreeSet::new(),
+                  reveal_goto_shift_escapes: BTreeSet::new(),
+              };
+
+              // Iterate over all possible revealed states
+              for (&revealed_state, row) in &parser.table {
+                  // Check if this state has a GOTO for our non-terminal
+                  if let Some(goto) = row.gotos.get(&nt_id) {
+                      if let Some(goto_state) = goto.state_id {
+                          // This is a valid starting point for a chain.
+                          let mut worklist: VecDeque<StateID> = VecDeque::new();
+                          worklist.push_back(goto_state);
+                          let mut visited: BTreeSet<StateID> = BTreeSet::new();
+                          visited.insert(goto_state);
+
+                          while let Some(current_state) = worklist.pop_front() {
+                              if let Some(action) = parser.table.get(&current_state).and_then(|r| r.shifts_and_reduces_full.get(&terminal_id)) {
+                                  match action {
+                                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
+                                          reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
+                                      }
+                                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
+                                          if *len == 1 {
+                                              // Unit reduction chain
+                                              if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
+                                                  if let Some(next_goto_state) = next_goto.state_id {
+                                                      if visited.insert(next_goto_state) {
+                                                          worklist.push_back(next_goto_state);
+                                                      }
+                                                  }
+                                              }
+                                          } else if *len > 1 {
+                                              // Pop below revealed state
+                                              reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
+                                          }
+                                      }
+                                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                          if let Some(shift_state) = shift {
+                                              reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
+                                          }
+                                          for (len, nts) in reduces {
+                                              for (reduce_nt, _) in nts {
+                                                  if *len == 1 {
+                                                      if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
+                                                          if let Some(next_goto_state) = next_goto.state_id {
+                                                              if visited.insert(next_goto_state) {
+                                                                  worklist.push_back(next_goto_state);
+                                                              }
+                                                          }
+                                                      }
+                                                  } else if *len > 1 {
+                                                      reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              if !reduce_char.reveal_and_rereduces.is_empty() || !reduce_char.reveal_goto_shift_escapes.is_empty() {
+                  char.reduce_characterizations.insert(nt_id, reduce_char);
+              }
+          }
+
+          char
+      }
+    src/precompute4/conversion.rs: |
+      // src/precompute4/conversion.rs
+      use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
+      use crate::datastructures::trie::Trie;
+      use crate::weighted_automata::{DWA, StateID as WaStateID, Weight as WaWeight};
+      use std::collections::BTreeMap;
+
+      pub fn dwa_to_precompute3(
+          dwa: &DWA,
+          trie3_god: &Trie3GodWrapper,
+          _internal_max_llm_token: usize,
+          max_parser_state_id: usize,
+      ) -> PrecomputeNode3Index {
+          let mut dwa_state_to_trie_node: BTreeMap<WaStateID, PrecomputeNode3Index> = BTreeMap::new();
+          let all_parser_states = StateIDBV::ones(max_parser_state_id + 1);
+
+          // Create all nodes first
+          for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+              let live_tokens = LLMTokenBV::from(dwa_state.weight.0.clone());
+              // All nodes from DWA states are internal; a shared 'end_node' will represent final states.
+              let contents = PrecomputedNodeContents { end: false, live_tokens };
+              let trie_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(contents)));
+              dwa_state_to_trie_node.insert(dwa_id, trie_node);
+          }
+
+          let end_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::leaf())));
+
+          // Create edges
+          for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+              let src_trie_node = *dwa_state_to_trie_node.get(&dwa_id).unwrap();
+
+              // Edge to the shared end node for final states
+              if let Some(final_weight) = &dwa_state.final_weight {
+                  let final_weight_bv = LLMTokenBV::from(final_weight.0.clone());
+                  if !final_weight_bv.is_empty() {
+                      let edge_key = (0, final_weight_bv); // pop 0
+                      let edge_val = all_parser_states.clone();
+                      trie3_god.insert_edge_simple(src_trie_node, end_node, edge_key, edge_val);
+                  }
+              }
+
+              let mut handled_exceptions = StateIDBV::zeros();
+
+              // Exception transitions
+              for (&char_code, &target_dwa_id) in &dwa_state.transitions.exceptions {
+                  let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
+                  let parser_state_id = char_code as usize;
+                  handled_exceptions.insert(parser_state_id);
+
+                  let trans_weight = dwa_state.trans_weights_exceptions.get(&char_code).cloned().unwrap_or_else(WaWeight::zeros);
+                  let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
+
+                  if !trans_weight_bv.is_empty() {
+                      let edge_key = (1, trans_weight_bv); // pop 1
+                      let mut edge_val = StateIDBV::zeros();
+                      edge_val.insert(parser_state_id);
+                      trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
+                  }
+              }
+
+              // Default transition
+              if let Some(target_dwa_id) = dwa_state.transitions.default {
+                  let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
+                  let trans_weight = dwa_state.trans_weight_default.as_ref().cloned().unwrap_or_else(WaWeight::zeros);
+                  let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
+
+                  if !trans_weight_bv.is_empty() {
+                      let edge_key = (1, trans_weight_bv); // pop 1
+                      let edge_val = &all_parser_states - &handled_exceptions;
+                      if !edge_val.is_empty() {
+                          trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
+                      }
+                  }
+              }
+          }
+
+          *dwa_state_to_trie_node.get(&dwa.start_state).unwrap()
+      }
+    src/precompute4/full_nwa.rs: |
+      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
+      use crate::glr::parser::{ExpectElse, GLRParser};
+      use crate::tokenizer::TokenizerStateID;
+      use crate::weighted_automata::{DWA, NWA as WaNWA, Weight as WaWeight};
+      use std::collections::{BTreeMap, BTreeSet};
+      use crate::datastructures::trie::Trie;
+      use crate::precompute4::augmented_nwa::AugmentedNwa;
+      use crate::glr::table::TerminalID;
+
+      pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
+
+      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
+          // 1. Build augmented NWAs for all terminals.
+          let augmented_nwas = match crate::precompute4::augmented_nwa::build_augmented_nwas(parser) {
+              Ok(nwas) => nwas,
+              Err(e) => panic!("Failed to build augmented NWAs: {:?}", e),
+          };
+
+          let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
+
+          println!("\n--- Augmented NWA Generation ---");
+          for (tid, aug_nwa) in &augmented_nwas {
+              println!("Terminal ID {:?}:\n{}", tid, aug_nwa);
+          }
+          println!("--- End Augmented NWA Generation ---\n");
+
+          // 2. Reverse the precompute1 trie.
+          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+
+          let leaf_node = all_nodes.iter().find_map(|&idx| {
+              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+          }).expect("Precompute1 trie must have a single leaf node.");
+
+          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+          let reversed_trie_root = leaf_node;
+              let options = crate::datastructures::trie::PrettyPrintOptions::default()
+                  .omit_depth()
+                  ;
+          println!("\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+
+          // 3. Traverse the reversed trie.
+          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
+              .expect("Failed to compute traversal data for reversed trie1");
+
+          let mut initial_nwa = WaNWA::new();
+          let initial_state = initial_nwa.start_state;
+          initial_nwa.set_final_weight(initial_state, WaWeight::all());
+          let initial_aug_nwa = AugmentedNwa {
+              nwa: initial_nwa,
+              nt_nodes: BTreeMap::new(),
+              end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+          };
+
+          let initial_values = vec![(reversed_trie_root, initial_aug_nwa)];
+
+          let mut final_nwas: BTreeMap<TokenizerStateID, AugmentedNwa> = BTreeMap::new();
+          let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
+
+          Trie::special_map_grouped(
+              &reversed_trie1_god,
+              &traversal_data,
+              initial_values,
+              // step function
+              |current_aug_nwa, edge_terminal_opt, dest_map| {
+                  let mut results: Vec<(PrecomputeNode1Index, AugmentedNwa)> = Vec::new();
+
+                  let aug_nwa;
+                  if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                      let terminal_id = edge_terminal_opt.unwrap();
+                      aug_nwa = augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id));
+                  } else {
+                      // Epsilon-like edge in grammar trie. Just propagate the current NWA.
+                      aug_nwa = &ignore_nwa;
+                  }
+                  println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+                  println!("--- RIGHT: Incoming aug_nwa ---\n{}", current_aug_nwa);
+                  println!("--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
+                  for (dest_idx, llm_token_bv) in dest_map.iter() {
+                      let mut new_aug_nwa = aug_nwa.clone();
+                      let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                      new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
+                          .expect("Combine failed");
+                      println!("For dest_idx {:?} with token bv (WEIGHT) {:?}:", dest_idx, llm_token_bv);
+                      println!("--- COMBINED: Resulting aug_nwa ---\n{}", new_aug_nwa);
+                      results.push((*dest_idx, new_aug_nwa));
+                  }
+                  results
+              },
+              // merge function
+              |aug_nwa1, aug_nwa2| {
+                  aug_nwa1.union_with(&aug_nwa2);
+              },
+              // process function
+              |node_data, node_idx, aug_nwa| {
+                  if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
+                      final_nwas.insert(*tokenizer_state_id, aug_nwa.clone());
+                  }
+                  true // continue traversal
+              },
+          );
+
+          println!("\n--- Final NWAs Before Determinization ---");
+          for (sid, aug_nwa) in &final_nwas {
+              println!("Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
+          }
+          println!("--- End Final NWAs Before Determinization ---\n");
+
+          // 4. Convert final NWAs to DWAs and simplify.
+          let mut precomputed4: Precomputed4 = BTreeMap::new();
+          for (sid, aug_nwa) in final_nwas {
+              let mut dwa = aug_nwa.nwa.determinize();
+              dwa.simplify();
+              precomputed4.insert(sid, dwa);
+          }
+
+          println!("\n--- Final DWAs After Determinization and Simplification ---");
+          for (sid, dwa) in &precomputed4 {
+              println!("Tokenizer State ID {:?}:\n{}", sid, dwa);
+          }
+          println!("--- End Final DWAs After Determinization and Simplification ---\n");
+
+          precomputed4
+      }
+    src/precompute4/mod.rs: |
+      pub mod characterize;
+      pub mod augmented_nwa;
+      pub mod full_nwa;
+      pub mod conversion;
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -4818,7 +5619,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -6638,8 +7439,10 @@ messages:
       ///   - from start, on symbol (initial_state), go to end_state; add
       ///     [initial_state, shift_state] into end_map[end_state].
       /// - For initial reduces (initial_state, len, nt):
-      ///   - create a chain of (len - 1) edges labeled (initial_state) ending at the `nt` node.
-      ///     If len == 1, go directly to the `nt` node.
+      ///   - create a chain of `len` transitions from `start` to the `nt` node.
+      ///   - The first transition is on `initial_state`.
+      ///   - The following `len - 1` transitions are unconditional (default) transitions
+      ///     through intermediate states.
       /// - For each nonterminal’s reduce characterization:
       ///   - For reveal-and-rereduces (revealed_state, pop_n, reduce_nt):
       ///     create a chain of pop_n edges labeled (revealed_state) from the `nt` node to `reduce_nt` node.
@@ -6672,20 +7475,24 @@ messages:
               end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
           }
 
-          // Initial reduces: chain of (len - 1) edges labeled by the initial_state, ending at the nt node.
+          // Initial reduces: create a chain of `len` transitions. The first is on `initial_state`,
+          // and the rest are default transitions. The chain ends at the `nt` node.
           for &(initial_state, len, nt) in &bb.initial_reduces {
               let ch = encode_symbol(initial_state)?;
               let target_nt = *nt_nodes
                   .get(&nt)
                   .expect("nonterminal node must exist (created from parser.non_terminal_map)");
               let mut from = start;
-              for i in 0..=len {
-                  let to = if i == len {
-                      target_nt
-                  } else {
-                      nwa.add_state()
-                  };
-                  nwa.add_transition(from, ch, to, w_all.clone());
+
+              // The first transition is on the specific character.
+              let next_state = if len == 0 { target_nt } else { nwa.add_state() };
+              nwa.add_transition(from, ch, next_state, w_all.clone());
+              from = next_state;
+
+              // The rest are default transitions.
+              for i in 0..len {
+                  let to = if i == len - 1 { target_nt } else { nwa.add_state() };
+                  nwa.add_default_transition(from, to, w_all.clone());
                   from = to;
               }
           }
@@ -6696,21 +7503,24 @@ messages:
                   .get(nt)
                   .expect("reduce_characterizations only contains existing nonterminals");
 
-              // Reveal-and-rereduces: chain of `pop_n` edges from `src_nt` to the node for `reduce_nt`,
-              // all labeled with `revealed_state`.
+              // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
+              // and the rest are default.
               for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
                   let ch = encode_symbol(revealed_state)?;
                   let dst_nt = *nt_nodes
                       .get(&reduce_nt)
                       .expect("reduce target nonterminal must exist");
                   let mut from = src_nt;
-                  for i in 0..=pop_n {
-                      let to = if i == pop_n {
-                          dst_nt
-                      } else {
-                          nwa.add_state()
-                      };
-                      nwa.add_transition(from, ch, to, w_all.clone());
+
+                  // The first transition is on the specific character.
+                  let next_state = if pop_n == 0 { dst_nt } else { nwa.add_state() };
+                  nwa.add_transition(from, ch, next_state, w_all.clone());
+                  from = next_state;
+
+                  // The rest are default transitions.
+                  for i in 0..pop_n {
+                      let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };
+                      nwa.add_default_transition(from, to, w_all.clone());
                       from = to;
                   }
               }
@@ -7253,38 +8063,425 @@ messages:
     metadata:
       filename: src/precompute4/augmented_nwa.rs
   - user: |-
-      Here's my original prompt for some of this code:
+      ```rust "src/precompute4/characterize.rs"
+      use crate::glr::parser::GLRParser;
+      use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
+      use std::fmt::{Display, Formatter};
+      use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-      > **per-terminal below zero charactarization -> per-terminal augmented NWA**
-      > 
-      > Convert each below zero charactarization into a NWA.
-      > This could just be a NDA, since we don't acutally use weights at this point. But we'll need to use weights eventually anyway.
-      > 
-      > **Structs:**
-      > Augmented NWA:
-      > - terminal
-      > - nwa
-      > - map NWA state -> set of vecs of parser state IDs: an end map
-      > 
-      > 
-      > Create an initial NWA state.
-      > Create an end NWA state.
-      > Create one NWA state per nonterminal.
-      > 
-      > For transitions from the initial NWA state, look at the inital shifts/reduces.
-      > - For each initial shift, create a transition (from the initial NWA state) on the initial shift's initial (parser) state to the end NWA state. Add to the end map a stack with the initial shift's initial state and the shift state (like a parser stack would be if we started in the initial state and shifted).
-      > - For each initial reduce, create a sequence of transitions on the initial reduce's revealed state to newly-created intermediate NWA states, one for each pop n. The final transition goes to the NWA state for the initial reduce's nonterminal. (If pop n=0, it just goes straight there, no intermediate transitions.)
-      >     - We could minimize the number of intermediate states required by sharing somehow... But don't bother yet. Want to keep the initial implementation as simple as possible.
-      > 
-      > For transitions from the nonterminal NWA states, look at the reduce charactarizations.
-      > - For each reveal-and-rereduce, create a sequence of transitions just like we did for each initial reduce.
-      > - For each reveal-goto-shift, create a transition to the end NWA state just like we did for the initial shifts. The only difference is that for the stack we add to the end map, there'll be *three* items, not two: the revealed state, the goto state, and the shift state. Again, stacked like they would be in a parser stack after performing a goto from the revealed state and then shifting.
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      pub struct ReduceCharacterization {
+          pub terminal: TerminalID,
+          pub nonterminal: NonTerminalID,
+          // (revealed_state, pop_n, nonterminal)
+          pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
+          // (revealed_state, goto_state, shift_state)
+          pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
+      }
 
-      I want to make this change (in bold):
+      impl Display for ReduceCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
+              if !self.reveal_and_rereduces.is_empty() {
+                  writeln!(f, "      Reveal-and-rereduces:")?;
+                  for (revealed, pop, nt) in &self.reveal_and_rereduces {
+                      writeln!(f, "        - revealed: {}, pop: {}, reduce_nt: {}", revealed.0, pop, nt.0)?;
+                  }
+              }
+              if !self.reveal_goto_shift_escapes.is_empty() {
+                  writeln!(f, "      Reveal-goto-shift escapes:")?;
+                  for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
+                      writeln!(f, "        - revealed: {}, goto: {}, shift: {}", revealed.0, goto.0, shift.0)?;
+                  }
+              }
+              Ok(())
+          }
+      }
 
-      > - For each initial reduce, create a sequence of transitions on the initial reduce's revealed state to newly-created intermediate NWA states, one for each pop n. The final transition goes to the NWA state for the initial reduce's nonterminal. (If pop n=0, it just goes straight there, no intermediate transitions.) **The very last transition is for the state ID of the initial reduce's revealed state; all intermediate transitions are unconditional (but not epsilon - use a default transition).**
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct BelowBottomCharacterization {
+          pub terminal: TerminalID,
+          // (initial_state, shift_state)
+          pub initial_shifts: BTreeSet<(StateID, StateID)>,
+          // (initial_state, pop_n, nonterminal)
+          pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
+          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+      }
 
-      Do it.
+      impl Display for BelowBottomCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
+              if !self.initial_shifts.is_empty() {
+                  writeln!(f, "  Initial Shifts:")?;
+                  for (initial, shift) in &self.initial_shifts {
+                      writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
+                  }
+              }
+              if !self.initial_reduces.is_empty() {
+                  writeln!(f, "  Initial Reduces:")?;
+                  for (initial, len, nt) in &self.initial_reduces {
+                      writeln!(f, "    - initial: {}, len: {}, nt: {}", initial.0, len, nt.0)?;
+                  }
+              }
+              if !self.reduce_characterizations.is_empty() {
+                  writeln!(f, "  Reduce Characterizations:")?;
+                  for rc in self.reduce_characterizations.values() {
+                      write!(f, "{}", rc)?;
+                  }
+              }
+              Ok(())
+          }
+      }
+
+      pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
+          let mut all_chars = BTreeMap::new();
+          for &terminal_id in parser.terminal_map.right_values() {
+              all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
+          }
+          all_chars
+      }
+
+      pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
+          let mut char = BelowBottomCharacterization {
+              terminal: terminal_id,
+              initial_shifts: BTreeSet::new(),
+              initial_reduces: BTreeSet::new(),
+              reduce_characterizations: BTreeMap::new(),
+          };
+
+          // --- 1. Compute initial actions ---
+          for (&initial_state, row) in &parser.table {
+              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
+                  match action {
+                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
+                          char.initial_shifts.insert((initial_state, *shift_state));
+                      }
+                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                          if *len > 0 {
+                              char.initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                          }
+                      }
+                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                          if let Some(shift_state) = shift {
+                              char.initial_shifts.insert((initial_state, *shift_state));
+                          }
+                          for (len, nts) in reduces {
+                              if *len > 0 {
+                                  for (nt_id, _) in nts {
+                                      char.initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // --- 2. Compute reduce characterizations ---
+          for &nt_id in parser.non_terminal_map.right_values() {
+              let mut reduce_char = ReduceCharacterization {
+                  terminal: terminal_id,
+                  nonterminal: nt_id,
+                  reveal_and_rereduces: BTreeSet::new(),
+                  reveal_goto_shift_escapes: BTreeSet::new(),
+              };
+
+              // Iterate over all possible revealed states
+              for (&revealed_state, row) in &parser.table {
+                  // Check if this state has a GOTO for our non-terminal
+                  if let Some(goto) = row.gotos.get(&nt_id) {
+                      if let Some(goto_state) = goto.state_id {
+                          // This is a valid starting point for a chain.
+                          let mut worklist: VecDeque<StateID> = VecDeque::new();
+                          worklist.push_back(goto_state);
+                          let mut visited: BTreeSet<StateID> = BTreeSet::new();
+                          visited.insert(goto_state);
+
+                          while let Some(current_state) = worklist.pop_front() {
+                              if let Some(action) = parser.table.get(&current_state).and_then(|r| r.shifts_and_reduces_full.get(&terminal_id)) {
+                                  match action {
+                                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
+                                          reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
+                                      }
+                                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
+                                          if *len == 1 {
+                                              // Unit reduction chain
+                                              if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
+                                                  if let Some(next_goto_state) = next_goto.state_id {
+                                                      if visited.insert(next_goto_state) {
+                                                          worklist.push_back(next_goto_state);
+                                                      }
+                                                  }
+                                              }
+                                          } else if *len > 1 {
+                                              // Pop below revealed state
+                                              reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
+                                          }
+                                      }
+                                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                          if let Some(shift_state) = shift {
+                                              reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
+                                          }
+                                          for (len, nts) in reduces {
+                                              for (reduce_nt, _) in nts {
+                                                  if *len == 1 {
+                                                      if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
+                                                          if let Some(next_goto_state) = next_goto.state_id {
+                                                              if visited.insert(next_goto_state) {
+                                                                  worklist.push_back(next_goto_state);
+                                                              }
+                                                          }
+                                                      }
+                                                  } else if *len > 1 {
+                                                      reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              if !reduce_char.reveal_and_rereduces.is_empty() || !reduce_char.reveal_goto_shift_escapes.is_empty() {
+                  char.reduce_characterizations.insert(nt_id, reduce_char);
+              }
+          }
+
+          char
+      }
+
+      ```
+    metadata:
+      filename: src/precompute4/characterize.rs
+  - user: |-
+      ```rust "src/precompute4/conversion.rs"
+      // src/precompute4/conversion.rs
+      use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
+      use crate::datastructures::trie::Trie;
+      use crate::weighted_automata::{DWA, StateID as WaStateID, Weight as WaWeight};
+      use std::collections::BTreeMap;
+
+      pub fn dwa_to_precompute3(
+          dwa: &DWA,
+          trie3_god: &Trie3GodWrapper,
+          _internal_max_llm_token: usize,
+          max_parser_state_id: usize,
+      ) -> PrecomputeNode3Index {
+          let mut dwa_state_to_trie_node: BTreeMap<WaStateID, PrecomputeNode3Index> = BTreeMap::new();
+          let all_parser_states = StateIDBV::ones(max_parser_state_id + 1);
+
+          // Create all nodes first
+          for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+              let live_tokens = LLMTokenBV::from(dwa_state.weight.0.clone());
+              // All nodes from DWA states are internal; a shared 'end_node' will represent final states.
+              let contents = PrecomputedNodeContents { end: false, live_tokens };
+              let trie_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(contents)));
+              dwa_state_to_trie_node.insert(dwa_id, trie_node);
+          }
+
+          let end_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::leaf())));
+
+          // Create edges
+          for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+              let src_trie_node = *dwa_state_to_trie_node.get(&dwa_id).unwrap();
+
+              // Edge to the shared end node for final states
+              if let Some(final_weight) = &dwa_state.final_weight {
+                  let final_weight_bv = LLMTokenBV::from(final_weight.0.clone());
+                  if !final_weight_bv.is_empty() {
+                      let edge_key = (0, final_weight_bv); // pop 0
+                      let edge_val = all_parser_states.clone();
+                      trie3_god.insert_edge_simple(src_trie_node, end_node, edge_key, edge_val);
+                  }
+              }
+
+              let mut handled_exceptions = StateIDBV::zeros();
+
+              // Exception transitions
+              for (&char_code, &target_dwa_id) in &dwa_state.transitions.exceptions {
+                  let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
+                  let parser_state_id = char_code as usize;
+                  handled_exceptions.insert(parser_state_id);
+
+                  let trans_weight = dwa_state.trans_weights_exceptions.get(&char_code).cloned().unwrap_or_else(WaWeight::zeros);
+                  let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
+
+                  if !trans_weight_bv.is_empty() {
+                      let edge_key = (1, trans_weight_bv); // pop 1
+                      let mut edge_val = StateIDBV::zeros();
+                      edge_val.insert(parser_state_id);
+                      trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
+                  }
+              }
+
+              // Default transition
+              if let Some(target_dwa_id) = dwa_state.transitions.default {
+                  let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
+                  let trans_weight = dwa_state.trans_weight_default.as_ref().cloned().unwrap_or_else(WaWeight::zeros);
+                  let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
+
+                  if !trans_weight_bv.is_empty() {
+                      let edge_key = (1, trans_weight_bv); // pop 1
+                      let edge_val = &all_parser_states - &handled_exceptions;
+                      if !edge_val.is_empty() {
+                          trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
+                      }
+                  }
+              }
+          }
+
+          *dwa_state_to_trie_node.get(&dwa.start_state).unwrap()
+      }
+
+      ```
+    metadata:
+      filename: src/precompute4/conversion.rs
+  - user: |-
+      ```rust "src/precompute4/full_nwa.rs"
+      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
+      use crate::glr::parser::{ExpectElse, GLRParser};
+      use crate::tokenizer::TokenizerStateID;
+      use crate::weighted_automata::{DWA, NWA as WaNWA, Weight as WaWeight};
+      use std::collections::{BTreeMap, BTreeSet};
+      use crate::datastructures::trie::Trie;
+      use crate::precompute4::augmented_nwa::AugmentedNwa;
+      use crate::glr::table::TerminalID;
+
+      pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
+
+      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
+          // 1. Build augmented NWAs for all terminals.
+          let augmented_nwas = match crate::precompute4::augmented_nwa::build_augmented_nwas(parser) {
+              Ok(nwas) => nwas,
+              Err(e) => panic!("Failed to build augmented NWAs: {:?}", e),
+          };
+
+          let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
+
+          println!("\n--- Augmented NWA Generation ---");
+          for (tid, aug_nwa) in &augmented_nwas {
+              println!("Terminal ID {:?}:\n{}", tid, aug_nwa);
+          }
+          println!("--- End Augmented NWA Generation ---\n");
+
+          // 2. Reverse the precompute1 trie.
+          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+
+          let leaf_node = all_nodes.iter().find_map(|&idx| {
+              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+          }).expect("Precompute1 trie must have a single leaf node.");
+
+          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+          let reversed_trie_root = leaf_node;
+              let options = crate::datastructures::trie::PrettyPrintOptions::default()
+                  .omit_depth()
+                  ;
+          println!("\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+
+          // 3. Traverse the reversed trie.
+          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
+              .expect("Failed to compute traversal data for reversed trie1");
+
+          let mut initial_nwa = WaNWA::new();
+          let initial_state = initial_nwa.start_state;
+          initial_nwa.set_final_weight(initial_state, WaWeight::all());
+          let initial_aug_nwa = AugmentedNwa {
+              nwa: initial_nwa,
+              nt_nodes: BTreeMap::new(),
+              end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+          };
+
+          let initial_values = vec![(reversed_trie_root, initial_aug_nwa)];
+
+          let mut final_nwas: BTreeMap<TokenizerStateID, AugmentedNwa> = BTreeMap::new();
+          let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
+
+          Trie::special_map_grouped(
+              &reversed_trie1_god,
+              &traversal_data,
+              initial_values,
+              // step function
+              |current_aug_nwa, edge_terminal_opt, dest_map| {
+                  let mut results: Vec<(PrecomputeNode1Index, AugmentedNwa)> = Vec::new();
+
+                  let aug_nwa;
+                  if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                      let terminal_id = edge_terminal_opt.unwrap();
+                      aug_nwa = augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id));
+                  } else {
+                      // Epsilon-like edge in grammar trie. Just propagate the current NWA.
+                      aug_nwa = &ignore_nwa;
+                  }
+                  println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+                  println!("--- RIGHT: Incoming aug_nwa ---\n{}", current_aug_nwa);
+                  println!("--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
+                  for (dest_idx, llm_token_bv) in dest_map.iter() {
+                      let mut new_aug_nwa = aug_nwa.clone();
+                      let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                      new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
+                          .expect("Combine failed");
+                      println!("For dest_idx {:?} with token bv (WEIGHT) {:?}:", dest_idx, llm_token_bv);
+                      println!("--- COMBINED: Resulting aug_nwa ---\n{}", new_aug_nwa);
+                      results.push((*dest_idx, new_aug_nwa));
+                  }
+                  results
+              },
+              // merge function
+              |aug_nwa1, aug_nwa2| {
+                  aug_nwa1.union_with(&aug_nwa2);
+              },
+              // process function
+              |node_data, node_idx, aug_nwa| {
+                  if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
+                      final_nwas.insert(*tokenizer_state_id, aug_nwa.clone());
+                  }
+                  true // continue traversal
+              },
+          );
+
+          println!("\n--- Final NWAs Before Determinization ---");
+          for (sid, aug_nwa) in &final_nwas {
+              println!("Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
+          }
+          println!("--- End Final NWAs Before Determinization ---\n");
+
+          // 4. Convert final NWAs to DWAs and simplify.
+          let mut precomputed4: Precomputed4 = BTreeMap::new();
+          for (sid, aug_nwa) in final_nwas {
+              let mut dwa = aug_nwa.nwa.determinize();
+              dwa.simplify();
+              precomputed4.insert(sid, dwa);
+          }
+
+          println!("\n--- Final DWAs After Determinization and Simplification ---");
+          for (sid, dwa) in &precomputed4 {
+              println!("Tokenizer State ID {:?}:\n{}", sid, dwa);
+          }
+          println!("--- End Final DWAs After Determinization and Simplification ---\n");
+
+          precomputed4
+      }
+
+      ```
+    metadata:
+      filename: src/precompute4/full_nwa.rs
+  - user: |-
+      ```rust "src/precompute4/mod.rs"
+      pub mod characterize;
+      pub mod augmented_nwa;
+      pub mod full_nwa;
+      pub mod conversion;
+
+      ```
+    metadata:
+      filename: src/precompute4/mod.rs
+  - user: Inconsistent terminology throughout src/precompute4/ where we refer to 'len'
+      in bb.initial_reduces and 'pop n' in rc.reveal_and_rereduces. Just refer to
+      'len'.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7304,383 +8501,126 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to apply the requested change, followed by the git diff.
+      Of course. Here are the step-by-step instructions to standardize the terminology, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/precompute4/augmented_nwa.rs`**.
+      #### File: `src/precompute4/characterize.rs`
 
-      2.  **Navigate to the `build_augmented_nwa_from_characterization` function.**
+      1.  In the `ReduceCharacterization` struct definition, update the comment for the `reveal_and_rereduces` field to use `len` instead of `pop_n`.
+          -   Change line 7 from `// (revealed_state, pop_n, nonterminal)` to `// (revealed_state, len, nonterminal)`.
 
-      3.  **Update the documentation comment** for the function to reflect the new logic for initial reduces. Replace these lines:
-          ```rust
-          ///   - create a chain of (len - 1) edges labeled (initial_state) ending at the `nt` node.
-          ///     If len == 1, go directly to the `nt` node.
-          ```
-          with:
-          ```rust
-          ///   - create a chain of `len` transitions from `start` to the `nt` node.
-          ///   - The first `len - 1` transitions are unconditional (default) transitions
-          ///     to intermediate states.
-          ///   - The final transition is on `initial_state` to the `nt` node.
-          ```
+      2.  In the `Display` implementation for `ReduceCharacterization`, update the loop variable and the format string to use `len` instead of `pop`.
+          -   On line 19, change `for (revealed, pop, nt) in &self.reveal_and_rereduces` to `for (revealed, len, nt) in &self.reveal_and_rereduces`.
+          -   On line 20, change `writeln!(f, "        - revealed: {}, pop: {}, reduce_nt: {}", revealed.0, pop, nt.0)?` to `writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?`.
 
-      4.  **Modify the "Initial reduces" loop.** Find the loop that starts with `for &(initial_state, len, nt) in &bb.initial_reduces`. Replace the entire loop and its preceding comment with the following code, which implements the new logic of using default transitions for intermediate steps:
-          ```rust
-          // Initial reduces: create a chain of `len` transitions. The first `len-1` are default
-          // transitions, and the last is on `initial_state`. The chain ends at the `nt` node.
-          for &(initial_state, len, nt) in &bb.initial_reduces {
-              let ch = encode_symbol(initial_state)?;
-              let target_nt = *nt_nodes
-                  .get(&nt)
-                  .expect("nonterminal node must exist (created from parser.non_terminal_map)");
-              let mut from = start;
+      3.  In the `BelowBottomCharacterization` struct definition, update the comment for the `initial_reduces` field.
+          -   Change line 38 from `// (initial_state, pop_n, nonterminal)` to `// (initial_state, len, nonterminal)`.
 
-              // Create `len - 1` intermediate default transitions.
-              for _ in 0..(len.saturating_sub(1)) {
-                  let to = nwa.add_state();
-                  nwa.add_default_transition(from, to, w_all.clone());
-                  from = to;
-              }
+      #### File: `src/precompute4/augmented_nwa.rs`
 
-              // The final transition is on the specific character.
-              nwa.add_transition(from, ch, target_nt, w_all.clone());
-          }
-          ```
+      1.  In the `build_augmented_nwa_from_characterization` function, find the section that handles `Reveal-and-rereduces` (around line 151).
 
-      5.  **Modify the "Reveal-and-rereduces" loop.** As per the original design, this logic should mirror the "Initial reduces" logic. Find the loop that starts with `for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces`. Replace that entire loop and its preceding comment with the following:
-          ```rust
-              // Reveal-and-rereduces: chain of `pop_n` transitions. The first `pop_n-1` are default,
-              // and the last is on `revealed_state`.
-              for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
-                  let ch = encode_symbol(revealed_state)?;
-                  let dst_nt = *nt_nodes
-                      .get(&reduce_nt)
-                      .expect("reduce target nonterminal must exist");
-                  let mut from = src_nt;
+      2.  Update the comment to refer to a "chain of `len` transitions" instead of `pop_n`.
+          -   Change line 151 from `// Reveal-and-rereduces: chain of `pop_n` transitions...` to `// Reveal-and-rereduces: chain of `len` transitions...`.
 
-                  // Create `pop_n - 1` intermediate default transitions.
-                  for _ in 0..(pop_n.saturating_sub(1)) {
-                      let to = nwa.add_state();
-                      nwa.add_default_transition(from, to, w_all.clone());
-                      from = to;
-                  }
+      3.  In the loop that processes `rc.reveal_and_rereduces`, rename the `pop_n` variable to `len` throughout the loop body.
+          -   On line 153, change `for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces` to `for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces`.
+          -   On line 160, change `let next_state = if pop_n == 0 { dst_nt } else { nwa.add_state() };` to `let next_state = if len == 0 { dst_nt } else { nwa.add_state() };`.
+          -   On line 164, change `for i in 0..pop_n` to `for i in 0..len`.
+          -   On line 165, change `let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };` to `let to = if i == len - 1 { dst_nt } else { nwa.add_state() };`.
 
-                  // The final transition is on the specific character.
-                  nwa.add_transition(from, ch, dst_nt, w_all.clone());
-              }
-          ```
+      ### Git Diffs
 
-      ### Git Diff
-
-      Here is the git diff to apply these changes directly.
+      Here are the git diffs to apply these changes:
 
       ```diff
+      diff --git a/src/precompute4/augmented_nwa.rs b/src/precompute4/augmented_nwa.rs
       --- a/src/precompute4/augmented_nwa.rs
       +++ b/src/precompute4/augmented_nwa.rs
-      @@ -118,9 +118,10 @@
-       ///   - from start, on symbol (initial_state), go to end_state; add
-       ///     [initial_state, shift_state] into end_map[end_state].
-       /// - For initial reduces (initial_state, len, nt):
-      -///   - create a chain of (len - 1) edges labeled (initial_state) ending at the `nt` node.
-      -///     If len == 1, go directly to the `nt` node.
-      +///   - create a chain of `len` transitions from `start` to the `nt` node.
-      +///   - The first `len - 1` transitions are unconditional (default) transitions
-      +///     to intermediate states.
-      +///   - The final transition is on `initial_state` to the `nt` node.
-       /// - For each nonterminal’s reduce characterization:
-       ///   - For reveal-and-rereduces (revealed_state, pop_n, reduce_nt):
-       ///     create a chain of pop_n edges labeled (revealed_state) from the `nt` node to `reduce_nt` node.
-      @@ -152,21 +153,24 @@
-               end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
-           }
-       
-      -    // Initial reduces: chain of (len - 1) edges labeled by the initial_state, ending at the nt node.
-      +    // Initial reduces: create a chain of `len` transitions. The first `len-1` are default
-      +    // transitions, and the last is on `initial_state`. The chain ends at the `nt` node.
-           for &(initial_state, len, nt) in &bb.initial_reduces {
-               let ch = encode_symbol(initial_state)?;
-               let target_nt = *nt_nodes
-                   .get(&nt)
-                   .expect("nonterminal node must exist (created from parser.non_terminal_map)");
-               let mut from = start;
-      -        for i in 0..=len {
-      -            let to = if i == len {
-      -                target_nt
-      -            } else {
-      -                nwa.add_state()
-      -            };
-      -            nwa.add_transition(from, ch, to, w_all.clone());
-      +
-      +        // Create `len - 1` intermediate default transitions.
-      +        for _ in 0..(len.saturating_sub(1)) {
-      +            let to = nwa.add_state();
-      +            nwa.add_default_transition(from, to, w_all.clone());
-                   from = to;
-               }
-      +
-      +        // The final transition is on the specific character.
-      +        nwa.add_transition(from, ch, target_nt, w_all.clone());
-           }
-       
-           // Reduce characterizations per nonterminal.
-      @@ -175,22 +179,22 @@
+      @@ -148,23 +148,23 @@
                    .get(nt)
                    .expect("reduce_characterizations only contains existing nonterminals");
        
-      -        // Reveal-and-rereduces: chain of `pop_n` edges from `src_nt` to the node for `reduce_nt`,
-      -        // all labeled with `revealed_state`.
-      +        // Reveal-and-rereduces: chain of `pop_n` transitions. The first `pop_n-1` are default,
-      +        // and the last is on `revealed_state`.
-               for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
-                   let ch = encode_symbol(revealed_state)?;
-                   let dst_nt = *nt_nodes
-                       .get(&reduce_nt)
-                       .expect("reduce target nonterminal must exist");
-                   let mut from = src_nt;
-      -            for i in 0..=pop_n {
-      -                let to = if i == pop_n {
-      -                    dst_nt
-      -                } else {
-      -                    nwa.add_state()
-      -                };
-      -                nwa.add_transition(from, ch, to, w_all.clone());
-      +
-      +            // Create `pop_n - 1` intermediate default transitions.
-      +            for _ in 0..(pop_n.saturating_sub(1)) {
-      +                let to = nwa.add_state();
-      +                nwa.add_default_transition(from, to, w_all.clone());
-                       from = to;
-                   }
-      +
-      +            // The final transition is on the specific character.
-      +            nwa.add_transition(from, ch, dst_nt, w_all.clone());
-               }
-       
-               // Reveal-goto-shift escapes: a single step to end_state; record the example stack.
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/augmented_nwa.rs
-      Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
-    metadata:
-  - user: 'Changes committed with message: "Refactor initial reduces and reveal-and-rereduces
-      in AugmentedNwa builder to use default transitions for intermediate steps"'
-    metadata:
-  - user: |-
-      Diff of src/weighted_automata.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/augmented_nwa.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: "Oh shoot, wrong way around: The very first transition is for the state
-      ID of the initial reduce's revealed state; all intermediate transitions are
-      unconditional (but not epsilon - use a default transition). Fix it. Oh and no
-      sub there on len/pop n at all."
-    metadata:
-  - assistant: |-
-      You've got it. I've swapped the logic to have the character-specific transition first, followed by the unconditional default transitions. Here are the step-by-step instructions and the corresponding git diff.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file `src/precompute4/augmented_nwa.rs`**.
-
-      2.  **Navigate to the `build_augmented_nwa_from_characterization` function.**
-
-      3.  **Update the documentation comment** to describe the new transition order for initial reduces. Replace this block:
-          ```rust
-          ///   - create a chain of `len` transitions from `start` to the `nt` node.
-          ///   - The first `len - 1` transitions are unconditional (default) transitions
-          ///     to intermediate states.
-          ///   - The final transition is on `initial_state` to the `nt` node.
-          ```
-          with this:
-          ```rust
-          ///   - create a chain of `len` transitions from `start` to the `nt` node.
-          ///   - The first transition is on `initial_state`.
-          ///   - The following `len - 1` transitions are unconditional (default) transitions
-          ///     through intermediate states.
-          ```
-
-      4.  **Modify the "Initial reduces" loop.** Replace the entire loop (and its preceding comment) with the following code. This new version creates the character-specific transition first, then adds the default transitions. It also correctly handles `len == 0` by creating no transitions.
-          ```rust
-          // Initial reduces: create a chain of `len` transitions. The first is on `initial_state`,
-          // and the rest are default transitions. The chain ends at the `nt` node.
-          for &(initial_state, len, nt) in &bb.initial_reduces {
-              if len == 0 {
-                  continue; // A reduce of length 0 consumes no stack.
-              }
-              let ch = encode_symbol(initial_state)?;
-              let target_nt = *nt_nodes
-                  .get(&nt)
-                  .expect("nonterminal node must exist (created from parser.non_terminal_map)");
-              let mut from = start;
-
-              // The first transition is on the specific character.
-              let next_state = if len == 1 { *target_nt } else { nwa.add_state() };
-              nwa.add_transition(from, ch, next_state, w_all.clone());
-              from = next_state;
-
-              // The rest are default transitions.
-              for i in 1..len {
-                  let to = if i == len - 1 { *target_nt } else { nwa.add_state() };
-                  nwa.add_default_transition(from, to, w_all.clone());
-                  from = to;
-              }
-          }
-          ```
-
-      5.  **Modify the "Reveal-and-rereduces" loop.** Replace this loop and its comment with the updated logic, which mirrors the change made to initial reduces.
-          ```rust
-              // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
-              // and the rest are default.
-              for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
-                  if pop_n == 0 {
-                      continue;
-                  }
-                  let ch = encode_symbol(revealed_state)?;
-                  let dst_nt = *nt_nodes
-                      .get(&reduce_nt)
-                      .expect("reduce target nonterminal must exist");
-                  let mut from = src_nt;
-
-                  // The first transition is on the specific character.
-                  let next_state = if pop_n == 1 { *dst_nt } else { nwa.add_state() };
-                  nwa.add_transition(from, ch, next_state, w_all.clone());
-                  from = next_state;
-
-                  // The rest are default transitions.
-                  for i in 1..pop_n {
-                      let to = if i == pop_n - 1 { *dst_nt } else { nwa.add_state() };
-                      nwa.add_default_transition(from, to, w_all.clone());
-                      from = to;
-                  }
-              }
-          ```
-
-      ### Git Diff
-
-      Here is the git diff to apply these changes.
-
-      ```diff
-      --- a/src/precompute4/augmented_nwa.rs
-      +++ b/src/precompute4/augmented_nwa.rs
-      @@ -118,10 +118,10 @@
-       ///   - from start, on symbol (initial_state), go to end_state; add
-       ///     [initial_state, shift_state] into end_map[end_state].
-       /// - For initial reduces (initial_state, len, nt):
-      -///   - create a chain of `len` transitions from `start` to the `nt` node.
-      -///   - The first `len - 1` transitions are unconditional (default) transitions
-      -///     to intermediate states.
-      -///   - The final transition is on `initial_state` to the `nt` node.
-      +///   - create a chain of `len` transitions from `start` to the `nt` node.
-      +///   - The first transition is on `initial_state`.
-      +///   - The following `len - 1` transitions are unconditional (default) transitions
-      +///     through intermediate states.
-       /// - For each nonterminal’s reduce characterization:
-       ///   - For reveal-and-rereduces (revealed_state, pop_n, reduce_nt):
-       ///     create a chain of pop_n edges labeled (revealed_state) from the `nt` node to `reduce_nt` node.
-      @@ -153,24 +153,27 @@
-               end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
-           }
-       
-      -    // Initial reduces: create a chain of `len` transitions. The first `len-1` are default
-      -    // transitions, and the last is on `initial_state`. The chain ends at the `nt` node.
-      +    // Initial reduces: create a chain of `len` transitions. The first is on `initial_state`,
-      +    // and the rest are default transitions. The chain ends at the `nt` node.
-           for &(initial_state, len, nt) in &bb.initial_reduces {
-      +        if len == 0 {
-      +            continue; // A reduce of length 0 consumes no stack.
-      +        }
-               let ch = encode_symbol(initial_state)?;
-               let target_nt = *nt_nodes
-                   .get(&nt)
-                   .expect("nonterminal node must exist (created from parser.non_terminal_map)");
-               let mut from = start;
-       
-      -        // Create `len - 1` intermediate default transitions.
-      -        for _ in 0..(len.saturating_sub(1)) {
-      -            let to = nwa.add_state();
-      +        // The first transition is on the specific character.
-      +        let next_state = if len == 1 { *target_nt } else { nwa.add_state() };
-      +        nwa.add_transition(from, ch, next_state, w_all.clone());
-      +        from = next_state;
-      +
-      +        // The rest are default transitions.
-      +        for i in 1..len {
-      +            let to = if i == len - 1 { *target_nt } else { nwa.add_state() };
-                   nwa.add_default_transition(from, to, w_all.clone());
-                   from = to;
-               }
-      -
-      -        // The final transition is on the specific character.
-      -        nwa.add_transition(from, ch, target_nt, w_all.clone());
-           }
-       
-           // Reduce characterizations per nonterminal.
-      @@ -179,25 +182,28 @@
-                   .get(nt)
-                   .expect("reduce_characterizations only contains existing nonterminals");
-       
-      -        // Reveal-and-rereduces: chain of `pop_n` transitions. The first `pop_n-1` are default,
-      -        // and the last is on `revealed_state`.
-      +        // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
-      +        // and the rest are default.
-               for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
-      +            if pop_n == 0 {
-      +                continue;
-      +            }
+      -        // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
+      +        // Reveal-and-rereduces: chain of `len` transitions. The first is on `revealed_state`,
+               // and the rest are default.
+      -        for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
+      +        for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
                    let ch = encode_symbol(revealed_state)?;
                    let dst_nt = *nt_nodes
                        .get(&reduce_nt)
                        .expect("reduce target nonterminal must exist");
                    let mut from = src_nt;
        
-      -            // Create `pop_n - 1` intermediate default transitions.
-      -            for _ in 0..(pop_n.saturating_sub(1)) {
-      -                let to = nwa.add_state();
-      +            // The first transition is on the specific character.
-      +            let next_state = if pop_n == 1 { *dst_nt } else { nwa.add_state() };
-      +            nwa.add_transition(from, ch, next_state, w_all.clone());
-      +            from = next_state;
-      +
-      +            // The rest are default transitions.
-      +            for i in 1..pop_n {
-      +                let to = if i == pop_n - 1 { *dst_nt } else { nwa.add_state() };
+                   // The first transition is on the specific character.
+      -            let next_state = if pop_n == 0 { dst_nt } else { nwa.add_state() };
+      +            let next_state = if len == 0 { dst_nt } else { nwa.add_state() };
+                   nwa.add_transition(from, ch, next_state, w_all.clone());
+                   from = next_state;
+       
+                   // The rest are default transitions.
+      -            for i in 0..pop_n {
+      -                let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };
+      +            for i in 0..len {
+      +                let to = if i == len - 1 { dst_nt } else { nwa.add_state() };
                        nwa.add_default_transition(from, to, w_all.clone());
                        from = to;
                    }
-      -
-      -            // The final transition is on the specific character.
-      -            nwa.add_transition(from, ch, dst_nt, w_all.clone());
+
+      ```
+
+      ```diff
+      diff --git a/src/precompute4/characterize.rs b/src/precompute4/characterize.rs
+      --- a/src/precompute4/characterize.rs
+      +++ b/src/precompute4/characterize.rs
+      @@ -6,7 +6,7 @@
+       pub struct ReduceCharacterization {
+           pub terminal: TerminalID,
+           pub nonterminal: NonTerminalID,
+      -    // (revealed_state, pop_n, nonterminal)
+      +    // (revealed_state, len, nonterminal)
+           pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
+           // (revealed_state, goto_state, shift_state)
+           pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
+      @@ -18,8 +18,8 @@
+               writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
+               if !self.reveal_and_rereduces.is_empty() {
+                   writeln!(f, "      Reveal-and-rereduces:")?;
+      -            for (revealed, pop, nt) in &self.reveal_and_rereduces {
+      -                writeln!(f, "        - revealed: {}, pop: {}, reduce_nt: {}", revealed.0, pop, nt.0)?;
+      +            for (revealed, len, nt) in &self.reveal_and_rereduces {
+      +                writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?;
+                   }
                }
-       
-               // Reveal-goto-shift escapes: a single step to end_state; record the example stack.
+               if !self.reveal_goto_shift_escapes.is_empty() {
+      @@ -36,7 +36,7 @@
+           pub terminal: TerminalID,
+           // (initial_state, shift_state)
+           pub initial_shifts: BTreeSet<(StateID, StateID)>,
+      -    // (initial_state, pop_n, nonterminal)
+      +    // (initial_state, len, nonterminal)
+           pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
+           pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+       }
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/precompute4/augmented_nwa.rs
       Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/precompute4/characterize.rs
+      Applying patch to 'src/precompute4/characterize.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/characterize.rs.
     metadata:
-  - user: 'Changes committed with message: "No changes detected in the provided diff
-      block."'
+  - user: "Changes committed with message: \"Refactor: Standardize 'len' terminology
+      over 'pop_n' in precompute4 characterization and augmented NWA construction\""
     metadata:
 ...
