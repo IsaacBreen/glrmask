@@ -1477,6 +1477,10 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
         productions = inline_null_productions(&productions);
         // println!("After inlining nullable productions:\n{}", display_productions(&productions));
         // println!("After inlining nullable productions: Number of productions: {}", productions.len());
+        // Assert that there are no nullable productions left.
+        for p in &productions {
+            assert!(!p.rhs.is_empty(), "Nullable production still present after inlining: {:?}", p);
+        }
     }
     if false {
         // println!("Before inlining unit productions:\n{}", display_productions(&productions));
