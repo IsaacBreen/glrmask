@@ -4,7 +4,6 @@ pub mod items;
 pub mod parser;
 pub mod stats;
 mod tests;
-pub mod characterize;
 pub mod analyze;
 pub mod automaton;
 pub mod minimizer;
