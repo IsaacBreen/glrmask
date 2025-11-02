@@ -179,6 +179,92 @@ pub fn build_augmented_nwa_from_characterization(
     })
 }
 
+impl AugmentedNwa {
+    /// Process a parser-state stack through this augmented NWA.
+    ///
+    /// The stack is interpreted in order (0..n) as the sequence to be consumed.
+    /// Returns a vector of (pos, stop_state, path_weight) where:
+    /// - pos is how many items were consumed from `stack`,
+    /// - stop_state is the NWA state reached (final or because input exhausted),
+    /// - path_weight is the accumulated weight along the taken path.
+    pub fn process_stack(
+        &self,
+        stack: &[ParserStateID],
+    ) -> Result<Vec<(WaStateID, WaStateID, WaWeight)>, AugmentedNwaBuildError> {
+        let mut encoded: Vec<u16> = Vec::with_capacity(stack.len());
+        for &s in stack {
+            encoded.push(encode_symbol(s)?);
+        }
+        Ok(self.nwa.process_stack_u16(&encoded))
+    }
+
+    /// Non-commutative combination: fold `right` into `self` (left).
+    ///
+    /// Algorithm summary:
+    /// - Snapshot the current left end-map.
+    /// - Append-copy the entire `right` NWA into `self`, capturing a state-id mapping.
+    /// - For each (left_end_state, left_stack) in the snapshot:
+    ///   - Run `right`’s NWA on `left_stack` to get multiple (pos, right_stop, path_weight).
+    ///   - Add an epsilon transition from `left_end_state` to the mapped `right_stop` with `path_weight`.
+    ///   - From `right_stop`, find all `right` end states reachable (ignoring labels).
+    ///     For each such end state and each stack in `right.end_map[end_state]`:
+    ///       - prepend `left_stack[pos..]` to that right stack and insert it into `self.end_map`
+    ///         under the mapped end-state id.
+    pub fn combine_right_into(
+        &mut self,
+        right: &AugmentedNwa,
+    ) -> Result<(), AugmentedNwaBuildError> {
+        // Snapshot the original left end_map so we only iterate over "left" entries.
+        let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
+            self.end_map.clone();
+
+        // Append-copy the right NWA into the left.
+        let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
+
+        // Walk all (left end state, stacks) pairs.
+        for (left_end_state, stacks) in left_end_snapshot {
+            for left_stack in stacks {
+                // 1) Process the left stack through the right NWA.
+                let mut encoded: Vec<u16> = Vec::with_capacity(left_stack.len());
+                for &s in &left_stack {
+                    encoded.push(encode_symbol(s)?);
+                }
+                let stops = right.nwa.process_stack_u16(&encoded);
+
+                // 2) For each stop: add epsilon edge and propagate end_map stacks.
+                for (pos, right_stop_state, path_weight) in stops {
+                    // Map the right stop state into the left's id space.
+                    let mapped_stop = right_to_left[right_stop_state];
+                    // Epsilon from the left end state to the mapped right stop state.
+                    self.nwa
+                        .add_epsilon_transition(left_end_state, mapped_stop, path_weight.clone());
+
+                    // Reachable right end states from this right stop, ignoring labels.
+                    let reachable = right
+                        .nwa
+                        .reachable_states_ignoring_labels(right_stop_state);
+                    for r_state in reachable {
+                        if let Some(r_stacks) = right.end_map.get(&r_state) {
+                            let mapped_end = right_to_left[r_state];
+                            for r_stack in r_stacks {
+                                // Prepend the remainder of the left stack to the right stack.
+                                let mut combined: Vec<ParserStateID> =
+                                    left_stack[pos..].to_vec();
+                                combined.extend(r_stack.iter().cloned());
+                                self.end_map
+                                    .entry(mapped_end)
+                                    .or_default()
+                                    .insert(combined);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -958,6 +958,171 @@ impl DWA {
     }
 }
 
+// --- NWA utilities: processing stacks and structural helpers ---
+impl NWA {
+    /// Process an input stack (sequence of u16 symbols) through this NWA.
+    ///
+    /// Returns a vector of (pos, stop_state, path_weight) for all nondeterministic
+    /// stops where:
+    /// - a final state is reached (pos may be < input.len()), or
+    /// - the input is exhausted (pos == input.len()).
+    ///
+    /// Path weights are accumulated by bitwise AND along edges and OR when
+    /// multiple paths converge on the same (pos, state).
+    pub fn process_stack_u16(&self, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
+        // Note: For external callers the first tuple element is "pos", but since
+        // type alias StateID = usize, we keep the signature consistent and document
+        // that the first usize is the consumed position in `input`.
+        if self.states.is_empty() {
+            return Vec::new();
+        }
+        let has_epsilons = self
+            .states
+            .iter()
+            .any(|s| !s.epsilon_transitions.is_empty());
+
+        // Current frontier as a map: state -> path_weight
+        let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
+        current.insert(self.start_state, Weight::all());
+        let mut current = self.epsilon_closure_with_flag(current, has_epsilons);
+
+        // Accumulate results across positions; deduplicate by (pos, state) with OR for weights.
+        let mut results: BTreeMap<(usize, StateID), Weight> = BTreeMap::new();
+        let n = input.len();
+
+        for pos in 0..=n {
+            // 1) If any current state is final, we can stop here and record a result.
+            for (&sid, path_w) in &current {
+                if self.states[sid].final_weight.is_some() {
+                    results
+                        .entry((pos, sid))
+                        .or_insert_with(Weight::zeros)
+                        .bitor_assign(path_w);
+                }
+            }
+            // 2) If we've consumed the entire input, record all current states as stops.
+            if pos == n {
+                for (&sid, path_w) in &current {
+                    results
+                        .entry((pos, sid))
+                        .or_insert_with(Weight::zeros)
+                        .bitor_assign(path_w);
+                }
+                break;
+            }
+
+            // 3) Advance one symbol.
+            let ch = input[pos];
+            let mut next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
+            for (&sid, path_w) in &current {
+                if let Some(transitions) = self.states[sid].transitions.get(ch) {
+                    for (to, w) in transitions {
+                        let w2 = path_w & w;
+                        if !w2.is_empty() {
+                            next_raw
+                                .entry(*to)
+                                .or_insert_with(Weight::zeros)
+                                .bitor_assign(&w2);
+                        }
+                    }
+                }
+            }
+            current = self.epsilon_closure_with_flag(next_raw, has_epsilons);
+        }
+
+        results
+            .into_iter()
+            .map(|((pos, sid), w)| (pos, sid, w))
+            .collect()
+    }
+
+    /// Append a deep copy of `other` into `self`, returning a mapping from
+    /// `other` StateID to new StateID in `self`.
+    ///
+    /// All transitions (exceptions, default, epsilons) are remapped accordingly.
+    /// The `start_state` of `self` is unchanged. Final weights are copied.
+    pub fn append_copy(&mut self, other: &NWA) -> Vec<StateID> {
+        let base = self.states.len();
+        let count = other.states.len();
+        // Build the mapping (right id -> new id).
+        let mut mapping: Vec<StateID> = Vec::with_capacity(count);
+        for i in 0..count {
+            mapping.push(base + i);
+            self.states.push(NWAState::new());
+        }
+        // Populate each new state's fields with remapped references.
+        for (i, st) in other.states.iter().enumerate() {
+            let dst_id = base + i;
+            let dst = &mut self.states[dst_id];
+            // Final weight
+            dst.final_weight = st.final_weight.clone();
+            // Epsilon transitions
+            dst.epsilon_transitions = st
+                .epsilon_transitions
+                .iter()
+                .map(|(to, w)| (mapping[*to], w.clone()))
+                .collect();
+            // Labeled transitions
+            let mut new_map: U16Map<Vec<(StateID, Weight)>> = U16Map::new();
+            // Exceptions
+            for (ch, vec) in st.transitions.exceptions.iter() {
+                let remapped: Vec<(StateID, Weight)> = vec
+                    .iter()
+                    .map(|(to, w)| (mapping[*to], w.clone()))
+                    .collect();
+                new_map.exceptions.insert(*ch, remapped);
+            }
+            // Default
+            if let Some(def) = st.transitions.default.as_ref() {
+                let remapped: Vec<(StateID, Weight)> = def
+                    .iter()
+                    .map(|(to, w)| (mapping[*to], w.clone()))
+                    .collect();
+                new_map.default = Some(remapped);
+            }
+            dst.transitions = new_map;
+        }
+        mapping
+    }
+
+    /// Return the set of states reachable from `from` by following any transitions
+    /// (exceptions, default, and epsilon), ignoring labels and weights.
+    pub fn reachable_states_ignoring_labels(&self, from: StateID) -> BTreeSet<StateID> {
+        let mut visited: BTreeSet<StateID> = BTreeSet::new();
+        let mut q: VecDeque<StateID> = VecDeque::new();
+        if from >= self.states.len() {
+            return visited;
+        }
+        visited.insert(from);
+        q.push_back(from);
+        while let Some(u) = q.pop_front() {
+            // Epsilons
+            for (v, _) in &self.states[u].epsilon_transitions {
+                if visited.insert(*v) {
+                    q.push_back(*v);
+                }
+            }
+            // Default
+            if let Some(def) = self.states[u].transitions.default.as_ref() {
+                for (v, _) in def {
+                    if visited.insert(*v) {
+                        q.push_back(*v);
+                    }
+                }
+            }
+            // Exceptions
+            for vec in self.states[u].transitions.exceptions.values() {
+                for (v, _) in vec {
+                    if visited.insert(*v) {
+                        q.push_back(*v);
+                    }
+                }
+            }
+        }
+        visited
+    }
+}
+
 // --- Display Implementations for Debugging ---
 
 // --- Display Implementations for Debugging ---
