@@ -106,5 +106,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         precomputed4.insert(sid, dwa);
     }
 
+    println!("\n--- Final DWAs After Determinization and Simplification ---");
+    for (sid, dwa) in &precomputed4 {
+        println!("Tokenizer State ID {:?}:\n{}", sid, dwa);
+    }
+    println!("--- End Final DWAs After Determinization and Simplification ---\n");
+
     precomputed4
 }
