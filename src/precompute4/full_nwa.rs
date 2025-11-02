@@ -61,8 +61,9 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         |current_aug_nwa, edge_terminal_opt, dest_map| {
             let mut results: Vec<(PrecomputeNode1Index, AugmentedNwa)> = Vec::new();
 
-            if let Some(terminal_id) = edge_terminal_opt {
-                let terminal_aug_nwa = augmented_nwas.get(terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id));
+            if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                let terminal_id = edge_terminal_opt.unwrap();
+                let terminal_aug_nwa = augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id));
                 for (dest_idx, llm_token_bv) in dest_map.iter() {
                     let mut new_aug_nwa = terminal_aug_nwa.clone();
                     let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
