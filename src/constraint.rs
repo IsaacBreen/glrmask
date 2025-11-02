@@ -49,6 +49,7 @@ use crate::glr::table::StateID;
 use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue};
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::precompute4::full_nwa::{precompute4, Precomputed4};
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
@@ -64,6 +65,7 @@ use std::borrow::Borrow;
 use std::collections::btree_map::Entry as BTreeEntry;
 use std::collections::BTreeMap as StdMap;
 use std::io::{Read, Write};
+use std::iter;
 use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
@@ -667,6 +669,7 @@ pub struct GrammarConstraintConfig {
     pub trie2: Trie2Config,
     pub trie3: Trie3Config,
     pub intermediate_trie3_templates: IntermediateTrie3Config,
+    pub run_precompute4: bool,
     pub intermediate_trie3_main: IntermediateTrie3Config,
     pub dummy_terminal_map: BTreeMap<String, BTreeSet<Terminal>>,
     pub dummy_terminal_penalties: BTreeMap<String, usize>,
@@ -682,6 +685,7 @@ impl Default for GrammarConstraintConfig {
             trie2: Trie2Config::off(),
             trie3: Trie3Config::default(),
             intermediate_trie3_templates: IntermediateTrie3Config::default(),
+            run_precompute4: false,
             intermediate_trie3_main: IntermediateTrie3Config::default(),
             dummy_terminal_map: BTreeMap::new(),
             dummy_terminal_penalties: BTreeMap::new(),
@@ -699,6 +703,7 @@ impl GrammarConstraintConfig {
             trie2: Trie2Config::off(),
             trie3: Trie3Config::off(),
             intermediate_trie3_templates: IntermediateTrie3Config::off(),
+            run_precompute4: false,
             intermediate_trie3_main: IntermediateTrie3Config::off(),
             dummy_terminal_map: BTreeMap::new(),
             dummy_terminal_penalties: BTreeMap::new(),
@@ -790,6 +795,7 @@ pub struct GrammarConstraint {
     pub(crate) precomputed1:      Precomputed,
     pub precomputed2:     Precomputed2,
     pub precomputed3:     Precomputed3,
+    pub precomputed4:     Precomputed4,
     pub llm_vocab:        Arc<LLMVocab>,
     pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -841,6 +847,7 @@ impl GrammarConstraint {
         assert_eq!(self.state_map_by_llm, other.state_map_by_llm);
         assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
         assert_eq!(self.special_precomputation, other.special_precomputation);
+        // assert_eq!(self.precomputed4, other.precomputed4); // DWA doesn't have PartialEq yet
         assert_eq!(self.original_to_dummy_map, other.original_to_dummy_map);
     }
 }
@@ -855,6 +862,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("precomputed1".to_string(), self.precomputed1.to_json());
         obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
         obj.insert("precomputed3".to_string(), self.precomputed3.to_json());
+        obj.insert("precomputed4".to_string(), self.precomputed4.to_json());
         obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
         obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
@@ -890,6 +898,8 @@ impl JSONConvertible for GrammarConstraint {
                                      .and_then(|n| Precomputed2::from_json(n))?;
                 let precomputed3 = obj.remove("precomputed3").ok_or_else(|| "Missing field precomputed3".to_string())
                                      .and_then(|n| Precomputed3::from_json(n))?;
+                let precomputed4 = obj.remove("precomputed4").ok_or_else(|| "Missing field precomputed4".to_string())
+                                     .and_then(|n| Precomputed4::from_json(n))?;
 
                 let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                        .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
@@ -952,6 +962,7 @@ impl JSONConvertible for GrammarConstraint {
                     precomputed1,
                     precomputed2,
                     precomputed3,
+                    precomputed4,
                     llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id }),
                     token_name_map,
                     possible_matches,
@@ -1395,6 +1406,7 @@ impl GrammarConstraint {
                 precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
+                precomputed4: BTreeMap::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -1436,6 +1448,7 @@ impl GrammarConstraint {
                 precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
+                precomputed4: BTreeMap::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -1506,6 +1519,13 @@ impl GrammarConstraint {
             &mut precompute3_vocab,
         );
 
+        let precomputed4 = if config.run_precompute4 {
+            precompute4(&parser, &precomputed1, &trie1_god)
+                .expect("Precompute4 failed")
+        } else {
+            BTreeMap::new()
+        };
+
         // After precompute3, vocab may have changed due to optimizations. Remap other structures that use internal LLM token IDs.
         let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
         for (original_id, old_internal_id) in &precompute3_vocab_before.original_to_internal {
@@ -1570,6 +1590,7 @@ impl GrammarConstraint {
             precomputed1,
             precomputed2,
             precomputed3,
+            precomputed4,
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches,
@@ -1721,6 +1742,7 @@ impl GrammarConstraint {
                 precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
+                precomputed4: BTreeMap::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
