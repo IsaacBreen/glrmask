@@ -19,8 +19,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
 
     println!("\n--- Augmented NWA Generation ---");
-    for aug_nwa in augmented_nwas.values() {
-        println!("{}", aug_nwa);
+    for (tid, aug_nwa) in &augmented_nwas {
+        println!("Terminal ID {:?}:\n{}", tid, aug_nwa);
     }
     println!("--- End Augmented NWA Generation ---\n");
 
