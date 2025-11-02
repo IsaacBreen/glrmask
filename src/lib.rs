@@ -28,5 +28,4 @@ mod constraint_special_precompute;
 // New lightweight pass framework for Trie3 optimization
 pub mod trie3_opt;
 mod weighted_automata;
-pub mod precompute4;
-
+mod precompute4;

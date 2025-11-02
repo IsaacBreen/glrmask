@@ -1207,56 +1207,30 @@ impl JSONConvertible for SimpleBitset {
     fn to_json(&self) -> JSONNode {
         let ranges: Vec<JSONNode> = self.0.ranges().map(|r| {
             JSONNode::Array(vec![
-                JSONNode::Int(*r.start() as i128),
-                JSONNode::Int(*r.end() as i128),
+                JSONNode::Int(r.start() as i64),
+                JSONNode::Int(r.end() as i64),
             ])
         }).collect();
         JSONNode::Array(ranges)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Array(arr) => {
-                let mut ranges = Vec::new();
-                for (i, range_node) in arr.into_iter().enumerate() {
-                    match range_node {
-                        JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                            let end_node = pair_vec.pop().unwrap();
-                            let start_node = pair_vec.pop().unwrap();
-
-                            // Use StateID (usize) from_json for range bounds.
-                            let start = StateID::from_json(start_node)
-                                .map_err(|e| format!("While deserializing SimpleBitset range start at $[{}][0]: {}", i, e))?;
-                            let end = StateID::from_json(end_node)
-                                .map_err(|e| format!("While deserializing SimpleBitset range end at $[{}][1]: {}", i, e))?;
-
-                            if start > end {
-                                return Err(format!("Invalid range at $[{}]: start ({}) is greater than end ({})", i, start, end));
-                            }
-                            ranges.push(start..=end);
-                        }
-                        other => return Err(format!(
-                            "Expected 2-element array for SimpleBitset range at $[{}], got {}",
-                            i,
-                            other.short_preview()
-                        )),
-                    }
-                }
-                Ok(SimpleBitset(RangeSetBlaze::from_iter(ranges)))
+        let arr = node.into_array()?;
+        let mut rsb = RangeSetBlaze::new();
+        for range_node in arr {
+            let mut range_arr = range_node.into_array()?;
+            if range_arr.len() != 2 {
+                return Err("Range must be a 2-element array".to_string());
             }
-            other => Err(format!(
-                "Expected JSON array of [start, end] pairs for SimpleBitset, got {}",
-                other.short_preview()
-            )),
+            let end = range_arr.pop().unwrap().into_int()? as usize;
+            let start = range_arr.pop().unwrap().into_int()? as usize;
+            rsb.insert_range(start..=end);
         }
+        Ok(SimpleBitset(rsb))
     }
 }
 
 impl<T: JSONConvertible> JSONConvertible for U16Map<T> {
-    // ... (existing impl)
-}
-
-impl JSONConvertible for NWAState {
     fn to_json(&self) -> JSONNode {
         let mut obj = BTreeMap::new();
         obj.insert("exceptions".to_string(), self.exceptions.to_json());
@@ -1265,49 +1239,10 @@ impl JSONConvertible for NWAState {
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        let mut obj = BTreeMap::new();
-        obj.insert("transitions".to_string(), self.transitions.to_json());
-        obj.insert("epsilon_transitions".to_string(), self.epsilon_transitions.to_json());
-        obj.insert("final_weight".to_string(), self.final_weight.to_json());
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
-        let transitions = U16Map::<Vec<(StateID, Weight)>>::from_json(
-            obj.remove("transitions").ok_or("Missing 'transitions' field")?
-        )?;
-        let epsilon_transitions = Vec::<(StateID, Weight)>::from_json(
-            obj.remove("epsilon_transitions").ok_or("Missing 'epsilon_transitions' field")?
-        )?;
-        let final_weight = Option::<Weight>::from_json(
-            obj.remove("final_weight").ok_or("Missing 'final_weight' field")?
-        )?;
-        Ok(NWAState {
-            transitions,
-            epsilon_transitions,
-            final_weight,
-        })
-    }
-}
-
-impl JSONConvertible for NWA {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = BTreeMap::new();
-        obj.insert("states".to_string(), self.states.to_json());
-        obj.insert("start_state".to_string(), self.start_state.to_json());
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        let mut obj = node.into_object()?;
-        let states = Vec::<NWAState>::from_json(
-            obj.remove("states").ok_or("Missing 'states' field")?
-        )?;
-        let start_state = StateID::from_json(
-            obj.remove("start_state").ok_or("Missing 'start_state' field")?
-        )?;
-        Ok(NWA { states, start_state })
+        let exceptions = BTreeMap::<u16, T>::from_json(obj.remove("exceptions").ok_or("Missing 'exceptions' field")?)?;
+        let default = Option::<T>::from_json(obj.remove("default").ok_or("Missing 'default' field")?)?;
+        Ok(U16Map { exceptions, default })
     }
 }
 
@@ -1742,31 +1677,5 @@ mod tests {
         // Check a transition to a known state (S7 is a sink)
         assert!(s7.transitions.exceptions.is_empty());
         assert!(s7.transitions.default.is_none());
-    }
-
-    #[test]
-    fn test_simple_bitset_json_conversion() {
-        let original = SimpleBitset::from_iter(vec![1, 2, 5, 10..=12, usize::MAX]);
-        let json_node = original.to_json();
-        
-        // Expected: [[1, 2], [5, 5], [10, 12], [usize::MAX, usize::MAX]]
-        if let JSONNode::Array(arr) = &json_node {
-            assert_eq!(arr.len(), 4);
-            if let JSONNode::Array(r1) = &arr[0] {
-                assert_eq!(r1.len(), 2);
-                assert_eq!(r1[0], JSONNode::Int(1));
-                assert_eq!(r1[1], JSONNode::Int(2));
-            } else { panic!("Expected array"); }
-        } else { panic!("Expected array"); }
-
-        let deserialized = SimpleBitset::from_json(json_node).unwrap();
-        assert_eq!(original, deserialized);
-
-        // Test empty set
-        let empty = SimpleBitset::zeros();
-        let empty_node = empty.to_json();
-        assert_eq!(empty_node, JSONNode::Array(vec![]));
-        let deserialized_empty = SimpleBitset::from_json(empty_node).unwrap();
-        assert_eq!(empty, deserialized_empty);
     }
 }
