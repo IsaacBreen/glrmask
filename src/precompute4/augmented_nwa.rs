@@ -24,7 +24,6 @@ pub enum AugmentedNwaBuildError {
 /// Alphabet: parser StateID values encoded as u16 (fails if any StateID > u16::MAX).
 #[derive(Debug, Clone)]
 pub struct AugmentedNwa {
-    pub terminal: TerminalID,
     pub nwa: WaNWA,
     pub end_state: WaStateID,
     pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
@@ -47,6 +46,29 @@ pub fn build_augmented_nwa_for_terminal(
     build_augmented_nwa_from_characterization(parser, &bb)
 }
 
+/// This NWA acts as an identity for stack transformations, simply passing through any stack it is combined with.
+pub fn build_augmented_nwa_for_ignore_terminal(
+    terminal_id: TerminalID,
+) -> AugmentedNwa {
+    let mut nwa = WaNWA::new();
+    let start_state = nwa.start_state;
+
+    // For an ignore terminal, the stack is passed through. The end_map should
+    // contain an empty stack at the end_state, which is also the start_state.
+    // When this NWA is on the left in a `combine_right_into` operation, the
+    // empty stack from its end_map results in the right-hand-side NWA's stacks
+    // being preserved.
+    let mut end_map = BTreeMap::new();
+    end_map.insert(start_state, BTreeSet::from([vec![]]));
+
+    AugmentedNwa {
+        nwa,
+        end_state: start_state,
+        nt_nodes: BTreeMap::new(),
+        end_map,
+    }
+}
+
 /// Build augmented NWAs for all terminals.
 pub fn build_augmented_nwas(
     parser: &GLRParser,
@@ -54,8 +76,9 @@ pub fn build_augmented_nwas(
     let all = compute_all_characterizations(parser);
 
     println!("\n--- Terminal Characterizations ---");
-    for bb in all.values() {
-        println!("{}", bb);
+    for (terminal_id, bb) in &all {
+        let terminal = parser.terminal_map.get_by_right(terminal_id).unwrap_or("<unknown>".as_ref());
+        println!("Terminal {} ({}) Characterization:\n{}", terminal_id.0, terminal, bb);
     }
     println!("--- End Terminal Characterizations ---\n");
 
@@ -179,7 +202,6 @@ pub fn build_augmented_nwa_from_characterization(
     }
 
     Ok(AugmentedNwa {
-        terminal: bb.terminal,
         nwa,
         end_state,
         nt_nodes,
@@ -305,8 +327,7 @@ impl AugmentedNwa {
 
 impl Display for AugmentedNwa {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let term_name = if self.terminal.0 == usize::MAX { "INITIAL".to_string() } else { self.terminal.0.to_string() };
-        writeln!(f, "Augmented NWA for Terminal {}:", term_name)?;
+        writeln!(f, "Augmented NWA")?;
         writeln!(f, "  End State: {}", self.end_state)?;
         writeln!(f, "  Nonterminal Nodes:")?;
         for (nt, state) in &self.nt_nodes {
