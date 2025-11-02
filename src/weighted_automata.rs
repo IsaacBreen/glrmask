@@ -218,7 +218,7 @@ pub type Weight = SimpleBitset;
 
 // --- Nondeterministic Weighted Automaton (NWA) ---
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NWAState {
     /// Transitions on specific `u16` characters. The `Vec` handles nondeterminism.
     pub transitions: U16Map<Vec<(StateID, Weight)>>,
@@ -234,7 +234,7 @@ impl NWAState {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NWA {
     pub states: Vec<NWAState>,
     pub start_state: StateID,

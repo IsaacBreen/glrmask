@@ -21,7 +21,7 @@ pub enum AugmentedNwaBuildError {
 /// - `end_map` accumulates example stacks that reach the `end_state`.
 ///
 /// Alphabet: parser StateID values encoded as u16 (fails if any StateID > u16::MAX).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AugmentedNwa {
     pub nwa: WaNWA,
     pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
@@ -48,6 +48,7 @@ pub fn build_augmented_nwa_for_terminal(
 pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
     let mut nwa = WaNWA::new();
     let start_state = nwa.start_state;
+    nwa.set_final_weight(start_state, WaWeight::all());
 
     // For an ignore terminal, the stack is passed through. The end_map should
     // contain an empty stack at the end_state, which is also the start_state.
@@ -404,32 +405,26 @@ mod tests {
 
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
-        // Expected structure:
-        // Original ignore NWA (state 0) has an epsilon transition to the start of the copied RHS NWA (state 1).
-        // The end_map of the combined NWA should be the RHS's end_map, but with keys remapped.
-        // Original RHS end_state was 1. It gets copied to state 2.
-        // So the new end_map should have key 2.
+        // Build expected result
+        let mut expected_nwa = WaNWA::new(); // state 0
+        expected_nwa.set_final_weight(0, WaWeight::all());
+        let s1 = expected_nwa.add_state(); // state 1
+        let s2 = expected_nwa.add_state(); // state 2
+        expected_nwa.add_epsilon_transition(0, s1, WaWeight::all());
+        expected_nwa.add_transition(s1, 100, s2, WaWeight::all());
 
-        assert_eq!(lhs.nwa.states.len(), 3); // 0 (ignore) + 1,2 (copied rhs)
-        assert_eq!(lhs.nwa.start_state, 0);
-
-        // Check for epsilon transition 0 -> 1
-        let start_state = &lhs.nwa.states[0];
-        assert_eq!(start_state.epsilon_transitions.len(), 1);
-        assert_eq!(start_state.epsilon_transitions[0], (1, WaWeight::all()));
-
-        // Check copied RHS structure
-        let copied_rhs_start = &lhs.nwa.states[1];
-        let transitions = copied_rhs_start.transitions.exceptions.get(&100).unwrap();
-        assert_eq!(transitions.len(), 1);
-        assert_eq!(transitions[0], (2, WaWeight::all())); // 0->1 in rhs becomes 1->2
-
-        // Check the final end_map
         let expected_end_map = BTreeMap::from([(
-            2, // original end_state 1 is mapped to 2
+            2,
             BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
         )]);
-        assert_eq!(lhs.end_map, expected_end_map);
+
+        let expected_aug_nwa = AugmentedNwa {
+            nwa: expected_nwa,
+            nt_nodes: BTreeMap::new(),
+            end_map: expected_end_map,
+        };
+
+        assert_eq!(lhs, expected_aug_nwa);
     }
 
     #[test]
@@ -438,44 +433,28 @@ mod tests {
         let rhs = build_augmented_nwa_for_ignore_terminal();
         let weight = WaWeight::all();
 
-        let original_end_map = lhs.end_map.clone();
-        let original_state_count = lhs.nwa.states.len();
-        let original_end_state_id = *lhs.end_map.keys().next().unwrap();
-
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
-        // Expected structure:
-        // The original LHS NWA is preserved.
-        // The ignore NWA (1 state) is copied into LHS.
-        // An epsilon transition is added from the original LHS end state to the copied ignore NWA's start state.
-        // The new end_map contains the original LHS stack, but now associated with the copied ignore NWA's end state.
+        // Build expected result
+        let mut expected_nwa = WaNWA::new(); // state 0
+        let s1 = expected_nwa.add_state(); // state 1
+        let s2 = expected_nwa.add_state(); // state 2
+        expected_nwa.add_transition(0, 100, s1, WaWeight::all());
+        expected_nwa.add_epsilon_transition(s1, s2, WaWeight::all());
+        expected_nwa.set_final_weight(s2, WaWeight::all());
 
-        assert_eq!(lhs.nwa.states.len(), original_state_count + 1); // 2 + 1 = 3
-        let copied_rhs_start_id = original_state_count; // state 2
-
-        // Check original LHS structure is preserved
-        let lhs_start_state = &lhs.nwa.states[0];
-        let transitions = lhs_start_state.transitions.exceptions.get(&100).unwrap();
-        assert_eq!(transitions.len(), 1);
-        assert_eq!(
-            transitions[0],
-            (original_end_state_id, WaWeight::all())
-        );
-
-        // Check for epsilon transition from original end state to new state
-        let lhs_original_end_state = &lhs.nwa.states[original_end_state_id];
-        assert_eq!(lhs_original_end_state.epsilon_transitions.len(), 1);
-        assert_eq!(
-            lhs_original_end_state.epsilon_transitions[0],
-            (copied_rhs_start_id, WaWeight::all())
-        );
-
-        // Check the final end_map
         let expected_end_map = BTreeMap::from([(
-            copied_rhs_start_id,
-            original_end_map.get(&original_end_state_id).unwrap().clone(),
+            2,
+            BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
         )]);
-        assert_eq!(lhs.end_map, expected_end_map);
+
+        let expected_aug_nwa = AugmentedNwa {
+            nwa: expected_nwa,
+            nt_nodes: BTreeMap::new(),
+            end_map: expected_end_map,
+        };
+
+        assert_eq!(lhs, expected_aug_nwa);
     }
 
     // Helper to build the NWA for Terminal 1 from the prompt
@@ -672,53 +651,54 @@ mod tests {
         let right_nwa = build_nwa_from_prompt_left();
         let weight = WaWeight::all();
 
-        // The state of `self_nwa` before combination:
-        // 4 states (0-3), start=0. end_map has state 1 with stack [0, 1].
-        assert_eq!(self_nwa.nwa.states.len(), 4);
-        assert_eq!(*self_nwa.end_map.keys().next().unwrap(), 1);
-        let original_nt_nodes = self_nwa.nt_nodes.clone();
-
         self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
 
-        // After combination:
-        // `self_nwa` should have its original 4 states + `right_nwa`'s 6 states = 10 states.
-        assert_eq!(self_nwa.nwa.states.len(), 10);
-        // nt_nodes should be preserved.
-        assert_eq!(self_nwa.nt_nodes, original_nt_nodes);
+        // Build expected result
+        let mut expected_nwa = WaNWA::new(); // 0
+        let s1 = expected_nwa.add_state(); // 1
+        let s2 = expected_nwa.add_state(); // 2
+        let s3 = expected_nwa.add_state(); // 3
+        // Copied states
+        let s4 = expected_nwa.add_state(); // 4 (copied 0)
+        let s5 = expected_nwa.add_state(); // 5 (copied 1)
+        let s6 = expected_nwa.add_state(); // 6 (copied 2)
+        let s7 = expected_nwa.add_state(); // 7 (copied 3)
+        let s8 = expected_nwa.add_state(); // 8 (copied 4)
+        let s9 = expected_nwa.add_state(); // 9 (copied 5)
 
-        // The original end state of `self_nwa` (state 1) should now have an epsilon
-        // transition to the mapped stop state from `right_nwa`.
-        // The stack `[0, 1]` processed by `right_nwa.nwa` stops at `pos=1`, `state=5` with weight `[3]`.
-        // `right_nwa`'s state 5 is mapped to `4 + 5 = 9` in the combined NWA.
-        let self_original_end_state = &self_nwa.nwa.states[1];
-        assert_eq!(self_original_end_state.epsilon_transitions.len(), 1);
-        assert_eq!(
-            self_original_end_state.epsilon_transitions[0],
-            (9, WaWeight::from_item(3))
-        );
+        // Original part
+        expected_nwa.add_transition(0, 1, s3, WaWeight::all());
+        expected_nwa.add_transition(0, 2, s1, WaWeight::all());
+        expected_nwa.add_transition(0, 3, s2, WaWeight::all());
 
-        // The new end_map should be calculated correctly.
-        // self_stack = [0, 1], pos = 1. Remainder is [1].
-        // right_stack = [0, 1].
-        // combined = [1, 0, 1].
-        // The end state from `right_nwa` was 5, mapped to 9.
+        // Connection
+        let w3 = WaWeight::from_item(3);
+        expected_nwa.add_epsilon_transition(s1, s9, w3.clone());
+
+        // Copied part
+        expected_nwa.add_epsilon_transition(s4, s5, w3.clone());
+        expected_nwa.add_transition(s5, 0, s6, WaWeight::all());
+        expected_nwa.add_transition(s5, 1, s8, WaWeight::all());
+        expected_nwa.add_transition(s5, 3, s7, WaWeight::all());
+        expected_nwa.add_epsilon_transition(s6, s9, w3.clone());
+        expected_nwa.set_final_weight(s9, WaWeight::all());
+
+        let expected_nt_nodes = BTreeMap::from([
+            (NonTerminalID(0), s2),
+            (NonTerminalID(1), s3),
+        ]);
+
         let expected_end_map = BTreeMap::from([(
-            9,
+            s9,
             BTreeSet::from([vec![ParserStateID(1), ParserStateID(0), ParserStateID(1)]]),
         )]);
-        assert_eq!(self_nwa.end_map, expected_end_map);
 
-        // Check that the appended states are structured correctly, matching the prompt's RESULT.
-        // right_nwa state 0 -> mapped to 4. ε -> 1 becomes ε -> 5.
-        assert_eq!(self_nwa.nwa.states[4].epsilon_transitions[0], (5, WaWeight::from_item(3)));
-        // right_nwa state 1 -> mapped to 5. transitions 0->2, 1->4, 3->3 become 0->6, 1->8, 3->7.
-        let s5_trans = &self_nwa.nwa.states[5].transitions.exceptions;
-        assert_eq!(*s5_trans.get(&0).unwrap(), vec![(6, WaWeight::all())]);
-        assert_eq!(*s5_trans.get(&1).unwrap(), vec![(8, WaWeight::all())]);
-        assert_eq!(*s5_trans.get(&3).unwrap(), vec![(7, WaWeight::all())]);
-        // right_nwa state 2 -> mapped to 6. ε -> 5 becomes ε -> 9.
-        assert_eq!(self_nwa.nwa.states[6].epsilon_transitions[0], (9, WaWeight::from_item(3)));
-        // right_nwa state 5 -> mapped to 9. final_weight should be copied.
-        assert_eq!(self_nwa.nwa.states[9].final_weight, Some(WaWeight::all()));
+        let expected_aug_nwa = AugmentedNwa {
+            nwa: expected_nwa,
+            nt_nodes: expected_nt_nodes,
+            end_map: expected_end_map,
+        };
+
+        assert_eq!(self_nwa, expected_aug_nwa);
     }
 }
