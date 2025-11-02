@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 use crate::glr::grammar::regex_name;
+use std::mem;
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{
@@ -228,6 +229,23 @@ impl AugmentedNwa {
         Ok(())
     }
 
+    fn remap_rest_with_mapping(rest: &mut AugmentedNwaRest, mapping: &[WaStateID]) {
+        // Remap start
+        rest.nwa.start_state = mapping[rest.nwa.start_state];
+        // Remap nt_nodes
+        let mut new_nt_nodes = BTreeMap::new();
+        for (nt, st) in rest.nt_nodes.iter() {
+            new_nt_nodes.insert(*nt, mapping[*st]);
+        }
+        rest.nt_nodes = new_nt_nodes;
+        // Remap end_map keys
+        let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+        for (k, v) in rest.end_map.iter() {
+            new_end_map.insert(mapping[*k], v.clone());
+        }
+        rest.end_map = new_end_map;
+    }
+
     /// Rebase a disjoint AugmentedNwa onto an existing shared states storage.
     pub fn rebase_onto_shared(
         shared_states: &mut WaNWAStates,
@@ -256,9 +274,18 @@ impl AugmentedNwa {
         right: &AugmentedNwa,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
-        let mut remapped_right = right.rest.clone();
-        Self::rebase_onto_shared(&mut self.states, &right.states, &mut remapped_right);
-        Self::combine_right_into_on_shared_states(&mut self.states, &mut self.rest, &remapped_right, weight)
+        // 1) Append-copy the right automaton into self.states to get a mapping.
+        let right_to_left = self.states.append_copy_from(&right.states);
+        // 2) Remap a clone of right.rest through that mapping.
+        let mut right_rest_mapped = right.rest.clone();
+        Self::remap_rest_with_mapping(&mut right_rest_mapped, &right_to_left);
+        // 3) Combine within self.states using the mapped right.
+        Self::combine_right_into_on_shared_states(
+            &mut self.states,
+            &mut self.rest,
+            &right_rest_mapped,
+            weight,
+        )
     }
 
     /// Union of two augmented NWAs into self.
