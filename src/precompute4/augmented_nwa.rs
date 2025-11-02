@@ -6,7 +6,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{
     compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
 };
-use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight};
+use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight, StateID};
 
 /// Error that can occur while building an AugmentedNwa.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +247,8 @@ impl AugmentedNwa {
         let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
             self.end_map.clone();
 
+        let mut new_end_map: BTreeMap<StateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+
         // Append-copy the right NWA into the left.
         let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
 
@@ -259,6 +261,15 @@ impl AugmentedNwa {
                     encoded.push(encode_symbol(s)?);
                 }
                 let stops = right.nwa.process_stack_u16(&encoded);
+
+                if stops.is_empty() {
+                    // Path could not be extended. Keep the original stack.
+                    new_end_map
+                        .entry(left_end_state)
+                        .or_default()
+                        .insert(left_stack);
+                    continue;
+                }
 
                 // 2) For each stop: add epsilon edge and propagate end_map stacks.
                 for (pos, right_stop_state, path_weight) in stops {
@@ -282,7 +293,7 @@ impl AugmentedNwa {
                                 let mut combined: Vec<ParserStateID> =
                                     left_stack[pos..].to_vec();
                                 combined.extend(r_stack.iter().cloned());
-                                self.end_map
+                                new_end_map
                                     .entry(mapped_end)
                                     .or_default()
                                     .insert(combined);
@@ -292,6 +303,7 @@ impl AugmentedNwa {
                 }
             }
         }
+        self.end_map = new_end_map;
         Ok(())
     }
 
