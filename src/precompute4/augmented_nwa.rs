@@ -135,7 +135,6 @@ pub fn build_augmented_nwa_from_characterization(
     // Initial reduces: create a chain of `len` transitions. The first is on `initial_state`,
     // and the rest are default transitions. The chain ends at the `nt` node.
     for &(initial_state, len, nt) in &bb.initial_reduces {
-        assert!(len >= 1);
         let ch = encode_symbol(initial_state)?;
         let target_nt = *nt_nodes
             .get(&nt)
@@ -143,7 +142,7 @@ pub fn build_augmented_nwa_from_characterization(
         let mut from = start;
 
         // The first transition is on the specific character.
-        let next_state = if len == 1 { target_nt } else { nwa.add_state() };
+        let next_state = if len == 0 { target_nt } else { nwa.add_state() };
         nwa.add_transition(from, ch, next_state, w_all.clone());
         from = next_state;
 
@@ -164,7 +163,6 @@ pub fn build_augmented_nwa_from_characterization(
         // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
         // and the rest are default.
         for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
-            assert!(pop_n >= 1);
             let ch = encode_symbol(revealed_state)?;
             let dst_nt = *nt_nodes
                 .get(&reduce_nt)
@@ -172,7 +170,7 @@ pub fn build_augmented_nwa_from_characterization(
             let mut from = src_nt;
 
             // The first transition is on the specific character.
-            let next_state = if pop_n == 1 { dst_nt } else { nwa.add_state() };
+            let next_state = if pop_n == 0 { dst_nt } else { nwa.add_state() };
             nwa.add_transition(from, ch, next_state, w_all.clone());
             from = next_state;
 
