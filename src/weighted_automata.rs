@@ -34,6 +34,10 @@ impl SimpleBitset {
         SimpleBitset(RangeSetBlaze::from_iter([item]))
     }
 
+    pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self {
+        SimpleBitset(rsb)
+    }
+
     /// Returns the number of elements in the set. Saturates at `usize::MAX`.
     pub fn len(&self) -> usize {
         self.0.len().try_into().unwrap_or(usize::MAX)

@@ -59,7 +59,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 if let Some(terminal_aug_nwa) = augmented_nwas.get(terminal_id) {
                     for (dest_idx, llm_token_bv) in dest_map.iter() {
                         let mut new_aug_nwa = terminal_aug_nwa.clone();
-                        let weight = WaWeight(llm_token_bv.inner.as_ref().clone());
+                        let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
                         new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
                             .expect("Combine failed");
                         results.push((*dest_idx, new_aug_nwa));
