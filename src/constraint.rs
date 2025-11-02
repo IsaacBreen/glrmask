@@ -685,7 +685,7 @@ impl Default for GrammarConstraintConfig {
             trie2: Trie2Config::off(),
             trie3: Trie3Config::default(),
             intermediate_trie3_templates: IntermediateTrie3Config::default(),
-            run_precompute4: false,
+            run_precompute4: true,
             intermediate_trie3_main: IntermediateTrie3Config::default(),
             dummy_terminal_map: BTreeMap::new(),
             dummy_terminal_penalties: BTreeMap::new(),
