@@ -376,4 +376,85 @@ mod tests {
             }
         }
     }
+
+    // Helper to create a simple AugmentedNwa for testing.
+    // NWA: 0 --(100)--> 1 (end)
+    // End map: {1: {[100, 101]}}
+    fn build_simple_aug_nwa() -> AugmentedNwa {
+        let mut nwa = WaNWA::new();
+        let start = nwa.start_state;
+        let end = nwa.add_state();
+        nwa.add_transition(start, 100, end, WaWeight::all());
+
+        let mut end_map = BTreeMap::new();
+        end_map.insert(
+            end,
+            BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
+        );
+
+        AugmentedNwa {
+            nwa,
+            end_state: end,
+            nt_nodes: BTreeMap::new(),
+            end_map,
+        }
+    }
+
+    #[test]
+    fn test_combine_with_ignore_on_left() {
+        let mut lhs = build_augmented_nwa_for_ignore_terminal();
+        let rhs = build_simple_aug_nwa();
+        let weight = WaWeight::all();
+
+        lhs.combine_right_into(&rhs, &weight).unwrap();
+
+        // Expected structure:
+        // Original ignore NWA (state 0) has an epsilon transition to the start of the copied RHS NWA (state 1).
+        // The end_map of the combined NWA should be the RHS's end_map, but with keys remapped.
+        // Original RHS end_state was 1. It gets copied to state 2.
+        // So the new end_map should have key 2.
+
+        assert_eq!(lhs.nwa.states.len(), 3); // 0 (ignore) + 1,2 (copied rhs)
+        assert_eq!(lhs.nwa.start_state, 0);
+
+        // Check for epsilon transition 0 -> 1
+        let start_state = &lhs.nwa.states[0];
+        assert_eq!(start_state.epsilon_transitions.len(), 1);
+        assert_eq!(start_state.epsilon_transitions[0], (1, WaWeight::all()));
+
+        // Check copied RHS structure
+        let copied_rhs_start = &lhs.nwa.states[1];
+        let transitions = copied_rhs_start.transitions.exceptions.get(&100).unwrap();
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0], (2, WaWeight::all())); // 0->1 in rhs becomes 1->2
+
+        // Check the final end_map
+        let expected_end_map = BTreeMap::from([(
+            2, // original end_state 1 is mapped to 2
+            BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
+        )]);
+        assert_eq!(lhs.end_map, expected_end_map);
+    }
+
+    #[test]
+    fn test_combine_with_ignore_on_right() {
+        let mut lhs = build_simple_aug_nwa();
+        let rhs = build_augmented_nwa_for_ignore_terminal();
+        let weight = WaWeight::all();
+
+        let original_end_map = lhs.end_map.clone();
+        let original_state_count = lhs.nwa.states.len();
+        let original_end_state_id = lhs.end_state;
+
+        lhs.combine_right_into(&rhs, &weight).unwrap();
+
+        // The combination should not change the end_map because processing a stack on the
+        // ignore NWA yields no stops. The only change is appending unreachable states.
+        assert_eq!(lhs.nwa.states.len(), original_state_count + rhs.nwa.states.len());
+        assert_eq!(lhs.end_map, original_end_map);
+
+        // Verify no new epsilon transitions were added to the original end state.
+        let original_end_state = &lhs.nwa.states[original_end_state_id];
+        assert!(original_end_state.epsilon_transitions.is_empty());
+    }
 }
