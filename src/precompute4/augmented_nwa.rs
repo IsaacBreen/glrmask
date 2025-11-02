@@ -424,6 +424,9 @@ mod tests {
             end_map: expected_end_map,
         };
 
+        println!("Expected NWA:\n{}", expected_aug_nwa);
+        println!("Resulting NWA:\n{}", lhs);
+
         assert_eq!(lhs, expected_aug_nwa);
     }
 
