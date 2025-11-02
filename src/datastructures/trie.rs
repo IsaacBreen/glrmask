@@ -2176,6 +2176,65 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         cyclic_nodes
     }
+
+    /// Reverses all edges in the graph reachable from `roots`.
+    ///
+    /// This function creates a new `Arena`. It clones all reachable nodes from the
+    /// `source_arena` into the new arena, preserving their indices. Then, it iterates
+    /// through all edges in the original graph and adds a corresponding reversed edge
+    /// to the new graph.
+    ///
+    /// Note that `max_depth` values are copied from the original nodes and are not
+    /// recomputed. They will likely be incorrect for the reversed graph. Call
+    /// `recompute_all_max_depths` on the new arena if correct depths are needed.
+    ///
+    /// # Arguments
+    /// * `source_arena`: The arena containing the original graph.
+    /// * `roots`: The set of roots to start traversal from. All reachable nodes will be included.
+    ///
+    /// # Returns
+    /// A new `Arena` containing the reversed graph.
+    pub fn reverse(
+        source_arena: &Arena<Self>,
+        roots: &[Trie2Index],
+    ) -> Arena<Self> {
+        let new_arena = Arena::new();
+        if roots.is_empty() {
+            return new_arena;
+        }
+
+        let all_nodes = Self::all_nodes(source_arena, roots);
+
+        // 1. Clone all nodes into the new arena at the same indices, but without edges.
+        for &node_idx in &all_nodes {
+            if let Some(source_guard) = node_idx.read(source_arena) {
+                let new_node = Trie {
+                    value: source_guard.value.clone(),
+                    children: BTreeMap::new(),
+                    max_depth: source_guard.max_depth,
+                };
+                new_arena.insert_at(node_idx.as_index(), new_node);
+            }
+        }
+
+        // 2. Iterate through the original graph and add reversed edges to the new one.
+        for &src_idx in &all_nodes {
+            if let Some(src_guard) = src_idx.read(source_arena) {
+                for (ek, dest_map) in src_guard.children() {
+                    for (&dst_idx, ev) in dest_map.iter() {
+                        // In the new graph, the edge is from dst_idx to src_idx.
+                        // Since `all_nodes` contains all reachable nodes, if `src_idx` is in it,
+                        // `dst_idx` must be as well, so it will exist in `new_arena`.
+                        if let Some(mut new_dst_guard) = dst_idx.write(&new_arena) {
+                            new_dst_guard.children.entry(ek.clone()).or_default().insert(src_idx, ev.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        new_arena
+    }
 }
 
 /// The result of comparing two paths in a Trie.
@@ -3579,5 +3638,63 @@ mod tests {
             edges_removed,
             "After 10 trials with p=0.5, no edges were removed, which is highly unlikely."
         );
+    }
+
+    #[test]
+    fn test_reverse() {
+        type TestTrie = Trie<String, i32, String>;
+        let arena = Arena::<TestTrie>::new();
+
+        // 0 -> 1 (key "a", val 10)
+        // |
+        // +--> 2 (key "b", val 20)
+        // |
+        // 1 -> 2 (key "c", val 30)
+        let n0 = Trie2Index::from(arena.insert(Trie::new("node0".to_string())));
+        let n1 = Trie2Index::from(arena.insert(Trie::new("node1".to_string())));
+        let n2 = Trie2Index::from(arena.insert(Trie::new("node2".to_string())));
+
+        // Add edges
+        let mut n0_w = n0.write(&arena).unwrap();
+        n0_w.force_insert_to_node("a".to_string(), 10, n1);
+        n0_w.force_insert_to_node("b".to_string(), 20, n2);
+        drop(n0_w);
+
+        let mut n1_w = n1.write(&arena).unwrap();
+        n1_w.force_insert_to_node("c".to_string(), 30, n2);
+        drop(n1_w);
+
+        // Reverse the graph
+        let reversed_arena = TestTrie::reverse(&arena, &[n0]);
+
+        // Check the reversed graph
+        // Expected:
+        // 1 -> 0 (key "a", val 10)
+        // 2 -> 0 (key "b", val 20)
+        // 2 -> 1 (key "c", val 30)
+
+        // Check node values are preserved
+        assert_eq!(n0.read(&reversed_arena).unwrap().value, "node0");
+        assert_eq!(n1.read(&reversed_arena).unwrap().value, "node1");
+        assert_eq!(n2.read(&reversed_arena).unwrap().value, "node2");
+
+        // Check reversed edges
+        let rev_n0_r = n0.read(&reversed_arena).unwrap();
+        assert!(rev_n0_r.is_leaf());
+
+        let rev_n1_r = n1.read(&reversed_arena).unwrap();
+        assert_eq!(rev_n1_r.children().len(), 1);
+        let (dest_idx, ev) = rev_n1_r.get(&"a".to_string()).unwrap().iter().next().unwrap();
+        assert_eq!(*dest_idx, n0);
+        assert_eq!(*ev, 10);
+
+        let rev_n2_r = n2.read(&reversed_arena).unwrap();
+        assert_eq!(rev_n2_r.children().len(), 2);
+        let (dest_idx_b, ev_b) = rev_n2_r.get(&"b".to_string()).unwrap().iter().next().unwrap();
+        assert_eq!(*dest_idx_b, n0);
+        assert_eq!(*ev_b, 20);
+        let (dest_idx_c, ev_c) = rev_n2_r.get(&"c".to_string()).unwrap().iter().next().unwrap();
+        assert_eq!(*dest_idx_c, n1);
+        assert_eq!(*ev_c, 30);
     }
 }
