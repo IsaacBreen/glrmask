@@ -262,15 +262,6 @@ impl AugmentedNwa {
                 }
                 let stops = right.nwa.process_stack_u16(&encoded);
 
-                if stops.is_empty() {
-                    // Path could not be extended. Keep the original stack.
-                    new_end_map
-                        .entry(left_end_state)
-                        .or_default()
-                        .insert(left_stack);
-                    continue;
-                }
-
                 // 2) For each stop: add epsilon edge and propagate end_map stacks.
                 for (pos, right_stop_state, path_weight) in stops {
                     // Map the right stop state into the left's id space.
