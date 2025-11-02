@@ -78,11 +78,11 @@ pub fn build_augmented_nwas(
 ) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> {
     let all = compute_all_characterizations(parser);
 
-    println!("\n--- Terminal Characterizations ---");
+    crate::debug!(5, "\n--- Terminal Characterizations ---");
     for bb in all.values() {
-        println!("{}", bb);
+        crate::debug!(5, "{}", bb);
     }
-    println!("--- End Terminal Characterizations ---\n");
+    crate::debug!(5, "--- End Terminal Characterizations ---\n");
 
     let mut out = BTreeMap::new();
     for (term, bb) in all {

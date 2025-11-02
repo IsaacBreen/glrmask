@@ -16,11 +16,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         Err(e) => panic!("Failed to build augmented NWAs: {:?}", e),
     };
 
-    println!("\n--- Augmented NWA Generation ---");
+    crate::debug!(5, "\n--- Augmented NWA Generation ---");
     for aug_nwa in augmented_nwas.values() {
-        println!("{}", aug_nwa);
+        crate::debug!(5, "{}", aug_nwa);
     }
-    println!("--- End Augmented NWA Generation ---\n");
+    crate::debug!(5, "--- End Augmented NWA Generation ---\n");
 
     // 2. Reverse the precompute1 trie.
     let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
@@ -91,11 +91,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
     );
 
-    println!("\n--- Final NWAs Before Determinization ---");
+    crate::debug!(5, "\n--- Final NWAs Before Determinization ---");
     for (sid, aug_nwa) in &final_nwas {
-        println!("Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
+        crate::debug!(5, "Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
     }
-    println!("--- End Final NWAs Before Determinization ---\n");
+    crate::debug!(5, "--- End Final NWAs Before Determinization ---\n");
 
     // 4. Convert final NWAs to DWAs and simplify.
     let mut precomputed4: Precomputed4 = BTreeMap::new();
@@ -105,11 +105,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         precomputed4.insert(sid, dwa);
     }
 
-    println!("\n--- Final DWAs After Determinization and Simplification ---");
+    crate::debug!(5, "\n--- Final DWAs After Determinization and Simplification ---");
     for (sid, dwa) in &precomputed4 {
-        println!("Tokenizer State ID {:?}:\n{}", sid, dwa);
+        crate::debug!(5, "Tokenizer State ID {:?}:\n{}", sid, dwa);
     }
-    println!("--- End Final DWAs After Determinization and Simplification ---\n");
+    crate::debug!(5, "--- End Final DWAs After Determinization and Simplification ---\n");
 
     precomputed4
 }
