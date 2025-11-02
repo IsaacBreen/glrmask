@@ -1,10 +1,12 @@
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
-use crate::weighted_automata::{DWA, NWA as WaNWA, Weight as WaWeight};
+use crate::weighted_automata::{
+    DWA, NWA as WaNWA, NWAMeta as WaNWAMeta, NWAStates as WaNWAStates, Weight as WaWeight,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use crate::datastructures::trie::Trie;
-use crate::precompute4::augmented_nwa::AugmentedNwa;
+use crate::precompute4::augmented_nwa::{remap_augmented_meta, AugmentedNwa, AugmentedNwaMeta};
 use crate::glr::table::TerminalID;
 
 pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
@@ -17,6 +19,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     };
 
     let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
+
+    let mut shared_states = WaNWAStates::new();
 
     crate::debug!(5, "\n--- Augmented NWA Generation ---");
     for (tid, aug_nwa) in &augmented_nwas {
@@ -43,18 +47,17 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
         .expect("Failed to compute traversal data for reversed trie1");
 
-    let mut initial_nwa = WaNWA::new();
-    let initial_state = initial_nwa.start_state;
-    initial_nwa.set_final_weight(initial_state, WaWeight::all());
-    let initial_aug_nwa = AugmentedNwa {
-        nwa: initial_nwa,
+    let start = shared_states.add_state();
+    let initial_meta = AugmentedNwaMeta {
+        nwa_meta: WaNWAMeta { start_state: start },
         nt_nodes: BTreeMap::new(),
-        end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+        end_map: BTreeMap::from([(start, BTreeSet::from([vec![]]))]),
     };
+    shared_states.set_final_weight(start, WaWeight::all());
 
-    let initial_values = vec![(reversed_trie_root, initial_aug_nwa)];
+    let initial_values = vec![(reversed_trie_root, initial_meta)];
 
-    let mut final_nwas: BTreeMap<TokenizerStateID, AugmentedNwa> = BTreeMap::new();
+    let mut final_metas: BTreeMap<TokenizerStateID, AugmentedNwaMeta> = BTreeMap::new();
     let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
 
     Trie::special_map_grouped(
@@ -62,54 +65,59 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         &traversal_data,
         initial_values,
         // step function
-        |current_aug_nwa, edge_terminal_opt, dest_map| {
-            let mut results: Vec<(PrecomputeNode1Index, AugmentedNwa)> = Vec::new();
+        |current_meta, edge_terminal_opt, dest_map| {
+            let mut results: Vec<(PrecomputeNode1Index, AugmentedNwaMeta)> = Vec::new();
 
-            let aug_nwa;
+            let edge_aug;
             if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
                 let terminal_id = edge_terminal_opt.unwrap();
-                aug_nwa = augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id));
+                edge_aug = augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id));
             } else {
                 // Epsilon-like edge in grammar trie. Just propagate the current NWA.
-                aug_nwa = &ignore_nwa;
+                edge_aug = &ignore_nwa;
             }
-            crate::debug!(5, "Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
-            crate::debug!(5, "--- RIGHT: Incoming aug_nwa ---\n{}", current_aug_nwa);
-            crate::debug!(5, "--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
             for (dest_idx, llm_token_bv) in dest_map.iter() {
-                let mut new_aug_nwa = aug_nwa.clone();
+                // 1) Copy the terminal's states into shared and remap its meta
+                let mapping = shared_states.append_copy_from(&edge_aug.states.nwa_states);
+                let mut left_meta =
+                    remap_augmented_meta(&edge_aug.meta, &mapping);
+
+                // 2) Combine into the current meta using shared states
                 let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
+                left_meta.combine_right_into_shared(&mut shared_states, current_meta, &weight)
                     .expect("Combine failed");
-                crate::debug!(5, "For dest_idx {:?} with token bv (WEIGHT) {:?}:", dest_idx, llm_token_bv);
-                crate::debug!(5, "--- COMBINED: Resulting aug_nwa ---\n{}", new_aug_nwa);
-                results.push((*dest_idx, new_aug_nwa));
+
+                results.push((*dest_idx, left_meta));
             }
             results
         },
         // merge function
-        |aug_nwa1, aug_nwa2| {
-            aug_nwa1.union_with(&aug_nwa2);
+        |dst_meta, src_meta| {
+            dst_meta.union_meta_in_place(&mut shared_states, &src_meta);
         },
         // process function
-        |node_data, node_idx, aug_nwa| {
+        |node_data, node_idx, meta| {
             if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                final_nwas.insert(*tokenizer_state_id, aug_nwa.clone());
+                final_metas.insert(*tokenizer_state_id, meta.clone());
             }
             true // continue traversal
         },
     );
 
     crate::debug!(5, "\n--- Final NWAs Before Determinization ---");
-    for (sid, aug_nwa) in &final_nwas {
-        crate::debug!(5, "Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
+    for (sid, meta) in &final_metas {
+        let tmp_nwa = WaNWA {
+            states: shared_states.clone(),
+            meta: meta.nwa_meta.clone(),
+        };
+        crate::debug!(5, "Tokenizer State ID {:?}:\n{}", sid, tmp_nwa);
     }
     crate::debug!(5, "--- End Final NWAs Before Determinization ---\n");
 
     // 4. Convert final NWAs to DWAs and simplify.
     let mut precomputed4: Precomputed4 = BTreeMap::new();
-    for (sid, aug_nwa) in final_nwas {
-        let mut dwa = aug_nwa.nwa.determinize();
+    for (sid, meta) in final_metas {
+        let mut dwa = shared_states.determinize(&meta.nwa_meta);
         dwa.simplify();
         precomputed4.insert(sid, dwa);
     }
