@@ -72,7 +72,7 @@ fn get_default_config_impl() -> CoordinatorConfig {
         merge_equivalent_llm_tokens: true,
         reorder_llm_tokens: true,
         generalize_sids: false,
-        nwa_dwa_roundtrip: true,
+        nwa_dwa_roundtrip: false,
         assert_no_pop0_except_roots: false,
     }
 }
