@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::{Display, Formatter};
+use std::ops::BitOrAssign;
 use crate::glr::grammar::regex_name;
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
@@ -222,6 +223,76 @@ impl AugmentedNwa {
         Ok(self.nwa.process_stack_u16(&encoded))
     }
 
+    /// Local epsilon-closure for a map of states -> path weight.
+    /// This mirrors the closure logic used by NWA, but is available here for tracing.
+    fn epsilon_closure_local(
+        nwa: &WaNWA,
+        mut initial_states: BTreeMap<WaStateID, WaWeight>,
+    ) -> BTreeMap<WaStateID, WaWeight> {
+        let mut worklist: VecDeque<WaStateID> = initial_states.keys().cloned().collect();
+        while let Some(u_id) = worklist.pop_front() {
+            let u_weight = initial_states.get(&u_id).cloned().unwrap_or_else(WaWeight::zeros);
+            if u_weight.is_empty() {
+                continue;
+            }
+            for (v_id, trans_weight) in &nwa.states[u_id].epsilon_transitions {
+                let new_v_weight = &u_weight & trans_weight;
+                if new_v_weight.is_empty() {
+                    continue;
+                }
+                let current_v_weight = initial_states.entry(*v_id).or_insert_with(WaWeight::zeros);
+                let old_len = current_v_weight.len();
+                *current_v_weight |= &new_v_weight;
+                if current_v_weight.len() > old_len {
+                    worklist.push_back(*v_id);
+                }
+            }
+        }
+        initial_states
+    }
+
+    /// For a given encoded input, compute the set of labeled edges actually taken
+    /// at each step (before epsilon closure). An edge is included for step p if,
+    /// starting from the epsilon-closed frontier at position p, taking label encoded[p]
+    /// from some state u to v contributes non-empty weight to the next frontier.
+    ///
+    /// Returns a Vec of length encoded.len(), where each entry is the set of
+    /// (from_state, ch, to_state, trans_weight) edges used at that position.
+    fn consumed_edges_per_step(
+        nwa: &WaNWA,
+        encoded: &[u16],
+    ) -> Vec<BTreeSet<(WaStateID, u16, WaStateID, WaWeight)>> {
+        // Frontier at position 0: start with ALL at start_state.
+        let mut current: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
+        current.insert(nwa.start_state, WaWeight::all());
+        current = Self::epsilon_closure_local(nwa, current);
+
+        let mut per_step: Vec<BTreeSet<(WaStateID, u16, WaStateID, WaWeight)>> =
+            Vec::with_capacity(encoded.len());
+
+        for &ch in encoded {
+            let mut next_raw: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
+            let mut step_edges: BTreeSet<(WaStateID, u16, WaStateID, WaWeight)> = BTreeSet::new();
+            for (&u, path_w) in &current {
+                if let Some(transitions) = nwa.states[u].transitions.get(ch) {
+                    for (v, trans_w) in transitions {
+                        let w2 = path_w & trans_w;
+                        if !w2.is_empty() {
+                            step_edges.insert((u, ch, *v, trans_w.clone()));
+                            next_raw.entry(*v)
+                                .or_insert_with(WaWeight::zeros)
+                                .bitor_assign(&w2);
+                        }
+                    }
+                }
+            }
+            per_step.push(step_edges);
+            // Advance to next position frontier via epsilon-closure.
+            current = Self::epsilon_closure_local(nwa, next_raw);
+        }
+        per_step
+    }
+
     /// Non-commutative combination: fold `right` into `self` (left).
     ///
     /// Algorithm summary:
@@ -248,6 +319,9 @@ impl AugmentedNwa {
         // Append-copy the right NWA into the left.
         let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
 
+        // Collect labeled edges on the right that are actually consumed by left stacks (prefix),
+        // to be turned into epsilon edges in the copied subgraph.
+        let mut edges_to_convert: BTreeSet<(WaStateID, u16, WaStateID, WaWeight)> = BTreeSet::new();
         // Walk all (left end state, stacks) pairs.
         for (left_end_state, stacks) in left_end_snapshot {
             for left_stack in stacks {
@@ -257,10 +331,19 @@ impl AugmentedNwa {
                 for &s in left_stack.iter().rev() {
                     encoded.push(encode_symbol(s)?);
                 }
+                // Identify which labeled edges were actually used at each step.
+                let steps_used = Self::consumed_edges_per_step(&right.nwa, &encoded);
                 let stops = right.nwa.process_stack_u16(&encoded);
 
                 // 2) For each stop: add epsilon edge and propagate end_map stacks.
                 for (pos, right_stop_state, path_weight) in stops {
+                    // Convert all consumed labeled edges up to this stop position into epsilons.
+                    let pos_usize: usize = pos;
+                    for p in 0..pos_usize {
+                        if p < steps_used.len() {
+                            edges_to_convert.extend(steps_used[p].iter().cloned());
+                        }
+                    }
                     // Map the right stop state into the left's id space.
                     let mapped_stop = right_to_left[right_stop_state];
                     // Combine the path weight with the provided weight.
@@ -294,6 +377,25 @@ impl AugmentedNwa {
                 }
             }
         }
+
+        // Apply the conversions inside the copied right NWA: for each consumed labeled edge
+        // (u --ch,w--> v), remove that labeled edge from the copy and add an epsilon edge u -ε,w-> v.
+        for (from_r, ch, to_r, w) in edges_to_convert {
+            let from_l = right_to_left[from_r];
+            let to_l = right_to_left[to_r];
+            // Remove the specific labeled transition (if present).
+            if let Some(vec) = self.nwa.states[from_l].transitions.exceptions.get_mut(&ch) {
+                vec.retain(|(t, wt)| !(*t == to_l && *wt == w));
+                if vec.is_empty() {
+                    self.nwa.states[from_l].transitions.exceptions.remove(&ch);
+                }
+            }
+            // Note: we do not alter default transitions here, as they are not keyed by character.
+            // Add the epsilon transition with the same edge weight.
+            self.nwa
+                .add_epsilon_transition(from_l, to_l, w.clone());
+        }
+
         self.end_map = new_end_map;
         Ok(())
     }
