@@ -399,18 +399,19 @@ mod tests {
     #[test]
     fn test_combine_with_ignore_on_left() {
         let mut lhs = build_augmented_nwa_for_ignore_terminal();
-        let rhs = build_simple_aug_nwa();
+        let mut rhs = build_simple_aug_nwa();
+        rhs.nwa.set_final_weight(rhs.nwa.start_state, WaWeight::all());
         let weight = WaWeight::all();
 
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
         // Build expected result
         let mut expected_nwa = WaNWA::new(); // state 0
-        expected_nwa.set_final_weight(0, WaWeight::all());
         let s1 = expected_nwa.add_state(); // state 1
         let s2 = expected_nwa.add_state(); // state 2
         expected_nwa.add_epsilon_transition(0, s1, WaWeight::all());
         expected_nwa.add_transition(s1, 100, s2, WaWeight::all());
+        expected_nwa.set_final_weight(s2, WaWeight::all());
 
         let expected_end_map = BTreeMap::from([(
             2,
@@ -429,7 +430,8 @@ mod tests {
     #[test]
     fn test_combine_with_ignore_on_right() {
         let mut lhs = build_simple_aug_nwa();
-        let rhs = build_augmented_nwa_for_ignore_terminal();
+        let mut rhs = build_augmented_nwa_for_ignore_terminal();
+        rhs.nwa.set_final_weight(rhs.nwa.start_state, WaWeight::all());
         let weight = WaWeight::all();
 
         lhs.combine_right_into(&rhs, &weight).unwrap();
