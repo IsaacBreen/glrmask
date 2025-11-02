@@ -252,8 +252,9 @@ impl AugmentedNwa {
         for (left_end_state, stacks) in left_end_snapshot {
             for left_stack in stacks {
                 // 1) Process the left stack through the right NWA.
+                // The parser stack's "top" is at the end, so we process it in reverse.
                 let mut encoded: Vec<u16> = Vec::with_capacity(left_stack.len());
-                for &s in &left_stack {
+                for &s in left_stack.iter().rev() {
                     encoded.push(encode_symbol(s)?);
                 }
                 let stops = right.nwa.process_stack_u16(&encoded);
@@ -277,8 +278,9 @@ impl AugmentedNwa {
                             let mapped_end = right_to_left[r_state];
                             for r_stack in r_stacks {
                                 // Prepend the remainder of the left stack to the right stack.
-                                let mut combined: Vec<ParserStateID> =
-                                    left_stack[pos..].to_vec();
+                                // Since we processed the reversed stack, the remainder is the prefix of the original stack.
+                                let remainder = &left_stack[..left_stack.len().saturating_sub(pos)];
+                                let mut combined: Vec<ParserStateID> = remainder.to_vec();
                                 combined.extend(r_stack.iter().cloned());
                                 new_end_map
                                     .entry(mapped_end)
