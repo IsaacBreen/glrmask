@@ -84,7 +84,6 @@ pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: Te
     };
 
     // --- 1. Compute initial actions ---
-    println!("Parser: {}", parser);
     for (&initial_state, row) in &parser.table {
         if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
             match action {
