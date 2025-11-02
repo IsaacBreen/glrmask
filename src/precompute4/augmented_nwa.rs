@@ -357,21 +357,22 @@ mod tests {
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
         let mut states = WaNWAStates::default();
+        let start = states.add_state();
         let s1 = states.add_state();
         let s2 = states.add_state();
-        states.add_epsilon_transition(0, s1, WaWeight::all());
+        states.add_epsilon_transition(start, s1, WaWeight::all());
         states.add_transition(s1, 100, s2, WaWeight::all());
         states.set_final_weight(s2, WaWeight::all());
 
         let expected_end_map = BTreeMap::from([(
-            2,
+            s2,
             BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
         )]);
 
         let expected_aug_nwa = AugmentedNwa {
             states,
             rest: AugmentedNwaRest {
-                nwa: WaNWARest { start_state: 0 },
+                nwa: WaNWARest { start_state: start },
                 nt_nodes: BTreeMap::new(),
                 end_map: expected_end_map,
             },
@@ -393,21 +394,22 @@ mod tests {
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
         let mut states = WaNWAStates::default();
+        let start = states.add_state();
         let s1 = states.add_state();
         let s2 = states.add_state();
-        states.add_transition(0, 100, s1, WaWeight::all());
+        states.add_transition(start, 100, s1, WaWeight::all());
         states.add_epsilon_transition(s1, s2, WaWeight::all());
         states.set_final_weight(s2, WaWeight::all());
 
         let expected_end_map = BTreeMap::from([(
-            2,
+            s2,
             BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
         )]);
 
         let expected_aug_nwa = AugmentedNwa {
             states,
             rest: AugmentedNwaRest {
-                nwa: WaNWARest { start_state: 0 },
+                nwa: WaNWARest { start_state: start },
                 nt_nodes: BTreeMap::new(),
                 end_map: expected_end_map,
             },
@@ -418,6 +420,7 @@ mod tests {
 
     fn build_terminal1_nwa() -> AugmentedNwa {
         let mut states = WaNWAStates::default();
+        let start = states.add_state();
         let end_state = states.add_state();
         let nt0_state = states.add_state();
         let nt1_state = states.add_state();
@@ -425,9 +428,9 @@ mod tests {
         assert_eq!(nt0_state, 2);
         assert_eq!(nt1_state, 3);
 
-        states.add_transition(0, 0, end_state, WaWeight::all());
-        states.add_transition(0, 1, nt1_state, WaWeight::all());
-        states.add_transition(0, 3, nt0_state, WaWeight::all());
+        states.add_transition(start, 0, end_state, WaWeight::all());
+        states.add_transition(start, 1, nt1_state, WaWeight::all());
+        states.add_transition(start, 3, nt0_state, WaWeight::all());
 
         let nt_nodes = BTreeMap::from([
             (NonTerminalID(0), nt0_state),
@@ -442,7 +445,7 @@ mod tests {
         AugmentedNwa {
             states,
             rest: AugmentedNwaRest {
-                nwa: WaNWARest { start_state: 0 },
+                nwa: WaNWARest { start_state: start },
                 nt_nodes,
                 end_map,
             },
@@ -451,6 +454,7 @@ mod tests {
 
     fn build_terminal2_nwa() -> AugmentedNwa {
         let mut states = WaNWAStates::default();
+        let start = states.add_state();
         let end_state = states.add_state();
         let nt0_state = states.add_state();
         let nt1_state = states.add_state();
@@ -458,8 +462,8 @@ mod tests {
         assert_eq!(nt0_state, 2);
         assert_eq!(nt1_state, 3);
 
-        states.add_transition(0, 1, nt1_state, WaWeight::all());
-        states.add_transition(0, 3, nt0_state, WaWeight::all());
+        states.add_transition(start, 1, nt1_state, WaWeight::all());
+        states.add_transition(start, 3, nt0_state, WaWeight::all());
 
         let nt_nodes = BTreeMap::from([
             (NonTerminalID(0), nt0_state),
@@ -469,7 +473,7 @@ mod tests {
         AugmentedNwa {
             states,
             rest: AugmentedNwaRest {
-                nwa: WaNWARest { start_state: 0 },
+                nwa: WaNWARest { start_state: start },
                 nt_nodes,
                 end_map: BTreeMap::new(),
             },
@@ -478,6 +482,7 @@ mod tests {
 
     fn build_terminal0_nwa() -> AugmentedNwa {
         let mut states = WaNWAStates::default();
+        let start = states.add_state();
         let end_state = states.add_state();
         let nt0_state = states.add_state();
         let nt1_state = states.add_state();
@@ -485,9 +490,9 @@ mod tests {
         assert_eq!(nt0_state, 2);
         assert_eq!(nt1_state, 3);
 
-        states.add_transition(0, 1, nt1_state, WaWeight::all());
-        states.add_transition(0, 2, end_state, WaWeight::all());
-        states.add_transition(0, 3, nt0_state, WaWeight::all());
+        states.add_transition(start, 1, nt1_state, WaWeight::all());
+        states.add_transition(start, 2, end_state, WaWeight::all());
+        states.add_transition(start, 3, nt0_state, WaWeight::all());
 
         let nt_nodes = BTreeMap::from([
             (NonTerminalID(0), nt0_state),
@@ -502,7 +507,7 @@ mod tests {
         AugmentedNwa {
             states,
             rest: AugmentedNwaRest {
-                nwa: WaNWARest { start_state: 0 },
+                nwa: WaNWARest { start_state: start },
                 nt_nodes,
                 end_map,
             },
@@ -547,13 +552,14 @@ mod tests {
 
     fn build_nwa_from_prompt_left() -> AugmentedNwa {
         let mut states = WaNWAStates::default();
+        let start = states.add_state();
         let end_state = states.add_state();
         let nt0_state = states.add_state();
         let nt1_state = states.add_state();
 
-        states.add_transition(0, 1, nt1_state, WaWeight::all());
-        states.add_transition(0, 2, end_state, WaWeight::all());
-        states.add_transition(0, 3, nt0_state, WaWeight::all());
+        states.add_transition(start, 1, nt1_state, WaWeight::all());
+        states.add_transition(start, 2, end_state, WaWeight::all());
+        states.add_transition(start, 3, nt0_state, WaWeight::all());
 
         let nt_nodes = BTreeMap::from([
             (NonTerminalID(0), nt0_state),
@@ -565,11 +571,12 @@ mod tests {
             BTreeSet::from([vec![ParserStateID(2), ParserStateID(0)]]),
         )]);
 
-        AugmentedNwa { states, rest: AugmentedNwaRest { nwa: WaNWARest { start_state: 0 }, nt_nodes, end_map } }
+        AugmentedNwa { states, rest: AugmentedNwaRest { nwa: WaNWARest { start_state: start }, nt_nodes, end_map } }
     }
 
     fn build_nwa_from_prompt_right() -> AugmentedNwa {
         let mut states = WaNWAStates::default();
+        let start = states.add_state();
         let s1 = states.add_state();
         let s2 = states.add_state();
         let s3 = states.add_state();
@@ -577,7 +584,7 @@ mod tests {
         let end_state = states.add_state();
 
         let w3 = WaWeight::from_item(3);
-        states.add_epsilon_transition(0, s1, w3.clone());
+        states.add_epsilon_transition(start, s1, w3.clone());
         states.add_transition(s1, 0, s2, WaWeight::all());
         states.add_transition(s1, 1, s4, WaWeight::all());
         states.add_transition(s1, 3, s3, WaWeight::all());
@@ -592,7 +599,7 @@ mod tests {
         AugmentedNwa {
             states,
             rest: AugmentedNwaRest {
-                nwa: WaNWARest { start_state: 0 },
+                nwa: WaNWARest { start_state: start },
                 nt_nodes: BTreeMap::new(),
                 end_map,
             },
@@ -610,6 +617,7 @@ mod tests {
         self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
 
         let mut states = WaNWAStates::default();
+        let start = states.add_state();
         let s1 = states.add_state();
         let s2 = states.add_state();
         let s3 = states.add_state();
@@ -620,9 +628,9 @@ mod tests {
         let s8 = states.add_state();
         let s9 = states.add_state();
 
-        states.add_transition(0, 1, s3, WaWeight::all());
-        states.add_transition(0, 2, s1, WaWeight::all());
-        states.add_transition(0, 3, s2, WaWeight::all());
+        states.add_transition(start, 1, s3, WaWeight::all());
+        states.add_transition(start, 2, s1, WaWeight::all());
+        states.add_transition(start, 3, s2, WaWeight::all());
 
         let w3 = WaWeight::from_item(3);
         states.add_epsilon_transition(s1, s9, w3.clone());
@@ -647,7 +655,7 @@ mod tests {
         let expected_aug_nwa = AugmentedNwa {
             states,
             rest: AugmentedNwaRest {
-                nwa: WaNWARest { start_state: 0 },
+                nwa: WaNWARest { start_state: start },
                 nt_nodes: expected_nt_nodes,
                 end_map: expected_end_map,
             },
