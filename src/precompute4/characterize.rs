@@ -89,8 +89,18 @@ pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: Te
                                     reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
                                 }
                                 Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
-                                    if *len > 0 {
-                                        reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 1, *reduce_nt));
+                                    if *len == 1 {
+                                        // Unit reduction chain
+                                        if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
+                                            if let Some(next_goto_state) = next_goto.state_id {
+                                                if visited.insert(next_goto_state) {
+                                                    worklist.push_back(next_goto_state);
+                                                }
+                                            }
+                                        }
+                                    } else if *len > 1 {
+                                        // Pop below revealed state
+                                        reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
                                     }
                                 }
                                 Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -99,8 +109,16 @@ pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: Te
                                     }
                                     for (len, nts) in reduces {
                                         for (reduce_nt, _) in nts {
-                                            if *len > 0 {
-                                                reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 1, *reduce_nt));
+                                            if *len == 1 {
+                                                if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
+                                                    if let Some(next_goto_state) = next_goto.state_id {
+                                                        if visited.insert(next_goto_state) {
+                                                            worklist.push_back(next_goto_state);
+                                                        }
+                                                    }
+                                                }
+                                            } else if *len > 1 {
+                                                reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
                                             }
                                         }
                                     }
