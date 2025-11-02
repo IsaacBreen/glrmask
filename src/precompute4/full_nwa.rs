@@ -6,6 +6,6 @@ use std::collections::BTreeMap;
 
 pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
 
-pub fn precompute4(x: &GLRParser, x0: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, x1: &Trie1GodWrapper) -> DWA {
+pub fn precompute4(x: &GLRParser, x0: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, x1: &Trie1GodWrapper) -> Precomputed4 {
     todo!()
 }

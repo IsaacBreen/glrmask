@@ -1521,7 +1521,6 @@ impl GrammarConstraint {
 
         let precomputed4 = if config.run_precompute4 {
             precompute4(&parser, &precomputed1, &trie1_god)
-                .expect("Precompute4 failed")
         } else {
             BTreeMap::new()
         };
