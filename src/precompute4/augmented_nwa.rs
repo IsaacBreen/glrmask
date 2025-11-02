@@ -136,22 +136,15 @@ pub fn build_augmented_nwa_from_characterization(
         let target_nt = *nt_nodes
             .get(&nt)
             .expect("nonterminal node must exist (created from parser.non_terminal_map)");
-        // Defensive: if len == 0 (should not happen), treat as zero-length chain.
-        let pops = if len == 0 { 0 } else { len.saturating_sub(1) };
-        if pops == 0 {
-            // Straight edge to the NT node.
-            nwa.add_transition(start, ch, target_nt, w_all.clone());
-        } else {
-            let mut from = start;
-            for i in 0..pops {
-                let to = if i + 1 == pops {
-                    target_nt
-                } else {
-                    nwa.add_state()
-                };
-                nwa.add_transition(from, ch, to, w_all.clone());
-                from = to;
-            }
+        let mut from = start;
+        for i in 0..len {
+            let to = if i + 1 == len {
+                target_nt
+            } else {
+                nwa.add_state()
+            };
+            nwa.add_transition(from, ch, to, w_all.clone());
+            from = to;
         }
     }
 
