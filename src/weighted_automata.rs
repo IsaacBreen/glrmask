@@ -216,42 +216,6 @@ impl<T> U16Map<T> {
 pub type StateID = usize;
 pub type Weight = SimpleBitset;
 
-// --- Split representations ---
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NWAStates {
-    pub states: Vec<NWAState>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NWAMeta {
-    pub start_state: StateID,
-}
-
-/// Convenience wrapper combining states + meta
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NWA {
-    pub states: NWAStates,
-    pub meta: NWAMeta,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DWAStates {
-    pub states: Vec<DWAState>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DWAMeta {
-    pub start_state: StateID,
-}
-
-/// Convenience wrapper combining states + meta
-#[derive(Clone, Debug, Default)]
-pub struct DWA {
-    pub states: DWAStates,
-    pub meta: DWAMeta,
-}
-
 // --- Nondeterministic Weighted Automaton (NWA) ---
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -270,9 +234,18 @@ impl NWAState {
     }
 }
 
-impl NWAStates {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NWA {
+    pub states: Vec<NWAState>,
+    pub start_state: StateID,
+}
+
+impl NWA {
+    /// Creates a new NWA with a single start state.
     pub fn new() -> Self {
-        Self { states: Vec::new() }
+        let mut nwa = Self::default();
+        nwa.add_state(); // Add start state 0
+        nwa
     }
 
     /// Adds a new, empty state and returns its ID.
@@ -311,40 +284,9 @@ impl NWAStates {
     }
 }
 
-impl NWA {
-    // Compatibility wrappers
-    /// Creates a new NWA with a single start state.
-    pub fn new() -> Self {
-        let mut states = NWAStates::new();
-        let start_state = states.add_state(); // Add start state 0
-        let meta = NWAMeta { start_state };
-        NWA { states, meta }
-    }
-
-    pub fn add_state(&mut self) -> StateID {
-        self.states.add_state()
-    }
-
-    pub fn add_transition(&mut self, from: StateID, on: u16, to: StateID, weight: Weight) {
-        self.states.add_transition(from, on, to, weight)
-    }
-
-    pub fn add_default_transition(&mut self, from: StateID, to: StateID, weight: Weight) {
-        self.states.add_default_transition(from, to, weight)
-    }
-
-    pub fn add_epsilon_transition(&mut self, from: StateID, to: StateID, weight: Weight) {
-        self.states.add_epsilon_transition(from, to, weight)
-    }
-
-    pub fn set_final_weight(&mut self, state: StateID, weight: Weight) {
-        self.states.states[state].final_weight = Some(weight);
-    }
-}
-
 // --- Deterministic Weighted Automaton (DWA) ---
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct DWAState {
     /// Deterministic transitions: one character leads to at most one state.
     pub transitions: U16Map<StateID>,
@@ -359,6 +301,12 @@ pub struct DWAState {
     /// For each exception character, stores the union of (path_weight & trans_weight) that form that deterministic edge.
     /// This is useful when reconstructing per-edge weights after determinization.
     pub trans_weights_exceptions: BTreeMap<u16, Weight>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DWA {
+    pub states: Vec<DWAState>,
+    pub start_state: StateID,
 }
 
 impl DWAState {
@@ -383,7 +331,7 @@ impl DWAState {
 
 // --- Part 5: Determinization ---
 
-impl NWAStates {
+impl NWA {
     /// Determinizes the Nondeterministic Weighted Automaton (NWA) into a
     /// Deterministic Weighted Automaton (DWA) using a weighted subset construction algorithm.
     ///
@@ -399,14 +347,15 @@ impl NWAStates {
     ///    build the DWA's transition map.
     /// The alphabet is partitioned based on character exceptions in the NWA states to
     /// build the DWA's transition map.
-    pub fn determinize(&self, meta: &NWAMeta) -> DWA {
-        let mut dwa = DWA { states: DWAStates::default(), meta: DWAMeta::default() };
+    pub fn determinize(&self) -> DWA {
+        let mut dwa = DWA::default();
         if self.states.is_empty() {
             return dwa;
         }
 
         // Fast-path: check once if the NWA has any epsilon transitions.
-        let has_epsilons = self.states
+        let has_epsilons = self
+            .states
             .iter()
             .any(|s| !s.epsilon_transitions.is_empty());
 
@@ -435,8 +384,8 @@ impl NWAStates {
                 if let Some(&id) = known.get(&comp_key) {
                     return Some(id);
                 }
-                let new_id = dwa.states.states.len();
-                dwa.states.states.push(DWAState::default());
+                let new_id = dwa.states.len();
+                dwa.states.push(DWAState::default());
                 known.insert(comp_key.clone(), new_id);
                 work.push_back(comp_key);
                 Some(new_id)
@@ -444,7 +393,7 @@ impl NWAStates {
 
         // The initial DWA state is the epsilon closure of the NWA start state.
         // The initial path has a weight of `all()`, representing no constraints yet.
-        let start_composition_raw = BTreeMap::from([(meta.start_state, Weight::all())]);
+        let start_composition_raw = BTreeMap::from([(self.start_state, Weight::all())]);
         let start_composition_map =
             self.epsilon_closure_with_flag(start_composition_raw, has_epsilons);
         let start_composition = to_key(start_composition_map);
@@ -455,7 +404,7 @@ impl NWAStates {
             &mut known_states,
             &mut worklist,
         ) {
-            dwa.meta.start_state = start_id;
+            dwa.start_state = start_id;
         } else {
             // The start state leads to nothing, so the DWA is empty.
             return dwa;
@@ -481,9 +430,9 @@ impl NWAStates {
                     critical_points.insert(char_code);
                 }
             }
-            dwa.states.states[current_dwa_id].weight = aggregate_weight;
+            dwa.states[current_dwa_id].weight = aggregate_weight;
             if is_final {
-                dwa.states.states[current_dwa_id].final_weight = Some(aggregate_final_weight);
+                dwa.states[current_dwa_id].final_weight = Some(aggregate_final_weight);
             }
 
             // --- 2. Calculate the default transition for the DWA state ---
@@ -511,9 +460,9 @@ impl NWAStates {
                 &mut known_states,
                 &mut worklist,
             );
-            dwa.states.states[current_dwa_id].transitions.default = default_target_dwa_id;
+            dwa.states[current_dwa_id].transitions.default = default_target_dwa_id;
             if default_target_dwa_id.is_some() {
-                dwa.states.states[current_dwa_id].trans_weight_default = Some(default_weight_agg);
+                dwa.states[current_dwa_id].trans_weight_default = Some(default_weight_agg);
             }
 
             // --- 3. Calculate transitions for all critical points (exceptions) ---
@@ -550,12 +499,12 @@ impl NWAStates {
                 // Add an exception if it differs from the default transition.
                 if exception_target_dwa_id != default_target_dwa_id {
                     if let Some(target_id) = exception_target_dwa_id {
-                        dwa.states.states[current_dwa_id]
+                        dwa.states[current_dwa_id]
                             .transitions
                             .exceptions
                             .insert(char_code, target_id);
                         // Record the aggregate weight for this exception transition.
-                        dwa.states.states[current_dwa_id]
+                        dwa.states[current_dwa_id]
                             .trans_weights_exceptions
                             .insert(char_code, exception_weight_agg);
                     }
@@ -616,14 +565,8 @@ impl NWAStates {
     }
 }
 
-impl NWA {
-    pub fn determinize(&self) -> DWA {
-        self.states.determinize(&self.meta)
-    }
-}
-
 // New: DWA simplification utilities (collapse simple edges, prune unreachable, merge equivalents)
-impl DWAStates {
+impl DWA {
     /// Simplify the DWA by repeatedly:
     /// 1) collapsing chains of "simple" default-only states,
     /// 2) merging equivalent states,
@@ -631,13 +574,13 @@ impl DWAStates {
     /// until a small fixed-point is reached.
     ///
     /// determinize() is intentionally left unchanged; call this afterwards if you want a smaller DWA.
-    pub fn simplify(&mut self, meta: &mut DWAMeta) {
+    pub fn simplify(&mut self) {
         if self.states.is_empty() {
             return;
         }
         // Normalize trivial redundancies up-front.
         self.normalize_edges_inplace();
-        self.prune_unreachable(meta);
+        self.prune_unreachable();
 
         let mut changed_any = true;
         let mut passes = 0usize;
@@ -650,14 +593,14 @@ impl DWAStates {
                 changed_any = true;
             }
             // 2) Partition-refinement DFA minimization (language-preserving).
-            if self.minimize_partition_refinement(meta) {
+            if self.minimize_partition_refinement() {
                 changed_any = true;
             }
             // 4) Final tidy-up per pass.
             if self.normalize_edges_inplace() {
                 changed_any = true;
             }
-            if self.prune_unreachable(meta) {
+            if self.prune_unreachable() {
                 changed_any = true;
             }
         }
@@ -697,7 +640,7 @@ impl DWAStates {
     /// enabling merging of partial and explicit-sink behaviors when equivalent.
     ///
     /// Returns true if any merge happened.
-    pub fn minimize_partition_refinement(&mut self, meta: &mut DWAMeta) -> bool {
+    pub fn minimize_partition_refinement(&mut self) -> bool {
         let n = self.states.len();
         if n <= 1 {
             return false;
@@ -858,23 +801,23 @@ impl DWAStates {
         // Normalize edges (drop redundant exceptions)
         self.normalize_edges_inplace();
         // Remap start state
-        let start_pid = part[meta.start_state];
-        meta.start_state = *pid_to_new.get(&start_pid).unwrap();
+        let start_pid = part[self.start_state];
+        self.start_state = *pid_to_new.get(&start_pid).unwrap();
         true
     }
 
     /// Remove states that are unreachable from `start_state` and renumber densely.
     ///
     /// Returns true if any state was removed.
-    pub fn prune_unreachable(&mut self, meta: &mut DWAMeta) -> bool {
+    pub fn prune_unreachable(&mut self) -> bool {
         if self.states.is_empty() {
             return false;
         }
         let n = self.states.len();
         let mut visited = vec![false; n];
         let mut q = std::collections::VecDeque::new();
-        visited[meta.start_state] = true;
-        q.push_back(meta.start_state);
+        visited[self.start_state] = true;
+        q.push_back(self.start_state);
         while let Some(u) = q.pop_front() {
             if let Some(d) = self.states[u].transitions.default {
                 if !visited[d] {
@@ -920,7 +863,7 @@ impl DWAStates {
             new_states.push(st);
         }
         self.states = new_states;
-        meta.start_state = map[meta.start_state];
+        self.start_state = map[self.start_state];
         true
     }
 
@@ -1013,19 +956,14 @@ impl DWAStates {
                 if !st.transitions.exceptions.contains_key(&k) { st.trans_weights_exceptions.remove(&k); }
             }
         }
-        self.meta.start_state = *repr_to_new.get(&repr[self.meta.start_state]).unwrap();
+        self.start_state = *repr_to_new.get(&repr[self.start_state]).unwrap();
         self.states = new_states;
         true
     }
 }
-impl DWA {
-    pub fn simplify(&mut self) {
-        self.states.simplify(&mut self.meta)
-    }
-}
 
 // --- NWA utilities: processing stacks and structural helpers ---
-impl NWAStates {
+impl NWA {
     /// Process an input stack (sequence of u16 symbols) through this NWA.
     ///
     /// Returns a vector of (pos, stop_state, path_weight) for all nondeterministic
@@ -1035,7 +973,7 @@ impl NWAStates {
     ///
     /// Path weights are accumulated by bitwise AND along edges and OR when
     /// multiple paths converge on the same (pos, state).
-    pub fn process_stack_u16(&self, meta: &NWAMeta, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
+    pub fn process_stack_u16(&self, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
         // Note: For external callers the first tuple element is "pos", but since
         // type alias StateID = usize, we keep the signature consistent and document
         // that the first usize is the consumed position in `input`.
@@ -1049,7 +987,7 @@ impl NWAStates {
 
         // Current frontier as a map: state -> path_weight
         let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
-        current.insert(meta.start_state, Weight::all());
+        current.insert(self.start_state, Weight::all());
         let mut current = self.epsilon_closure_with_flag(current, has_epsilons);
 
         // Accumulate results across positions; deduplicate by (pos, state) with OR for weights.
@@ -1107,7 +1045,7 @@ impl NWAStates {
     ///
     /// All transitions (exceptions, default, epsilons) are remapped accordingly.
     /// The `start_state` of `self` is unchanged. Final weights are copied.
-    pub fn append_copy_from(&mut self, other: &NWAStates) -> Vec<StateID> {
+    pub fn append_copy(&mut self, other: &NWA) -> Vec<StateID> {
         let base = self.states.len();
         let count = other.states.len();
         // Build the mapping (right id -> new id).
@@ -1189,27 +1127,14 @@ impl NWAStates {
     }
 }
 
-impl NWA {
-    pub fn process_stack_u16(&self, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
-        self.states.process_stack_u16(&self.meta, input)
-    }
-
-    pub fn append_copy(&mut self, other: &NWA) -> Vec<StateID> {
-        self.states.append_copy_from(&other.states)
-    }
-
-    pub fn reachable_states_ignoring_labels(&self, from: StateID) -> BTreeSet<StateID> {
-        self.states.reachable_states_ignoring_labels(from)
-    }
-}
-
 // --- Display Implementations for Debugging ---
+
 // --- Display Implementations for Debugging ---
 
 impl Display for NWA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "NWA (start: {})", self.meta.start_state)?;
-        for (id, state) in self.states.states.iter().enumerate() {
+        writeln!(f, "NWA (start: {})", self.start_state)?;
+        for (id, state) in self.states.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
             if let Some(w) = &state.final_weight {
                 writeln!(f, "    final_weight: {}", w)?;
@@ -1243,8 +1168,8 @@ impl Display for NWA {
 
 impl Display for DWA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "DWA (start: {})", self.meta.start_state)?;
-        for (id, state) in self.states.states.iter().enumerate() {
+        writeln!(f, "DWA (start: {})", self.start_state)?;
+        for (id, state) in self.states.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
             writeln!(f, "    weight: {}", state.weight)?;
             if let Some(w) = &state.final_weight {
@@ -1354,20 +1279,16 @@ impl JSONConvertible for DWAState {
 impl JSONConvertible for DWA {
     fn to_json(&self) -> JSONNode {
         let mut obj = BTreeMap::new();
-        obj.insert("states".to_string(), self.states.states.to_json());
-        obj.insert("start_state".to_string(), self.meta.start_state.to_json());
+        obj.insert("states".to_string(), self.states.to_json());
+        obj.insert("start_state".to_string(), self.start_state.to_json());
         JSONNode::Object(obj)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
         let states = Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing 'states' field")?)?;
-        let start_state =
-            StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
-        Ok(DWA {
-            states: DWAStates { states },
-            meta: DWAMeta { start_state },
-        })
+        let start_state = StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
+        Ok(DWA { states, start_state })
     }
 }
 
@@ -1383,7 +1304,7 @@ mod tests {
         for _ in 0..20 {
             nwa.add_state();
         }
-        nwa.meta.start_state = 1;
+        nwa.start_state = 1;
 
         let w0 = SimpleBitset::from_item(0);
         let w1 = SimpleBitset::from_item(1);
@@ -1496,18 +1417,18 @@ mod tests {
         // S1: weight={1}
         //   'b' -> S2
         // S2: weight={1,4}&{1,5}={1}, final_weight=({1})&{1,6}={1}
-        assert_eq!(dwa.states.states.len(), 3);
-        let start_state = &dwa.states.states[dwa.meta.start_state];
+        assert_eq!(dwa.states.len(), 3);
+        let start_state = &dwa.states[dwa.start_state];
         assert_eq!(start_state.weight, SimpleBitset::all());
         assert!(start_state.final_weight.is_none());
 
         let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
-        let state1 = &dwa.states.states[s1_id];
+        let state1 = &dwa.states[s1_id];
         assert_eq!(state1.weight, SimpleBitset::from_iter(vec![1, 4]));
         assert!(state1.final_weight.is_none());
 
         let s2_id = *state1.transitions.get(b'b' as u16).unwrap();
-        let state2 = &dwa.states.states[s2_id];
+        let state2 = &dwa.states[s2_id];
         let expected_s2_weight = SimpleBitset::from_iter(vec![1, 4]) & SimpleBitset::from_iter(vec![1, 5]);
         assert_eq!(state2.weight, expected_s2_weight);
         let expected_final_weight = &expected_s2_weight & &SimpleBitset::from_iter(vec![1, 6]);
@@ -1532,14 +1453,14 @@ mod tests {
         // S0 (start): composition={0:ALL, 1:{1}}. weight=ALL|{1}. final_weight={4}
         //   'a' -> S1
         // S1: composition={2:{1}&{2}}. weight={1}&{2}. final_weight=({1}&{2})&{3}
-        assert_eq!(dwa.states.states.len(), 2);
+        assert_eq!(dwa.states.len(), 2);
 
-        let start_state = &dwa.states.states[dwa.meta.start_state];
+        let start_state = &dwa.states[dwa.start_state];
         assert_eq!(start_state.weight, SimpleBitset::from_iter(vec![1, 5]) | SimpleBitset::all());
         assert_eq!(start_state.final_weight, Some(SimpleBitset::from_item(4)));
 
         let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
-        let state1 = &dwa.states.states[s1_id];
+        let state1 = &dwa.states[s1_id];
         let expected_s1_weight = &SimpleBitset::from_iter(vec![1, 5]) & &SimpleBitset::from_iter(vec![1, 6]);
         assert_eq!(state1.weight, expected_s1_weight);
         let expected_final = &expected_s1_weight & &SimpleBitset::from_iter(vec![1, 7]);
@@ -1566,18 +1487,18 @@ mod tests {
         //   * -> S2 (default)
         // S1: weight={1}, final_weight={1}&{10}
         // S2: weight={2}, final_weight={2}&{20}
-        assert_eq!(dwa.states.states.len(), 3);
+        assert_eq!(dwa.states.len(), 3);
 
-        let start_state = &dwa.states.states[dwa.meta.start_state];
+        let start_state = &dwa.states[dwa.start_state];
         let s1_id = *start_state.transitions.exceptions.get(&(b'a' as u16)).unwrap();
         let s2_id = start_state.transitions.default.unwrap();
         assert_ne!(s1_id, s2_id);
 
-        let state1 = &dwa.states.states[s1_id];
+        let state1 = &dwa.states[s1_id];
         assert_eq!(state1.weight, SimpleBitset::from_iter(vec![1, 5]));
         assert_eq!(state1.final_weight, Some(SimpleBitset::from_iter(vec![1, 5]) & SimpleBitset::from_iter(vec![1, 10])));
 
-        let state2 = &dwa.states.states[s2_id];
+        let state2 = &dwa.states[s2_id];
         assert_eq!(state2.weight, SimpleBitset::from_iter(vec![2, 5]));
         assert_eq!(state2.final_weight, Some(SimpleBitset::from_iter(vec![2, 5]) & SimpleBitset::from_iter(vec![2, 20])));
     }
@@ -1600,11 +1521,11 @@ mod tests {
         // S0 (start): weight=ALL
         //   'a' -> S1
         // S1: composition={1:{1}, 2:{2}}. weight={1}|{2}. final_weight=({1}&{10})|({2}&{20})
-        assert_eq!(dwa.states.states.len(), 2);
+        assert_eq!(dwa.states.len(), 2);
 
-        let start_state = &dwa.states.states[dwa.meta.start_state];
+        let start_state = &dwa.states[dwa.start_state];
         let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
-        let state1 = &dwa.states.states[s1_id];
+        let state1 = &dwa.states[s1_id];
 
         let expected_weight = SimpleBitset::from_iter(vec![1, 5]) | SimpleBitset::from_iter(vec![2, 5]);
         assert_eq!(state1.weight, expected_weight);
@@ -1633,7 +1554,7 @@ mod tests {
         let s1 = nwa.add_state(); // 1 (Start)
         let s2 = nwa.add_state(); // 2
         let s3 = nwa.add_state(); // 3 (Final)
-        nwa.meta.start_state = s1;
+        nwa.start_state = s1;
 
         let w01 = SimpleBitset::from_iter(0..=1);
         let w0 = SimpleBitset::from_item(0);
@@ -1655,8 +1576,8 @@ mod tests {
         crate::debug!(5, "{}", dwa);
 
         // Expected DWA: 4 states (S0, S1, S2, S3)
-        assert_eq!(dwa.states.states.len(), 4);
-        let s0_dwa = &dwa.states.states[dwa.meta.start_state]; // S0: {1:ALL}
+        assert_eq!(dwa.states.len(), 4);
+        let s0_dwa = &dwa.states[dwa.start_state]; // S0: {1:ALL}
         let w01_expected = SimpleBitset::from_iter(0..=1);
 
         // S0 checks
@@ -1665,19 +1586,19 @@ mod tests {
 
         // S1: {2:[0..=1]}. Target for '0', '2', '3', '5'.
         let s1_dwa_id = *s0_dwa.transitions.get(0).unwrap();
-        let s1_dwa = &dwa.states.states[s1_dwa_id];
+        let s1_dwa = &dwa.states[s1_dwa_id];
         assert_eq!(s1_dwa.weight, w01_expected);
         assert!(s1_dwa.final_weight.is_none());
 
         // S2: {3:[0], 2:[0..=1]}. Target for '1'.
         let s2_dwa_id = *s0_dwa.transitions.get(1).unwrap();
-        let s2_dwa = &dwa.states.states[s2_dwa_id];
+        let s2_dwa = &dwa.states[s2_dwa_id];
         assert_eq!(s2_dwa.weight, w01_expected);
         assert_eq!(s2_dwa.final_weight, Some(w0)); // [0] & ALL = [0]
 
         // S3: {2:[0..=1], 3:[1]}. Target for '4'.
         let s3_dwa_id = *s0_dwa.transitions.get(4).unwrap();
-        let s3_dwa = &dwa.states.states[s3_dwa_id];
+        let s3_dwa = &dwa.states[s3_dwa_id];
         assert_eq!(s3_dwa.weight, w01_expected);
         assert_eq!(s3_dwa.final_weight, Some(w1)); // [1] & ALL = [1]
 
@@ -1693,7 +1614,7 @@ mod tests {
         let dwa = nwa.determinize();
 
         // Expected DWA states: 15 (0 to 14)
-        assert_eq!(dwa.states.states.len(), 15);
+        assert_eq!(dwa.states.len(), 15);
 
         let w0 = SimpleBitset::from_item(0);
         let w1 = SimpleBitset::from_item(1);
@@ -1704,21 +1625,21 @@ mod tests {
         let wall = SimpleBitset::all();
 
         // S0 (ID 0): {1:ALL} - Start state
-        let s0 = &dwa.states.states[dwa.meta.start_state];
+        let s0 = &dwa.states[dwa.start_state];
         assert_eq!(s0.weight, wall);
         assert!(s0.final_weight.is_none());
 
         // S1 (ID 1): Target of '1' from S0. Composition: {2:[0]}
         let s1_id = *s0.transitions.get(1).unwrap();
         assert_eq!(s1_id, 1);
-        let s1 = &dwa.states.states[s1_id];
+        let s1 = &dwa.states[s1_id];
         assert_eq!(s1.weight, w0.clone());
         assert!(s1.final_weight.is_none());
 
         // S2 (ID 2): Target of '2' from S0. Composition: {7:[1..=2], 3:[3]}
         let s2_id = *s0.transitions.get(2).unwrap();
         assert_eq!(s2_id, 2);
-        let s2 = &dwa.states.states[s2_id];
+        let s2 = &dwa.states[s2_id];
         assert_eq!(s2.weight, w123.clone());
         // Final weight: ([1..=2] & ALL) | ([3] & None) = [1..=2]
         assert_eq!(s2.final_weight, Some(w12.clone()));
@@ -1726,7 +1647,7 @@ mod tests {
         // S7 (ID 7): Target of '10' from S0. Composition: {7:[1..=3]}
         let s7_id = *s0.transitions.get(10).unwrap();
         assert_eq!(s7_id, 7);
-        let s7 = &dwa.states.states[s7_id];
+        let s7 = &dwa.states[s7_id];
         assert_eq!(s7.weight, w123.clone());
         // Final weight: [1..=3] & ALL = [1..=3]
         assert_eq!(s7.final_weight, Some(w123.clone()));
@@ -1734,7 +1655,7 @@ mod tests {
         // S9 (ID 9): Target of '10' from S2. Composition: {7:[3]}
         let s9_id = *s2.transitions.get(10).unwrap();
         assert_eq!(s9_id, 9);
-        let s9 = &dwa.states.states[s9_id];
+        let s9 = &dwa.states[s9_id];
         assert_eq!(s9.weight, w3.clone());
         // Final weight: [3] & ALL = [3]
         assert_eq!(s9.final_weight, Some(w3.clone()));
@@ -1742,13 +1663,13 @@ mod tests {
         // Check S6 (ID 6) and S8 (ID 8) properties and transitions
         let s6_id = *s0.transitions.get(7).unwrap(); // Target of '7' from S0. Composition: {7:[0]}
         assert_eq!(s6_id, 6);
-        let s6 = &dwa.states.states[s6_id];
+        let s6 = &dwa.states[s6_id];
         assert_eq!(s6.weight, w0.clone());
         assert_eq!(s6.final_weight, Some(w0.clone()));
 
         let s8_id = s1.transitions.default.unwrap(); // Target of '*' from S1. Composition: {8:[0]}
         assert_eq!(s8_id, 8);
-        let s8 = &dwa.states.states[s8_id];
+        let s8 = &dwa.states[s8_id];
         assert_eq!(s8.weight, w0.clone());
         assert!(s8.final_weight.is_none());
         
