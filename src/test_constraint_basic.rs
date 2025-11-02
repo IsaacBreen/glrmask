@@ -657,9 +657,9 @@ fn test_ignore_token() {
     let llm_b = LLMTokenID(1);
     let llm_ws = LLMTokenID(2);
     let llm_a_b = LLMTokenID(3);
-    // llm_token_map.insert(b"a".to_vec(), llm_a);
-    // llm_token_map.insert(b"b".to_vec(), llm_b);
-    // llm_token_map.insert(b" ".to_vec(), llm_ws);
+    llm_token_map.insert(b"a".to_vec(), llm_a);
+    llm_token_map.insert(b"b".to_vec(), llm_b);
+    llm_token_map.insert(b" ".to_vec(), llm_ws);
     llm_token_map.insert(b"a b".to_vec(), llm_a_b);
 
     let constraint = GrammarConstraint::new_from_grammar_definition(

@@ -691,7 +691,7 @@ mod tests {
 
         // Copied part
         expected_nwa.add_epsilon_transition(s4, s5, w3.clone());
-        expected_nwa.add_epsilon_transition(s5, s6, WaWeight::all());
+        expected_nwa.add_transition(s5, 0, s6, WaWeight::all());
         expected_nwa.add_transition(s5, 1, s8, WaWeight::all());
         expected_nwa.add_transition(s5, 3, s7, WaWeight::all());
         expected_nwa.add_epsilon_transition(s6, s9, w3.clone());
