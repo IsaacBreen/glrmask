@@ -762,52 +762,37 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     }
 
     let nullability = compute_nonterminal_nullability(productions);
-    let nullable_nonterminals: BTreeSet<_> = nullability
-        .iter()
-        .filter_map(|(nt, status)| {
-            if matches!(status, Nullability::Nullable | Nullability::Null) {
-                Some(nt.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut out = Vec::<Production>::new();
     let mut seen = BTreeSet::<Production>::new();
+    let mut out = Vec::<Production>::new();
 
-    for prod in productions {
+    let start_prod = productions[0].clone();
+    seen.insert(start_prod.clone());
+    out.push(start_prod);
+
+    for prod in &productions[1..] {
         // Generate all RHS variants by taking the Cartesian product of options for each symbol.
         let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
             let sym_options = match sym {
                 Symbol::Terminal(_) => vec![Some(sym.clone())],
-                Symbol::NonTerminal(nt) => {
-                    if nullable_nonterminals.contains(nt) {
-                        vec![Some(sym.clone()), None] // Optional
-                    } else {
-                        vec![Some(sym.clone())] // Must be kept
-                    }
-                }
+                Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                    Some(Nullability::Null) => vec![None], // Must be removed
+                    Some(Nullability::Nullable) => vec![Some(sym.clone()), None], // Optional
+                    _ => vec![Some(sym.clone())], // Must be kept
+                },
             };
 
-            acc.into_iter()
-                .flat_map(|variant| {
-                    sym_options.iter().map(move |opt| {
-                        let mut new_variant = variant.clone();
-                        if let Some(s) = opt {
-                            new_variant.push(s.clone());
-                        }
-                        new_variant
-                    })
+            acc.into_iter().flat_map(|variant| {
+                sym_options.iter().map(move |opt| {
+                    let mut new_variant = variant.clone();
+                    if let Some(s) = opt {
+                        new_variant.push(s.clone());
+                    }
+                    new_variant
                 })
-                .collect()
+            }).collect()
         });
 
         for rhs in rhs_variants {
-            // Don't add original epsilon productions back, and don't add newly generated ones.
-            if rhs.is_empty() {
-                continue;
-            }
             let new_prod = Production { lhs: prod.lhs.clone(), rhs };
             if seen.insert(new_prod.clone()) {
                 out.push(new_prod);
@@ -815,20 +800,21 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         }
     }
 
-    // If the original start symbol was nullable, the new grammar must accept the empty string.
-    // The standard way is to add an epsilon production for the start symbol.
-    let start_symbol = &productions[0].lhs;
-    if nullable_nonterminals.contains(start_symbol) {
-        let epsilon_prod = Production {
-            lhs: start_symbol.clone(),
-            rhs: vec![],
-        };
-        if seen.insert(epsilon_prod.clone()) {
-            out.push(epsilon_prod);
-        }
-    }
+    let start_rhs_nts: BTreeSet<_> = productions[0]
+        .rhs
+        .iter()
+        .filter_map(|s| {
+            if let Symbol::NonTerminal(nt) = s {
+                Some(nt.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
 
-    out
+    out.into_iter()
+        .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
+        .collect()
 }
 
 pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {

@@ -1472,12 +1472,11 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     // println!("After direct right recursion:\n{}", display_productions(&productions));
 
     if true {
-        let original_start_symbol = productions[0].lhs.clone();
+        // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+        // println!("Before inlining nullable productions: Number of productions: {}", productions.len());
         productions = inline_null_productions(&productions);
-        // Assert that there are no nullable productions left, except for the start symbol.
-        for p in &productions {
-            assert!(!p.rhs.is_empty() || p.lhs == original_start_symbol, "Nullable production still present after inlining for non-start symbol: {:?}", p);
-        }
+        // println!("After inlining nullable productions:\n{}", display_productions(&productions));
+        // println!("After inlining nullable productions: Number of productions: {}", productions.len());
     }
     if false {
         // println!("Before inlining unit productions:\n{}", display_productions(&productions));
