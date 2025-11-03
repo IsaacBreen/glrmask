@@ -110,9 +110,13 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 let combine_elapsed = combine_now.elapsed();
 
                 println!(
-                    "step inner loop: term {:?}, dest {}, append_copy_from: {:?}, combine_right_into: {:?}, shared_states_len: {}",
-                    edge_terminal_opt, dest_idx.as_usize(), copy_elapsed, combine_elapsed, shared_states.borrow().len()
+                    "step inner loop: term {:?}, dest {}, shared_states_len: {}",
+                    edge_terminal_opt,
+                    dest_idx.as_usize(),
+                    shared_states.borrow().len()
                 );
+                println!("  append_copy_from: {:?}", copy_elapsed);
+                println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
 
                 results.push((*dest_idx, new_body));
             }
