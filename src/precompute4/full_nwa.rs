@@ -96,15 +96,15 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 left_body.remap_states(&mapping);
 
                 let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                // Combine into a new body (mutating the shared graph with epsilon links).
+                // Concatenate into a new body (mutating the shared graph with epsilon links).
                 let combine_now = Instant::now();
                 let mut new_body = left_body.clone();
-                AugmentedNwaBody::combine_right_into_on_shared(
+                AugmentedNwaBody::concatenate_right_into_on_shared(
                     &mut shared_states.borrow_mut(),
                     &mut new_body,
                     &current_aug_body,
                     &weight,
-                ).expect("Combine failed");
+                ).expect("Concatenate failed");
                 let combine_elapsed = combine_now.elapsed();
 
                 println!(
@@ -114,7 +114,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                     shared_states.borrow().len()
                 );
                 println!("  append_copy_from: {:?}", copy_elapsed);
-                println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
+                println!("  concatenate_right_into_on_shared (caller): {:?}", combine_elapsed);
 
                 results.push((*dest_idx, new_body));
             }

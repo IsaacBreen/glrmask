@@ -207,17 +207,17 @@ impl AugmentedNwaBody {
         Ok(states.process_stack_u16_from_starts(&self.nwa.start_states, &encoded))
     }
 
-    pub fn combine_right_into_on_shared(
+    pub fn concatenate_right_into_on_shared(
         states: &mut WaNWAStates,
         left: &mut AugmentedNwaBody,
         right: &AugmentedNwaBody,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
-        crate::debug!(6, "--- combine_right_into_on_shared ---");
+        crate::debug!(6, "--- concatenate_right_into_on_shared ---");
         crate::debug!(6, "--- WEIGHT: {} ---", weight);
         crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
         crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
-        crate::debug!(6, "States before combine:\n{}", states);
+        crate::debug!(6, "States before concatenate:\n{}", states);
 
         let now = Instant::now();
         let left_end_snapshot = left.end_map.clone();
@@ -253,7 +253,7 @@ impl AugmentedNwaBody {
 
                 let process_now = Instant::now();
                 let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
-                crate::debug!(6, "  Combining left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
+                crate::debug!(6, "  Concatenating left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
                 stops_count += stops.len();
                 total_process_stack_time += process_now.elapsed();
 
@@ -288,10 +288,10 @@ impl AugmentedNwaBody {
         left.end_map = new_end_map;
 
         crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
-        crate::debug!(6, "--- end combine_right_into_on_shared ---");
+        crate::debug!(6, "--- end concatenate_right_into_on_shared ---");
 
         println!(
-            "    combine_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
+            "    concatenate_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
             now.elapsed(),
             total_process_stack_time,
             stops_count,
@@ -342,8 +342,8 @@ impl AugmentedNwaBody {
 }
 
 impl AugmentedNwa {
-    /// Implementation note: rebase the right's states/body into `self` first, then combine on shared states.
-    pub fn combine_right_into(
+    /// Implementation note: rebase the right's states/body into `self` first, then concatenate on shared states.
+    pub fn concatenate_right_into(
         &mut self,
         right: &AugmentedNwa,
         weight: &WaWeight,
@@ -351,7 +351,7 @@ impl AugmentedNwa {
         let mapping = self.states.append_copy_from(&right.states);
         let mut mapped_right_body = right.body.clone();
         mapped_right_body.remap_states(&mapping);
-        AugmentedNwaBody::combine_right_into_on_shared(
+        AugmentedNwaBody::concatenate_right_into_on_shared(
             &mut self.states,
             &mut self.body,
             &mapped_right_body,
@@ -452,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_combine_with_ignore_on_left() {
+    fn test_concatenate_with_ignore_on_left() {
         let mut lhs = build_augmented_nwa_for_ignore_terminal();
         let mut rhs = build_simple_aug_nwa();
         let end_state = rhs.body.end_map.keys().cloned().next().unwrap();
@@ -462,7 +462,7 @@ mod tests {
         crate::debug!(5, "Left NWA (ignore):\n{}", lhs);
         crate::debug!(5, "Right NWA (simple):\n{}", rhs);
 
-        lhs.combine_right_into(&rhs, &weight).unwrap();
+        lhs.concatenate_right_into(&rhs, &weight).unwrap();
 
         let mut states = WaNWAStates::default();
         let s0 = states.add_state();
@@ -491,13 +491,13 @@ mod tests {
     }
 
     #[test]
-    fn test_combine_with_ignore_on_right() {
+    fn test_concatenate_with_ignore_on_right() {
         let mut lhs = build_simple_aug_nwa();
         let mut rhs = build_augmented_nwa_for_ignore_terminal();
         rhs.states.set_final_weight(*rhs.body.nwa.start_states.iter().next().unwrap(), WaWeight::all());
         let weight = WaWeight::all();
 
-        lhs.combine_right_into(&rhs, &weight).unwrap();
+        lhs.concatenate_right_into(&rhs, &weight).unwrap();
 
         let mut states = WaNWAStates::default();
         let s0 = states.add_state();
@@ -594,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn test_right_to_left_combination() {
+    fn test_right_to_left_concatenation() {
         let mut states = WaNWAStates::default();
         let initial_state = states.add_state();
         states.set_final_weight(initial_state, WaWeight::all());
@@ -612,15 +612,15 @@ mod tests {
         let weight = WaWeight::all();
 
         for (i, (term_id, term_nwa)) in terminal_nwas_with_id.iter().rev().enumerate() {
-            crate::debug!(5, "\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
+            crate::debug!(5, "\n--- Concatenation Step {} (Term {} on LEFT) ---", i, term_id);
             crate::debug!(5, "LEFT NWA (Term {}):\n{}", term_id, term_nwa);
             crate::debug!(5, "RIGHT NWA (Current):\n{}", current_aug_nwa);
 
             let mut new_current = term_nwa.clone();
-            new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
+            new_current.concatenate_right_into(&current_aug_nwa, &weight).unwrap();
             current_aug_nwa = new_current;
 
-            crate::debug!(5, "Resulting Combined NWA:\n{}", current_aug_nwa);
+            crate::debug!(5, "Resulting Concatenated NWA:\n{}", current_aug_nwa);
         }
 
         assert_eq!(current_aug_nwa.states.len(), 13);
@@ -676,16 +676,16 @@ mod tests {
     }
 
     #[test]
-    fn test_combination_from_prompt_example() {
+    fn test_concatenation_from_prompt_example() {
         let mut self_nwa = build_nwa_from_prompt_left();
         let right_nwa = build_nwa_from_prompt_right();
         let weight = WaWeight::all();
         crate::debug!(5, "RIGHT NWA:\n{}", right_nwa);
         crate::debug!(5, "LEFT NWA:\n{}", self_nwa);
 
-        self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
+        self_nwa.concatenate_right_into(&right_nwa, &weight).unwrap();
 
-        crate::debug!(5, "Resulting NWA after combination:\n{}", self_nwa);
+        crate::debug!(5, "Resulting NWA after concatenation:\n{}", self_nwa);
 
         // Build expected result
         let mut states = WaNWAStates::default();
