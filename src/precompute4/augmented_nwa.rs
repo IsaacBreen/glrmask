@@ -103,6 +103,7 @@ pub fn build_augmented_nwa_from_characterization(
         nwa: WaNWABody { start_state: start },
         nt_nodes: BTreeMap::new(),
         end_map: BTreeMap::new(),
+        state_set: BTreeSet::new(),
     };
 
     for &nt in parser.non_terminal_map.right_values() {
@@ -624,7 +625,10 @@ mod tests {
 
         AugmentedNwa {
             states,
-            body: AugmentedNwaBody { nwa: WaNWABody { start_state }, nt_nodes, end_map },
+            body: AugmentedNwaBody {
+                nwa: WaNWABody { start_state }, nt_nodes, end_map,
+                state_set: (0..4).collect(),
+            },
         }
     }
 
@@ -691,7 +695,7 @@ mod tests {
 
         // Connection
         let w3 = WaWeight::from_item(3);
-        states.add_epsilon_transition(s1, s9, w3.clone());
+        states.add_or_merge_epsilon_transition(s1, s9, w3.clone());
 
         // Copied part
         states.add_epsilon_transition(s4, s5, w3.clone());

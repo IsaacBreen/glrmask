@@ -4,11 +4,11 @@ use crate::tokenizer::TokenizerStateID;
 use crate::weighted_automata::{DWA, NWA as WaNWA, NWAStates as WaNWAStates, NWABody as WaNWABody, Weight as WaWeight};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ops::BitOrAssign;
 use crate::datastructures::trie::Trie;
 use crate::precompute4::augmented_nwa::{AugmentedNwa, AugmentedNwaBody};
 use crate::glr::table::TerminalID;
 use std::time::Instant;
+use std::ops::BitOrAssign;
 
 pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
 
@@ -63,7 +63,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let initial_aug_body = AugmentedNwaBody {
         nwa: WaNWABody { start_state: initial_state },
         nt_nodes: BTreeMap::new(),
-        end_map: BTreeMap::from([]),
+        end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+        state_set: BTreeSet::from([initial_state]),
     };
 
     let initial_values = vec![(reversed_trie_root, initial_aug_body)];
@@ -162,8 +163,10 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                     for left_stack in stacks {
                         if let Some(stops) = stops_by_stack.get(left_stack) {
                             for (_, right_stop_state, path_weight) in stops {
+                                // Map the right_stop_state to the new arena ID
+                                let mapped_right_stop_state = mapping[*right_stop_state];
                                 dedup_edges
-                                    .entry((*left_end_state, *right_stop_state))
+                                    .entry((*left_end_state, mapped_right_stop_state))
                                     .or_insert_with(WaWeight::zeros)
                                     .bitor_assign(path_weight);
                             }
@@ -183,7 +186,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
                 // New body = left_body + updated end_map + expanded state_set (union with right).
                 let mut new_body = left_body.clone();
-                new_body.end_map = precomputed_new_end_map.clone();
+                // Remap the precomputed end_map keys (right body states) to the new arena IDs.
+                new_body.end_map = precomputed_new_end_map.iter().map(|(old_k, v)| (mapping[*old_k], v.clone())).collect();
                 new_body.state_set.extend(current_aug_body.state_set.iter().cloned());
 
                 println!(
