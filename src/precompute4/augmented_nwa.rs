@@ -289,52 +289,100 @@ impl AugmentedNwaBody {
         right: &AugmentedNwaBody,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
+        crate::debug!(6, "--- concatenate_right_into_on_shared ---");
+        crate::debug!(6, "--- WEIGHT: {} ---", weight);
+        crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
+        crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
+        crate::debug!(6, "States before concatenate:\n{}", states);
+
         let now = Instant::now();
-        crate::debug!(6, "--- concatenate_right_into_on_shared (using product) ---");
-
-        // Create a new start state for the right NWA to apply the concatenation weight.
-        let mut right_body = right.nwa.clone();
-        if !weight.is_empty() && weight != &WaWeight::all() {
-            let new_right_start = states.add_state();
-            for &old_start in &right.nwa.start_states {
-                states.add_epsilon_transition(new_right_start, old_start, weight.clone());
-            }
-            right_body.start_states = BTreeSet::from([new_right_start]);
-        }
-
-        // Join end states of left NWA to start states of right NWA.
-        let mut join_map: BTreeMap<WaStateID, BTreeSet<WaStateID>> = BTreeMap::new();
-        for &end_state in left.end_map.keys() {
-            join_map.insert(end_state, right_body.start_states.clone());
-        }
-
-        let mapping = WaNWA::concatenate_components(states, &mut left.nwa, &right_body, &join_map);
-
-        // Update end_map and nt_nodes for the new composite NWA.
+        let left_end_snapshot = left.end_map.clone();
         let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-        let mut new_nt_nodes: BTreeMap<NonTerminalID, WaStateID> = BTreeMap::new();
 
-        for (new_id, old_ids) in &mapping {
-            for &(automaton_idx, old_id) in old_ids {
-                if automaton_idx == 0 { // From left automaton
-                    if let Some(nt_id) = left.nt_nodes.iter().find(|(_, &v)| v == old_id).map(|(k, _)| *k) {
-                        new_nt_nodes.insert(nt_id, *new_id);
-                    }
-                } else { // From right automaton
-                    if let Some(stacks) = right.end_map.get(&old_id) {
-                        // Semantic change: We lose the prefix from the left stack.
-                        // This is a simplification inherent to using a product construction
-                        // that doesn't track input consumption history.
-                        new_end_map.entry(*new_id).or_default().extend(stacks.clone());
-                    }
+        let mut total_stacks = 0;
+        let mut unique_stacks = BTreeSet::new();
+        let mut total_stack_len = 0;
+        let mut max_stack_len = 0;
+        for stacks in left_end_snapshot.values() {
+            total_stacks += stacks.len();
+            for stack in stacks {
+                unique_stacks.insert(stack.clone());
+                let len = stack.len();
+                total_stack_len += len;
+                if len > max_stack_len {
+                    max_stack_len = len;
                 }
             }
         }
+        let avg_stack_len = if total_stacks > 0 { total_stack_len as f64 / total_stacks as f64 } else { 0.0 };
 
+        let mut total_process_stack_time = std::time::Duration::new(0, 0);
+        let mut total_reachable_time = std::time::Duration::new(0, 0);
+        let mut total_end_map_build_time = std::time::Duration::new(0, 0);
+        let mut stops_count = 0;
+        let mut reachable_count = 0;
+ 
+        for (left_end_state, stacks) in &left_end_snapshot {
+            for left_stack in stacks {
+                let encoded: Vec<u16> =
+                    left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
+
+                let process_now = Instant::now();
+                let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+                crate::debug!(6, "  Concatenating left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
+                stops_count += stops.len();
+                total_process_stack_time += process_now.elapsed();
+
+                for (pos, right_stop_state, path_weight) in stops {
+                    let combined_weight = &path_weight & weight;
+                    states.add_epsilon_transition(*left_end_state, right_stop_state, combined_weight);
+
+                    if right.end_map.values().all(|stacks| stacks.is_empty()) {
+                        continue;
+                    }
+
+                    let reachable_now = Instant::now();
+                    let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                    reachable_count += reachable.len();
+                    total_reachable_time += reachable_now.elapsed();
+
+                    let end_map_build_now = Instant::now();
+                    for r_state in reachable {
+                        if let Some(r_stacks) = right.end_map.get(&r_state) {
+                            for r_stack in r_stacks {
+                                let keep_len = left_stack.len().saturating_sub(pos);
+                                let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
+                                combined.extend(r_stack.iter().cloned());
+                                new_end_map.entry(r_state).or_default().insert(combined);
+                            }
+                        }
+                    }
+                    total_end_map_build_time += end_map_build_now.elapsed();
+                }
+            }
+        }
         left.end_map = new_end_map;
-        left.nt_nodes = new_nt_nodes;
 
-        println!("    concatenate_right_into_on_shared (product) took: {:?}", now.elapsed());
+        crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
+        crate::debug!(6, "--- end concatenate_right_into_on_shared ---");
+
+        println!(
+            "    concatenate_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
+            now.elapsed(),
+            total_process_stack_time,
+            stops_count,
+            total_reachable_time,
+            reachable_count,
+            total_end_map_build_time
+        );
+        println!(
+            "      left_end_snapshot stats: end_states={}, total_stacks={}, unique_stacks={}, max_stack_len={}, avg_stack_len={:.2}",
+            left_end_snapshot.len(),
+            total_stacks,
+            unique_stacks.len(),
+            max_stack_len,
+            avg_stack_len
+        );
         Ok(())
     }
 
