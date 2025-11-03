@@ -417,6 +417,11 @@ impl NWAStates {
     /// is a meet (∩) along edges and joins (∪) when multiple paths converge.
     pub fn process_stack_u16_from_starts(&self, start_states: &BTreeSet<StateID>, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
         let now = Instant::now();
+        let mut total_eps_closure_time = std::time::Duration::new(0, 0);
+        let mut total_next_raw_time = std::time::Duration::new(0, 0);
+        let mut max_current_states = 0;
+        let mut max_next_raw_states = 0;
+
         if self.0.is_empty() {
             return Vec::new();
         }
@@ -426,7 +431,9 @@ impl NWAStates {
         for &start_state in start_states {
             current.insert(start_state, Weight::all());
         }
-        let mut current = self.epsilon_closure_with_flag(current, has_eps);
+        let eps_now = Instant::now();
+        let mut current = self.epsilon_closure_with_flag(current, has_eps, input.len());
+        total_eps_closure_time += eps_now.elapsed();
 
         // deduplicate results by (pos,state) and join weights
         let mut results: BTreeMap<(usize, StateID), Weight> = BTreeMap::new();
@@ -434,6 +441,7 @@ impl NWAStates {
 
         for pos in 0..=n {
             for (&sid, path_w) in &current {
+                max_current_states = max_current_states.max(current.len());
                 if self[sid].final_weight.is_some() {
                     results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
                 }
@@ -446,6 +454,7 @@ impl NWAStates {
             }
 
             let ch = input[pos];
+            let next_raw_now = Instant::now();
             let mut next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
             for (&sid, path_w) in &current {
                 if let Some(transitions) = self[sid].transitions.get(ch) {
@@ -457,11 +466,24 @@ impl NWAStates {
                     }
                 }
             }
-            current = self.epsilon_closure_with_flag(next_raw, has_eps);
+            total_next_raw_time += next_raw_now.elapsed();
+            max_next_raw_states = max_next_raw_states.max(next_raw.len());
+
+            let eps_now = Instant::now();
+            current = self.epsilon_closure_with_flag(next_raw, has_eps, input.len());
+            total_eps_closure_time += eps_now.elapsed();
         }
 
         let result = results.into_iter().map(|((pos, sid), w)| (pos, sid, w)).collect();
-        println!("NWAStates::process_stack_u16_from_starts (input len {}) took: {:?}", input.len(), now.elapsed());
+        println!(
+            "NWAStates::process_stack_u16_from_starts (input len {}, total_states: {}) took: {:?}. eps_closure: {:?}, next_raw: {:?}, max_current: {}, max_next_raw: {}",
+            input.len(),
+            self.len(),
+            now.elapsed(),
+            total_eps_closure_time,
+            total_next_raw_time,
+            max_current_states,
+            max_next_raw_states);
         result
     }
 
@@ -473,13 +495,19 @@ impl NWAStates {
         &self,
         initial_states: BTreeMap<StateID, Weight>,
         has_epsilons: bool,
+        input_len_for_debug: usize,
     ) -> BTreeMap<StateID, Weight> {
         if !has_epsilons {
             return initial_states;
         }
 
+        let now = Instant::now();
+        let mut worklist_pushes = 0;
+        let mut edges_traversed = 0;
+
         let mut closure = initial_states;
         let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
+        worklist_pushes += worklist.len();
 
         while let Some(u_id) = worklist.pop_front() {
             let u_weight = closure.get(&u_id).unwrap().clone();
@@ -487,6 +515,10 @@ impl NWAStates {
                 continue;
             }
 
+            if self[u_id].epsilon_transitions.is_empty() {
+                continue;
+            }
+            edges_traversed += self[u_id].epsilon_transitions.len();
             for (v_id, trans_weight) in &self[u_id].epsilon_transitions {
                 let new_v_weight = &u_weight & trans_weight;
                 if new_v_weight.is_empty() {
@@ -499,8 +531,17 @@ impl NWAStates {
 
                 if current_v_weight.len() > old_len {
                     worklist.push_back(*v_id);
+                    worklist_pushes += 1;
                 }
             }
+        }
+
+        let elapsed = now.elapsed();
+        if elapsed.as_millis() > 10 {
+            println!(
+                "    epsilon_closure_with_flag (input_len: {}, initial_states: {}, total_states: {}) took: {:?}, worklist_pushes: {}, edges_traversed: {}",
+                input_len_for_debug, initial_states.len(), self.len(), elapsed, worklist_pushes, edges_traversed
+            );
         }
         closure
     }
@@ -561,7 +602,7 @@ impl NWA {
         for &start_state in &body.start_states {
             start_raw.insert(start_state, Weight::all());
         }
-        let start_map = states.epsilon_closure_with_flag(start_raw, has_epsilons);
+        let start_map = states.epsilon_closure_with_flag(start_raw, has_epsilons, 0);
         if let Some(start_id) = get_or_create(to_key(start_map), &mut dwa_states, &mut known_states, &mut worklist) {
             dwa_body.start_state = start_id;
         } else {
@@ -604,7 +645,7 @@ impl NWA {
                     }
                 }
             }
-            let def_comp = to_key(states.epsilon_closure_with_flag(default_next_raw, has_epsilons));
+            let def_comp = to_key(states.epsilon_closure_with_flag(default_next_raw, has_epsilons, 0));
             let def_target = get_or_create(def_comp, &mut dwa_states, &mut known_states, &mut worklist);
             dwa_states[current_dwa_id].transitions.default = def_target;
             if def_target.is_some() {
@@ -627,7 +668,7 @@ impl NWA {
                 if exception_next_raw.is_empty() {
                     continue;
                 }
-                let exc_comp = to_key(states.epsilon_closure_with_flag(exception_next_raw, has_epsilons));
+                let exc_comp = to_key(states.epsilon_closure_with_flag(exception_next_raw, has_epsilons, 0));
                 let exc_target = get_or_create(exc_comp, &mut dwa_states, &mut known_states, &mut worklist);
 
                 if exc_target != def_target {
