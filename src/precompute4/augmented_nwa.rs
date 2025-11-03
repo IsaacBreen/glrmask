@@ -184,12 +184,12 @@ impl AugmentedNwaBody {
         right: &AugmentedNwaBody,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
-        crate::debug!(5, "--- combine_right_into_on_shared ---");
-        crate::debug!(5, "--- WEIGHT: {} ---", weight);
+        crate::debug!(6, "--- combine_right_into_on_shared ---");
+        crate::debug!(6, "--- WEIGHT: {} ---", weight);
         let left_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
-        crate::debug!(5, "LEFT AugmentedNWA:\n{}", left_nwa_debug);
+        crate::debug!(6, "LEFT AugmentedNWA:\n{}", left_nwa_debug);
         let right_nwa_debug = AugmentedNwa { states: states.clone(), body: right.clone() };
-        crate::debug!(5, "RIGHT AugmentedNWA:\n{}", right_nwa_debug);
+        crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right_nwa_debug);
 
         let now = Instant::now();
         let left_end_snapshot = left.end_map.clone();
@@ -225,7 +225,7 @@ impl AugmentedNwaBody {
 
                 let process_now = Instant::now();
                 let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
-                crate::debug!(5, "  Combining left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
+                crate::debug!(6, "  Combining left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
                 stops_count += stops.len();
                 total_process_stack_time += process_now.elapsed();
 

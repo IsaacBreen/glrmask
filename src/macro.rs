@@ -17,7 +17,7 @@ macro_rules! choice_fast {
 // Import the Local timezone functionality
 
 /// The compile-time debug level. Messages with a level greater than this will be ignored.
-pub const MACRO_DEBUG_LEVEL: usize = 5;
+pub const MACRO_DEBUG_LEVEL: usize = 6;
 
 /// A list of filenames (not full paths) to allow debug messages from.
 /// If this list is empty, all files are allowed (respecting `MACRO_DEBUG_LEVEL`).
