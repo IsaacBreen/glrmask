@@ -277,35 +277,40 @@ impl NWAStates {
 
     /// Reachability ignoring labels/weights.
     pub fn reachable_states_ignoring_labels(&self, from: StateID) -> BTreeSet<StateID> {
-        let mut visited: BTreeSet<StateID> = BTreeSet::new();
+        let mut result: BTreeSet<StateID> = BTreeSet::new();
         let mut q: VecDeque<StateID> = VecDeque::new();
         if from >= self.0.len() {
-            return visited;
+            return result;
         }
-        visited.insert(from);
+        let mut visited = vec![false; self.len()];
+        visited[from] = true;
         q.push_back(from);
         while let Some(u) = q.pop_front() {
+            result.insert(u);
             for (v, _) in &self[u].epsilon_transitions {
-                if visited.insert(*v) {
+                if !visited[*v] {
+                    visited[*v] = true;
                     q.push_back(*v);
                 }
             }
             if let Some(def) = self[u].transitions.default.as_ref() {
                 for (v, _) in def {
-                    if visited.insert(*v) {
+                    if !visited[*v] {
+                        visited[*v] = true;
                         q.push_back(*v);
                     }
                 }
             }
             for vec in self[u].transitions.exceptions.values() {
                 for (v, _) in vec {
-                    if visited.insert(*v) {
+                    if !visited[*v] {
+                        visited[*v] = true;
                         q.push_back(*v);
                     }
                 }
             }
         }
-        visited
+        result
     }
 }
 
