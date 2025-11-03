@@ -407,6 +407,27 @@ local_system:
 
       // --- Deterministic Weighted Automaton (DWA) ---
 
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum DWABuildError {
+          TransitionAlreadyExists { from: StateID, on: u16 },
+          DefaultTransitionAlreadyExists { from: StateID },
+          StateOutOfBounds { state: StateID },
+      }
+
+      impl Display for DWABuildError {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              match self {
+                  DWABuildError::TransitionAlreadyExists { from, on } => {
+                      write!(f, "Transition from state {} on char {} already exists", from, on)
+                  }
+                  DWABuildError::DefaultTransitionAlreadyExists { from } => {
+                      write!(f, "Default transition from state {} already exists", from)
+                  }
+                  DWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
+              }
+          }
+      }
+
       #[derive(Clone, Debug, Default)]
       pub struct DWAState {
           pub transitions: U16Map<StateID>,
@@ -439,6 +460,11 @@ local_system:
       impl DWAStates {
           pub fn len(&self) -> usize {
               self.0.len()
+          }
+          pub fn add_state(&mut self) -> StateID {
+              let id = self.0.len();
+              self.0.push(DWAState::default());
+              id
           }
       }
 
@@ -936,6 +962,75 @@ local_system:
 
       // DWA simplification utilities
       impl DWA {
+          pub fn new() -> Self {
+              let mut states = DWAStates::default();
+              let start = states.add_state();
+              DWA { states, body: DWABody { start_state: start } }
+          }
+
+          pub fn add_state(&mut self) -> StateID {
+              self.states.add_state()
+          }
+
+          pub fn set_state_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
+              if state >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state });
+              }
+              self.states[state].weight = weight;
+              Ok(())
+          }
+
+          pub fn set_final_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
+              if state >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state });
+              }
+              self.states[state].final_weight = Some(weight);
+              Ok(())
+          }
+
+          pub fn add_transition(
+              &mut self,
+              from: StateID,
+              on: u16,
+              to: StateID,
+              weight: Weight,
+          ) -> Result<(), DWABuildError> {
+              if from >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state: from });
+              }
+              if to >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state: to });
+              }
+              let from_state = &mut self.states[from];
+              if from_state.transitions.exceptions.contains_key(&on) {
+                  return Err(DWABuildError::TransitionAlreadyExists { from, on });
+              }
+              from_state.transitions.exceptions.insert(on, to);
+              from_state.trans_weights_exceptions.insert(on, weight);
+              Ok(())
+          }
+
+          pub fn set_default_transition(
+              &mut self,
+              from: StateID,
+              to: StateID,
+              weight: Weight,
+          ) -> Result<(), DWABuildError> {
+              if from >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state: from });
+              }
+              if to >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state: to });
+              }
+              let from_state = &mut self.states[from];
+              if from_state.transitions.default.is_some() {
+                  return Err(DWABuildError::DefaultTransitionAlreadyExists { from });
+              }
+              from_state.transitions.default = Some(to);
+              from_state.trans_weight_default = Some(weight);
+              Ok(())
+          }
+
           /// Union of two DWAs via product construction.
           /// The states of the new DWA correspond to pairs of states from the input DWAs.
           /// A state is final if either of the original states is final.
@@ -1885,6 +1980,41 @@ local_system:
 
               assert!(s7.transitions.exceptions.is_empty());
               assert!(s7.transitions.default.is_none());
+          }
+
+          #[test]
+          fn test_dwa_builder() {
+              let mut dwa = DWA::new();
+              assert_eq!(dwa.states.len(), 1);
+              assert_eq!(dwa.body.start_state, 0);
+
+              let s1 = dwa.add_state();
+              assert_eq!(s1, 1);
+              assert_eq!(dwa.states.len(), 2);
+
+              dwa.set_state_weight(0, SimpleBitset::from_item(10)).unwrap();
+              dwa.set_final_weight(1, SimpleBitset::from_item(20)).unwrap();
+
+              assert_eq!(dwa.states[0].weight, SimpleBitset::from_item(10));
+              assert_eq!(dwa.states[1].final_weight, Some(SimpleBitset::from_item(20)));
+
+              dwa.add_transition(0, b'a' as u16, 1, SimpleBitset::from_item(30)).unwrap();
+              assert_eq!(*dwa.states[0].transitions.get(b'a' as u16).unwrap(), 1);
+              assert_eq!(*dwa.states[0].trans_weights_exceptions.get(&(b'a' as u16)).unwrap(), SimpleBitset::from_item(30));
+
+              // Test error cases
+              let res = dwa.add_transition(0, b'a' as u16, 1, SimpleBitset::zeros());
+              assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: 97 })));
+
+              dwa.set_default_transition(0, 0, SimpleBitset::from_item(40)).unwrap();
+              assert_eq!(dwa.states[0].transitions.default, Some(0));
+              assert_eq!(dwa.states[0].trans_weight_default, Some(SimpleBitset::from_item(40)));
+
+              let res = dwa.set_default_transition(0, 0, SimpleBitset::zeros());
+              assert!(matches!(res, Err(DWABuildError::DefaultTransitionAlreadyExists { from: 0 })));
+
+              let res = dwa.set_final_weight(10, SimpleBitset::zeros());
+              assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
           }
       }
     src/precompute4/augmented_nwa.rs: |
@@ -6729,6 +6859,27 @@ messages:
 
       // --- Deterministic Weighted Automaton (DWA) ---
 
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum DWABuildError {
+          TransitionAlreadyExists { from: StateID, on: u16 },
+          DefaultTransitionAlreadyExists { from: StateID },
+          StateOutOfBounds { state: StateID },
+      }
+
+      impl Display for DWABuildError {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              match self {
+                  DWABuildError::TransitionAlreadyExists { from, on } => {
+                      write!(f, "Transition from state {} on char {} already exists", from, on)
+                  }
+                  DWABuildError::DefaultTransitionAlreadyExists { from } => {
+                      write!(f, "Default transition from state {} already exists", from)
+                  }
+                  DWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
+              }
+          }
+      }
+
       #[derive(Clone, Debug, Default)]
       pub struct DWAState {
           pub transitions: U16Map<StateID>,
@@ -6761,6 +6912,11 @@ messages:
       impl DWAStates {
           pub fn len(&self) -> usize {
               self.0.len()
+          }
+          pub fn add_state(&mut self) -> StateID {
+              let id = self.0.len();
+              self.0.push(DWAState::default());
+              id
           }
       }
 
@@ -7258,6 +7414,75 @@ messages:
 
       // DWA simplification utilities
       impl DWA {
+          pub fn new() -> Self {
+              let mut states = DWAStates::default();
+              let start = states.add_state();
+              DWA { states, body: DWABody { start_state: start } }
+          }
+
+          pub fn add_state(&mut self) -> StateID {
+              self.states.add_state()
+          }
+
+          pub fn set_state_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
+              if state >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state });
+              }
+              self.states[state].weight = weight;
+              Ok(())
+          }
+
+          pub fn set_final_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
+              if state >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state });
+              }
+              self.states[state].final_weight = Some(weight);
+              Ok(())
+          }
+
+          pub fn add_transition(
+              &mut self,
+              from: StateID,
+              on: u16,
+              to: StateID,
+              weight: Weight,
+          ) -> Result<(), DWABuildError> {
+              if from >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state: from });
+              }
+              if to >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state: to });
+              }
+              let from_state = &mut self.states[from];
+              if from_state.transitions.exceptions.contains_key(&on) {
+                  return Err(DWABuildError::TransitionAlreadyExists { from, on });
+              }
+              from_state.transitions.exceptions.insert(on, to);
+              from_state.trans_weights_exceptions.insert(on, weight);
+              Ok(())
+          }
+
+          pub fn set_default_transition(
+              &mut self,
+              from: StateID,
+              to: StateID,
+              weight: Weight,
+          ) -> Result<(), DWABuildError> {
+              if from >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state: from });
+              }
+              if to >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state: to });
+              }
+              let from_state = &mut self.states[from];
+              if from_state.transitions.default.is_some() {
+                  return Err(DWABuildError::DefaultTransitionAlreadyExists { from });
+              }
+              from_state.transitions.default = Some(to);
+              from_state.trans_weight_default = Some(weight);
+              Ok(())
+          }
+
           /// Union of two DWAs via product construction.
           /// The states of the new DWA correspond to pairs of states from the input DWAs.
           /// A state is final if either of the original states is final.
@@ -8207,6 +8432,41 @@ messages:
 
               assert!(s7.transitions.exceptions.is_empty());
               assert!(s7.transitions.default.is_none());
+          }
+
+          #[test]
+          fn test_dwa_builder() {
+              let mut dwa = DWA::new();
+              assert_eq!(dwa.states.len(), 1);
+              assert_eq!(dwa.body.start_state, 0);
+
+              let s1 = dwa.add_state();
+              assert_eq!(s1, 1);
+              assert_eq!(dwa.states.len(), 2);
+
+              dwa.set_state_weight(0, SimpleBitset::from_item(10)).unwrap();
+              dwa.set_final_weight(1, SimpleBitset::from_item(20)).unwrap();
+
+              assert_eq!(dwa.states[0].weight, SimpleBitset::from_item(10));
+              assert_eq!(dwa.states[1].final_weight, Some(SimpleBitset::from_item(20)));
+
+              dwa.add_transition(0, b'a' as u16, 1, SimpleBitset::from_item(30)).unwrap();
+              assert_eq!(*dwa.states[0].transitions.get(b'a' as u16).unwrap(), 1);
+              assert_eq!(*dwa.states[0].trans_weights_exceptions.get(&(b'a' as u16)).unwrap(), SimpleBitset::from_item(30));
+
+              // Test error cases
+              let res = dwa.add_transition(0, b'a' as u16, 1, SimpleBitset::zeros());
+              assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: 97 })));
+
+              dwa.set_default_transition(0, 0, SimpleBitset::from_item(40)).unwrap();
+              assert_eq!(dwa.states[0].transitions.default, Some(0));
+              assert_eq!(dwa.states[0].trans_weight_default, Some(SimpleBitset::from_item(40)));
+
+              let res = dwa.set_default_transition(0, 0, SimpleBitset::zeros());
+              assert!(matches!(res, Err(DWABuildError::DefaultTransitionAlreadyExists { from: 0 })));
+
+              let res = dwa.set_final_weight(10, SimpleBitset::zeros());
+              assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
           }
       }
 
@@ -9434,9 +9694,10 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: Make it easy to build a DWA directly. Add methods analogous to `add_transition`.
-      But they'll need to be able to fail, e.g. if there's already a transition for
-      that u16.
+  - user: Instead of building an augmented NWA, build an augmented DWA straight from
+      characterisation. Keep the augmented NWA code for now, but hollow out `build_augmented_nwa_from_characterization`
+      and inside use `build_augmented_dwa_from_characterization` followed by a conversion
+      from DWA to NWA.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9456,184 +9717,357 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add builder methods for `DWA`, followed by the corresponding git diff.
+      Here are the step-by-step instructions to refactor the augmented automaton construction to build a DWA directly from the characterization, and then convert it to an NWA for use in the rest of the system.
 
       ### Step-by-step Instructions
 
-      1.  **File: `src/weighted_automata.rs`**
-          *   **Add `DWABuildError` enum**: Before the `DWAState` struct definition (around line 489), insert a new public enum `DWABuildError` with variants for `TransitionAlreadyExists`, `DefaultTransitionAlreadyExists`, and `StateOutOfBounds`. Also, implement `Display` for this enum to provide helpful error messages.
-          *   **Implement `DWAStates::add_state`**: In the `impl DWAStates` block (around line 520), add a new public method `add_state` that pushes a default `DWAState` into the vector of states and returns the new state's ID.
-          *   **Add builder methods to `DWA`**: In the `impl DWA` block (around line 1000), add the following new public methods:
-              *   `new()`: A constructor that creates a DWA with a single start state.
-              *   `add_state()`: A convenience method that calls `self.states.add_state()`.
-              *   `set_state_weight()`: Sets the `weight` of a given state, returning an error if the state is out of bounds.
-              *   `set_final_weight()`: Sets the `final_weight` of a given state, returning an error if the state is out of bounds.
-              *   `add_transition()`: Adds an exception transition, returning an error if the transition already exists or if states are out of bounds.
-              *   `set_default_transition()`: Sets the default transition, returning an error if one already exists or if states are out of bounds.
-          *   **Add a new test case**: Inside the `#[cfg(test)] mod tests` block at the end of the file, add a new test function `test_dwa_builder` to verify the functionality of the newly added builder methods and their error conditions.
+      #### File: `src/precompute4/augmented_nwa.rs`
 
-      ### Git Diff
+      1.  **Update Imports**: Add necessary imports for DWA components, `HashMap`, `VecDeque`, and `Instant` at the top of the file.
+
+          Modify the existing `use crate::weighted_automata` line to:
+          ```rust
+          use crate::weighted_automata::{
+              DWA, DWABody, DWAStates, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID,
+              Weight as WaWeight,
+          };
+          ```
+          And add these new `use` statements:
+          ```rust
+          use std::collections::{HashMap, VecDeque};
+          ```
+
+      2.  **Define `AugmentedDwa`**: After the `AugmentedNwa` struct definition, add new structs to represent an augmented DWA. `AugmentedDwaBody` will hold the DWA-specific body, including a map from DWA state IDs to the set of non-terminals they represent.
+
+          ```rust
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub struct AugmentedDwaBody {
+              pub dwa: DWABody,
+              pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
+              pub nt_map: BTreeMap<WaStateID, BTreeSet<NonTerminalID>>,
+          }
+          
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub struct AugmentedDwa {
+              pub states: DWAStates,
+              pub body: AugmentedDwaBody,
+          }
+          ```
+
+      3.  **Implement `to_augmented_nwa` for `AugmentedDwa`**: Add an implementation block for `AugmentedDwa` with a method to convert it back to an `AugmentedNwa`. The resulting `AugmentedNwa` will have an empty `nt_nodes` map, as the non-terminal-specific transitions are now part of the main automaton states.
+
+          ```rust
+          impl AugmentedDwa {
+              pub fn to_augmented_nwa(&self) -> AugmentedNwa {
+                  let nwa_dwa = DWA { states: self.states.clone(), body: self.body.dwa.clone() };
+                  let nwa = nwa_dwa.to_nwa();
+                  AugmentedNwa {
+                      states: nwa.states,
+                      body: AugmentedNwaBody {
+                          nwa: nwa.body,
+                          nt_nodes: BTreeMap::new(),
+                          end_map: self.body.end_map.clone(),
+                      },
+                  }
+              }
+          }
+          ```
+
+      4.  **Rename `build_augmented_nwa_from_characterization`**: Change the name of the existing function to `build_augmented_nwa_from_characterization_direct` to preserve the original NWA construction logic.
+
+          ```diff
+          - pub fn build_augmented_nwa_from_characterization(
+          + pub fn build_augmented_nwa_from_characterization_direct(
+          ```
+
+      5.  **Implement `determinize_augmented`**: In the `impl AugmentedNwa` block, add a new method `determinize_augmented`. This method will adapt the logic from `NWA::determinize_components` to handle the augmented information (`end_map` and `nt_nodes`).
+
+          This will be a large function that performs subset construction while tracking which non-terminals and end-stacks correspond to each new DWA state.
+
+      6.  **Add `build_augmented_dwa_from_characterization`**: This new function will orchestrate the new flow: build the NWA directly, then determinize it into an `AugmentedDwa`.
+
+          ```rust
+          pub fn build_augmented_dwa_from_characterization(
+              parser: &GLRParser,
+              bb: &BelowBottomCharacterization,
+          ) -> Result<AugmentedDwa, AugmentedNwaBuildError> {
+              let nwa = build_augmented_nwa_from_characterization_direct(parser, bb)?;
+              Ok(nwa.determinize_augmented())
+          }
+          ```
+
+      7.  **Create the new `build_augmented_nwa_from_characterization`**: This function will now serve as the public interface, creating the `AugmentedDwa` and immediately converting it back to an `AugmentedNwa`.
+
+          ```rust
+          pub fn build_augmented_nwa_from_characterization(
+              parser: &GLRParser,
+              bb: &BelowBottomCharacterization,
+          ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
+              let dwa = build_augmented_dwa_from_characterization(parser, bb)?;
+              Ok(dwa.to_augmented_nwa())
+          }
+          ```
+
+      ### Git Diffs
+
+      Here are the git diffs to apply the changes described above.
 
       ```diff
-      --- a/src/weighted_automata.rs
-      +++ b/src/weighted_automata.rs
-      @@ -486,6 +486,29 @@
+      --- a/src/precompute4/augmented_nwa.rs
+      +++ b/src/precompute4/augmented_nwa.rs
+      @@ -2,11 +2,12 @@
+       use crate::glr::parser::GLRParser;
+       use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
+       use crate::precompute4::characterize::{
+      -    compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
+      +    compute_all_characterizations, BelowBottomCharacterization, compute_below_bottom_characterization,
+       };
+       use crate::weighted_automata::{
+      -    DWA, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID, Weight as WaWeight,
+      +    DWA, DWABody, DWAStates, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID,
+      +    Weight as WaWeight,
+       };
+      -use std::collections::{BTreeMap, BTreeSet};
+      +use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+       use std::fmt::{Display, Formatter};
+       use std::time::Instant;
        
-       // --- Deterministic Weighted Automaton (DWA) ---
-       
-      +#[derive(Debug, Clone, PartialEq, Eq)]
-      +pub enum DWABuildError {
-      +    TransitionAlreadyExists { from: StateID, on: u16 },
-      +    DefaultTransitionAlreadyExists { from: StateID },
-      +    StateOutOfBounds { state: StateID },
-      +}
-      +
-      +impl Display for DWABuildError {
-      +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-      +        match self {
-      +            DWABuildError::TransitionAlreadyExists { from, on } => {
-      +                write!(f, "Transition from state {} on char {} already exists", from, on)
-      +            }
-      +            DWABuildError::DefaultTransitionAlreadyExists { from } => {
-      +                write!(f, "Default transition from state {} already exists", from)
-      +            }
-      +            DWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
-      +        }
-      +    }
-      +}
-      +
-       #[derive(Clone, Debug, Default)]
-       pub struct DWAState {
-           pub transitions: U16Map<StateID>,
-      @@ -519,6 +542,11 @@
-       impl DWAStates {
-           pub fn len(&self) -> usize {
-               self.0.len()
-      +    }
-      +    pub fn add_state(&mut self) -> StateID {
-      +        let id = self.0.len();
-      +        self.0.push(DWAState::default());
-      +        id
-           }
+      @@ -51,6 +52,34 @@
+           pub body: AugmentedNwaBody,
        }
        
-      @@ -998,6 +1026,70 @@
-       
-       // DWA simplification utilities
-       impl DWA {
-      +    pub fn new() -> Self {
-      +        let mut states = DWAStates::default();
-      +        let start = states.add_state();
-      +        DWA { states, body: DWABody { start_state: start } }
-      +    }
+      +#[derive(Debug, Clone, PartialEq, Eq)]
+      +pub struct AugmentedDwaBody {
+      +    pub dwa: DWABody,
+      +    pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
+      +    pub nt_map: BTreeMap<WaStateID, BTreeSet<NonTerminalID>>,
+      +}
       +
-      +    pub fn add_state(&mut self) -> StateID {
-      +        self.states.add_state()
-      +    }
+      +#[derive(Debug, Clone, PartialEq, Eq)]
+      +pub struct AugmentedDwa {
+      +    pub states: DWAStates,
+      +    pub body: AugmentedDwaBody,
+      +}
       +
-      +    pub fn set_state_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
-      +        if state >= self.states.len() {
-      +            return Err(DWABuildError::StateOutOfBounds { state });
+      +impl AugmentedDwa {
+      +    pub fn to_augmented_nwa(&self) -> AugmentedNwa {
+      +        let nwa_dwa = DWA { states: self.states.clone(), body: self.body.dwa.clone() };
+      +        let nwa = nwa_dwa.to_nwa();
+      +        AugmentedNwa {
+      +            states: nwa.states,
+      +            body: AugmentedNwaBody {
+      +                nwa: nwa.body,
+      +                nt_nodes: BTreeMap::new(),
+      +                end_map: self.body.end_map.clone(),
+      +            },
       +        }
-      +        self.states[state].weight = weight;
-      +        Ok(())
-      +    }
-      +
-      +    pub fn set_final_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
-      +        if state >= self.states.len() {
-      +            return Err(DWABuildError::StateOutOfBounds { state });
-      +        }
-      +        self.states[state].final_weight = Some(weight);
-      +        Ok(())
-      +    }
-      +
-      +    pub fn add_transition(
-      +        &mut self,
-      +        from: StateID,
-      +        on: u16,
-      +        to: StateID,
-      +        weight: Weight,
-      +    ) -> Result<(), DWABuildError> {
-      +        if from >= self.states.len() {
-      +            return Err(DWABuildError::StateOutOfBounds { state: from });
-      +        }
-      +        if to >= self.states.len() {
-      +            return Err(DWABuildError::StateOutOfBounds { state: to });
-      +        }
-      +        let from_state = &mut self.states[from];
-      +        if from_state.transitions.exceptions.contains_key(&on) {
-      +            return Err(DWABuildError::TransitionAlreadyExists { from, on });
-      +        }
-      +        from_state.transitions.exceptions.insert(on, to);
-      +        from_state.trans_weights_exceptions.insert(on, weight);
-      +        Ok(())
-      +    }
-      +
-      +    pub fn set_default_transition(
-      +        &mut self,
-      +        from: StateID,
-      +        to: StateID,
-      +        weight: Weight,
-      +    ) -> Result<(), DWABuildError> {
-      +        if from >= self.states.len() {
-      +            return Err(DWABuildError::StateOutOfBounds { state: from });
-      +        }
-      +        if to >= self.states.len() {
-      +            return Err(DWABuildError::StateOutOfBounds { state: to });
-      +        }
-      +        let from_state = &mut self.states[from];
-      +        if from_state.transitions.default.is_some() {
-      +            return Err(DWABuildError::DefaultTransitionAlreadyExists { from });
-      +        }
-      +        from_state.transitions.default = Some(to);
-      +        from_state.trans_weight_default = Some(weight);
-      +        Ok(())
-      +    }
-      +
-           /// Union of two DWAs via product construction.
-           /// The states of the new DWA correspond to pairs of states from the input DWAs.
-           /// A state is final if either of the original states is final.
-      @@ -1641,4 +1733,36 @@
-               assert!(s7.transitions.exceptions.is_empty());
-               assert!(s7.transitions.default.is_none());
-           }
-      -}
-      +
-      +    #[test]
-      +    fn test_dwa_builder() {
-      +        let mut dwa = DWA::new();
-      +        assert_eq!(dwa.states.len(), 1);
-      +        assert_eq!(dwa.body.start_state, 0);
-      +
-      +        let s1 = dwa.add_state();
-      +        assert_eq!(s1, 1);
-      +        assert_eq!(dwa.states.len(), 2);
-      +
-      +        dwa.set_state_weight(0, SimpleBitset::from_item(10)).unwrap();
-      +        dwa.set_final_weight(1, SimpleBitset::from_item(20)).unwrap();
-      +
-      +        assert_eq!(dwa.states[0].weight, SimpleBitset::from_item(10));
-      +        assert_eq!(dwa.states[1].final_weight, Some(SimpleBitset::from_item(20)));
-      +
-      +        dwa.add_transition(0, b'a' as u16, 1, SimpleBitset::from_item(30)).unwrap();
-      +        assert_eq!(*dwa.states[0].transitions.get(b'a' as u16).unwrap(), 1);
-      +        assert_eq!(*dwa.states[0].trans_weights_exceptions.get(&(b'a' as u16)).unwrap(), SimpleBitset::from_item(30));
-      +
-      +        // Test error cases
-      +        let res = dwa.add_transition(0, b'a' as u16, 1, SimpleBitset::zeros());
-      +        assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: 97 })));
-      +
-      +        dwa.set_default_transition(0, 0, SimpleBitset::from_item(40)).unwrap();
-      +        assert_eq!(dwa.states[0].transitions.default, Some(0));
-      +        assert_eq!(dwa.states[0].trans_weight_default, Some(SimpleBitset::from_item(40)));
-      +
-      +        let res = dwa.set_default_transition(0, 0, SimpleBitset::zeros());
-      +        assert!(matches!(res, Err(DWABuildError::DefaultTransitionAlreadyExists { from: 0 })));
-      +
-      +        let res = dwa.set_final_weight(10, SimpleBitset::zeros());
-      +        assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
       +    }
       +}
+      +
+       fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
+           u16::try_from(id.0).map_err(|_| AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id: id })
+       }
+      @@ -58,7 +87,7 @@
+       pub fn build_augmented_nwa_for_terminal(
+           parser: &GLRParser,
+           terminal_id: TerminalID,
+      -) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
+      +) -> Result<AugmentedNwa, AugmentedNwaBuildError> { // TODO-LATER: this should return AugmentedDwa
+           let bb = compute_below_bottom_characterization(parser, terminal_id);
+           build_augmented_nwa_from_characterization(parser, &bb)
+       }
+      @@ -96,13 +125,29 @@
+           Ok(out)
+       }
+       
+      +pub fn build_augmented_dwa_from_characterization(
+      +    parser: &GLRParser,
+      +    bb: &BelowBottomCharacterization,
+      +) -> Result<AugmentedDwa, AugmentedNwaBuildError> {
+      +    let nwa = build_augmented_nwa_from_characterization_direct(parser, bb)?;
+      +    Ok(nwa.determinize_augmented())
+      +}
+      +
+      +pub fn build_augmented_nwa_from_characterization(
+      +    parser: &GLRParser,
+      +    bb: &BelowBottomCharacterization,
+      +) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
+      +    let dwa = build_augmented_dwa_from_characterization(parser, bb)?;
+      +    Ok(dwa.to_augmented_nwa())
+      +}
+      +
+       /// Core builder: turns a BelowBottomCharacterization into an AugmentedNwa.
+       ///
+       /// Construction rules:
+       /// - Create one initial start node, one unique `end_state`, and one node per nonterminal.
+       /// - Initial shifts: start --(initial_state)--> end_state; record [initial_state, shift_state].
+       /// - Initial reduces (initial_state, len, nt): first step on initial_state, then len default steps to nt.
+      -/// - Per-nonterminal reduces:
+      +/// - Per-nonterminal reduces: from nt node,
+       ///   - Reveal-and-rereduces (revealed_state, len, reduce_nt): first on revealed_state, then len default steps to reduce_nt.
+       ///   - Reveal-goto-shift escapes: from nt node, on revealed_state go to end_state; record [revealed_state, goto_state, shift_state].
+      -pub fn build_augmented_nwa_from_characterization(
+      +pub fn build_augmented_nwa_from_characterization_direct(
+           parser: &GLRParser,
+           bb: &BelowBottomCharacterization,
+       ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
+      @@ -320,6 +365,141 @@
+               WaNWA::determinize_components(&self.states, &self.body.nwa)
+           }
+       }
+      +impl AugmentedNwa {
+      +    pub fn determinize_augmented(&self) -> AugmentedDwa {
+      +        let now = Instant::now();
+      +        let mut dwa_states = DWAStates::default();
+      +        let mut aug_dwa_body = AugmentedDwaBody {
+      +            dwa: DWABody::default(),
+      +            end_map: BTreeMap::new(),
+      +            nt_map: BTreeMap::new(),
+      +        };
+      +
+      +        if self.states.0.is_empty() {
+      +            return AugmentedDwa { states: dwa_states, body: aug_dwa_body };
+      +        }
+      +
+      +        let has_epsilons = self.states.0.iter().any(|s| !s.epsilon_transitions.is_empty());
+      +
+      +        let to_key = |comp: BTreeMap<WaStateID, WaWeight>| -> Vec<(WaStateID, WaWeight)> {
+      +            comp.into_iter().filter(|(_, w)| !w.is_empty()).collect()
+      +        };
+      +
+      +        let mut known_states: HashMap<Vec<(WaStateID, WaWeight)>, WaStateID> = HashMap::new();
+      +        let mut worklist: VecDeque<Vec<(WaStateID, WaWeight)>> = VecDeque::new();
+      +
+      +        let mut get_or_create = |comp_key: Vec<(WaStateID, WaWeight)>,
+      +                                 dwa_states: &mut DWAStates,
+      +                                 known: &mut HashMap<Vec<(WaStateID, WaWeight)>, WaStateID>,
+      +                                 work: &mut VecDeque<Vec<(WaStateID, WaWeight)>>|
+      +         -> Option<WaStateID> {
+      +            if comp_key.is_empty() {
+      +                return None;
+      +            }
+      +            if let Some(&id) = known.get(&comp_key) {
+      +                return Some(id);
+      +            }
+      +            let new_id = dwa_states.0.len();
+      +            dwa_states.0.push(DWAState::default());
+      +            known.insert(comp_key.clone(), new_id);
+      +            work.push_back(comp_key);
+      +            Some(new_id)
+      +        };
+      +
+      +        let mut start_raw = BTreeMap::new();
+      +        for &start_state in &self.body.nwa.start_states {
+      +            start_raw.insert(start_state, WaWeight::all());
+      +        }
+      +        let start_map = self.states.epsilon_closure_with_flag(start_raw, has_epsilons, 0);
+      +        if let Some(start_id) = get_or_create(to_key(start_map), &mut dwa_states, &mut known_states, &mut worklist) {
+      +            aug_dwa_body.dwa.start_state = start_id;
+      +        } else {
+      +            return AugmentedDwa { states: dwa_states, body: aug_dwa_body };
+      +        }
+      +
+      +        let rev_nt_nodes: BTreeMap<WaStateID, NonTerminalID> =
+      +            self.body.nt_nodes.iter().map(|(k, v)| (*v, *k)).collect();
+      +
+      +        while let Some(current_composition) = worklist.pop_front() {
+      +            let current_dwa_id = *known_states.get(&current_composition).unwrap();
+      +
+      +            // Aggregate state and final weights; collect exception alphabet.
+      +            let mut aggregate_weight = WaWeight::zeros();
+      +            let mut aggregate_final_weight = WaWeight::zeros();
+      +            let mut is_final = false;
+      +            let mut critical_points = BTreeSet::new();
+      +            let mut nts_in_composition = BTreeSet::new();
+      +            let mut stacks_for_composition = BTreeSet::new();
+      +
+      +            for (nwa_id, path_weight) in &current_composition {
+      +                aggregate_weight |= path_weight;
+      +                if let Some(final_w) = &self.states[*nwa_id].final_weight {
+      +                    is_final = true;
+      +                    aggregate_final_weight |= &(path_weight & final_w);
+      +                }
+      +                for &char_code in self.states[*nwa_id].transitions.exceptions.keys() {
+      +                    critical_points.insert(char_code);
+      +                }
+      +                if let Some(nt_id) = rev_nt_nodes.get(nwa_id) {
+      +                    nts_in_composition.insert(*nt_id);
+      +                }
+      +                if let Some(stacks) = self.body.end_map.get(nwa_id) {
+      +                    stacks_for_composition.extend(stacks.clone());
+      +                }
+      +            }
+      +            dwa_states[current_dwa_id].weight = aggregate_weight;
+      +            if is_final {
+      +                dwa_states[current_dwa_id].final_weight = Some(aggregate_final_weight);
+      +            }
+      +            if !nts_in_composition.is_empty() {
+      +                aug_dwa_body.nt_map.insert(current_dwa_id, nts_in_composition);
+      +            }
+      +            if !stacks_for_composition.is_empty() {
+      +                aug_dwa_body.end_map.insert(current_dwa_id, stacks_for_composition);
+      +            }
+      +
+      +            // Default transition
+      +            let mut default_next_raw: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
+      +            let mut default_weight_agg = WaWeight::zeros();
+      +            for (nwa_id, path_weight) in &current_composition {
+      +                if let Some(transitions) = self.states[*nwa_id].transitions.get_default() {
+      +                    for (next_nwa_id, trans_weight) in transitions {
+      +                        let w = path_weight & trans_weight;
+      +                        default_next_raw.entry(*next_nwa_id).or_default().bitor_assign(&w);
+      +                        default_weight_agg |= &w;
+      +                    }
+      +                }
+      +            }
+      +            let def_comp = to_key(self.states.epsilon_closure_with_flag(default_next_raw, has_epsilons, 0));
+      +            let def_target = get_or_create(def_comp, &mut dwa_states, &mut known_states, &mut worklist);
+      +            dwa_states[current_dwa_id].transitions.default = def_target;
+      +            if def_target.is_some() {
+      +                dwa_states[current_dwa_id].trans_weight_default = Some(default_weight_agg);
+      +            }
+      +
+      +            // Exception transitions
+      +            for char_code in critical_points {
+      +                let mut exception_next_raw: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
+      +                let mut exception_weight_agg = WaWeight::zeros();
+      +                for (nwa_id, path_weight) in &current_composition {
+      +                    if let Some(transitions) = self.states[*nwa_id].transitions.get(char_code) {
+      +                        for (next_nwa_id, trans_weight) in transitions {
+      +                            let w = path_weight & trans_weight;
+      +                            exception_next_raw.entry(*next_nwa_id).or_default().bitor_assign(&w);
+      +                            exception_weight_agg |= &w;
+      +                        }
+      +                    }
+      +                }
+      +                if exception_next_raw.is_empty() {
+      +                    continue;
+      +                }
+      +                let exc_comp = to_key(self.states.epsilon_closure_with_flag(exception_next_raw, has_epsilons, 0));
+      +                let exc_target = get_or_create(exc_comp, &mut dwa_states, &mut known_states, &mut worklist);
+      +
+      +                if exc_target != def_target {
+      +                    if let Some(tid) = exc_target {
+      +                        dwa_states[current_dwa_id].transitions.exceptions.insert(char_code, tid);
+      +                        dwa_states[current_dwa_id].trans_weights_exceptions.insert(char_code, exception_weight_agg);
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        let result = AugmentedDwa { states: dwa_states, body: aug_dwa_body };
+      +        println!(
+      +            "AugmentedNwa::determinize_augmented ({} NWA states -> {} DWA states) took: {:?}",
+      +            self.states.len(),
+      +            result.states.len(),
+      +            now.elapsed()
+      +        );
+      +        result
+      +    }
+      +}
+       
+       
+       impl Display for AugmentedNwa {
 
       ```
     metadata:
@@ -9642,11 +10076,9 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/weighted_automata.rs
-      Applying patch to 'src/weighted_automata.rs' using custom patcher...
-      Successfully applied patch and wrote to src/weighted_automata.rs.
+      Warning: Diff block 1 parsed with no hunks. Skipping.
     metadata:
-  - user: 'Changes committed with message: "Add builder API to DWA with error handling
-      and tests"'
+  - user: 'Changes committed with message: "Refactor augmented automaton construction
+      to build DWA directly from characterization and convert to NWA"'
     metadata:
 ...
