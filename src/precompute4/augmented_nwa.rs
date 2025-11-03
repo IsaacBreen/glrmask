@@ -225,6 +225,7 @@ impl AugmentedNwaBody {
 
                 let process_now = Instant::now();
                 let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+                crate::debug!(5, "  Combining left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
                 stops_count += stops.len();
                 total_process_stack_time += process_now.elapsed();
 
