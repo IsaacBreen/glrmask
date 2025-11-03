@@ -1080,6 +1080,51 @@ impl NWA {
         (new_nwa, mapping)
     }
 
+    /// Union of two NWAs.
+    /// The new NWA has a new start state with epsilon transitions to the start states
+    /// of the original NWAs. The states of both NWAs are copied.
+    /// Returns the new NWA and a map from new state IDs to the original automaton states.
+    /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
+    pub fn union(&self, other: &NWA) -> (NWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+        let mut new_nwa = NWA::new();
+        new_nwa.states.0.clear();
+        new_nwa.body.start_states.clear();
+
+        let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
+
+        // 1. Copy states from `self`
+        let self_mapping = new_nwa.states.append_copy_from(&self.states);
+        for (old_id, &new_id) in self_mapping.iter().enumerate() {
+            mapping.entry(new_id).or_default().insert((0, old_id));
+        }
+
+        // 2. Copy states from `other`
+        let other_mapping = new_nwa.states.append_copy_from(&other.states);
+        for (old_id, &new_id) in other_mapping.iter().enumerate() {
+            mapping.entry(new_id).or_default().insert((1, old_id));
+        }
+
+        // 3. Create a new universal start state
+        let new_start_id = new_nwa.states.add_state();
+        new_nwa.body.start_states.insert(new_start_id);
+
+        // 4. Add epsilon transitions from the new start state
+        for &old_start in &self.body.start_states {
+            if old_start < self_mapping.len() {
+                let new_target = self_mapping[old_start];
+                new_nwa.add_epsilon_transition(new_start_id, new_target, Weight::all());
+            }
+        }
+        for &old_start in &other.body.start_states {
+            if old_start < other_mapping.len() {
+                let new_target = other_mapping[old_start];
+                new_nwa.add_epsilon_transition(new_start_id, new_target, Weight::all());
+            }
+        }
+
+        (new_nwa, mapping)
+    }
+
     pub fn process_stack_u16(&self, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
         self.states.process_stack_u16_from_starts(&self.body.start_states, input)
     }
@@ -2263,5 +2308,49 @@ mod tests {
         // So no character transitions are expected.
         assert!(state_after_a.transitions.default.is_none());
         assert!(state_after_a.transitions.exceptions.is_empty());
+    }
+
+    #[test]
+    fn test_nwa_union() {
+        // NWA1: accepts "a"
+        let mut nwa1 = NWA::new();
+        let s1_final = nwa1.add_state();
+        nwa1.add_transition(0, b'a' as u16, s1_final, SimpleBitset::from_item(1));
+        nwa1.set_final_weight(s1_final, SimpleBitset::from_item(10));
+
+        // NWA2: accepts "b"
+        let mut nwa2 = NWA::new();
+        let s2_final = nwa2.add_state();
+        nwa2.add_transition(0, b'b' as u16, s2_final, SimpleBitset::from_item(2));
+        nwa2.set_final_weight(s2_final, SimpleBitset::from_item(20));
+
+        let (nwa_union, _) = nwa1.union(&nwa2);
+
+        // The union NWA should have a new start state with epsilon transitions
+        // to the old start states.
+        // Total states: 1 (new start) + 2 (from nwa1) + 2 (from nwa2) = 5
+        assert_eq!(nwa_union.states.len(), 5);
+        assert_eq!(nwa_union.body.start_states.len(), 1);
+        let start_id = *nwa_union.body.start_states.iter().next().unwrap();
+        assert_eq!(start_id, 4); // 0,1 from nwa1, 2,3 from nwa2, 4 is new start
+
+        let start_state = &nwa_union.states[start_id];
+        assert_eq!(start_state.epsilon_transitions.len(), 2);
+
+        // Check processing
+        let res_a = nwa_union.process_stack_u16(&[b'a' as u16]);
+        assert_eq!(res_a.len(), 1);
+        let (_, stop_state_a, weight_a) = &res_a[0];
+        assert_eq!(nwa_union.states[*stop_state_a].final_weight, Some(SimpleBitset::from_item(10)));
+        assert_eq!(*weight_a, SimpleBitset::from_item(1));
+
+        let res_b = nwa_union.process_stack_u16(&[b'b' as u16]);
+        assert_eq!(res_b.len(), 1);
+        let (_, stop_state_b, weight_b) = &res_b[0];
+        assert_eq!(nwa_union.states[*stop_state_b].final_weight, Some(SimpleBitset::from_item(20)));
+        assert_eq!(*weight_b, SimpleBitset::from_item(2));
+
+        let res_c = nwa_union.process_stack_u16(&[b'c' as u16]);
+        assert!(res_c.is_empty());
     }
 }
