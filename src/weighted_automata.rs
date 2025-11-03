@@ -2295,6 +2295,81 @@ impl JSONConvertible for DWA {
     }
 }
 
+// --- Weight gating at start states (NWA/DWA) ---
+
+impl NWA {
+    /// Apply a weight gate to the automaton's start states by introducing a new merged start.
+    /// The new start has ε-edges to the previous start states labeled with `weight`.
+    /// This intersects the provided weight with:
+    /// - any final weights on original starts (via epsilon-closure at position 0), and
+    /// - all subsequent edge weights along paths starting from the original starts.
+    /// Returns the ID of the newly created start state.
+    pub fn apply_weight(&mut self, weight: &Weight) -> StateID {
+        Self::apply_weight_components(&mut self.states, &mut self.body, weight)
+    }
+
+    /// Component-level variant: mutate only the shared `states` arena and this `body`.
+    /// Creates a fresh start that ε-transitions to every old start with edge-weight `weight`,
+    /// effectively merging multiple starts without changing existing states.
+    pub fn apply_weight_components(
+        states: &mut NWAStates,
+        body: &mut NWABody,
+        weight: &Weight,
+    ) -> StateID {
+        let new_start = states.add_state();
+        for &s in &body.start_states {
+            states.add_epsilon_transition(new_start, s, weight.clone());
+        }
+        body.start_states = BTreeSet::from([new_start]);
+        new_start
+    }
+}
+
+impl DWA {
+    /// Apply a weight gate to the DWA by introducing a new start state that forwards to the
+    /// original start with all outgoing edge weights intersected by `weight`. The new state's
+    /// own weight and final_weight are intersected as well.
+    /// Returns the ID of the newly created start state.
+    pub fn apply_weight(&mut self, weight: &Weight) -> StateID {
+        Self::apply_weight_components(&mut self.states, &mut self.body, weight)
+    }
+
+    /// Component-level variant: mutate only the shared `states` arena and this `body`.
+    /// Builds a fresh start that mirrors the original start's transitions but with
+    /// per-edge weights intersected by `weight`. Other states remain unchanged.
+    pub fn apply_weight_components(
+        states: &mut DWAStates,
+        body: &mut DWABody,
+        weight: &Weight,
+    ) -> StateID {
+        let old_start = body.start_state;
+        let new_id = states.add_state();
+
+        // Snapshot the old start state's data before mutating the arena.
+        let old = states[old_start].clone();
+
+        let mut new_state = DWAState::default();
+        // Gate state/output weights
+        new_state.weight = &old.weight & weight;
+        if let Some(fw) = &old.final_weight {
+            let gw = fw & weight;
+            if !gw.is_empty() {
+                new_state.final_weight = Some(gw);
+            }
+        }
+        // Copy structure of transitions (targets), gate their weights.
+        new_state.transitions.default = old.transitions.default;
+        new_state.transitions.exceptions = old.transitions.exceptions.clone();
+        new_state.trans_weight_default = old.trans_weight_default.as_ref().map(|dw| dw & weight);
+        new_state.trans_weights_exceptions =
+            old.trans_weights_exceptions.into_iter().map(|(ch, w)| (ch, &w & weight)).collect();
+
+        states[new_id] = new_state;
+        body.start_state = new_id;
+        new_id
+    }
+}
+
 // --- Tests ---
 #[cfg(test)]
 mod tests {
