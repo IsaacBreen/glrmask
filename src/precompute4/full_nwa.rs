@@ -101,7 +101,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             results
         },
         // merge function: union two rests that reside in the same shared states
-        |aug_nwa1: &mut AugmentedNwaRest, aug_nwa2: &AugmentedNwaRest| {
+        |aug_nwa1: &mut AugmentedNwaRest, aug_nwa2: AugmentedNwaRest| {
             // Merge end_maps
             for (st, stacks) in &aug_nwa2.end_map {
                 aug_nwa1.end_map.entry(*st).or_default().extend(stacks.clone());

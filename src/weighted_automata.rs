@@ -722,7 +722,7 @@ impl NWA {
 
 // --- Deterministic Weighted Automaton (DWA) ---
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWAState {
     /// Deterministic transitions: one character leads to at most one state.
     pub transitions: U16Map<StateID>,
@@ -1047,7 +1047,6 @@ impl DWA {
         }
         let n = states.0.len();
         let mut visited = vec![false; n];
-        let mut q: std::collections::VecDeque::new();
         let mut q = std::collections::VecDeque::new();
         visited[rest.start_state] = true;
         q.push_back(rest.start_state);
