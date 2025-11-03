@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::precompute4::augmented_nwa::AugmentedNwaBody;
 use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
@@ -1496,6 +1497,258 @@ impl DWA {
         };
 
         NWA { states: nwa_states, body: nwa_body }
+    }
+
+    /// In-place union on a shared DWAStates arena using two AugmentedNwaBody "views".
+    /// - self_states: the shared state arena containing both left and right subgraphs.
+    /// - self_body: identifies the left component's starts (and will be updated to new product starts).
+    /// - other: identifies the right component's starts in the same arena.
+    /// Returns a map from new product state -> set of (0,left_id)/(1,right_id) merged into it.
+    pub fn union_components(
+        self_states: &mut DWAStates,
+        self_body: &mut AugmentedNwaBody,
+        other: &AugmentedNwaBody,
+    ) -> BTreeMap<StateID, BTreeSet<(usize, StateID)>> {
+        let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
+        // Use sentinel sinks that can never clash with real indices (we never index with these).
+        let sink0: StateID = usize::MAX - 1;
+        let sink1: StateID = usize::MAX;
+
+        let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
+        let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
+
+        let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+            if let Some(&id) = pair_to_new_id.get(&pair) {
+                return id;
+            }
+            let new_id = self_states.add_state();
+            pair_to_new_id.insert(pair, new_id);
+            worklist.push_back(pair);
+
+            let mut merged_from = BTreeSet::new();
+            if pair.0 != sink0 {
+                merged_from.insert((0, pair.0));
+            }
+            if pair.1 != sink1 {
+                merged_from.insert((1, pair.1));
+            }
+            mapping.insert(new_id, merged_from);
+            new_id
+        };
+
+        // Create product start states: cross-product of start sets
+        let mut new_starts: BTreeSet<StateID> = BTreeSet::new();
+        for &s0 in &self_body.nwa.start_states {
+            for &s1 in &other.nwa.start_states {
+                let id = get_or_create((s0, s1));
+                new_starts.insert(id);
+            }
+        }
+        self_body.nwa.start_states = new_starts;
+
+        // Helpers
+        let get_target = |s: Option<&DWAState>, sink: StateID, ch: u16| -> StateID {
+            s.and_then(|ss| ss.transitions.get(ch).copied()).unwrap_or(sink)
+        };
+
+        while let Some((id0, id1)) = worklist.pop_front() {
+            let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
+            let s0_opt = if id0 == sink0 { None } else { Some(&self_states[id0]) };
+            let s1_opt = if id1 == sink1 { None } else { Some(&self_states[id1]) };
+
+            // Aggregate state outputs
+            let w0 = s0_opt.map(|s| s.weight.clone()).unwrap_or_else(Weight::zeros);
+            let w1 = s1_opt.map(|s| s.weight.clone()).unwrap_or_else(Weight::zeros);
+            self_states[new_id].weight = &w0 | &w1;
+
+            let fw0 = s0_opt.and_then(|s| s.final_weight.clone()).unwrap_or_else(Weight::zeros);
+            let fw1 = s1_opt.and_then(|s| s.final_weight.clone()).unwrap_or_else(Weight::zeros);
+            let fsum = &fw0 | &fw1;
+            self_states[new_id].final_weight = if fsum.is_empty() { None } else { Some(fsum) };
+
+            // Critical characters to consider
+            let mut critical: BTreeSet<u16> = BTreeSet::new();
+            if let Some(s) = s0_opt {
+                critical.extend(s.transitions.exceptions.keys());
+            }
+            if let Some(s) = s1_opt {
+                critical.extend(s.transitions.exceptions.keys());
+            }
+
+            // Default transition
+            let def0 = s0_opt.and_then(|s| s.transitions.default).unwrap_or(sink0);
+            let def1 = s1_opt.and_then(|s| s.transitions.default).unwrap_or(sink1);
+            let def_pair = (def0, def1);
+            let def_tgt = get_or_create(def_pair);
+            self_states[new_id].transitions.default = Some(def_tgt);
+
+            let twd0 = s0_opt.and_then(|s| s.trans_weight_default.clone()).unwrap_or_else(Weight::zeros);
+            let twd1 = s1_opt.and_then(|s| s.trans_weight_default.clone()).unwrap_or_else(Weight::zeros);
+            self_states[new_id].trans_weight_default = Some(&twd0 | &twd1);
+
+            // Reset (in case we revisit/build incrementally)
+            self_states[new_id].transitions.exceptions.clear();
+            self_states[new_id].trans_weights_exceptions.clear();
+
+            // Exception transitions
+            for &ch in &critical {
+                let tgt0 = get_target(s0_opt, sink0, ch);
+                let tgt1 = get_target(s1_opt, sink1, ch);
+                let pair = (tgt0, tgt1);
+                if pair != def_pair {
+                    let exc_tgt = get_or_create(pair);
+                    self_states[new_id].transitions.exceptions.insert(ch, exc_tgt);
+                    let twe0 =
+                        s0_opt.and_then(|s| s.trans_weights_exceptions.get(&ch).cloned()).unwrap_or_else(Weight::zeros);
+                    let twe1 =
+                        s1_opt.and_then(|s| s.trans_weights_exceptions.get(&ch).cloned()).unwrap_or_else(Weight::zeros);
+                    self_states[new_id].trans_weights_exceptions.insert(ch, &twe0 | &twe1);
+                }
+            }
+        }
+
+        mapping
+    }
+
+    /// In-place concatenation on a shared DWAStates arena using two AugmentedNwaBody "views".
+    /// The right component is activated via `join_map` when entering mapped left states.
+    /// Exactly matches the requested signature.
+    pub fn concatenate_components(
+        self_states: &mut DWAStates,
+        self_body: &mut AugmentedNwaBody,
+        other: &AugmentedNwaBody,
+        join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
+    ) -> BTreeMap<StateID, BTreeSet<(usize, StateID)>> {
+        let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
+        // Sentinel sinks; never index with these.
+        let sink0: StateID = usize::MAX - 1;
+        let sink1: StateID = usize::MAX;
+
+        let mut comp_to_new_id: BTreeMap<(StateID, BTreeSet<StateID>), StateID> = BTreeMap::new();
+        let mut worklist: VecDeque<(StateID, BTreeSet<StateID>)> = VecDeque::new();
+
+        let mut get_or_create =
+            |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+                if let Some(&id) = comp_to_new_id.get(&comp) {
+                    return id;
+                }
+                let new_id = self_states.add_state();
+                comp_to_new_id.insert((comp.0, comp.1.clone()), new_id);
+                worklist.push_back((comp.0, comp.1.clone()));
+
+                let mut merged_from = BTreeSet::new();
+                if comp.0 != sink0 {
+                    merged_from.insert((0, comp.0));
+                }
+                for &s1 in &comp.1 {
+                    if s1 != sink1 {
+                        merged_from.insert((1, s1));
+                    }
+                }
+                mapping.insert(new_id, merged_from);
+                new_id
+            };
+
+        // Start compositions: left starts + any join-in on those starts.
+        let mut new_starts: BTreeSet<StateID> = BTreeSet::new();
+        for &s0 in &self_body.nwa.start_states {
+            let mut s1s: BTreeSet<StateID> = join_map.get(&s0).cloned().unwrap_or_default();
+            s1s.remove(&sink1);
+            let id = get_or_create((s0, s1s));
+            new_starts.insert(id);
+        }
+        self_body.nwa.start_states = new_starts;
+
+        let get_target = |s: Option<&DWAState>, sink: StateID, ch: u16| -> StateID {
+            s.and_then(|ss| ss.transitions.get(ch).copied()).unwrap_or(sink)
+        };
+
+        while let Some((id0, ids1)) = worklist.pop_front() {
+            let new_id = *comp_to_new_id.get(&(id0, ids1.clone())).unwrap();
+            let s0 = if id0 == sink0 { None } else { Some(&self_states[id0]) };
+
+            // Aggregate outputs (weight and final_weight)
+            let mut agg_w = s0.map(|s| s.weight.clone()).unwrap_or_else(Weight::zeros);
+            let mut agg_fw = s0.and_then(|s| s.final_weight.clone()).unwrap_or_else(Weight::zeros);
+            for &r in &ids1 {
+                if r != sink1 {
+                    let s1 = &self_states[r];
+                    agg_w |= &s1.weight;
+                    if let Some(w) = &s1.final_weight {
+                        agg_fw |= w;
+                    }
+                }
+            }
+            self_states[new_id].weight = agg_w;
+            self_states[new_id].final_weight = if agg_fw.is_empty() { None } else { Some(agg_fw) };
+
+            // Critical points
+            let mut critical: BTreeSet<u16> = BTreeSet::new();
+            if let Some(st) = s0 {
+                critical.extend(st.transitions.exceptions.keys());
+            }
+            for &r in &ids1 {
+                if r != sink1 {
+                    critical.extend(self_states[r].transitions.exceptions.keys());
+                }
+            }
+
+            // Default transition
+            let def0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
+            let mut def1s: BTreeSet<StateID> = ids1
+                .iter()
+                .filter(|&&r| r != sink1)
+                .map(|&r| self_states[r].transitions.default.unwrap_or(sink1))
+                .collect();
+            def1s.remove(&sink1);
+            if let Some(joins) = join_map.get(&def0) {
+                def1s.extend(joins);
+            }
+            let def_comp = (def0, def1s.clone());
+            let def_tgt = get_or_create(def_comp.clone());
+            self_states[new_id].transitions.default = Some(def_tgt);
+
+            let mut tw_def = s0.and_then(|s| s.trans_weight_default.clone()).unwrap_or_else(Weight::zeros);
+            for &r in &ids1 {
+                if r != sink1 {
+                    tw_def |= &self_states[r].trans_weight_default.clone().unwrap_or_else(Weight::zeros);
+                }
+            }
+            self_states[new_id].trans_weight_default = Some(tw_def);
+
+            // Reset exceptions for this freshly built node
+            self_states[new_id].transitions.exceptions.clear();
+            self_states[new_id].trans_weights_exceptions.clear();
+
+            // Exception transitions
+            for &ch in &critical {
+                let tgt0 = get_target(s0, sink0, ch);
+                let mut tgt1s: BTreeSet<StateID> = ids1
+                    .iter()
+                    .filter(|&&r| r != sink1)
+                    .map(|&r| get_target(Some(&self_states[r]), sink1, ch))
+                    .collect();
+                tgt1s.remove(&sink1);
+                if let Some(joins) = join_map.get(&tgt0) {
+                    tgt1s.extend(joins);
+                }
+                let exc_comp = (tgt0, tgt1s);
+                if exc_comp != def_comp {
+                    let exc_tgt = get_or_create(exc_comp);
+                    self_states[new_id].transitions.exceptions.insert(ch, exc_tgt);
+
+                    let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch).cloned()).unwrap_or_else(Weight::zeros);
+                    for &r in &ids1 {
+                        if r != sink1 {
+                            tw_exc |= &self_states[r].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
+                        }
+                    }
+                    self_states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
+                }
+            }
+        }
+
+        mapping
     }
 
     /// Simplify by iterating a small pipeline until stable (or pass limit):
