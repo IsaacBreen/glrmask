@@ -61,54 +61,53 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let mut final_nwas: BTreeMap<TokenizerStateID, AugmentedNwaBody> = BTreeMap::new();
     let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
 
-    Trie::special_map_unified(
+    Trie::special_map_grouped(
         &reversed_trie1_god,
         &traversal_data,
         initial_values,
-        // process_and_step function
-        |node_data, node_idx, current_aug_body| {
-            // Process part: check if this node corresponds to a final NWA
-            if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                final_nwas.insert(*tokenizer_state_id, current_aug_body.clone());
-            }
-
-            // Step part: propagate to children
+        // step function
+        |current_aug_body, edge_terminal_opt, dest_map| {
             let mut results: Vec<(PrecomputeNode1Index, AugmentedNwaBody)> = Vec::new();
 
-            for (edge_terminal_opt, dest_map) in node_data.children() {
-                // Prepare the LEFT body by mapping the terminal's NWA into the shared states.
-                let template_aug: &AugmentedNwa = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
-                    let terminal_id = edge_terminal_opt.unwrap();
-                    augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id))
-                } else {
-                    &ignore_nwa
-                };
+            // Prepare the LEFT body by mapping the terminal's NWA into the shared states.
+            let template_aug: &AugmentedNwa = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                let terminal_id = edge_terminal_opt.unwrap();
+                augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id))
+            } else {
+                &ignore_nwa
+            };
 
-                for (dest_idx, llm_token_bv) in dest_map.iter() {
-                    // Map the template_aug's states into the shared arena.
-                    let mapping = shared_states.borrow_mut().append_copy_from(&template_aug.states);
+            for (dest_idx, llm_token_bv) in dest_map.iter() {
+                // Map the template_aug's states into the shared arena.
+                let mapping = shared_states.borrow_mut().append_copy_from(&template_aug.states);
 
-                    let mut left_body = template_aug.body.clone();
-                    left_body.remap_states(&mapping);
+                let mut left_body = template_aug.body.clone();
+                left_body.remap_states(&mapping);
 
-                    let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                    // Combine into a new body (mutating the shared graph with epsilon links).
-                    let mut new_body = left_body.clone();
-                    AugmentedNwaBody::combine_right_into_on_shared(
-                        &mut shared_states.borrow_mut(),
-                        &mut new_body,
-                        &current_aug_body,
-                        &weight,
-                    ).expect("Combine failed");
+                let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                // Combine into a new body (mutating the shared graph with epsilon links).
+                let mut new_body = left_body.clone();
+                AugmentedNwaBody::combine_right_into_on_shared(
+                    &mut shared_states.borrow_mut(),
+                    &mut new_body,
+                    &current_aug_body,
+                    &weight,
+                ).expect("Combine failed");
 
-                    results.push((*dest_idx, new_body));
-                }
+                results.push((*dest_idx, new_body));
             }
             results
         },
         // merge function
         |aug_body1, aug_body2| {
             AugmentedNwaBody::union_with_on_shared(&mut shared_states.borrow_mut(), aug_body1, &aug_body2);
+        },
+        // process function
+        |_node_data, node_idx, aug_body| {
+            if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
+                final_nwas.insert(*tokenizer_state_id, aug_body.clone());
+            }
+            true // continue traversal
         },
     );
 
