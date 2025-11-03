@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - src/weighted_automata.rs
     - src/precompute4/augmented_nwa.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/weighted_automata.rs: |
@@ -4615,101 +4615,113 @@ local_system:
               other: &AugmentedNwaBody,
           ) -> BTreeMap<StateID, BTreeSet<(usize, StateID)>> {
               let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
-              // Use sentinel sinks that can never clash with real indices (we never index with these).
               let sink0: StateID = usize::MAX - 1;
               let sink1: StateID = usize::MAX;
 
               let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
               let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
 
-              let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
-                  if let Some(&id) = pair_to_new_id.get(&pair) {
-                      return id;
-                  }
-                  let new_id = self_states.add_state();
-                  pair_to_new_id.insert(pair, new_id);
-                  worklist.push_back(pair);
-
-                  let mut merged_from = BTreeSet::new();
-                  if pair.0 != sink0 {
-                      merged_from.insert((0, pair.0));
-                  }
-                  if pair.1 != sink1 {
-                      merged_from.insert((1, pair.1));
-                  }
-                  mapping.insert(new_id, merged_from);
-                  new_id
-              };
-
-              // Create product start states: cross-product of start sets
               let mut new_starts: BTreeSet<StateID> = BTreeSet::new();
               for &s0 in &self_body.nwa.start_states {
                   for &s1 in &other.nwa.start_states {
-                      let id = get_or_create((s0, s1));
-                      new_starts.insert(id);
+                      let pair = (s0, s1);
+                      if let std::collections::btree_map::Entry::Vacant(e) = pair_to_new_id.entry(pair) {
+                          let new_id = self_states.add_state();
+                          e.insert(new_id);
+                          worklist.push_back(pair);
+                          let mut merged_from = BTreeSet::new();
+                          if pair.0 != sink0 {
+                              merged_from.insert((0, pair.0));
+                          }
+                          if pair.1 != sink1 {
+                              merged_from.insert((1, pair.1));
+                          }
+                          mapping.insert(new_id, merged_from);
+                          new_starts.insert(new_id);
+                      } else {
+                          new_starts.insert(*pair_to_new_id.get(&pair).unwrap());
+                      }
                   }
               }
               self_body.nwa.start_states = new_starts;
 
-              // Helpers
-              let get_target = |s: Option<&DWAState>, sink: StateID, ch: u16| -> StateID {
-                  s.and_then(|ss| ss.transitions.get(ch).copied()).unwrap_or(sink)
-              };
-
               while let Some((id0, id1)) = worklist.pop_front() {
                   let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
-                  let s0_opt = if id0 == sink0 { None } else { Some(&self_states[id0]) };
-                  let s1_opt = if id1 == sink1 { None } else { Some(&self_states[id1]) };
+
+                  let s0_opt_info = if id0 == sink0 { None } else { Some(self_states[id0].clone()) };
+                  let s1_opt_info = if id1 == sink1 { None } else { Some(self_states[id1].clone()) };
+                  let s0_opt = s0_opt_info.as_ref();
+                  let s1_opt = s1_opt_info.as_ref();
 
                   // Aggregate state outputs
                   let w0 = s0_opt.map(|s| s.weight.clone()).unwrap_or_else(Weight::zeros);
                   let w1 = s1_opt.map(|s| s.weight.clone()).unwrap_or_else(Weight::zeros);
-                  self_states[new_id].weight = &w0 | &w1;
 
                   let fw0 = s0_opt.and_then(|s| s.final_weight.clone()).unwrap_or_else(Weight::zeros);
                   let fw1 = s1_opt.and_then(|s| s.final_weight.clone()).unwrap_or_else(Weight::zeros);
                   let fsum = &fw0 | &fw1;
-                  self_states[new_id].final_weight = if fsum.is_empty() { None } else { Some(fsum) };
 
                   // Critical characters to consider
                   let mut critical: BTreeSet<u16> = BTreeSet::new();
-                  if let Some(s) = s0_opt {
-                      critical.extend(s.transitions.exceptions.keys());
-                  }
-                  if let Some(s) = s1_opt {
-                      critical.extend(s.transitions.exceptions.keys());
-                  }
+                  if let Some(s) = s0_opt { critical.extend(s.transitions.exceptions.keys()); }
+                  if let Some(s) = s1_opt { critical.extend(s.transitions.exceptions.keys()); }
 
                   // Default transition
                   let def0 = s0_opt.and_then(|s| s.transitions.default).unwrap_or(sink0);
                   let def1 = s1_opt.and_then(|s| s.transitions.default).unwrap_or(sink1);
                   let def_pair = (def0, def1);
-                  let def_tgt = get_or_create(def_pair);
-                  self_states[new_id].transitions.default = Some(def_tgt);
+                  let def_tgt = if let Some(&id) = pair_to_new_id.get(&def_pair) {
+                      id
+                  } else {
+                      let new_id = self_states.add_state();
+                      pair_to_new_id.insert(def_pair, new_id);
+                      worklist.push_back(def_pair);
+                      let mut merged_from = BTreeSet::new();
+                      if def_pair.0 != sink0 { merged_from.insert((0, def_pair.0)); }
+                      if def_pair.1 != sink1 { merged_from.insert((1, def_pair.1)); }
+                      mapping.insert(new_id, merged_from);
+                      new_id
+                  };
 
                   let twd0 = s0_opt.and_then(|s| s.trans_weight_default.clone()).unwrap_or_else(Weight::zeros);
                   let twd1 = s1_opt.and_then(|s| s.trans_weight_default.clone()).unwrap_or_else(Weight::zeros);
-                  self_states[new_id].trans_weight_default = Some(&twd0 | &twd1);
 
-                  // Reset (in case we revisit/build incrementally)
-                  self_states[new_id].transitions.exceptions.clear();
-                  self_states[new_id].trans_weights_exceptions.clear();
+                  let mut new_exceptions = BTreeMap::new();
+                  let mut new_trans_weights_exceptions = BTreeMap::new();
 
-                  // Exception transitions
                   for &ch in &critical {
-                      let tgt0 = get_target(s0_opt, sink0, ch);
-                      let tgt1 = get_target(s1_opt, sink1, ch);
+                      let tgt0 = s0_opt.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink0);
+                      let tgt1 = s1_opt.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink1);
                       let pair = (tgt0, tgt1);
                       if pair != def_pair {
-                          let exc_tgt = get_or_create(pair);
-                          self_states[new_id].transitions.exceptions.insert(ch, exc_tgt);
+                          let exc_tgt = if let Some(&id) = pair_to_new_id.get(&pair) {
+                              id
+                          } else {
+                              let new_id = self_states.add_state();
+                              pair_to_new_id.insert(pair, new_id);
+                              worklist.push_back(pair);
+                              let mut merged_from = BTreeSet::new();
+                              if pair.0 != sink0 { merged_from.insert((0, pair.0)); }
+                              if pair.1 != sink1 { merged_from.insert((1, pair.1)); }
+                              mapping.insert(new_id, merged_from);
+                              new_id
+                          };
+                          new_exceptions.insert(ch, exc_tgt);
                           let twe0 =
                               s0_opt.and_then(|s| s.trans_weights_exceptions.get(&ch).cloned()).unwrap_or_else(Weight::zeros);
                           let twe1 =
                               s1_opt.and_then(|s| s.trans_weights_exceptions.get(&ch).cloned()).unwrap_or_else(Weight::zeros);
-                          self_states[new_id].trans_weights_exceptions.insert(ch, &twe0 | &twe1);
+                          new_trans_weights_exceptions.insert(ch, &twe0 | &twe1);
                       }
                   }
+
+                  let state = &mut self_states[new_id];
+                  state.weight = &w0 | &w1;
+                  state.final_weight = if fsum.is_empty() { None } else { Some(fsum) };
+                  state.transitions.default = Some(def_tgt);
+                  state.trans_weight_default = Some(&twd0 | &twd1);
+                  state.transitions.exceptions = new_exceptions;
+                  state.trans_weights_exceptions = new_trans_weights_exceptions;
               }
 
               mapping
@@ -4725,22 +4737,21 @@ local_system:
               join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
           ) -> BTreeMap<StateID, BTreeSet<(usize, StateID)>> {
               let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
-              // Sentinel sinks; never index with these.
               let sink0: StateID = usize::MAX - 1;
               let sink1: StateID = usize::MAX;
 
               let mut comp_to_new_id: BTreeMap<(StateID, BTreeSet<StateID>), StateID> = BTreeMap::new();
               let mut worklist: VecDeque<(StateID, BTreeSet<StateID>)> = VecDeque::new();
 
-              let mut get_or_create =
-                  |comp: (StateID, BTreeSet<StateID>)| -> StateID {
-                      if let Some(&id) = comp_to_new_id.get(&comp) {
-                          return id;
-                      }
+              let mut new_starts: BTreeSet<StateID> = BTreeSet::new();
+              for &s0 in &self_body.nwa.start_states {
+                  let mut s1s: BTreeSet<StateID> = join_map.get(&s0).cloned().unwrap_or_default();
+                  s1s.remove(&sink1);
+                  let comp = (s0, s1s);
+                  if let std::collections::btree_map::Entry::Vacant(e) = comp_to_new_id.entry(comp.clone()) {
                       let new_id = self_states.add_state();
-                      comp_to_new_id.insert((comp.0, comp.1.clone()), new_id);
-                      worklist.push_back((comp.0, comp.1.clone()));
-
+                      e.insert(new_id);
+                      worklist.push_back(comp.clone());
                       let mut merged_from = BTreeSet::new();
                       if comp.0 != sink0 {
                           merged_from.insert((0, comp.0));
@@ -4751,106 +4762,100 @@ local_system:
                           }
                       }
                       mapping.insert(new_id, merged_from);
-                      new_id
-                  };
-
-              // Start compositions: left starts + any join-in on those starts.
-              let mut new_starts: BTreeSet<StateID> = BTreeSet::new();
-              for &s0 in &self_body.nwa.start_states {
-                  let mut s1s: BTreeSet<StateID> = join_map.get(&s0).cloned().unwrap_or_default();
-                  s1s.remove(&sink1);
-                  let id = get_or_create((s0, s1s));
-                  new_starts.insert(id);
+                      new_starts.insert(new_id);
+                  } else {
+                      new_starts.insert(*comp_to_new_id.get(&comp).unwrap());
+                  }
               }
               self_body.nwa.start_states = new_starts;
 
-              let get_target = |s: Option<&DWAState>, sink: StateID, ch: u16| -> StateID {
-                  s.and_then(|ss| ss.transitions.get(ch).copied()).unwrap_or(sink)
-              };
-
               while let Some((id0, ids1)) = worklist.pop_front() {
                   let new_id = *comp_to_new_id.get(&(id0, ids1.clone())).unwrap();
-                  let s0 = if id0 == sink0 { None } else { Some(&self_states[id0]) };
+
+                  let s0_info = if id0 == sink0 { None } else { Some(self_states[id0].clone()) };
+                  let s1_infos: Vec<_> = ids1.iter().filter(|&&r| r != sink1).map(|&r| self_states[r].clone()).collect();
+                  let s0 = s0_info.as_ref();
 
                   // Aggregate outputs (weight and final_weight)
                   let mut agg_w = s0.map(|s| s.weight.clone()).unwrap_or_else(Weight::zeros);
                   let mut agg_fw = s0.and_then(|s| s.final_weight.clone()).unwrap_or_else(Weight::zeros);
-                  for &r in &ids1 {
-                      if r != sink1 {
-                          let s1 = &self_states[r];
-                          agg_w |= &s1.weight;
-                          if let Some(w) = &s1.final_weight {
-                              agg_fw |= w;
-                          }
+                  for s1 in &s1_infos {
+                      agg_w |= &s1.weight;
+                      if let Some(w) = &s1.final_weight {
+                          agg_fw |= w;
                       }
                   }
-                  self_states[new_id].weight = agg_w;
-                  self_states[new_id].final_weight = if agg_fw.is_empty() { None } else { Some(agg_fw) };
 
                   // Critical points
                   let mut critical: BTreeSet<u16> = BTreeSet::new();
-                  if let Some(st) = s0 {
-                      critical.extend(st.transitions.exceptions.keys());
-                  }
-                  for &r in &ids1 {
-                      if r != sink1 {
-                          critical.extend(self_states[r].transitions.exceptions.keys());
-                      }
-                  }
+                  if let Some(st) = s0 { critical.extend(st.transitions.exceptions.keys()); }
+                  for s1 in &s1_infos { critical.extend(s1.transitions.exceptions.keys()); }
 
                   // Default transition
                   let def0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
-                  let mut def1s: BTreeSet<StateID> = ids1
-                      .iter()
-                      .filter(|&&r| r != sink1)
-                      .map(|&r| self_states[r].transitions.default.unwrap_or(sink1))
-                      .collect();
+                  let mut def1s: BTreeSet<StateID> =
+                      s1_infos.iter().map(|s1| s1.transitions.default.unwrap_or(sink1)).collect();
                   def1s.remove(&sink1);
-                  if let Some(joins) = join_map.get(&def0) {
-                      def1s.extend(joins);
-                  }
+                  if let Some(joins) = join_map.get(&def0) { def1s.extend(joins); }
                   let def_comp = (def0, def1s.clone());
-                  let def_tgt = get_or_create(def_comp.clone());
-                  self_states[new_id].transitions.default = Some(def_tgt);
+                  let def_tgt = if let Some(&id) = comp_to_new_id.get(&def_comp) {
+                      id
+                  } else {
+                      let new_id = self_states.add_state();
+                      comp_to_new_id.insert(def_comp.clone(), new_id);
+                      worklist.push_back(def_comp.clone());
+                      let mut merged_from = BTreeSet::new();
+                      if def_comp.0 != sink0 { merged_from.insert((0, def_comp.0)); }
+                      for &s1 in &def_comp.1 { if s1 != sink1 { merged_from.insert((1, s1)); } }
+                      mapping.insert(new_id, merged_from);
+                      new_id
+                  };
 
                   let mut tw_def = s0.and_then(|s| s.trans_weight_default.clone()).unwrap_or_else(Weight::zeros);
-                  for &r in &ids1 {
-                      if r != sink1 {
-                          tw_def |= &self_states[r].trans_weight_default.clone().unwrap_or_else(Weight::zeros);
-                      }
+                  for s1 in &s1_infos {
+                      tw_def |= &s1.trans_weight_default.clone().unwrap_or_else(Weight::zeros);
                   }
-                  self_states[new_id].trans_weight_default = Some(tw_def);
 
-                  // Reset exceptions for this freshly built node
-                  self_states[new_id].transitions.exceptions.clear();
-                  self_states[new_id].trans_weights_exceptions.clear();
+                  let mut new_exceptions = BTreeMap::new();
+                  let mut new_trans_weights_exceptions = BTreeMap::new();
 
-                  // Exception transitions
                   for &ch in &critical {
-                      let tgt0 = get_target(s0, sink0, ch);
-                      let mut tgt1s: BTreeSet<StateID> = ids1
-                          .iter()
-                          .filter(|&&r| r != sink1)
-                          .map(|&r| get_target(Some(&self_states[r]), sink1, ch))
-                          .collect();
+                      let tgt0 = s0.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink0);
+                      let mut tgt1s: BTreeSet<StateID> =
+                          s1_infos.iter().map(|s1| s1.transitions.get(ch).copied().unwrap_or(sink1)).collect();
                       tgt1s.remove(&sink1);
-                      if let Some(joins) = join_map.get(&tgt0) {
-                          tgt1s.extend(joins);
-                      }
+                      if let Some(joins) = join_map.get(&tgt0) { tgt1s.extend(joins); }
                       let exc_comp = (tgt0, tgt1s);
                       if exc_comp != def_comp {
-                          let exc_tgt = get_or_create(exc_comp);
-                          self_states[new_id].transitions.exceptions.insert(ch, exc_tgt);
+                          let exc_tgt = if let Some(&id) = comp_to_new_id.get(&exc_comp) {
+                              id
+                          } else {
+                              let new_id = self_states.add_state();
+                              comp_to_new_id.insert(exc_comp.clone(), new_id);
+                              worklist.push_back(exc_comp.clone());
+                              let mut merged_from = BTreeSet::new();
+                              if exc_comp.0 != sink0 { merged_from.insert((0, exc_comp.0)); }
+                              for &s1 in &exc_comp.1 { if s1 != sink1 { merged_from.insert((1, s1)); } }
+                              mapping.insert(new_id, merged_from);
+                              new_id
+                          };
+                          new_exceptions.insert(ch, exc_tgt);
 
                           let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch).cloned()).unwrap_or_else(Weight::zeros);
-                          for &r in &ids1 {
-                              if r != sink1 {
-                                  tw_exc |= &self_states[r].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
-                              }
+                          for s1 in &s1_infos {
+                              tw_exc |= &s1.trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
                           }
-                          self_states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
+                          new_trans_weights_exceptions.insert(ch, tw_exc);
                       }
                   }
+
+                  let state = &mut self_states[new_id];
+                  state.weight = agg_w;
+                  state.final_weight = if agg_fw.is_empty() { None } else { Some(agg_fw) };
+                  state.transitions.default = Some(def_tgt);
+                  state.trans_weight_default = Some(tw_def);
+                  state.transitions.exceptions = new_exceptions;
+                  state.trans_weights_exceptions = new_trans_weights_exceptions;
               }
 
               mapping
@@ -6462,7 +6467,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -9947,5 +9952,900 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Add in-place DWA construction methods:
       union_components and concatenate_components"'
+    metadata:
+  - user: |-
+      Diff of src/weighted_automata.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/augmented_nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --message-format=json-diagnostic-rendered-ansi --no-run --package sep1 --lib test_constraint_basic --profile test
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0499]: cannot borrow `worklist` as mutable more than once at a time
+          --> src/weighted_automata.rs:1554:38
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- first mutable borrow occurs here
+      ...
+      1526 |             worklist.push_back(pair);
+           |             -------- first borrow occurs due to use of `worklist` in closure
+      ...
+      1554 |         while let Some((id0, id1)) = worklist.pop_front() {
+           |                                      ^^^^^^^^ second mutable borrow occurs here
+      ...
+      1582 |             let def_tgt = get_or_create(def_pair);
+           |                           ------------- first borrow later used here
+
+      error[E0502]: cannot borrow `pair_to_new_id` as immutable because it is also borrowed as mutable
+          --> src/weighted_automata.rs:1555:27
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- mutable borrow occurs here
+      ...
+      1525 |             pair_to_new_id.insert(pair, new_id);
+           |             -------------- first borrow occurs due to use of `pair_to_new_id` in closure
+      ...
+      1555 |             let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
+           |                           ^^^^^^^^^^^^^^ immutable borrow occurs here
+      ...
+      1582 |             let def_tgt = get_or_create(def_pair);
+           |                           ------------- mutable borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as immutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1556:64
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- closure construction occurs here
+      ...
+      1524 |             let new_id = self_states.add_state();
+           |                          ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1556 |             let s0_opt = if id0 == sink0 { None } else { Some(&self_states[id0]) };
+           |                                                                ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1582 |             let def_tgt = get_or_create(def_pair);
+           |                           ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as immutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1557:64
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- closure construction occurs here
+      ...
+      1524 |             let new_id = self_states.add_state();
+           |                          ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1557 |             let s1_opt = if id1 == sink1 { None } else { Some(&self_states[id1]) };
+           |                                                                ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1582 |             let def_tgt = get_or_create(def_pair);
+           |                           ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1562:13
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- closure construction occurs here
+      ...
+      1524 |             let new_id = self_states.add_state();
+           |                          ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1562 |             self_states[new_id].weight = &w0 | &w1;
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1582 |             let def_tgt = get_or_create(def_pair);
+           |                           ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1567:13
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- closure construction occurs here
+      ...
+      1524 |             let new_id = self_states.add_state();
+           |                          ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1567 |             self_states[new_id].final_weight = if fsum.is_empty() { None } else { Some(fsum) };
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1582 |             let def_tgt = get_or_create(def_pair);
+           |                           ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1583:13
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- closure construction occurs here
+      ...
+      1524 |             let new_id = self_states.add_state();
+           |                          ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1583 |             self_states[new_id].transitions.default = Some(def_tgt);
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1599 |                     let exc_tgt = get_or_create(pair);
+           |                                   ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1587:13
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- closure construction occurs here
+      ...
+      1524 |             let new_id = self_states.add_state();
+           |                          ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1587 |             self_states[new_id].trans_weight_default = Some(&twd0 | &twd1);
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1599 |                     let exc_tgt = get_or_create(pair);
+           |                                   ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1590:13
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- closure construction occurs here
+      ...
+      1524 |             let new_id = self_states.add_state();
+           |                          ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1590 |             self_states[new_id].transitions.exceptions.clear();
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1599 |                     let exc_tgt = get_or_create(pair);
+           |                                   ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1591:13
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- closure construction occurs here
+      ...
+      1524 |             let new_id = self_states.add_state();
+           |                          ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1591 |             self_states[new_id].trans_weights_exceptions.clear();
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1599 |                     let exc_tgt = get_or_create(pair);
+           |                                   ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1600:21
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- closure construction occurs here
+      ...
+      1524 |             let new_id = self_states.add_state();
+           |                          ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1599 |                     let exc_tgt = get_or_create(pair);
+           |                                   ------------- first borrow later used here
+      1600 |                     self_states[new_id].transitions.exceptions.insert(ch, exc_tgt);
+           |                     ^^^^^^^^^^^ second borrow occurs here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1605:21
+           |
+      1520 |         let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+           |                                 ------------------------------------- closure construction occurs here
+      ...
+      1524 |             let new_id = self_states.add_state();
+           |                          ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1599 |                     let exc_tgt = get_or_create(pair);
+           |                                   ------------- first borrow later used here
+      ...
+      1605 |                     self_states[new_id].trans_weights_exceptions.insert(ch, &twe0 | &twe1);
+           |                     ^^^^^^^^^^^ second borrow occurs here
+
+      error[E0499]: cannot borrow `worklist` as mutable more than once at a time
+          --> src/weighted_automata.rs:1666:39
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- first mutable borrow occurs here
+      ...
+      1637 |                 worklist.push_back((comp.0, comp.1.clone()));
+           |                 -------- first borrow occurs due to use of `worklist` in closure
+      ...
+      1666 |         while let Some((id0, ids1)) = worklist.pop_front() {
+           |                                       ^^^^^^^^ second mutable borrow occurs here
+      ...
+      1708 |             let def_tgt = get_or_create(def_comp.clone());
+           |                           ------------- first borrow later used here
+
+      error[E0502]: cannot borrow `comp_to_new_id` as immutable because it is also borrowed as mutable
+          --> src/weighted_automata.rs:1667:27
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- mutable borrow occurs here
+      ...
+      1636 |                 comp_to_new_id.insert((comp.0, comp.1.clone()), new_id);
+           |                 -------------- first borrow occurs due to use of `comp_to_new_id` in closure
+      ...
+      1667 |             let new_id = *comp_to_new_id.get(&(id0, ids1.clone())).unwrap();
+           |                           ^^^^^^^^^^^^^^ immutable borrow occurs here
+      ...
+      1708 |             let def_tgt = get_or_create(def_comp.clone());
+           |                           ------------- mutable borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as immutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1668:60
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1668 |             let s0 = if id0 == sink0 { None } else { Some(&self_states[id0]) };
+           |                                                            ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1708 |             let def_tgt = get_or_create(def_comp.clone());
+           |                           ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as immutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1675:31
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1675 |                     let s1 = &self_states[r];
+           |                               ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1708 |             let def_tgt = get_or_create(def_comp.clone());
+           |                           ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1682:13
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1682 |             self_states[new_id].weight = agg_w;
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1708 |             let def_tgt = get_or_create(def_comp.clone());
+           |                           ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1683:13
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1683 |             self_states[new_id].final_weight = if agg_fw.is_empty() { None } else { Some(agg_fw) };
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1708 |             let def_tgt = get_or_create(def_comp.clone());
+           |                           ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as immutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1692:37
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1692 |                     critical.extend(self_states[r].transitions.exceptions.keys());
+           |                                     ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1708 |             let def_tgt = get_or_create(def_comp.clone());
+           |                           ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as immutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1701:22
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1701 |                 .map(|&r| self_states[r].transitions.default.unwrap_or(sink1))
+           |                      ^^^^ ----------- second borrow occurs due to use of `*self_states` in closure
+           |                      |
+           |                      second borrow occurs here
+      ...
+      1708 |             let def_tgt = get_or_create(def_comp.clone());
+           |                           ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1709:13
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1709 |             self_states[new_id].transitions.default = Some(def_tgt);
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1737 |                     let exc_tgt = get_or_create(exc_comp);
+           |                                   ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as immutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1714:32
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1714 |                     tw_def |= &self_states[r].trans_weight_default.clone().unwrap_or_else(Weight::zeros);
+           |                                ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1737 |                     let exc_tgt = get_or_create(exc_comp);
+           |                                   ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1717:13
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1717 |             self_states[new_id].trans_weight_default = Some(tw_def);
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1737 |                     let exc_tgt = get_or_create(exc_comp);
+           |                                   ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1720:13
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1720 |             self_states[new_id].transitions.exceptions.clear();
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1737 |                     let exc_tgt = get_or_create(exc_comp);
+           |                                   ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1721:13
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1721 |             self_states[new_id].trans_weights_exceptions.clear();
+           |             ^^^^^^^^^^^ second borrow occurs here
+      ...
+      1737 |                     let exc_tgt = get_or_create(exc_comp);
+           |                                   ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as immutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1729:26
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1729 |                     .map(|&r| get_target(Some(&self_states[r]), sink1, ch))
+           |                          ^^^^                  ----------- second borrow occurs due to use of `*self_states` in closure
+           |                          |
+           |                          second borrow occurs here
+      ...
+      1737 |                     let exc_tgt = get_or_create(exc_comp);
+           |                                   ------------- first borrow later used here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1738:21
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1737 |                     let exc_tgt = get_or_create(exc_comp);
+           |                                   ------------- first borrow later used here
+      1738 |                     self_states[new_id].transitions.exceptions.insert(ch, exc_tgt);
+           |                     ^^^^^^^^^^^ second borrow occurs here
+
+      error[E0501]: cannot borrow `*self_states` as immutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1743:40
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1737 |                     let exc_tgt = get_or_create(exc_comp);
+           |                                   ------------- first borrow later used here
+      ...
+      1743 |                             tw_exc |= &self_states[r].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
+           |                                        ^^^^^^^^^^^ second borrow occurs here
+
+      error[E0501]: cannot borrow `*self_states` as mutable because previous closure requires unique access
+          --> src/weighted_automata.rs:1746:21
+           |
+      1631 |             |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+           |             ----------------------------------------------- closure construction occurs here
+      ...
+      1635 |                 let new_id = self_states.add_state();
+           |                              ----------- first borrow occurs due to use of `*self_states` in closure
+      ...
+      1737 |                     let exc_tgt = get_or_create(exc_comp);
+           |                                   ------------- first borrow later used here
+      ...
+      1746 |                     self_states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
+           |                     ^^^^^^^^^^^ second borrow occurs here
+
+      Some errors have detailed explanations: E0499, E0501, E0502.
+      For more information about an error, try `rustc --explain E0499`.
+      error: could not compile `sep1` (lib test) due to 29 previous errors
+      Process finished with exit code 101
+    metadata:
+  - assistant: |-
+      Of course. The compiler errors you're seeing are due to Rust's borrowing rules. The `get_or_create` closure you've defined captures mutable references to several variables (`self_states`, `worklist`, `pair_to_new_id`, etc.) and holds those borrows for its entire lifetime. When you then try to access those same variables within the `while` loop where the closure is active, the compiler correctly flags this as a conflict (e.g., trying to read from `self_states` while the closure holds a mutable borrow on it).
+
+      To fix this, we need to refactor the code to avoid this closure pattern. The most direct way is to inline the "get or create" logic and separate the "read" phase of the loop from the "write" phase. This involves cloning the state of the items being processed to release borrows on the main `self_states` vector, allowing you to safely add new states to it.
+
+      Here are the step-by-step instructions and the corresponding diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `src/weighted_automata.rs`**.
+
+      2.  **Refactor `DWA::union_components`**:
+          *   Remove the `get_or_create` closure entirely.
+          *   In the initial loop that creates start states, replace the call to `get_or_create` with an inlined version using `pair_to_new_id.entry(pair).or_insert_with(...)`. This will check for an existing state and create a new one only if necessary, adding it to the `worklist` and `mapping` inside the closure.
+          *   Inside the main `while let Some((id0, id1)) = worklist.pop_front()` loop, at the beginning, clone the `DWAState` for `id0` and `id1` into local variables (e.g., `s0_opt_info`, `s1_opt_info`). This releases the borrow on `self_states`.
+          *   Perform all calculations for weights, final weights, and transitions using these cloned copies.
+          *   When you need to get or create the target state for a default or exception transition, use the same inlined `if let Some... else...` or `entry().or_insert_with()` pattern as you did for the start states. This will safely mutate `self_states`, `worklist`, and `pair_to_new_id`.
+          *   At the end of the loop, gather all the computed transitions and weights and write them back to `self_states[new_id]`.
+
+      3.  **Refactor `DWA::concatenate_components`**:
+          *   Apply the exact same pattern as for `union_components`.
+          *   Remove the `get_or_create` closure.
+          *   Inline the "get or create" logic for start states and for all transition targets within the main `while` loop.
+          *   Inside the `while` loop, clone the state for `id0` and all states in `ids1` to release borrows on `self_states`.
+          *   Perform all computations on the cloned data.
+          *   At the end of the loop, write the final computed values back to the state at `self_states[new_id]`.
+
+      This approach resolves all the borrowing conflicts by ensuring that you are not holding a reference to `self_states` at the same time you are trying to mutate it by adding new states.
+
+      ### Git Diff
+
+      Here is the git diff to apply these changes.
+
+      ```diff
+      diff --git a/src/weighted_automata.rs b/src/weighted_automata.rs
+      --- a/src/weighted_automata.rs
+      +++ b/src/weighted_automata.rs
+      @@ -941,120 +941,118 @@
+               other: &AugmentedNwaBody,
+           ) -> BTreeMap<StateID, BTreeSet<(usize, StateID)>> {
+               let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
+      -        // Use sentinel sinks that can never clash with real indices (we never index with these).
+               let sink0: StateID = usize::MAX - 1;
+               let sink1: StateID = usize::MAX;
+       
+               let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
+               let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
+       
+      -        let mut get_or_create = |pair: (StateID, StateID)| -> StateID {
+      -            if let Some(&id) = pair_to_new_id.get(&pair) {
+      -                return id;
+      -            }
+      -            let new_id = self_states.add_state();
+      -            pair_to_new_id.insert(pair, new_id);
+      -            worklist.push_back(pair);
+      -
+      -            let mut merged_from = BTreeSet::new();
+      -            if pair.0 != sink0 {
+      -                merged_from.insert((0, pair.0));
+      -            }
+      -            if pair.1 != sink1 {
+      -                merged_from.insert((1, pair.1));
+      -            }
+      -            mapping.insert(new_id, merged_from);
+      -            new_id
+      -        };
+      -
+      -        // Create product start states: cross-product of start sets
+               let mut new_starts: BTreeSet<StateID> = BTreeSet::new();
+               for &s0 in &self_body.nwa.start_states {
+                   for &s1 in &other.nwa.start_states {
+      -                let id = get_or_create((s0, s1));
+      -                new_starts.insert(id);
+      +                let pair = (s0, s1);
+      +                if let std::collections::btree_map::Entry::Vacant(e) = pair_to_new_id.entry(pair) {
+      +                    let new_id = self_states.add_state();
+      +                    e.insert(new_id);
+      +                    worklist.push_back(pair);
+      +                    let mut merged_from = BTreeSet::new();
+      +                    if pair.0 != sink0 {
+      +                        merged_from.insert((0, pair.0));
+      +                    }
+      +                    if pair.1 != sink1 {
+      +                        merged_from.insert((1, pair.1));
+      +                    }
+      +                    mapping.insert(new_id, merged_from);
+      +                    new_starts.insert(new_id);
+      +                } else {
+      +                    new_starts.insert(*pair_to_new_id.get(&pair).unwrap());
+      +                }
+                   }
+               }
+               self_body.nwa.start_states = new_starts;
+       
+      -        // Helpers
+      -        let get_target = |s: Option<&DWAState>, sink: StateID, ch: u16| -> StateID {
+      -            s.and_then(|ss| ss.transitions.get(ch).copied()).unwrap_or(sink)
+      -        };
+      -
+               while let Some((id0, id1)) = worklist.pop_front() {
+                   let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
+      -            let s0_opt = if id0 == sink0 { None } else { Some(&self_states[id0]) };
+      -            let s1_opt = if id1 == sink1 { None } else { Some(&self_states[id1]) };
+      +
+      +            let s0_opt_info = if id0 == sink0 { None } else { Some(self_states[id0].clone()) };
+      +            let s1_opt_info = if id1 == sink1 { None } else { Some(self_states[id1].clone()) };
+      +            let s0_opt = s0_opt_info.as_ref();
+      +            let s1_opt = s1_opt_info.as_ref();
+       
+                   // Aggregate state outputs
+                   let w0 = s0_opt.map(|s| s.weight.clone()).unwrap_or_else(Weight::zeros);
+                   let w1 = s1_opt.map(|s| s.weight.clone()).unwrap_or_else(Weight::zeros);
+      -            self_states[new_id].weight = &w0 | &w1;
+       
+                   let fw0 = s0_opt.and_then(|s| s.final_weight.clone()).unwrap_or_else(Weight::zeros);
+                   let fw1 = s1_opt.and_then(|s| s.final_weight.clone()).unwrap_or_else(Weight::zeros);
+                   let fsum = &fw0 | &fw1;
+      -            self_states[new_id].final_weight = if fsum.is_empty() { None } else { Some(fsum) };
+       
+                   // Critical characters to consider
+                   let mut critical: BTreeSet<u16> = BTreeSet::new();
+      -            if let Some(s) = s0_opt {
+      -                critical.extend(s.transitions.exceptions.keys());
+      -            }
+      -            if let Some(s) = s1_opt {
+      -                critical.extend(s.transitions.exceptions.keys());
+      -            }
+      +            if let Some(s) = s0_opt { critical.extend(s.transitions.exceptions.keys()); }
+      +            if let Some(s) = s1_opt { critical.extend(s.transitions.exceptions.keys()); }
+       
+                   // Default transition
+                   let def0 = s0_opt.and_then(|s| s.transitions.default).unwrap_or(sink0);
+                   let def1 = s1_opt.and_then(|s| s.transitions.default).unwrap_or(sink1);
+                   let def_pair = (def0, def1);
+      -            let def_tgt = get_or_create(def_pair);
+      -            self_states[new_id].transitions.default = Some(def_tgt);
+      +            let def_tgt = if let Some(&id) = pair_to_new_id.get(&def_pair) {
+      +                id
+      +            } else {
+      +                let new_id = self_states.add_state();
+      +                pair_to_new_id.insert(def_pair, new_id);
+      +                worklist.push_back(def_pair);
+      +                let mut merged_from = BTreeSet::new();
+      +                if def_pair.0 != sink0 { merged_from.insert((0, def_pair.0)); }
+      +                if def_pair.1 != sink1 { merged_from.insert((1, def_pair.1)); }
+      +                mapping.insert(new_id, merged_from);
+      +                new_id
+      +            };
+       
+                   let twd0 = s0_opt.and_then(|s| s.trans_weight_default.clone()).unwrap_or_else(Weight::zeros);
+                   let twd1 = s1_opt.and_then(|s| s.trans_weight_default.clone()).unwrap_or_else(Weight::zeros);
+      -            self_states[new_id].trans_weight_default = Some(&twd0 | &twd1);
+      -
+      -            // Reset (in case we revisit/build incrementally)
+      -            self_states[new_id].transitions.exceptions.clear();
+      -            self_states[new_id].trans_weights_exceptions.clear();
+      -
+      -            // Exception transitions
+      +
+      +            let mut new_exceptions = BTreeMap::new();
+      +            let mut new_trans_weights_exceptions = BTreeMap::new();
+      +
+                   for &ch in &critical {
+      -                let tgt0 = get_target(s0_opt, sink0, ch);
+      -                let tgt1 = get_target(s1_opt, sink1, ch);
+      +                let tgt0 = s0_opt.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink0);
+      +                let tgt1 = s1_opt.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink1);
+                       let pair = (tgt0, tgt1);
+                       if pair != def_pair {
+      -                    let exc_tgt = get_or_create(pair);
+      -                    self_states[new_id].transitions.exceptions.insert(ch, exc_tgt);
+      +                    let exc_tgt = if let Some(&id) = pair_to_new_id.get(&pair) {
+      +                        id
+      +                    } else {
+      +                        let new_id = self_states.add_state();
+      +                        pair_to_new_id.insert(pair, new_id);
+      +                        worklist.push_back(pair);
+      +                        let mut merged_from = BTreeSet::new();
+      +                        if pair.0 != sink0 { merged_from.insert((0, pair.0)); }
+      +                        if pair.1 != sink1 { merged_from.insert((1, pair.1)); }
+      +                        mapping.insert(new_id, merged_from);
+      +                        new_id
+      +                    };
+      +                    new_exceptions.insert(ch, exc_tgt);
+                           let twe0 =
+                               s0_opt.and_then(|s| s.trans_weights_exceptions.get(&ch).cloned()).unwrap_or_else(Weight::zeros);
+                           let twe1 =
+                               s1_opt.and_then(|s| s.trans_weights_exceptions.get(&ch).cloned()).unwrap_or_else(Weight::zeros);
+      -                    self_states[new_id].trans_weights_exceptions.insert(ch, &twe0 | &twe1);
+      -                }
+      -            }
+      +                    new_trans_weights_exceptions.insert(ch, &twe0 | &twe1);
+      +                }
+      +            }
+      +
+      +            let state = &mut self_states[new_id];
+      +            state.weight = &w0 | &w1;
+      +            state.final_weight = if fsum.is_empty() { None } else { Some(fsum) };
+      +            state.transitions.default = Some(def_tgt);
+      +            state.trans_weight_default = Some(&twd0 | &twd1);
+      +            state.transitions.exceptions = new_exceptions;
+      +            state.trans_weights_exceptions = new_trans_weights_exceptions;
+               }
+       
+               mapping
+      @@ -1069,114 +1065,120 @@
+               other: &AugmentedNwaBody,
+               join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
+           ) -> BTreeMap<StateID, BTreeSet<(usize, StateID)>> {
+               let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
+      -        // Sentinel sinks; never index with these.
+               let sink0: StateID = usize::MAX - 1;
+               let sink1: StateID = usize::MAX;
+       
+               let mut comp_to_new_id: BTreeMap<(StateID, BTreeSet<StateID>), StateID> = BTreeMap::new();
+               let mut worklist: VecDeque<(StateID, BTreeSet<StateID>)> = VecDeque::new();
+       
+      -        let mut get_or_create =
+      -            |comp: (StateID, BTreeSet<StateID>)| -> StateID {
+      -                if let Some(&id) = comp_to_new_id.get(&comp) {
+      -                    return id;
+      -                }
+      -                let new_id = self_states.add_state();
+      -                comp_to_new_id.insert((comp.0, comp.1.clone()), new_id);
+      -                worklist.push_back((comp.0, comp.1.clone()));
+      -
+      -                let mut merged_from = BTreeSet::new();
+      -                if comp.0 != sink0 {
+      -                    merged_from.insert((0, comp.0));
+      -                }
+      -                for &s1 in &comp.1 {
+      -                    if s1 != sink1 {
+      -                        merged_from.insert((1, s1));
+      -                    }
+      -                }
+      -                mapping.insert(new_id, merged_from);
+      -                new_id
+      -            };
+      -
+      -        // Start compositions: left starts + any join-in on those starts.
+               let mut new_starts: BTreeSet<StateID> = BTreeSet::new();
+               for &s0 in &self_body.nwa.start_states {
+                   let mut s1s: BTreeSet<StateID> = join_map.get(&s0).cloned().unwrap_or_default();
+                   s1s.remove(&sink1);
+      -            let id = get_or_create((s0, s1s));
+      -            new_starts.insert(id);
+      +            let comp = (s0, s1s);
+      +            if let std::collections::btree_map::Entry::Vacant(e) = comp_to_new_id.entry(comp.clone()) {
+      +                let new_id = self_states.add_state();
+      +                e.insert(new_id);
+      +                worklist.push_back(comp.clone());
+      +                let mut merged_from = BTreeSet::new();
+      +                if comp.0 != sink0 {
+      +                    merged_from.insert((0, comp.0));
+      +                }
+      +                for &s1 in &comp.1 {
+      +                    if s1 != sink1 {
+      +                        merged_from.insert((1, s1));
+      +                    }
+      +                }
+      +                mapping.insert(new_id, merged_from);
+      +                new_starts.insert(new_id);
+      +            } else {
+      +                new_starts.insert(*comp_to_new_id.get(&comp).unwrap());
+      +            }
+               }
+               self_body.nwa.start_states = new_starts;
+       
+      -        let get_target = |s: Option<&DWAState>, sink: StateID, ch: u16| -> StateID {
+      -            s.and_then(|ss| ss.transitions.get(ch).copied()).unwrap_or(sink)
+      -        };
+      -
+               while let Some((id0, ids1)) = worklist.pop_front() {
+                   let new_id = *comp_to_new_id.get(&(id0, ids1.clone())).unwrap();
+      -            let s0 = if id0 == sink0 { None } else { Some(&self_states[id0]) };
+      +
+      +            let s0_info = if id0 == sink0 { None } else { Some(self_states[id0].clone()) };
+      +            let s1_infos: Vec<_> = ids1.iter().filter(|&&r| r != sink1).map(|&r| self_states[r].clone()).collect();
+      +            let s0 = s0_info.as_ref();
+       
+                   // Aggregate outputs (weight and final_weight)
+                   let mut agg_w = s0.map(|s| s.weight.clone()).unwrap_or_else(Weight::zeros);
+                   let mut agg_fw = s0.and_then(|s| s.final_weight.clone()).unwrap_or_else(Weight::zeros);
+      -            for &r in &ids1 {
+      -                if r != sink1 {
+      -                    let s1 = &self_states[r];
+      -                    agg_w |= &s1.weight;
+      -                    if let Some(w) = &s1.final_weight {
+      -                        agg_fw |= w;
+      -                    }
+      -                }
+      -            }
+      -            self_states[new_id].weight = agg_w;
+      -            self_states[new_id].final_weight = if agg_fw.is_empty() { None } else { Some(agg_fw) };
+      +            for s1 in &s1_infos {
+      +                agg_w |= &s1.weight;
+      +                if let Some(w) = &s1.final_weight {
+      +                    agg_fw |= w;
+      +                }
+      +            }
+       
+                   // Critical points
+                   let mut critical: BTreeSet<u16> = BTreeSet::new();
+      -            if let Some(st) = s0 {
+      -                critical.extend(st.transitions.exceptions.keys());
+      -            }
+      -            for &r in &ids1 {
+      -                if r != sink1 {
+      -                    critical.extend(self_states[r].transitions.exceptions.keys());
+      -                }
+      -            }
+      +            if let Some(st) = s0 { critical.extend(st.transitions.exceptions.keys()); }
+      +            for s1 in &s1_infos { critical.extend(s1.transitions.exceptions.keys()); }
+       
+                   // Default transition
+                   let def0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
+      -            let mut def1s: BTreeSet<StateID> = ids1
+      -                .iter()
+      -                .filter(|&&r| r != sink1)
+      -                .map(|&r| self_states[r].transitions.default.unwrap_or(sink1))
+      -                .collect();
+      +            let mut def1s: BTreeSet<StateID> =
+      +                s1_infos.iter().map(|s1| s1.transitions.default.unwrap_or(sink1)).collect();
+                   def1s.remove(&sink1);
+      -            if let Some(joins) = join_map.get(&def0) {
+      -                def1s.extend(joins);
+      -            }
+      +            if let Some(joins) = join_map.get(&def0) { def1s.extend(joins); }
+                   let def_comp = (def0, def1s.clone());
+      -            let def_tgt = get_or_create(def_comp.clone());
+      -            self_states[new_id].transitions.default = Some(def_tgt);
+      +            let def_tgt = if let Some(&id) = comp_to_new_id.get(&def_comp) {
+      +                id
+      +            } else {
+      +                let new_id = self_states.add_state();
+      +                comp_to_new_id.insert(def_comp.clone(), new_id);
+      +                worklist.push_back(def_comp.clone());
+      +                let mut merged_from = BTreeSet::new();
+      +                if def_comp.0 != sink0 { merged_from.insert((0, def_comp.0)); }
+      +                for &s1 in &def_comp.1 { if s1 != sink1 { merged_from.insert((1, s1)); } }
+      +                mapping.insert(new_id, merged_from);
+      +                new_id
+      +            };
+       
+                   let mut tw_def = s0.and_then(|s| s.trans_weight_default.clone()).unwrap_or_else(Weight::zeros);
+      -            for &r in &ids1 {
+      -                if r != sink1 {
+      -                    tw_def |= &self_states[r].trans_weight_default.clone().unwrap_or_else(Weight::zeros);
+      -                }
+      -            }
+      -            self_states[new_id].trans_weight_default = Some(tw_def);
+      -
+      -            // Reset exceptions for this freshly built node
+      -            self_states[new_id].transitions.exceptions.clear();
+      -            self_states[new_id].trans_weights_exceptions.clear();
+      -
+      -            // Exception transitions
+      +            for s1 in &s1_infos {
+      +                tw_def |= &s1.trans_weight_default.clone().unwrap_or_else(Weight::zeros);
+      +            }
+      +
+      +            let mut new_exceptions = BTreeMap::new();
+      +            let mut new_trans_weights_exceptions = BTreeMap::new();
+      +
+                   for &ch in &critical {
+      -                let tgt0 = get_target(s0, sink0, ch);
+      -                let mut tgt1s: BTreeSet<StateID> = ids1
+      -                    .iter()
+      -                    .filter(|&&r| r != sink1)
+      -                    .map(|&r| get_target(Some(&self_states[r]), sink1, ch))
+      -                    .collect();
+      +                let tgt0 = s0.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink0);
+      +                let mut tgt1s: BTreeSet<StateID> =
+      +                    s1_infos.iter().map(|s1| s1.transitions.get(ch).copied().unwrap_or(sink1)).collect();
+                       tgt1s.remove(&sink1);
+      -                if let Some(joins) = join_map.get(&tgt0) {
+      -                    tgt1s.extend(joins);
+      -                }
+      +                if let Some(joins) = join_map.get(&tgt0) { tgt1s.extend(joins); }
+                       let exc_comp = (tgt0, tgt1s);
+                       if exc_comp != def_comp {
+      -                    let exc_tgt = get_or_create(exc_comp);
+      -                    self_states[new_id].transitions.exceptions.insert(ch, exc_tgt);
+      +                    let exc_tgt = if let Some(&id) = comp_to_new_id.get(&exc_comp) {
+      +                        id
+      +                    } else {
+      +                        let new_id = self_states.add_state();
+      +                        comp_to_new_id.insert(exc_comp.clone(), new_id);
+      +                        worklist.push_back(exc_comp.clone());
+      +                        let mut merged_from = BTreeSet::new();
+      +                        if exc_comp.0 != sink0 { merged_from.insert((0, exc_comp.0)); }
+      +                        for &s1 in &exc_comp.1 { if s1 != sink1 { merged_from.insert((1, s1)); } }
+      +                        mapping.insert(new_id, merged_from);
+      +                        new_id
+      +                    };
+      +                    new_exceptions.insert(ch, exc_tgt);
+       
+                           let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch).cloned()).unwrap_or_else(Weight::zeros);
+      -                    for &r in &ids1 {
+      -                        if r != sink1 {
+      -                            tw_exc |= &self_states[r].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
+      -                        }
+      -                    }
+      -                    self_states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
+      -                }
+      -            }
+      +                    for s1 in &s1_infos {
+      +                        tw_exc |= &s1.trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
+      +                    }
+      +                    new_trans_weights_exceptions.insert(ch, tw_exc);
+      +                }
+      +            }
+      +
+      +            let state = &mut self_states[new_id];
+      +            state.weight = agg_w;
+      +            state.final_weight = if agg_fw.is_empty() { None } else { Some(agg_fw) };
+      +            state.transitions.default = Some(def_tgt);
+      +            state.trans_weight_default = Some(tw_def);
+      +            state.transitions.exceptions = new_exceptions;
+      +            state.trans_weights_exceptions = new_trans_weights_exceptions;
+               }
+       
+               mapping
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/weighted_automata.rs
+      Applying patch to 'src/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/weighted_automata.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor DWA::union_components and DWA::concatenate_components
+      to resolve borrowing errors"'
     metadata:
 ...
