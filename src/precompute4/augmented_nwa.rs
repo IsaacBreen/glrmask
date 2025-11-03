@@ -215,9 +215,9 @@ impl AugmentedNwaBody {
     ) -> Result<(), AugmentedNwaBuildError> {
         crate::debug!(6, "--- combine_right_into_on_shared ---");
         crate::debug!(6, "--- WEIGHT: {} ---", weight);
-        crate::debug!(6, "States before combine:\n{}", states);
         crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
         crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
+        crate::debug!(6, "States before combine:\n{}", states);
 
         let now = Instant::now();
         let left_end_snapshot = left.end_map.clone();
@@ -287,8 +287,7 @@ impl AugmentedNwaBody {
         }
         left.end_map = new_end_map;
 
-        let result_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
-        crate::debug!(6, "RESULT AugmentedNWA:\n{}", result_nwa_debug);
+        crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
         crate::debug!(6, "--- end combine_right_into_on_shared ---");
 
         println!(
