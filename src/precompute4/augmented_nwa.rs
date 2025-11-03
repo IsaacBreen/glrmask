@@ -184,6 +184,12 @@ impl AugmentedNwaBody {
         right: &AugmentedNwaBody,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
+        crate::debug!(5, "--- combine_right_into_on_shared ---");
+        let left_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
+        crate::debug!(5, "LEFT AugmentedNWA:\n{}", left_nwa_debug);
+        let right_nwa_debug = AugmentedNwa { states: states.clone(), body: right.clone() };
+        crate::debug!(5, "RIGHT AugmentedNWA:\n{}", right_nwa_debug);
+
         let now = Instant::now();
         let left_end_snapshot = left.end_map.clone();
         let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
@@ -250,6 +256,11 @@ impl AugmentedNwaBody {
             }
         }
         left.end_map = new_end_map;
+
+        let result_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
+        crate::debug!(5, "RESULT AugmentedNWA:\n{}", result_nwa_debug);
+        crate::debug!(5, "--- end combine_right_into_on_shared ---");
+
         println!(
             "    combine_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
             now.elapsed(),
