@@ -468,7 +468,7 @@ struct EpsilonCache {
 impl EpsilonCache {
     fn new(states: &NWAStates) -> Self {
         let mut closures = Vec::with_capacity(states.len());
-        let has_epsilons = states.0.iter().any(|s| !s.epsilon_transitions.is_empty());
+        let has_epsilons = true;
         if !has_epsilons {
             for i in 0..states.len() {
                 let mut map = BTreeMap::new();
@@ -675,7 +675,7 @@ impl NWAStates {
             return merged_from;
         }
 
-        let has_epsilons = self.0.iter().any(|s| !s.epsilon_transitions.is_empty());
+        let has_epsilons = true;
         let eps_cache = if has_epsilons { Some(EpsilonCache::new(self)) } else { None };
         let epsilon_closure = |states| {
             if let Some(cache) = &eps_cache {
@@ -864,7 +864,7 @@ impl NWA {
             return DWA { states: dwa_states, body: dwa_body };
         }
 
-        let has_epsilons = states.0.iter().any(|s| !s.epsilon_transitions.is_empty());
+        let has_epsilons = true;
         let eps_cache = if has_epsilons { Some(EpsilonCache::new(states)) } else { None };
         let epsilon_closure = |s| {
             if let Some(cache) = &eps_cache {
