@@ -1948,18 +1948,18 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     ///
     /// This version uses pre-computed traversal data for efficiency.
     #[time_it]
-    pub fn special_map_grouped<V, S, I>(
+    pub fn special_map_grouped<V, U, S, I>(
         arena: &Arena<Trie<EK, EV, T>>,
         traversal_data: &TrieTraversalData,
         initial_nodes_and_values: Vec<(Trie2Index, V)>,
         mut step: S,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&Trie<EK, EV, T>, Trie2Index, &mut V) -> bool,
+        mut process: impl FnMut(&Trie<EK, EV, T>, Trie2Index, &mut V) -> Option<U>,
     )
     where
         V: Clone,
         S: FnMut(
-            &V, &EK, &OrderedHashMap<Trie2Index, EV>
+            &U, &EK, &OrderedHashMap<Trie2Index, EV>
         ) -> I,
         I: IntoIterator<Item = (Trie2Index, V)>,
     {
@@ -2030,15 +2030,18 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
 
                 let process_now = Instant::now();
-                let proceed = {
+                let processed_value = {
                     let guard = node_idx.read(arena).expect("poison");
                     process(&guard, node_idx, &mut agg_v)
                 };
                 process_duration += process_now.elapsed();
-                if !proceed {
-                    stopped_nodes.insert(u);
-                    continue;
-                }
+                let proceed_value = match processed_value {
+                    Some(val) => val,
+                    None => {
+                        stopped_nodes.insert(u);
+                        continue;
+                    }
+                };
 
                 // Propagate to children grouped by edge key.
                 let children_by_ek: Vec<(EK, OrderedHashMap<Trie2Index, EV>)> = {
@@ -2055,7 +2058,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     }
 
                     let step_now = Instant::now();
-                    let new_values_for_children = step(&agg_v, &ek, &dest_map);
+                    let new_values_for_children = step(&proceed_value, &ek, &dest_map);
                     step_duration += step_now.elapsed();
                     for (child_idx, new_v) in new_values_for_children {
                         let child_u = child_idx.as_usize();
