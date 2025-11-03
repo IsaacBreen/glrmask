@@ -1838,6 +1838,11 @@ local_system:
               right: &AugmentedNwaBody,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
+              crate::debug!(6, "--- combine_right_into_on_shared ---");
+              crate::debug!(6, "--- WEIGHT: {} ---", weight);
+              crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
+              crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
+
               let now = Instant::now();
               let left_end_snapshot = left.end_map.clone();
               let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
@@ -1872,6 +1877,7 @@ local_system:
 
                       let process_now = Instant::now();
                       let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+                      crate::debug!(6, "  Combining left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
                       stops_count += stops.len();
                       total_process_stack_time += process_now.elapsed();
 
@@ -1904,6 +1910,11 @@ local_system:
                   }
               }
               left.end_map = new_end_map;
+
+              let result_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
+              crate::debug!(5, "RESULT AugmentedNWA:\n{}", result_nwa_debug);
+              crate::debug!(5, "--- end combine_right_into_on_shared ---");
+
               println!(
                   "    combine_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
                   now.elapsed(),
@@ -4485,6 +4496,29 @@ local_system:
           pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
       }
 
+      impl Display for AugmentedNwaBody {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "  Starts: {:?}", self.nwa.start_states)?;
+              if !self.nt_nodes.is_empty() {
+                  writeln!(f, "  Nonterminal Nodes:")?;
+                  for (nt, state) in &self.nt_nodes {
+                      writeln!(f, "    - NT {}: State {}", nt.0, state)?;
+                  }
+              }
+              if !self.end_map.is_empty() {
+                  writeln!(f, "  End Map:")?;
+                  for (state, stacks) in &self.end_map {
+                      writeln!(f, "    - State {}:", state)?;
+                      for stack in stacks {
+                          let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
+                          writeln!(f, "      - [{}]", stack_str.join(", "))?;
+                      }
+                  }
+              }
+              Ok(())
+          }
+      }
+
       #[derive(Debug, Clone, PartialEq, Eq)]
       pub struct AugmentedNwa {
           pub states: WaNWAStates,
@@ -4645,11 +4679,11 @@ local_system:
               right: &AugmentedNwaBody,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
-              crate::debug!(5, "--- combine_right_into_on_shared ---");
+              crate::debug!(6, "--- combine_right_into_on_shared ---");
+              crate::debug!(6, "--- WEIGHT: {} ---", weight);
               let left_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
-              crate::debug!(5, "LEFT AugmentedNWA:\n{}", left_nwa_debug);
-              let right_nwa_debug = AugmentedNwa { states: states.clone(), body: right.clone() };
-              crate::debug!(5, "RIGHT AugmentedNWA:\n{}", right_nwa_debug);
+              crate::debug!(6, "LEFT AugmentedNWA:\n{}", left_nwa_debug);
+              crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
 
               let now = Instant::now();
               let left_end_snapshot = left.end_map.clone();
@@ -4685,6 +4719,7 @@ local_system:
 
                       let process_now = Instant::now();
                       let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+                      crate::debug!(6, "  Combining left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
                       stops_count += stops.len();
                       total_process_stack_time += process_now.elapsed();
 
@@ -4814,21 +4849,8 @@ local_system:
       impl Display for AugmentedNwa {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
               writeln!(f, "Augmented NWA")?;
-              writeln!(f, "  Nonterminal Nodes:")?;
-              for (nt, state) in &self.body.nt_nodes {
-                  writeln!(f, "    - NT {}: State {}", nt.0, state)?;
-              }
-              if !self.body.end_map.is_empty() {
-                  writeln!(f, "  End Map:")?;
-                  for (state, stacks) in &self.body.end_map {
-                      writeln!(f, "    - State {}:", state)?;
-                      for stack in stacks {
-                          let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
-                          writeln!(f, "      - [{}]", stack_str.join(", "))?;
-                      }
-                  }
-              }
-              writeln!(f, "  Underlying NWA (starts: {:?}):", self.body.nwa.start_states)?;
+              write!(f, "{}", self.body)?;
+              writeln!(f, "  Underlying NWA states:")?;
               for (id, state) in self.states.0.iter().enumerate() {
                   writeln!(f, "    State {}:", id)?;
                   if let Some(w) = &state.final_weight {
@@ -7510,6 +7532,11 @@ messages:
               right: &AugmentedNwaBody,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
+              crate::debug!(6, "--- combine_right_into_on_shared ---");
+              crate::debug!(6, "--- WEIGHT: {} ---", weight);
+              crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
+              crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
+
               let now = Instant::now();
               let left_end_snapshot = left.end_map.clone();
               let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
@@ -7544,6 +7571,7 @@ messages:
 
                       let process_now = Instant::now();
                       let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+                      crate::debug!(6, "  Combining left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
                       stops_count += stops.len();
                       total_process_stack_time += process_now.elapsed();
 
@@ -7576,6 +7604,11 @@ messages:
                   }
               }
               left.end_map = new_end_map;
+
+              let result_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
+              crate::debug!(5, "RESULT AugmentedNWA:\n{}", result_nwa_debug);
+              crate::debug!(5, "--- end combine_right_into_on_shared ---");
+
               println!(
                   "    combine_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
                   now.elapsed(),
@@ -8511,8 +8544,7 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: In `combine_right_into_on_shared`, at debug level 5, pretty print the left
-      and right NWAs and the resulting NWA.
+  - user: Implement Display for AugmentedNwaBody
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8532,68 +8564,84 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the requested debugging output, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to implement the `Display` trait for `AugmentedNwaBody` and refactor the `Display` implementation for `AugmentedNwa`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I will add logging to `combine_right_into_on_shared` to print the left, right, and resulting `AugmentedNwa` instances at debug level 5.
+      #### 1. File: `src/precompute4/augmented_nwa.rs`
 
-      1.  **Open the file `src/precompute4/augmented_nwa.rs`**.
+      1.  **Implement `Display` for `AugmentedNwaBody`**:
+          *   Open the file `src/precompute4/augmented_nwa.rs`.
+          *   After the definition of the `AugmentedNwaBody` struct (around line 25), add a new `impl Display for AugmentedNwaBody` block.
+          *   This implementation will format and print the `start_states` from the `nwa` field, the `nt_nodes`, and the `end_map`. This will be useful for debugging.
 
-      2.  **Navigate to the `combine_right_into_on_shared` function.**
+      2.  **Refactor `Display` for `AugmentedNwa`**:
+          *   In the same file, locate the existing `impl Display for AugmentedNwa` (around line 361).
+          *   Modify this implementation to delegate the formatting of the body to the new `Display` implementation of `AugmentedNwaBody`.
+          *   The updated implementation will first print "Augmented NWA", then print the formatted `body`, and finally print the "Underlying NWA states:" followed by the detailed state information. This removes duplicated formatting logic.
 
-      3.  **Add pre-combination logging:** Immediately after the function signature, insert the following code to print the `left` and `right` NWAs before they are combined:
+      ### Git Diffs
 
-          ```rust
-          crate::debug!(5, "--- combine_right_into_on_shared ---");
-          let left_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
-          crate::debug!(5, "LEFT AugmentedNWA:\n{}", left_nwa_debug);
-          let right_nwa_debug = AugmentedNwa { states: states.clone(), body: right.clone() };
-          crate::debug!(5, "RIGHT AugmentedNWA:\n{}", right_nwa_debug);
-          ```
-
-      4.  **Add post-combination logging:** Find the line `left.end_map = new_end_map;`. Just after this line and before the `println!` call, insert the following code to print the resulting NWA:
-
-          ```rust
-          let result_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
-          crate::debug!(5, "RESULT AugmentedNWA:\n{}", result_nwa_debug);
-          crate::debug!(5, "--- end combine_right_into_on_shared ---");
-          ```
-
-      These changes will provide detailed snapshots of the automata during the combination process when your application is run with a debug level of 5 or higher.
-
-      ### Git Diff
-
-      Here is the git diff for the changes described above.
+      Here is the git diff for the changes:
 
       ```diff
+      diff --git a/src/precompute4/augmented_nwa.rs b/src/precompute4/augmented_nwa.rs
       --- a/src/precompute4/augmented_nwa.rs
       +++ b/src/precompute4/augmented_nwa.rs
-      @@ -165,6 +165,13 @@
-               right: &AugmentedNwaBody,
-               weight: &WaWeight,
-           ) -> Result<(), AugmentedNwaBuildError> {
-      +        crate::debug!(5, "--- combine_right_into_on_shared ---");
-      +        let left_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
-      +        crate::debug!(5, "LEFT AugmentedNWA:\n{}", left_nwa_debug);
-      +        let right_nwa_debug = AugmentedNwa { states: states.clone(), body: right.clone() };
-      +        crate::debug!(5, "RIGHT AugmentedNWA:\n{}", right_nwa_debug);
+      @@ -21,6 +21,29 @@
+           pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
+       }
+       
+      +impl Display for AugmentedNwaBody {
+      +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+      +        writeln!(f, "  Starts: {:?}", self.nwa.start_states)?;
+      +        if !self.nt_nodes.is_empty() {
+      +            writeln!(f, "  Nonterminal Nodes:")?;
+      +            for (nt, state) in &self.nt_nodes {
+      +                writeln!(f, "    - NT {}: State {}", nt.0, state)?;
+      +            }
+      +        }
+      +        if !self.end_map.is_empty() {
+      +            writeln!(f, "  End Map:")?;
+      +            for (state, stacks) in &self.end_map {
+      +                writeln!(f, "    - State {}:", state)?;
+      +                for stack in stacks {
+      +                    let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
+      +                    writeln!(f, "      - [{}]", stack_str.join(", "))?;
+      +                }
+      +            }
+      +        }
+      +        Ok(())
+      +    }
+      +}
       +
-               let now = Instant::now();
-               let left_end_snapshot = left.end_map.clone();
-               let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-      @@ -229,6 +236,11 @@
-                   }
-               }
-               left.end_map = new_end_map;
-      +
-      +        let result_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
-      +        crate::debug!(5, "RESULT AugmentedNWA:\n{}", result_nwa_debug);
-      +        crate::debug!(5, "--- end combine_right_into_on_shared ---");
-      +
-               println!(
-                   "    combine_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
-                   now.elapsed(),
+       #[derive(Debug, Clone, PartialEq, Eq)]
+       pub struct AugmentedNwa {
+           pub states: WaNWAStates,
+      @@ -361,24 +384,8 @@
+       impl Display for AugmentedNwa {
+           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+               writeln!(f, "Augmented NWA")?;
+      -        writeln!(f, "  Nonterminal Nodes:")?;
+      -        for (nt, state) in &self.body.nt_nodes {
+      -            writeln!(f, "    - NT {}: State {}", nt.0, state)?;
+      -        }
+      -        if !self.body.end_map.is_empty() {
+      -            writeln!(f, "  End Map:")?;
+      -            for (state, stacks) in &self.body.end_map {
+      -                writeln!(f, "    - State {}:", state)?;
+      -                for stack in stacks {
+      -                    let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
+      -                    writeln!(f, "      - [{}]", stack_str.join(", "))?;
+      -                }
+      -            }
+      -        }
+      -        writeln!(f, "  Underlying NWA (starts: {:?}):", self.body.nwa.start_states)?;
+      +        write!(f, "{}", self.body)?;
+      +        writeln!(f, "  Underlying NWA states:")?;
+               for (id, state) in self.states.0.iter().enumerate() {
+                   writeln!(f, "    State {}:", id)?;
+                   if let Some(w) = &state.final_weight {
 
       ```
     metadata:
@@ -8606,7 +8654,7 @@ messages:
       Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
     metadata:
-  - user: 'Changes committed with message: "Add debug logging for left, right, and
-      resulting NWAs in combine_right_into_on_shared"'
+  - user: 'Changes committed with message: "Implement Display for AugmentedNwaBody
+      and refactor AugmentedNwa::fmt"'
     metadata:
 ...

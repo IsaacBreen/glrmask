@@ -24,6 +24,29 @@ pub struct AugmentedNwaBody {
     pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
 }
 
+impl Display for AugmentedNwaBody {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "  Starts: {:?}", self.nwa.start_states)?;
+        if !self.nt_nodes.is_empty() {
+            writeln!(f, "  Nonterminal Nodes:")?;
+            for (nt, state) in &self.nt_nodes {
+                writeln!(f, "    - NT {}: State {}", nt.0, state)?;
+            }
+        }
+        if !self.end_map.is_empty() {
+            writeln!(f, "  End Map:")?;
+            for (state, stacks) in &self.end_map {
+                writeln!(f, "    - State {}:", state)?;
+                for stack in stacks {
+                    let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
+                    writeln!(f, "      - [{}]", stack_str.join(", "))?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AugmentedNwa {
     pub states: WaNWAStates,
@@ -188,8 +211,7 @@ impl AugmentedNwaBody {
         crate::debug!(6, "--- WEIGHT: {} ---", weight);
         let left_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
         crate::debug!(6, "LEFT AugmentedNWA:\n{}", left_nwa_debug);
-        let right_nwa_debug = AugmentedNwa { states: states.clone(), body: right.clone() };
-        crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right_nwa_debug);
+        crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
 
         let now = Instant::now();
         let left_end_snapshot = left.end_map.clone();
@@ -355,21 +377,8 @@ impl AugmentedNwa {
 impl Display for AugmentedNwa {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Augmented NWA")?;
-        writeln!(f, "  Nonterminal Nodes:")?;
-        for (nt, state) in &self.body.nt_nodes {
-            writeln!(f, "    - NT {}: State {}", nt.0, state)?;
-        }
-        if !self.body.end_map.is_empty() {
-            writeln!(f, "  End Map:")?;
-            for (state, stacks) in &self.body.end_map {
-                writeln!(f, "    - State {}:", state)?;
-                for stack in stacks {
-                    let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
-                    writeln!(f, "      - [{}]", stack_str.join(", "))?;
-                }
-            }
-        }
-        writeln!(f, "  Underlying NWA (starts: {:?}):", self.body.nwa.start_states)?;
+        write!(f, "{}", self.body)?;
+        writeln!(f, "  Underlying NWA states:")?;
         for (id, state) in self.states.0.iter().enumerate() {
             writeln!(f, "    State {}:", id)?;
             if let Some(w) = &state.final_weight {
