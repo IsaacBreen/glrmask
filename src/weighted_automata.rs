@@ -949,6 +949,40 @@ impl NWA {
         result
     }
 
+    /// Concatenate two NWAs.
+    ///
+    /// Creates a new NWA that accepts the language L(self)L(other).
+    /// It works by taking all final states of `self`, removing their final weight,
+    /// and adding epsilon transitions from them to the start states of `other`,
+    /// using the removed final weight as the transition weight.
+    /// The start states of the new NWA are the start states of `self`.
+    /// The final states of the new NWA are the final states of `other`.
+    pub fn concatenate(&self, other: &NWA) -> NWA {
+        if self.states.is_empty() {
+            return other.clone();
+        }
+        if other.states.is_empty() {
+            return self.clone();
+        }
+
+        let mut new_states = self.states.clone();
+        let self_len = self.states.len();
+        let mapping = new_states.append_copy_from(&other.states);
+
+        // For each state in the original `self` part that was final,
+        // add epsilon transitions to the start states of `other`.
+        for i in 0..self_len {
+            if let Some(fw) = new_states[i].final_weight.take() { // take() removes it
+                if fw.is_empty() { continue; }
+                for &other_start in &other.body.start_states {
+                    new_states.add_epsilon_transition(i, mapping[other_start], fw.clone());
+                }
+            }
+        }
+
+        NWA { states: new_states, body: self.body.clone() }
+    }
+
     pub fn process_stack_u16(&self, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
         self.states.process_stack_u16_from_starts(&self.body.start_states, input)
     }
@@ -1247,7 +1281,7 @@ impl DWA {
             let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
             for &id1 in &ids1 {
                 if id1 != sink1 {
-                    tw_def |= other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                    tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
                 }
             }
             new_dwa.states[new_id].trans_weight_default = Some(tw_def);
@@ -1273,7 +1307,7 @@ impl DWA {
                     let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
                     for &id1 in &ids1 {
                         if id1 != sink1 {
-                            tw_exc |= other.states[id1].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
+                            tw_exc |= &other.states[id1].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
                         }
                     }
                     new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
@@ -2165,5 +2199,61 @@ mod tests {
 
         let res = dwa.set_final_weight(10, SimpleBitset::zeros());
         assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
+    }
+
+    #[test]
+    fn test_nwa_concatenate() {
+        // NWA1: accepts "a" with weight {1, 10}, final state s1
+        let mut nwa1 = NWA::new();
+        let s1 = nwa1.add_state();
+        nwa1.add_transition(0, b'a' as u16, s1, SimpleBitset::all());
+        nwa1.set_final_weight(s1, SimpleBitset::from_iter(vec![1, 10]));
+
+        // NWA2: accepts "b" with weight {2, 10}, final state s3
+        let mut nwa2 = NWA::new();
+        let s3 = nwa2.add_state();
+        nwa2.add_transition(0, b'b' as u16, s3, SimpleBitset::all());
+        nwa2.set_final_weight(s3, SimpleBitset::from_iter(vec![2, 10]));
+
+        let nwa_concat = nwa1.concatenate(&nwa2);
+
+        // Expected: "ab"
+        // s0 --a/all--> s1 --eps/{1,10}--> s2 --b/all--> s3
+        // s0 is start of nwa1 (state 0)
+        // s1 is state 1
+        // s2 is start of nwa2 (state 2, since nwa1 has 2 states)
+        // s3 is state 3
+        // final state is s3 with weight {2, 10}
+
+        assert_eq!(nwa_concat.states.len(), 4);
+        assert_eq!(nwa_concat.body.start_states, BTreeSet::from([0]));
+
+        // Check transitions from nwa1 part
+        assert_eq!(nwa_concat.states[0].transitions.get(b'a' as u16).unwrap(), &vec![(1, SimpleBitset::all())]);
+        assert!(nwa_concat.states[0].final_weight.is_none());
+        assert!(nwa_concat.states[1].final_weight.is_none()); // final weight moved to epsilon transition
+
+        // Check epsilon transition
+        assert_eq!(nwa_concat.states[1].epsilon_transitions, vec![(2, SimpleBitset::from_iter(vec![1, 10]))]);
+
+        // Check transitions from nwa2 part
+        assert_eq!(nwa_concat.states[2].transitions.get(b'b' as u16).unwrap(), &vec![(3, SimpleBitset::all())]);
+        assert!(nwa_concat.states[2].final_weight.is_none());
+        assert_eq!(nwa_concat.states[3].final_weight, Some(SimpleBitset::from_iter(vec![2, 10])));
+
+        // Test processing
+        let input: Vec<u16> = vec![b'a' as u16, b'b' as u16];
+        let results = nwa_concat.process_stack_u16(&input);
+        // We should end at state 3.
+        let final_results: Vec<_> = results.into_iter().filter(|(pos, sid, _w)| *pos == 2 && nwa_concat.states[*sid].final_weight.is_some()).collect();
+        assert_eq!(final_results.len(), 1);
+        let (_pos, sid, path_w) = &final_results[0];
+        assert_eq!(*sid, 3);
+        let final_w = nwa_concat.states[*sid].final_weight.as_ref().unwrap();
+        let total_w = path_w & final_w;
+        // path_w = all & {1, 10} & all = {1, 10}
+        // final_w = {2, 10}
+        // total_w = {1, 10} & {2, 10} = {10}
+        assert_eq!(total_w, SimpleBitset::from_item(10));
     }
 }
