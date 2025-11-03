@@ -545,6 +545,216 @@ impl NWAStates {
         }
         closure
     }
+
+    /// Create a depth-limited, DWA-like deterministic front-end inside the NWA itself.
+    ///
+    /// For the given `body` (other NWABody may reference these states; we do not modify them),
+    /// we append new NWA states that represent weighted subset-compositions of original states,
+    /// but only up to `level` input steps. Epsilon transitions are absorbed (no eps in new states).
+    ///
+    /// Properties:
+    /// - For any input of length ≤ level, processing visits at most one new state per symbol
+    ///   (i.e., no more than `level` transitions), akin to a DWA.
+    /// - For longer inputs, transitions from the depth-`level` frontier route back to the
+    ///   original NWA states (no further merging), so normal NWA processing continues.
+    /// - We never overwrite existing states. New states are appended and only `body.start_states`
+    ///   is changed to the new merged start state.
+    /// - We minimize the number of new states by canonicalizing compositions
+    ///   as Vec<(StateID, Weight)> and memoizing them globally across the whole depth-limited
+    ///   construction. This is optimal for exact semantics under our Boolean-algebra weights.
+    ///
+    /// Returns: map from each new merged state ID to the set of original state IDs merged into it.
+    pub fn simplify_to_level(&mut self, body: &mut NWABody, level: usize) -> BTreeMap<StateID, BTreeSet<StateID>> {
+        let mut merged_from: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
+        if level == 0 || self.0.is_empty() || body.start_states.is_empty() {
+            return merged_from;
+        }
+
+        let has_epsilons = self.0.iter().any(|s| !s.epsilon_transitions.is_empty());
+
+        // Canonicalize a composition map into a sorted vector, dropping empty weights.
+        let to_key = |comp: BTreeMap<StateID, Weight>| -> Vec<(StateID, Weight)> {
+            comp.into_iter().filter(|(_, w)| !w.is_empty()).collect()
+        };
+
+        // Global memo for compositions -> new state ID, and BFS worklist.
+        let mut comp2id: HashMap<Vec<(StateID, Weight)>, StateID> = HashMap::new();
+        let mut depth_of: HashMap<StateID, usize> = HashMap::new();
+        let mut work: VecDeque<(Vec<(StateID, Weight)>, StateID, usize)> = VecDeque::new();
+
+        // get_or_create for merged states
+        let mut get_or_create = |comp_key: Vec<(StateID, Weight)>, depth: usize| -> StateID {
+            if let Some(&id) = comp2id.get(&comp_key) {
+                return id;
+            }
+            let id = self.add_state();
+            // Aggregate final weight: ⋃_{s} (w_s ∧ final_w(s))
+            let mut agg_final = Weight::zeros();
+            let mut is_final = false;
+            for (sid, path_w) in &comp_key {
+                if let Some(fw) = &self[*sid].final_weight {
+                    let v = path_w & fw;
+                    if !v.is_empty() {
+                        is_final = true;
+                        agg_final |= &v;
+                    }
+                }
+            }
+            // Initialize the new state (no epsilons; transitions filled later).
+            self[id].epsilon_transitions.clear();
+            self[id].transitions = U16Map::new();
+            self[id].final_weight = if is_final { Some(agg_final) } else { None };
+
+            // Track provenance (states merged)
+            let mut set = BTreeSet::new();
+            for (sid, _) in &comp_key {
+                set.insert(*sid);
+            }
+            merged_from.insert(id, set);
+
+            comp2id.insert(comp_key.clone(), id);
+            depth_of.insert(id, depth);
+            work.push_back((comp_key, id, depth));
+            id
+        };
+
+        // Start composition: starts with ALL weight and epsilon-closure.
+        let mut start_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
+        for &start_state in &body.start_states {
+            start_raw.insert(start_state, Weight::all());
+        }
+        let start_map = self.epsilon_closure_with_flag(start_raw, has_epsilons, 0);
+        let start_key = to_key(start_map);
+        if start_key.is_empty() {
+            // No reachable start under epsilon-closure; leave body unchanged.
+            return merged_from;
+        }
+        let new_start_id = get_or_create(start_key, 0);
+
+        // Process merged states breadth-first up to given level.
+        while let Some((comp, agg_id, depth)) = work.pop_front() {
+            // Collect exception alphabet for this composition
+            let mut critical_points: BTreeSet<u16> = BTreeSet::new();
+            for (nwa_id, _) in &comp {
+                for (&ch, _) in self[*nwa_id].transitions.exceptions.iter() {
+                    critical_points.insert(ch);
+                }
+            }
+
+            // Default transition (using only defaults from components)
+            let mut def_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
+            let mut def_agg_weight = Weight::zeros();
+            for (nwa_id, path_w) in &comp {
+                if let Some(def) = self[*nwa_id].transitions.get_default() {
+                    for (to, trans_w) in def {
+                        let w = path_w & trans_w;
+                        if !w.is_empty() {
+                            def_next_raw.entry(*to).or_insert_with(Weight::zeros).bitor_assign(&w);
+                            def_agg_weight |= &w;
+                        }
+                    }
+                }
+            }
+
+            // Prepare default target for assignment and exception-comparison.
+            let mut default_target_id: Option<StateID> = None;
+            let mut default_vec_bottom: Option<Vec<(StateID, Weight)>> = None;
+            if depth < level {
+                let def_closure = self.epsilon_closure_with_flag(def_next_raw, has_epsilons, 0);
+                let def_key = to_key(def_closure);
+                if !def_key.is_empty() {
+                    let tid = get_or_create(def_key, depth + 1);
+                    default_target_id = Some(tid);
+                }
+            } else {
+                if !def_next_raw.is_empty() {
+                    let mut vec: Vec<(StateID, Weight)> = def_next_raw.into_iter().collect();
+                    vec.sort_by_key(|(to, _)| *to);
+                    default_vec_bottom = Some(vec);
+                }
+            }
+
+            // Build the transitions for this merged state.
+            let mut new_transitions: U16Map<Vec<(StateID, Weight)>> = U16Map::new();
+            if depth < level {
+                if let Some(tid) = default_target_id {
+                    if !def_agg_weight.is_empty() {
+                        new_transitions.default = Some(vec![(tid, def_agg_weight.clone())]);
+                    }
+                }
+            } else {
+                if let Some(v) = default_vec_bottom.clone() {
+                    new_transitions.default = Some(v);
+                }
+            }
+
+            // Exception transitions for critical points
+            for ch in critical_points {
+                let mut exc_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
+                let mut exc_agg_weight = Weight::zeros();
+                for (nwa_id, path_w) in &comp {
+                    if let Some(transitions) = self[*nwa_id].transitions.get(ch) {
+                        for (to, trans_w) in transitions {
+                            let w = path_w & trans_w;
+                            if !w.is_empty() {
+                                exc_next_raw.entry(*to).or_insert_with(Weight::zeros).bitor_assign(&w);
+                                exc_agg_weight |= &w;
+                            }
+                        }
+                    }
+                }
+                if exc_next_raw.is_empty() {
+                    continue;
+                }
+
+                if depth < level {
+                    let exc_closure = self.epsilon_closure_with_flag(exc_next_raw, has_epsilons, 0);
+                    let exc_key = to_key(exc_closure);
+                    if exc_key.is_empty() {
+                        continue;
+                    }
+                    let tid = get_or_create(exc_key, depth + 1);
+                    let exc_vec = vec![(tid, exc_agg_weight.clone())];
+
+                    // Deduplicate vs default if identical (target and weight are equal).
+                    let same_as_default = if let Some(def_tid) = default_target_id {
+                        if let Some(def_vec) = &new_transitions.default {
+                            def_tid == tid && def_vec[0].1 == exc_agg_weight
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !same_as_default {
+                        new_transitions.exceptions.insert(ch, exc_vec);
+                    }
+                } else {
+                    let mut vec: Vec<(StateID, Weight)> = exc_next_raw.into_iter().collect();
+                    vec.sort_by_key(|(to, _)| *to);
+
+                    let same_as_default = match &default_vec_bottom {
+                        Some(d) => d == &vec,
+                        None => false,
+                    };
+                    if !same_as_default {
+                        new_transitions.exceptions.insert(ch, vec);
+                    }
+                }
+            }
+
+            // Assign the computed transitions to the merged state; ensure no epsilons.
+            {
+                let st = &mut self[agg_id];
+                st.transitions = new_transitions;
+                st.epsilon_transitions.clear();
+            }
+        }
+
+        // Rewire this body's starts to the new merged start. Other bodies remain untouched.
+        body.start_states = BTreeSet::from([new_start_id]);
+        merged_from
+    }
 }
 
 impl NWA {
