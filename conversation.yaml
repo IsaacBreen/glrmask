@@ -3678,10 +3678,16 @@ local_system:
           pub start_state: StateID,
       }
 
-      #[derive(Clone, Debug, Default)]
+      #[derive(Clone, Debug)]
       pub struct DWA {
           pub states: DWAStates,
           pub body: DWABody,
+      }
+
+      impl Default for DWA {
+          fn default() -> Self {
+              Self::new()
+          }
       }
 
       impl DWAState {
@@ -4332,6 +4338,162 @@ local_system:
                           let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
                           let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
                           new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc0 | tw_exc1);
+                      }
+                  }
+              }
+
+              (new_dwa, mapping)
+          }
+
+          /// Join two DWAs. This is a flexible concatenation-like operation.
+          /// The `join_map` specifies which states in `self` (the left DWA) are "join points".
+          /// When a join point `s_left` is entered, it's as if we also simultaneously enter
+          /// all states from `other` (the right DWA) associated with `s_left` in the `join_map`.
+          ///
+          /// This is implemented via a product-like construction where states in the new DWA
+          /// are compositions of a state from `self` and a set of states from `other`.
+          ///
+          /// Returns the new DWA and a map from new state IDs to the set of original automaton states.
+          /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
+          pub fn join(
+              &self,
+              other: &DWA,
+              join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
+          ) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+              let mut new_dwa = DWA::new();
+              new_dwa.states.0.clear(); // start with no states
+
+              let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
+              let mut composition_to_new_id: BTreeMap<(StateID, BTreeSet<StateID>), StateID> = BTreeMap::new();
+              let mut worklist: VecDeque<(StateID, BTreeSet<StateID>)> = VecDeque::new();
+
+              let sink0 = self.states.len();
+              let sink1 = other.states.len();
+
+              let mut get_or_create = |comp: (StateID, BTreeSet<StateID>),
+                                       new_dwa: &mut DWA,
+                                       comp_to_new_id: &mut BTreeMap<(StateID, BTreeSet<StateID>), StateID>,
+                                       worklist: &mut VecDeque<(StateID, BTreeSet<StateID>)>,
+                                       mapping: &mut BTreeMap<StateID, BTreeSet<(usize, StateID)>>|
+               -> StateID {
+                  if let Some(&id) = comp_to_new_id.get(&comp) {
+                      return id;
+                  }
+                  let new_id = new_dwa.states.0.len();
+                  new_dwa.states.0.push(DWAState::default());
+                  comp_to_new_id.insert(comp.clone(), new_id);
+                  worklist.push_back(comp.clone());
+
+                  let mut merged_from = BTreeSet::new();
+                  if comp.0 != sink0 {
+                      merged_from.insert((0, comp.0));
+                  }
+                  for &s1 in &comp.1 {
+                      if s1 != sink1 {
+                          merged_from.insert((1, s1));
+                      }
+                  }
+                  mapping.insert(new_id, merged_from);
+
+                  new_id
+              };
+
+              if self.states.is_empty() {
+                  return (DWA::new(), BTreeMap::new());
+              }
+
+              let start0 = self.body.start_state;
+              let start1_set = join_map.get(&start0).cloned().unwrap_or_default();
+              let start_comp = (start0, start1_set);
+              new_dwa.body.start_state =
+                  get_or_create(start_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist, &mut mapping);
+
+              while let Some((id0, ids1)) = worklist.pop_front() {
+                  let new_id = *composition_to_new_id.get(&(id0, ids1.clone())).unwrap();
+                  let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
+
+                  let new_state = &mut new_dwa.states[new_id];
+
+                  // Aggregate weights
+                  let mut agg_weight = s0.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
+                  let mut agg_final_weight = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                  for &id1 in &ids1 {
+                      if id1 != sink1 {
+                          let s1 = &other.states[id1];
+                          agg_weight |= &s1.weight;
+                          if let Some(fw) = &s1.final_weight {
+                              agg_final_weight |= fw;
+                          }
+                      }
+                  }
+                  new_state.weight = agg_weight;
+                  if !agg_final_weight.is_empty() {
+                      new_state.final_weight = Some(agg_final_weight);
+                  }
+
+                  // Collect critical points
+                  let mut critical_points = BTreeSet::new();
+                  if let Some(s) = s0 {
+                      critical_points.extend(s.transitions.exceptions.keys());
+                  }
+                  for &id1 in &ids1 {
+                      if id1 != sink1 {
+                          critical_points.extend(other.states[id1].transitions.exceptions.keys());
+                      }
+                  }
+
+                  let get_target = |s: Option<&DWAState>, sink: StateID, ch: u16| -> StateID {
+                      s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
+                  };
+
+                  // Default transition
+                  let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
+                  let mut def_tgts1: BTreeSet<StateID> =
+                      ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| other.states[id1].transitions.default.unwrap_or(sink1)).collect();
+                  def_tgts1.remove(&sink1);
+
+                  if let Some(joins) = join_map.get(&def_tgt0) {
+                      def_tgts1.extend(joins);
+                  }
+
+                  let def_comp = (def_tgt0, def_tgts1);
+                  let new_def_tgt =
+                      get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist, &mut mapping);
+                  new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+
+                  let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                  for &id1 in &ids1 {
+                      if id1 != sink1 {
+                          tw_def |= other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                      }
+                  }
+                  new_dwa.states[new_id].trans_weight_default = Some(tw_def);
+
+                  // Exception transitions
+                  for &ch in &critical_points {
+                      let tgt0 = get_target(s0, sink0, ch);
+                      let mut tgts1: BTreeSet<StateID> =
+                          ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| get_target(Some(&other.states[id1]), sink1, ch)).collect();
+                      tgts1.remove(&sink1);
+
+                      if let Some(joins) = join_map.get(&tgt0) {
+                          tgts1.extend(joins);
+                      }
+
+                      let exc_comp = (tgt0, tgts1);
+
+                      if exc_comp != def_comp {
+                          let new_exc_tgt =
+                              get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist, &mut mapping);
+                          new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
+
+                          let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+                          for &id1 in &ids1 {
+                              if id1 != sink1 {
+                                  tw_exc |= other.states[id1].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
+                              }
+                          }
+                          new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
                       }
                   }
               }
@@ -9694,10 +9856,17 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: Instead of building an augmented NWA, build an augmented DWA straight from
-      characterisation. Keep the augmented NWA code for now, but hollow out `build_augmented_nwa_from_characterization`
-      and inside use `build_augmented_dwa_from_characterization` followed by a conversion
-      from DWA to NWA.
+  - user: Add code for concatenating two DWA. But not just a naive concatenation,
+      a more flexible one. Take a map from left state to a set of right states. These
+      become the join points. It's equivalent to drawing an epsilon transition between
+      each left state and its associated right states (but of course there are no
+      epsilon transitions in our DWA). Retain the design philosophy of the rest of
+      the code which is to separate the states vec from the body, and try to only
+      modify the states in a way that respects other potential heads that may be referring
+      to the same states (and don't want to be disturbed by our modifications). (e.g.
+      Create new states where needed instead of modifying existing ones, in general.)
+      It should return a map from each newly created state to a set of states that
+      it was merged from.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9717,357 +9886,208 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to refactor the augmented automaton construction to build a DWA directly from the characterization, and then convert it to an NWA for use in the rest of the system.
+      Of course. Here are the step-by-step instructions for the requested changes, followed by the git diffs.
 
       ### Step-by-step Instructions
 
-      #### File: `src/precompute4/augmented_nwa.rs`
-
-      1.  **Update Imports**: Add necessary imports for DWA components, `HashMap`, `VecDeque`, and `Instant` at the top of the file.
-
-          Modify the existing `use crate::weighted_automata` line to:
-          ```rust
-          use crate::weighted_automata::{
-              DWA, DWABody, DWAStates, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID,
-              Weight as WaWeight,
-          };
-          ```
-          And add these new `use` statements:
-          ```rust
-          use std::collections::{HashMap, VecDeque};
-          ```
-
-      2.  **Define `AugmentedDwa`**: After the `AugmentedNwa` struct definition, add new structs to represent an augmented DWA. `AugmentedDwaBody` will hold the DWA-specific body, including a map from DWA state IDs to the set of non-terminals they represent.
-
-          ```rust
-          #[derive(Debug, Clone, PartialEq, Eq)]
-          pub struct AugmentedDwaBody {
-              pub dwa: DWABody,
-              pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
-              pub nt_map: BTreeMap<WaStateID, BTreeSet<NonTerminalID>>,
-          }
-          
-          #[derive(Debug, Clone, PartialEq, Eq)]
-          pub struct AugmentedDwa {
-              pub states: DWAStates,
-              pub body: AugmentedDwaBody,
-          }
-          ```
-
-      3.  **Implement `to_augmented_nwa` for `AugmentedDwa`**: Add an implementation block for `AugmentedDwa` with a method to convert it back to an `AugmentedNwa`. The resulting `AugmentedNwa` will have an empty `nt_nodes` map, as the non-terminal-specific transitions are now part of the main automaton states.
-
-          ```rust
-          impl AugmentedDwa {
-              pub fn to_augmented_nwa(&self) -> AugmentedNwa {
-                  let nwa_dwa = DWA { states: self.states.clone(), body: self.body.dwa.clone() };
-                  let nwa = nwa_dwa.to_nwa();
-                  AugmentedNwa {
-                      states: nwa.states,
-                      body: AugmentedNwaBody {
-                          nwa: nwa.body,
-                          nt_nodes: BTreeMap::new(),
-                          end_map: self.body.end_map.clone(),
-                      },
-                  }
-              }
-          }
-          ```
-
-      4.  **Rename `build_augmented_nwa_from_characterization`**: Change the name of the existing function to `build_augmented_nwa_from_characterization_direct` to preserve the original NWA construction logic.
-
-          ```diff
-          - pub fn build_augmented_nwa_from_characterization(
-          + pub fn build_augmented_nwa_from_characterization_direct(
-          ```
-
-      5.  **Implement `determinize_augmented`**: In the `impl AugmentedNwa` block, add a new method `determinize_augmented`. This method will adapt the logic from `NWA::determinize_components` to handle the augmented information (`end_map` and `nt_nodes`).
-
-          This will be a large function that performs subset construction while tracking which non-terminals and end-stacks correspond to each new DWA state.
-
-      6.  **Add `build_augmented_dwa_from_characterization`**: This new function will orchestrate the new flow: build the NWA directly, then determinize it into an `AugmentedDwa`.
-
-          ```rust
-          pub fn build_augmented_dwa_from_characterization(
-              parser: &GLRParser,
-              bb: &BelowBottomCharacterization,
-          ) -> Result<AugmentedDwa, AugmentedNwaBuildError> {
-              let nwa = build_augmented_nwa_from_characterization_direct(parser, bb)?;
-              Ok(nwa.determinize_augmented())
-          }
-          ```
-
-      7.  **Create the new `build_augmented_nwa_from_characterization`**: This function will now serve as the public interface, creating the `AugmentedDwa` and immediately converting it back to an `AugmentedNwa`.
-
-          ```rust
-          pub fn build_augmented_nwa_from_characterization(
-              parser: &GLRParser,
-              bb: &BelowBottomCharacterization,
-          ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
-              let dwa = build_augmented_dwa_from_characterization(parser, bb)?;
-              Ok(dwa.to_augmented_nwa())
-          }
-          ```
+      1.  **Modify `src/weighted_automata.rs`:**
+          *   In the `DWA` struct definition, remove the `#[derive(Default)]` attribute.
+          *   Immediately after the `DWA` struct, add a manual implementation of `impl Default for DWA` that calls `DWA::new()`. This ensures that a default-constructed `DWA` is always in a valid state with a single start state.
+          *   In the `impl DWA` block, after the existing `union` method, add a new public method named `join`.
+          *   This `join` method will accept another `DWA` and a `join_map` as arguments. It will perform a flexible concatenation using a product-like construction. The states in the resulting DWA will represent compositions of a state from the first DWA and a set of states from the second.
+          *   The implementation will use a worklist algorithm to explore all reachable compositions, creating new states for each unique composition. It will correctly handle sinks, aggregate state weights and final weights by unioning them, and compute new transitions by combining the outcomes from the component states.
+          *   The method will return a tuple containing the newly constructed `DWA` and a mapping from its new state IDs back to the original states they were derived from.
 
       ### Git Diffs
 
-      Here are the git diffs to apply the changes described above.
+      Here is the git diff for the changes.
 
       ```diff
-      --- a/src/precompute4/augmented_nwa.rs
-      +++ b/src/precompute4/augmented_nwa.rs
-      @@ -2,11 +2,12 @@
-       use crate::glr::parser::GLRParser;
-       use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
-       use crate::precompute4::characterize::{
-      -    compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
-      +    compute_all_characterizations, BelowBottomCharacterization, compute_below_bottom_characterization,
-       };
-       use crate::weighted_automata::{
-      -    DWA, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID, Weight as WaWeight,
-      +    DWA, DWABody, DWAStates, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID,
-      +    Weight as WaWeight,
-       };
-      -use std::collections::{BTreeMap, BTreeSet};
-      +use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-       use std::fmt::{Display, Formatter};
-       use std::time::Instant;
-       
-      @@ -51,6 +52,34 @@
-           pub body: AugmentedNwaBody,
+      --- a/src/weighted_automata.rs
+      +++ b/src/weighted_automata.rs
+      @@ -518,12 +518,18 @@
+           pub start_state: StateID,
        }
        
-      +#[derive(Debug, Clone, PartialEq, Eq)]
-      +pub struct AugmentedDwaBody {
-      +    pub dwa: DWABody,
-      +    pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
-      +    pub nt_map: BTreeMap<WaStateID, BTreeSet<NonTerminalID>>,
-      +}
-      +
-      +#[derive(Debug, Clone, PartialEq, Eq)]
-      +pub struct AugmentedDwa {
-      +    pub states: DWAStates,
-      +    pub body: AugmentedDwaBody,
-      +}
-      +
-      +impl AugmentedDwa {
-      +    pub fn to_augmented_nwa(&self) -> AugmentedNwa {
-      +        let nwa_dwa = DWA { states: self.states.clone(), body: self.body.dwa.clone() };
-      +        let nwa = nwa_dwa.to_nwa();
-      +        AugmentedNwa {
-      +            states: nwa.states,
-      +            body: AugmentedNwaBody {
-      +                nwa: nwa.body,
-      +                nt_nodes: BTreeMap::new(),
-      +                end_map: self.body.end_map.clone(),
-      +            },
-      +        }
+      -#[derive(Clone, Debug, Default)]
+      +#[derive(Clone, Debug)]
+       pub struct DWA {
+           pub states: DWAStates,
+           pub body: DWABody,
+       }
+       
+      +impl Default for DWA {
+      +    fn default() -> Self {
+      +        Self::new()
       +    }
       +}
       +
-       fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
-           u16::try_from(id.0).map_err(|_| AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id: id })
-       }
-      @@ -58,7 +87,7 @@
-       pub fn build_augmented_nwa_for_terminal(
-           parser: &GLRParser,
-           terminal_id: TerminalID,
-      -) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
-      +) -> Result<AugmentedNwa, AugmentedNwaBuildError> { // TODO-LATER: this should return AugmentedDwa
-           let bb = compute_below_bottom_characterization(parser, terminal_id);
-           build_augmented_nwa_from_characterization(parser, &bb)
-       }
-      @@ -96,13 +125,29 @@
-           Ok(out)
-       }
-       
-      +pub fn build_augmented_dwa_from_characterization(
-      +    parser: &GLRParser,
-      +    bb: &BelowBottomCharacterization,
-      +) -> Result<AugmentedDwa, AugmentedNwaBuildError> {
-      +    let nwa = build_augmented_nwa_from_characterization_direct(parser, bb)?;
-      +    Ok(nwa.determinize_augmented())
-      +}
-      +
-      +pub fn build_augmented_nwa_from_characterization(
-      +    parser: &GLRParser,
-      +    bb: &BelowBottomCharacterization,
-      +) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
-      +    let dwa = build_augmented_dwa_from_characterization(parser, bb)?;
-      +    Ok(dwa.to_augmented_nwa())
-      +}
-      +
-       /// Core builder: turns a BelowBottomCharacterization into an AugmentedNwa.
-       ///
-       /// Construction rules:
-       /// - Create one initial start node, one unique `end_state`, and one node per nonterminal.
-       /// - Initial shifts: start --(initial_state)--> end_state; record [initial_state, shift_state].
-       /// - Initial reduces (initial_state, len, nt): first step on initial_state, then len default steps to nt.
-      -/// - Per-nonterminal reduces:
-      +/// - Per-nonterminal reduces: from nt node,
-       ///   - Reveal-and-rereduces (revealed_state, len, reduce_nt): first on revealed_state, then len default steps to reduce_nt.
-       ///   - Reveal-goto-shift escapes: from nt node, on revealed_state go to end_state; record [revealed_state, goto_state, shift_state].
-      -pub fn build_augmented_nwa_from_characterization(
-      +pub fn build_augmented_nwa_from_characterization_direct(
-           parser: &GLRParser,
-           bb: &BelowBottomCharacterization,
-       ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
-      @@ -320,6 +365,141 @@
-               WaNWA::determinize_components(&self.states, &self.body.nwa)
+       impl DWAState {
+           /// Returns Some(target) if:
+           /// - only a default transition exists (no exceptions),
+      @@ -1000,6 +1006,115 @@
+               (new_dwa, mapping)
            }
-       }
-      +impl AugmentedNwa {
-      +    pub fn determinize_augmented(&self) -> AugmentedDwa {
-      +        let now = Instant::now();
-      +        let mut dwa_states = DWAStates::default();
-      +        let mut aug_dwa_body = AugmentedDwaBody {
-      +            dwa: DWABody::default(),
-      +            end_map: BTreeMap::new(),
-      +            nt_map: BTreeMap::new(),
-      +        };
+       
+      +    /// Join two DWAs. This is a flexible concatenation-like operation.
+      +    /// The `join_map` specifies which states in `self` (the left DWA) are "join points".
+      +    /// When a join point `s_left` is entered, it's as if we also simultaneously enter
+      +    /// all states from `other` (the right DWA) associated with `s_left` in the `join_map`.
+      +    ///
+      +    /// This is implemented via a product-like construction where states in the new DWA
+      +    /// are compositions of a state from `self` and a set of states from `other`.
+      +    ///
+      +    /// Returns the new DWA and a map from new state IDs to the set of original automaton states.
+      +    /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
+      +    pub fn join(
+      +        &self,
+      +        other: &DWA,
+      +        join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
+      +    ) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+      +        let mut new_dwa = DWA::new();
+      +        new_dwa.states.0.clear(); // start with no states
       +
-      +        if self.states.0.is_empty() {
-      +            return AugmentedDwa { states: dwa_states, body: aug_dwa_body };
-      +        }
+      +        let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
+      +        let mut composition_to_new_id: BTreeMap<(StateID, BTreeSet<StateID>), StateID> = BTreeMap::new();
+      +        let mut worklist: VecDeque<(StateID, BTreeSet<StateID>)> = VecDeque::new();
       +
-      +        let has_epsilons = self.states.0.iter().any(|s| !s.epsilon_transitions.is_empty());
+      +        let sink0 = self.states.len();
+      +        let sink1 = other.states.len();
       +
-      +        let to_key = |comp: BTreeMap<WaStateID, WaWeight>| -> Vec<(WaStateID, WaWeight)> {
-      +            comp.into_iter().filter(|(_, w)| !w.is_empty()).collect()
-      +        };
-      +
-      +        let mut known_states: HashMap<Vec<(WaStateID, WaWeight)>, WaStateID> = HashMap::new();
-      +        let mut worklist: VecDeque<Vec<(WaStateID, WaWeight)>> = VecDeque::new();
-      +
-      +        let mut get_or_create = |comp_key: Vec<(WaStateID, WaWeight)>,
-      +                                 dwa_states: &mut DWAStates,
-      +                                 known: &mut HashMap<Vec<(WaStateID, WaWeight)>, WaStateID>,
-      +                                 work: &mut VecDeque<Vec<(WaStateID, WaWeight)>>|
-      +         -> Option<WaStateID> {
-      +            if comp_key.is_empty() {
-      +                return None;
+      +        let mut get_or_create = |comp: (StateID, BTreeSet<StateID>),
+      +                                 new_dwa: &mut DWA,
+      +                                 comp_to_new_id: &mut BTreeMap<(StateID, BTreeSet<StateID>), StateID>,
+      +                                 worklist: &mut VecDeque<(StateID, BTreeSet<StateID>)>,
+      +                                 mapping: &mut BTreeMap<StateID, BTreeSet<(usize, StateID)>>|
+      +         -> StateID {
+      +            if let Some(&id) = comp_to_new_id.get(&comp) {
+      +                return id;
       +            }
-      +            if let Some(&id) = known.get(&comp_key) {
-      +                return Some(id);
+      +            let new_id = new_dwa.states.0.len();
+      +            new_dwa.states.0.push(DWAState::default());
+      +            comp_to_new_id.insert(comp.clone(), new_id);
+      +            worklist.push_back(comp.clone());
+      +
+      +            let mut merged_from = BTreeSet::new();
+      +            if comp.0 != sink0 {
+      +                merged_from.insert((0, comp.0));
       +            }
-      +            let new_id = dwa_states.0.len();
-      +            dwa_states.0.push(DWAState::default());
-      +            known.insert(comp_key.clone(), new_id);
-      +            work.push_back(comp_key);
-      +            Some(new_id)
+      +            for &s1 in &comp.1 {
+      +                if s1 != sink1 {
+      +                    merged_from.insert((1, s1));
+      +                }
+      +            }
+      +            mapping.insert(new_id, merged_from);
+      +
+      +            new_id
       +        };
       +
-      +        let mut start_raw = BTreeMap::new();
-      +        for &start_state in &self.body.nwa.start_states {
-      +            start_raw.insert(start_state, WaWeight::all());
-      +        }
-      +        let start_map = self.states.epsilon_closure_with_flag(start_raw, has_epsilons, 0);
-      +        if let Some(start_id) = get_or_create(to_key(start_map), &mut dwa_states, &mut known_states, &mut worklist) {
-      +            aug_dwa_body.dwa.start_state = start_id;
-      +        } else {
-      +            return AugmentedDwa { states: dwa_states, body: aug_dwa_body };
+      +        if self.states.is_empty() {
+      +            return (DWA::new(), BTreeMap::new());
       +        }
       +
-      +        let rev_nt_nodes: BTreeMap<WaStateID, NonTerminalID> =
-      +            self.body.nt_nodes.iter().map(|(k, v)| (*v, *k)).collect();
+      +        let start0 = self.body.start_state;
+      +        let start1_set = join_map.get(&start0).cloned().unwrap_or_default();
+      +        let start_comp = (start0, start1_set);
+      +        new_dwa.body.start_state =
+      +            get_or_create(start_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist, &mut mapping);
       +
-      +        while let Some(current_composition) = worklist.pop_front() {
-      +            let current_dwa_id = *known_states.get(&current_composition).unwrap();
+      +        while let Some((id0, ids1)) = worklist.pop_front() {
+      +            let new_id = *composition_to_new_id.get(&(id0, ids1.clone())).unwrap();
+      +            let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
       +
-      +            // Aggregate state and final weights; collect exception alphabet.
-      +            let mut aggregate_weight = WaWeight::zeros();
-      +            let mut aggregate_final_weight = WaWeight::zeros();
-      +            let mut is_final = false;
+      +            let new_state = &mut new_dwa.states[new_id];
+      +
+      +            // Aggregate weights
+      +            let mut agg_weight = s0.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
+      +            let mut agg_final_weight = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      +            for &id1 in &ids1 {
+      +                if id1 != sink1 {
+      +                    let s1 = &other.states[id1];
+      +                    agg_weight |= &s1.weight;
+      +                    if let Some(fw) = &s1.final_weight {
+      +                        agg_final_weight |= fw;
+      +                    }
+      +                }
+      +            }
+      +            new_state.weight = agg_weight;
+      +            if !agg_final_weight.is_empty() {
+      +                new_state.final_weight = Some(agg_final_weight);
+      +            }
+      +
+      +            // Collect critical points
       +            let mut critical_points = BTreeSet::new();
-      +            let mut nts_in_composition = BTreeSet::new();
-      +            let mut stacks_for_composition = BTreeSet::new();
+      +            if let Some(s) = s0 {
+      +                critical_points.extend(s.transitions.exceptions.keys());
+      +            }
+      +            for &id1 in &ids1 {
+      +                if id1 != sink1 {
+      +                    critical_points.extend(other.states[id1].transitions.exceptions.keys());
+      +                }
+      +            }
       +
-      +            for (nwa_id, path_weight) in &current_composition {
-      +                aggregate_weight |= path_weight;
-      +                if let Some(final_w) = &self.states[*nwa_id].final_weight {
-      +                    is_final = true;
-      +                    aggregate_final_weight |= &(path_weight & final_w);
-      +                }
-      +                for &char_code in self.states[*nwa_id].transitions.exceptions.keys() {
-      +                    critical_points.insert(char_code);
-      +                }
-      +                if let Some(nt_id) = rev_nt_nodes.get(nwa_id) {
-      +                    nts_in_composition.insert(*nt_id);
-      +                }
-      +                if let Some(stacks) = self.body.end_map.get(nwa_id) {
-      +                    stacks_for_composition.extend(stacks.clone());
-      +                }
-      +            }
-      +            dwa_states[current_dwa_id].weight = aggregate_weight;
-      +            if is_final {
-      +                dwa_states[current_dwa_id].final_weight = Some(aggregate_final_weight);
-      +            }
-      +            if !nts_in_composition.is_empty() {
-      +                aug_dwa_body.nt_map.insert(current_dwa_id, nts_in_composition);
-      +            }
-      +            if !stacks_for_composition.is_empty() {
-      +                aug_dwa_body.end_map.insert(current_dwa_id, stacks_for_composition);
-      +            }
+      +            let get_target = |s: Option<&DWAState>, sink: StateID, ch: u16| -> StateID {
+      +                s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
+      +            };
       +
       +            // Default transition
-      +            let mut default_next_raw: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
-      +            let mut default_weight_agg = WaWeight::zeros();
-      +            for (nwa_id, path_weight) in &current_composition {
-      +                if let Some(transitions) = self.states[*nwa_id].transitions.get_default() {
-      +                    for (next_nwa_id, trans_weight) in transitions {
-      +                        let w = path_weight & trans_weight;
-      +                        default_next_raw.entry(*next_nwa_id).or_default().bitor_assign(&w);
-      +                        default_weight_agg |= &w;
-      +                    }
+      +            let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
+      +            let mut def_tgts1: BTreeSet<StateID> =
+      +                ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| other.states[id1].transitions.default.unwrap_or(sink1)).collect();
+      +            def_tgts1.remove(&sink1);
+      +
+      +            if let Some(joins) = join_map.get(&def_tgt0) {
+      +                def_tgts1.extend(joins);
+      +            }
+      +
+      +            let def_comp = (def_tgt0, def_tgts1);
+      +            let new_def_tgt =
+      +                get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist, &mut mapping);
+      +            new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+      +
+      +            let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      +            for &id1 in &ids1 {
+      +                if id1 != sink1 {
+      +                    tw_def |= other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
       +                }
       +            }
-      +            let def_comp = to_key(self.states.epsilon_closure_with_flag(default_next_raw, has_epsilons, 0));
-      +            let def_target = get_or_create(def_comp, &mut dwa_states, &mut known_states, &mut worklist);
-      +            dwa_states[current_dwa_id].transitions.default = def_target;
-      +            if def_target.is_some() {
-      +                dwa_states[current_dwa_id].trans_weight_default = Some(default_weight_agg);
-      +            }
+      +            new_dwa.states[new_id].trans_weight_default = Some(tw_def);
       +
       +            // Exception transitions
-      +            for char_code in critical_points {
-      +                let mut exception_next_raw: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
-      +                let mut exception_weight_agg = WaWeight::zeros();
-      +                for (nwa_id, path_weight) in &current_composition {
-      +                    if let Some(transitions) = self.states[*nwa_id].transitions.get(char_code) {
-      +                        for (next_nwa_id, trans_weight) in transitions {
-      +                            let w = path_weight & trans_weight;
-      +                            exception_next_raw.entry(*next_nwa_id).or_default().bitor_assign(&w);
-      +                            exception_weight_agg |= &w;
+      +            for &ch in &critical_points {
+      +                let tgt0 = get_target(s0, sink0, ch);
+      +                let mut tgts1: BTreeSet<StateID> =
+      +                    ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| get_target(Some(&other.states[id1]), sink1, ch)).collect();
+      +                tgts1.remove(&sink1);
+      +
+      +                if let Some(joins) = join_map.get(&tgt0) {
+      +                    tgts1.extend(joins);
+      +                }
+      +
+      +                let exc_comp = (tgt0, tgts1);
+      +
+      +                if exc_comp != def_comp {
+      +                    let new_exc_tgt =
+      +                        get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist, &mut mapping);
+      +                    new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
+      +
+      +                    let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+      +                    for &id1 in &ids1 {
+      +                        if id1 != sink1 {
+      +                            tw_exc |= other.states[id1].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
       +                        }
       +                    }
-      +                }
-      +                if exception_next_raw.is_empty() {
-      +                    continue;
-      +                }
-      +                let exc_comp = to_key(self.states.epsilon_closure_with_flag(exception_next_raw, has_epsilons, 0));
-      +                let exc_target = get_or_create(exc_comp, &mut dwa_states, &mut known_states, &mut worklist);
-      +
-      +                if exc_target != def_target {
-      +                    if let Some(tid) = exc_target {
-      +                        dwa_states[current_dwa_id].transitions.exceptions.insert(char_code, tid);
-      +                        dwa_states[current_dwa_id].trans_weights_exceptions.insert(char_code, exception_weight_agg);
-      +                    }
+      +                    new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
       +                }
       +            }
       +        }
       +
-      +        let result = AugmentedDwa { states: dwa_states, body: aug_dwa_body };
-      +        println!(
-      +            "AugmentedNwa::determinize_augmented ({} NWA states -> {} DWA states) took: {:?}",
-      +            self.states.len(),
-      +            result.states.len(),
-      +            now.elapsed()
-      +        );
-      +        result
+      +        (new_dwa, mapping)
       +    }
-      +}
-       
-       
-       impl Display for AugmentedNwa {
+      +
+           /// Convert this DWA to an NWA.
+           /// This is a straightforward conversion as a DWA is a special case of an NWA.
+           pub fn to_nwa(&self) -> NWA {
 
       ```
     metadata:
@@ -10076,9 +10096,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Warning: Diff block 1 parsed with no hunks. Skipping.
+      Identified target file: src/weighted_automata.rs
+      Applying patch to 'src/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor augmented automaton construction
-      to build DWA directly from characterization and convert to NWA"'
+  - user: 'Changes committed with message: "Implement DWA::join for flexible DWA composition
+      and update DWA Default implementation"'
     metadata:
 ...
