@@ -5,7 +5,8 @@ use crate::precompute4::characterize::{
     compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
 };
 use crate::weighted_automata::{
-    DWA, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID, Weight as WaWeight,
+    DWA, DWAState, DWAStates, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates,
+    StateID as WaStateID, Weight as WaWeight,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
@@ -259,6 +260,76 @@ impl AugmentedNwaBody {
         left.nt_nodes = new_nt_nodes;
 
         println!("    concatenate_right_into_on_shared (product) took: {:?}", now.elapsed());
+        Ok(())
+    }
+
+    pub fn concatenate_dwa_right_into_on_shared(
+        states: &mut DWAStates,
+        left: &mut AugmentedNwaBody,
+        right: &AugmentedNwaBody,
+        weight: &WaWeight,
+    ) -> Result<(), AugmentedNwaBuildError> {
+        let now = Instant::now();
+        crate::debug!(6, "--- concatenate_dwa_right_into_on_shared ---");
+
+        let mut right_body_to_use = right.clone();
+
+        if !weight.is_empty() && weight != &WaWeight::all() {
+            let mut new_right_starts = BTreeSet::new();
+            for &start_state in &right.nwa.start_states {
+                let original_start_state = states[start_state].clone();
+                let proxy_start_id = states.add_state();
+                new_right_starts.insert(proxy_start_id);
+
+                let mut proxy_state = DWAState::default();
+
+                proxy_state.weight = original_start_state.weight.clone();
+                proxy_state.final_weight = original_start_state.final_weight.clone();
+                proxy_state.transitions = original_start_state.transitions.clone();
+
+                if let Some(w) = &original_start_state.trans_weight_default {
+                    proxy_state.trans_weight_default = Some(w & weight);
+                }
+                for (ch, w) in &original_start_state.trans_weights_exceptions {
+                    proxy_state.trans_weights_exceptions.insert(*ch, w & weight);
+                }
+
+                states[proxy_start_id] = proxy_state;
+            }
+            right_body_to_use.nwa.start_states = new_right_starts;
+        }
+
+        // Join end states of left DWA to start states of right DWA.
+        let mut join_map: BTreeMap<WaStateID, BTreeSet<WaStateID>> = BTreeMap::new();
+        for &end_state in left.end_map.keys() {
+            join_map.insert(end_state, right_body_to_use.nwa.start_states.clone());
+        }
+
+        let old_left_nt_nodes = left.nt_nodes.clone();
+        let mapping = DWA::concatenate_components(states, left, &right_body_to_use, &join_map);
+
+        // Update end_map and nt_nodes for the new composite DWA.
+        let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+        let mut new_nt_nodes: BTreeMap<NonTerminalID, WaStateID> = BTreeMap::new();
+
+        for (new_id, old_ids) in &mapping {
+            for &(automaton_idx, old_id) in old_ids {
+                if automaton_idx == 0 { // From left automaton
+                    if let Some(nt_id) = old_left_nt_nodes.iter().find(|(_, &v)| v == old_id).map(|(k, _)| *k) {
+                        new_nt_nodes.insert(nt_id, *new_id);
+                    }
+                } else { // From right automaton
+                    if let Some(stacks) = right.end_map.get(&old_id) {
+                        new_end_map.entry(*new_id).or_default().extend(stacks.clone());
+                    }
+                }
+            }
+        }
+
+        left.end_map = new_end_map;
+        left.nt_nodes = new_nt_nodes;
+
+        println!("    concatenate_dwa_right_into_on_shared took: {:?}", now.elapsed());
         Ok(())
     }
 
