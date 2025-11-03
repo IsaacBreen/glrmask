@@ -207,109 +207,6 @@ impl AugmentedNwaBody {
         Ok(states.process_stack_u16_from_starts(&self.nwa.start_states, &encoded))
     }
 
-    pub fn concatenate_right_into_on_shared(
-        states: &mut WaNWAStates,
-        left: &mut AugmentedNwaBody,
-        right: &AugmentedNwaBody,
-        weight: &WaWeight,
-    ) -> Result<(), AugmentedNwaBuildError> {
-        crate::debug!(6, "--- concatenate_right_into_on_shared ---");
-        crate::debug!(6, "--- WEIGHT: {} ---", weight);
-        crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
-        crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
-        crate::debug!(6, "States before concatenate:\n{}", states);
-
-        let now = Instant::now();
-        let left_end_snapshot = left.end_map.clone();
-        let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-
-        let mut total_stacks = 0;
-        let mut unique_stacks = BTreeSet::new();
-        let mut total_stack_len = 0;
-        let mut max_stack_len = 0;
-        for stacks in left_end_snapshot.values() {
-            total_stacks += stacks.len();
-            for stack in stacks {
-                unique_stacks.insert(stack.clone());
-                let len = stack.len();
-                total_stack_len += len;
-                if len > max_stack_len {
-                    max_stack_len = len;
-                }
-            }
-        }
-        let avg_stack_len = if total_stacks > 0 { total_stack_len as f64 / total_stacks as f64 } else { 0.0 };
-
-        let mut total_process_stack_time = std::time::Duration::new(0, 0);
-        let mut total_reachable_time = std::time::Duration::new(0, 0);
-        let mut total_end_map_build_time = std::time::Duration::new(0, 0);
-        let mut stops_count = 0;
-        let mut reachable_count = 0;
- 
-        for (left_end_state, stacks) in &left_end_snapshot {
-            for left_stack in stacks {
-                let encoded: Vec<u16> =
-                    left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
-
-                let process_now = Instant::now();
-                let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
-                crate::debug!(6, "  Concatenating left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
-                stops_count += stops.len();
-                total_process_stack_time += process_now.elapsed();
-
-                for (pos, right_stop_state, path_weight) in stops {
-                    let combined_weight = &path_weight & weight;
-                    states.add_epsilon_transition(*left_end_state, right_stop_state, combined_weight);
-
-                    if right.end_map.values().all(|stacks| stacks.is_empty()) {
-                        continue;
-                    }
-
-                    let reachable_now = Instant::now();
-                    let reachable = states.reachable_states_ignoring_labels(right_stop_state);
-                    reachable_count += reachable.len();
-                    total_reachable_time += reachable_now.elapsed();
-
-                    let end_map_build_now = Instant::now();
-                    for r_state in reachable {
-                        if let Some(r_stacks) = right.end_map.get(&r_state) {
-                            for r_stack in r_stacks {
-                                let keep_len = left_stack.len().saturating_sub(pos);
-                                let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
-                                combined.extend(r_stack.iter().cloned());
-                                new_end_map.entry(r_state).or_default().insert(combined);
-                            }
-                        }
-                    }
-                    total_end_map_build_time += end_map_build_now.elapsed();
-                }
-            }
-        }
-        left.end_map = new_end_map;
-
-        crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
-        crate::debug!(6, "--- end concatenate_right_into_on_shared ---");
-
-        println!(
-            "    concatenate_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
-            now.elapsed(),
-            total_process_stack_time,
-            stops_count,
-            total_reachable_time,
-            reachable_count,
-            total_end_map_build_time
-        );
-        println!(
-            "      left_end_snapshot stats: end_states={}, total_stacks={}, unique_stacks={}, max_stack_len={}, avg_stack_len={:.2}",
-            left_end_snapshot.len(),
-            total_stacks,
-            unique_stacks.len(),
-            max_stack_len,
-            avg_stack_len
-        );
-        Ok(())
-    }
-
     pub fn union_with_on_shared(
         _states: &mut WaNWAStates,
         left: &mut AugmentedNwaBody,
@@ -348,15 +245,64 @@ impl AugmentedNwa {
         right: &AugmentedNwa,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
-        let mapping = self.states.append_copy_from(&right.states);
-        let mut mapped_right_body = right.body.clone();
-        mapped_right_body.remap_states(&mapping);
-        AugmentedNwaBody::concatenate_right_into_on_shared(
-            &mut self.states,
-            &mut self.body,
-            &mapped_right_body,
-            weight,
-        )
+        let left_nwa = WaNWA { states: self.states.clone(), body: self.body.nwa.clone() };
+
+        let mut right_nwa = WaNWA { states: right.states.clone(), body: right.body.nwa.clone() };
+
+        // Apply the weight to all transitions in the right NWA
+        for state in &mut right_nwa.states.0 {
+            for (_, w) in &mut state.epsilon_transitions {
+                *w &= weight;
+            }
+            if let Some(def) = &mut state.transitions.default {
+                for (_, w) in def {
+                    *w &= weight;
+                }
+            }
+            for vec in state.transitions.exceptions.values_mut() {
+                for (_, w) in vec {
+                    *w &= weight;
+                }
+            }
+        }
+
+        let join_map: BTreeMap<WaStateID, BTreeSet<WaStateID>> =
+            self.body.end_map.keys().map(|&s| (s, right.body.nwa.start_states.clone())).collect();
+
+        let (new_nwa, new_to_old_map) = left_nwa.concatenate(&right_nwa, &join_map);
+
+        let mut new_nt_nodes = BTreeMap::new();
+        let mut new_end_map = BTreeMap::new();
+
+        for (new_id, old_ids) in &new_to_old_map {
+            for (aut_idx, old_id) in old_ids {
+                if *aut_idx == 0 {
+                    // from left NWA
+                    for (nt, &state_id) in &self.body.nt_nodes {
+                        if state_id == *old_id {
+                            new_nt_nodes.insert(*nt, *new_id);
+                        }
+                    }
+                } else {
+                    // from right NWA
+                    for (nt, &state_id) in &right.body.nt_nodes {
+                        if state_id == *old_id {
+                            new_nt_nodes.insert(*nt, *new_id);
+                        }
+                    }
+                    if let Some(stacks) = right.body.end_map.get(old_id) {
+                        new_end_map.entry(*new_id).or_default().extend(stacks.clone());
+                    }
+                }
+            }
+        }
+
+        self.states = new_nwa.states;
+        self.body.nwa = new_nwa.body;
+        self.body.nt_nodes = new_nt_nodes;
+        self.body.end_map = new_end_map;
+
+        Ok(())
     }
 
     /// Union of two augmented NWAs into self.
