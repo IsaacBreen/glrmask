@@ -205,6 +205,10 @@ impl AugmentedNwaBody {
                     let combined_weight = &path_weight & weight;
                     states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
 
+                    if right.end_map.values().all(|stacks| stacks.is_empty()) {
+                        continue;
+                    }
+
                     let reachable_now = Instant::now();
                     let reachable = states.reachable_states_ignoring_labels(right_stop_state);
                     total_reachable_time += reachable_now.elapsed();
