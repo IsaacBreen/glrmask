@@ -1610,13 +1610,19 @@ impl DWA {
         }
         let n = states.0.len();
 
+        if body.start_state >= n {
+            // Invalid start state. Canonicalize to empty.
+            let changed = n != 1 || body.start_state != 0 || states[0].final_weight.is_some() || !states[0].transitions.exceptions.is_empty() || states[0].transitions.default.is_some();
+            states.0.clear();
+            body.start_state = states.add_state();
+            return (changed, BTreeMap::new());
+        }
+
         // 1. Forward reachability from start_state
         let mut reachable = vec![false; n];
         let mut q: VecDeque<usize> = VecDeque::new();
-        if body.start_state < n {
-            reachable[body.start_state] = true;
-            q.push_back(body.start_state);
-        }
+        reachable[body.start_state] = true;
+        q.push_back(body.start_state);
 
         while let Some(u) = q.pop_front() {
             if let Some(d) = states[u].transitions.default {
@@ -1660,6 +1666,15 @@ impl DWA {
 
         // 3. Live states are intersection
         let live: Vec<bool> = (0..n).map(|i| reachable[i] && co_reachable[i]).collect();
+
+        if !live[body.start_state] {
+            // Start state is not co-reachable. Language is empty.
+            // Canonicalize to a single non-final state with no transitions.
+            let changed = n != 1 || states[0].final_weight.is_some() || !states[0].transitions.exceptions.is_empty() || states[0].transitions.default.is_some();
+            states.0.clear();
+            body.start_state = states.add_state();
+            return (changed, BTreeMap::new());
+        }
 
         if live.iter().all(|&b| b) && n > 0 {
             return (false, BTreeMap::new());
