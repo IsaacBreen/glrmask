@@ -3,7 +3,7 @@ use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
 use crate::weighted_automata::{DWA, NWA as WaNWA, NWAStates as WaNWAStates, NWABody as WaNWABody, Weight as WaWeight};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::datastructures::trie::Trie;
 use crate::precompute4::augmented_nwa::{AugmentedNwa, AugmentedNwaBody};
 use crate::glr::table::TerminalID;
@@ -88,6 +88,61 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 &ignore_nwa
             };
 
+            // Precompute the set of unique stacks from the template's end_map. We will compute stops for each
+            // unique stack exactly once (restricted to the RIGHT body's state_set) and reuse across destinations.
+            let mut unique_stacks: BTreeSet<Vec<crate::glr::table::StateID>> = BTreeSet::new();
+            for stacks in template_aug.body.end_map.values() {
+                for s in stacks {
+                    unique_stacks.insert(s.clone());
+                }
+            }
+            // Compute stops_by_stack: for each left stack, compute process_stack from RIGHT start restricted to RIGHT state_set.
+            let mut stops_by_stack: BTreeMap<Vec<crate::glr::table::StateID>, Vec<(usize, usize, WaWeight)>> = BTreeMap::new();
+            let mut unique_right_stops: BTreeSet<usize> = BTreeSet::new();
+            for s in &unique_stacks {
+                let encoded: Vec<u16> = s
+                    .iter()
+                    .rev()
+                    .map(|id| u16::try_from(id.0).expect("ParserStateIdOutOfRange"))
+                    .collect();
+                let stops = shared_states
+                    .borrow()
+                    .process_stack_u16_from_start_restricted(current_aug_body.nwa.start_state, &encoded, Some(&current_aug_body.state_set));
+                for (_, rs, _) in &stops {
+                    unique_right_stops.insert(*rs);
+                }
+                stops_by_stack.insert(s.clone(), stops);
+            }
+            // Reachable cache for RIGHT stops (restricted).
+            let mut reachable_cache: HashMap<usize, BTreeSet<usize>> = HashMap::new();
+            for rs in &unique_right_stops {
+                let r = shared_states
+                    .borrow()
+                    .reachable_states_ignoring_labels_subset(*rs, Some(&current_aug_body.state_set));
+                reachable_cache.insert(*rs, r);
+            }
+            // Precompute the new end_map that results from combining these stacks with the RIGHT body.
+            let mut precomputed_new_end_map: BTreeMap<usize, BTreeSet<Vec<crate::glr::table::StateID>>> = BTreeMap::new();
+            for left_stack in &unique_stacks {
+                if let Some(stops) = stops_by_stack.get(left_stack) {
+                    for (pos, right_stop_state, _) in stops {
+                        let keep_len = left_stack.len().saturating_sub(*pos);
+                        let prefix: Vec<crate::glr::table::StateID> = left_stack[..keep_len].to_vec();
+                        if let Some(reach) = reachable_cache.get(right_stop_state) {
+                            for r_state in reach {
+                                if let Some(r_stacks) = current_aug_body.end_map.get(r_state) {
+                                    for r_stack in r_stacks {
+                                        let mut combined = prefix.clone();
+                                        combined.extend(r_stack.iter().cloned());
+                                        precomputed_new_end_map.entry(*r_state).or_default().insert(combined);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             for (dest_idx, llm_token_bv) in dest_map.iter() {
                 // Map the template_aug's states into the shared arena.
                 let copy_now = Instant::now();
@@ -98,16 +153,37 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 left_body.remap_states(&mapping);
 
                 let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                // Combine into a new body (mutating the shared graph with epsilon links).
-                let combine_now = Instant::now();
+
+                // Build deduped epsilon edges for this mapping by aggregating over the precomputed stops_by_stack.
+                let build_edges_now = Instant::now();
+                let mut dedup_edges: BTreeMap<(usize, usize), WaWeight> = BTreeMap::new();
+                for (left_end_state, stacks) in &left_body.end_map {
+                    for left_stack in stacks {
+                        if let Some(stops) = stops_by_stack.get(left_stack) {
+                            for (_, right_stop_state, path_weight) in stops {
+                                dedup_edges
+                                    .entry((*left_end_state, *right_stop_state))
+                                    .or_insert_with(WaWeight::zeros)
+                                    .bitor_assign(path_weight);
+                            }
+                        }
+                    }
+                }
+                {
+                    let mut arena = shared_states.borrow_mut();
+                    for ((from, to), agg_w) in dedup_edges {
+                        let w2 = &agg_w & &weight;
+                        if !w2.is_empty() {
+                            arena.add_or_merge_epsilon_transition(from, to, w2);
+                        }
+                    }
+                }
+                let build_edges_elapsed = build_edges_now.elapsed();
+
+                // New body = left_body + updated end_map + expanded state_set (union with right).
                 let mut new_body = left_body.clone();
-                AugmentedNwaBody::combine_right_into_on_shared(
-                    &mut shared_states.borrow_mut(),
-                    &mut new_body,
-                    &current_aug_body,
-                    &weight,
-                ).expect("Combine failed");
-                let combine_elapsed = combine_now.elapsed();
+                new_body.end_map = precomputed_new_end_map.clone();
+                new_body.state_set.extend(current_aug_body.state_set.iter().cloned());
 
                 println!(
                     "step inner loop: term {:?}, dest {}, shared_states_len: {}",
@@ -116,7 +192,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                     shared_states.borrow().len()
                 );
                 println!("  append_copy_from: {:?}", copy_elapsed);
-                println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
+                println!("  build_edges (precomputed stops reused): {:?}", build_edges_elapsed);
 
                 results.push((*dest_idx, new_body));
             }

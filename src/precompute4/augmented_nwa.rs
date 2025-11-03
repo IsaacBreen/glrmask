@@ -22,6 +22,7 @@ pub struct AugmentedNwaBody {
     pub nwa: WaNWABody,
     pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
     pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
+    pub state_set: BTreeSet<WaStateID>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,12 +50,14 @@ pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
     let mut end_map = BTreeMap::new();
     end_map.insert(start_state, BTreeSet::from([vec![]]));
 
+    let mut state_set = BTreeSet::new();
+    state_set.insert(start_state);
     AugmentedNwa {
         states,
         body: AugmentedNwaBody {
             nwa: WaNWABody { start_state },
             nt_nodes: BTreeMap::new(),
-            end_map,
+            end_map, state_set,
         },
     }
 }
@@ -156,6 +159,10 @@ pub fn build_augmented_nwa_from_characterization(
         }
     }
 
+    // Initialize state set to include all currently-built states.
+    let all_states: BTreeSet<WaStateID> = (0..states.len()).collect();
+    body.state_set = all_states;
+
     Ok(AugmentedNwa { states, body })
 }
 
@@ -166,6 +173,11 @@ impl AugmentedNwaBody {
             *v = mapping[*v];
         }
         self.end_map = std::mem::take(&mut self.end_map).into_iter().map(|(k, v)| (mapping[k], v)).collect();
+        let mut new_set = BTreeSet::new();
+        for s in std::mem::take(&mut self.state_set) {
+            new_set.insert(mapping[s]);
+        }
+        self.state_set = new_set;
     }
 
     pub fn process_stack(
@@ -191,30 +203,55 @@ impl AugmentedNwaBody {
         let mut total_process_stack_time = std::time::Duration::new(0, 0);
         let mut total_reachable_time = std::time::Duration::new(0, 0);
         let mut total_end_map_build_time = std::time::Duration::new(0, 0);
+        let mut dedup_edges: BTreeMap<(WaStateID, WaStateID), WaWeight> = BTreeMap::new();
+        let mut reachable_cache: HashMap<WaStateID, BTreeSet<WaStateID>> = HashMap::new();
 
         for (left_end_state, stacks) in left_end_snapshot {
             for left_stack in stacks {
-                let encoded: Vec<u16> =
-                    left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
+                let encoded: Vec<u16> = left_stack
+                    .iter()
+                    .rev()
+                    .map(|&s| encode_symbol(s))
+                    .collect::<Result<_, _>>()?;
 
                 let process_now = Instant::now();
-                let stops = states.process_stack_u16_from_start(right.nwa.start_state, &encoded);
+                // Restrict processing to the right body's state set to avoid exploring the entire shared arena.
+                let stops = states.process_stack_u16_from_start_restricted(
+                    right.nwa.start_state,
+                    &encoded,
+                    Some(&right.state_set),
+                );
                 total_process_stack_time += process_now.elapsed();
 
-                for (pos, right_stop_state, path_weight) in stops {
-                    let combined_weight = &path_weight & weight;
-                    states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
+                // Aggregate epsilon edges by (left_end_state, right_stop_state) and union their weights.
+                for (_pos, right_stop_state, path_weight) in &stops {
+                    dedup_edges
+                        .entry((left_end_state, *right_stop_state))
+                        .or_insert_with(WaWeight::zeros)
+                        .bitor_assign(path_weight);
+                }
 
-                    let reachable_now = Instant::now();
-                    let reachable = states.reachable_states_ignoring_labels(right_stop_state);
-                    total_reachable_time += reachable_now.elapsed();
-
+                // Build end_map contributions using a reachable cache; restrict reachability to right.state_set.
+                for (pos, right_stop_state, _) in stops {
+                    let reachable = if let Some(cached) = reachable_cache.get(&right_stop_state) {
+                        cached.clone()
+                    } else {
+                        let reachable_now = Instant::now();
+                        let r = states.reachable_states_ignoring_labels_subset(
+                            right_stop_state,
+                            Some(&right.state_set),
+                        );
+                        total_reachable_time += reachable_now.elapsed();
+                        reachable_cache.insert(right_stop_state, r.clone());
+                        r
+                    };
                     let end_map_build_now = Instant::now();
                     for r_state in reachable {
                         if let Some(r_stacks) = right.end_map.get(&r_state) {
+                            let keep_len = left_stack.len().saturating_sub(pos);
+                            let prefix: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
                             for r_stack in r_stacks {
-                                let keep_len = left_stack.len().saturating_sub(pos);
-                                let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
+                                let mut combined = prefix.clone();
                                 combined.extend(r_stack.iter().cloned());
                                 new_end_map.entry(r_state).or_default().insert(combined);
                             }
@@ -224,7 +261,16 @@ impl AugmentedNwaBody {
                 }
             }
         }
+        // Materialize merged epsilon edges with per-call weight filter.
+        for ((from, to), agg_w) in dedup_edges {
+            let w2 = &agg_w & weight;
+            if !w2.is_empty() {
+                states.add_or_merge_epsilon_transition(from, to, w2);
+            }
+        }
         left.end_map = new_end_map;
+        // The resulting body includes the right body's states as they become reachable via epsilons.
+        left.state_set.extend(right.state_set.iter().cloned());
         println!(
             "    combine_right_into_on_shared took: {:?}, process_stack: {:?}, reachable: {:?}, end_map_build: {:?}",
             now.elapsed(),
@@ -248,6 +294,9 @@ impl AugmentedNwaBody {
         states.add_epsilon_transition(new_start, left.nwa.start_state, WaWeight::all());
         states.add_epsilon_transition(new_start, right.nwa.start_state, WaWeight::all());
         left.nwa.start_state = new_start;
+        // Maintain state subset: union both and include the newly introduced start state.
+        left.state_set.extend(right.state_set.iter().cloned());
+        left.state_set.insert(new_start);
     }
 }
 
@@ -366,6 +415,7 @@ mod tests {
                 nwa: WaNWABody { start_state: start },
                 nt_nodes: BTreeMap::new(),
                 end_map,
+                state_set: (0..2).collect(),
             },
         }
     }
@@ -400,6 +450,7 @@ mod tests {
                 nwa: WaNWABody { start_state: s0 },
                 nt_nodes: BTreeMap::new(),
                 end_map: expected_end_map,
+                state_set: BTreeSet::from([s0, s1, s2]),
             },
         };
 
@@ -435,6 +486,7 @@ mod tests {
                 nwa: WaNWABody { start_state: s0 },
                 nt_nodes: BTreeMap::new(),
                 end_map: expected_end_map,
+                state_set: BTreeSet::from([s0, s1, s2]),
             },
         };
 
@@ -460,7 +512,10 @@ mod tests {
 
         AugmentedNwa {
             states,
-            body: AugmentedNwaBody { nwa: WaNWABody { start_state }, nt_nodes, end_map },
+            body: AugmentedNwaBody {
+                nwa: WaNWABody { start_state }, nt_nodes, end_map,
+                state_set: (0..4).collect(),
+            },
         }
     }
 
@@ -485,6 +540,7 @@ mod tests {
                 nwa: WaNWABody { start_state },
                 nt_nodes,
                 end_map: BTreeMap::new(),
+                state_set: (0..4).collect(),
             },
         }
     }
@@ -508,7 +564,10 @@ mod tests {
 
         AugmentedNwa {
             states,
-            body: AugmentedNwaBody { nwa: WaNWABody { start_state }, nt_nodes, end_map },
+            body: AugmentedNwaBody {
+                nwa: WaNWABody { start_state }, nt_nodes, end_map,
+                state_set: (0..4).collect(),
+            },
         }
     }
 
@@ -523,6 +582,7 @@ mod tests {
                 nwa: WaNWABody { start_state: initial_state },
                 nt_nodes: BTreeMap::new(),
                 end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+                state_set: BTreeSet::from([initial_state]),
             },
         };
 
@@ -590,7 +650,10 @@ mod tests {
 
         AugmentedNwa {
             states,
-            body: AugmentedNwaBody { nwa: WaNWABody { start_state }, nt_nodes: BTreeMap::new(), end_map },
+            body: AugmentedNwaBody {
+                nwa: WaNWABody { start_state }, nt_nodes: BTreeMap::new(), end_map,
+                state_set: (0..6).collect(),
+            },
         }
     }
 
@@ -647,6 +710,7 @@ mod tests {
                 nwa: WaNWABody { start_state },
                 nt_nodes: expected_nt_nodes,
                 end_map: expected_end_map,
+                state_set: BTreeSet::from([start_state, s1, s2, s3, s4, s5, s6, s7, s8, s9]),
             },
         };
 
