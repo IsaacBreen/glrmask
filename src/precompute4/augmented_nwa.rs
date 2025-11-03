@@ -227,7 +227,7 @@ impl AugmentedNwaBody {
         }
         // end_map keys remap
         let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-        for (k, v) in self.end_map.drain() {
+        for (k, v) in std::mem::take(&mut self.end_map) {
             new_end_map.insert(mapping[k], v);
         }
         self.end_map = new_end_map;

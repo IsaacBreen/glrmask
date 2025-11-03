@@ -97,7 +97,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
         // merge function
         |aug_body1, aug_body2| {
-            AugmentedNwaBody::union_with_on_shared(&mut shared_states, aug_body1, aug_body2);
+            AugmentedNwaBody::union_with_on_shared(&mut shared_states, aug_body1, &aug_body2);
         },
         // process function
         |node_data, node_idx, aug_body| {

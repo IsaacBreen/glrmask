@@ -679,7 +679,7 @@ impl NWAStates {
         }
 
         let mut closure = BTreeMap::new();
-        for (k, v) in initial_states.drain() {
+        for (k, v) in std::mem::take(&mut initial_states) {
             if !v.is_empty() {
                 closure.insert(k, v);
             }
@@ -1049,7 +1049,7 @@ impl DWAStates {
         }
         let n = self.states.len();
         let mut visited = vec![false; n];
-        let mut q: std::collections::VecDeque::new = std::collections::VecDeque::new();
+        let mut q = std::collections::VecDeque::new();
         visited[body.start_state] = true;
         q.push_back(body.start_state);
         while let Some(u) = q.pop_front() {
