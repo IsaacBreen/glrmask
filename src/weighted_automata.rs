@@ -1027,6 +1027,39 @@ impl DWA {
         (new_dwa, mapping)
     }
 
+    /// Convert this DWA to an NWA.
+    /// This is a straightforward conversion as a DWA is a special case of an NWA.
+    pub fn to_nwa(&self) -> NWA {
+        let mut nwa_states = NWAStates(Vec::with_capacity(self.states.len()));
+        for dwa_state in &self.states.0 {
+            let mut nwa_state = NWAState::new();
+            nwa_state.final_weight = dwa_state.final_weight.clone();
+
+            // Convert default transition
+            if let Some(target) = dwa_state.transitions.default {
+                let weight = dwa_state.trans_weight_default.clone().unwrap_or_else(Weight::zeros);
+                if !weight.is_empty() {
+                    nwa_state.transitions.default = Some(vec![(target, weight)]);
+                }
+            }
+
+            // Convert exception transitions
+            for (&on, &target) in &dwa_state.transitions.exceptions {
+                let weight = dwa_state.trans_weights_exceptions.get(&on).cloned().unwrap_or_else(Weight::zeros);
+                if !weight.is_empty() {
+                    nwa_state.transitions.exceptions.insert(on, vec![(target, weight)]);
+                }
+            }
+            nwa_states.0.push(nwa_state);
+        }
+
+        let nwa_body = NWABody {
+            start_states: if self.states.is_empty() { BTreeSet::new() } else { BTreeSet::from([self.body.start_state]) },
+        };
+
+        NWA { states: nwa_states, body: nwa_body }
+    }
+
     /// Simplify by iterating a small pipeline until stable (or pass limit):
     /// - normalize redundant edges,
     /// - partition-refinement minimization,
