@@ -51,7 +51,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let initial_aug_body = AugmentedNwaBody {
         nwa: WaNWABody { start_state: initial_state },
         nt_nodes: BTreeMap::new(),
-        end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+        end_map: BTreeMap::from([]),
     };
 
     let initial_values = vec![(reversed_trie_root, initial_aug_body)];
