@@ -425,32 +425,22 @@ impl NWAStates {
         // frontier: state -> weight
         let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
         current.insert(start_state, Weight::all());
-
-        let initial_closure_now = Instant::now();
         let mut current = self.epsilon_closure_with_flag(current, has_eps);
-        let mut total_closure_time = initial_closure_now.elapsed();
-        let mut total_results_time = std::time::Duration::new(0, 0);
-        let mut total_next_raw_time = std::time::Duration::new(0, 0);
 
         // deduplicate results by (pos,state) and join weights
         let mut results: BTreeMap<(usize, StateID), Weight> = BTreeMap::new();
         let n = input.len();
 
         for pos in 0..=n {
-            let results_now = Instant::now();
             for (&sid, path_w) in &current {
                 if self[sid].final_weight.is_some() {
                     results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
                 }
             }
-            total_results_time += results_now.elapsed();
-
             if pos == n {
-                let results_now_final = Instant::now();
                 for (&sid, path_w) in &current {
                     results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
                 }
-                total_results_time += results_now_final.elapsed();
                 break;
             }
 
@@ -466,22 +456,11 @@ impl NWAStates {
                     }
                 }
             }
-            total_next_raw_time += next_raw_now.elapsed();
-
-            let closure_now = Instant::now();
             current = self.epsilon_closure_with_flag(next_raw, has_eps);
-            total_closure_time += closure_now.elapsed();
         }
 
         let result = results.into_iter().map(|((pos, sid), w)| (pos, sid, w)).collect();
-        println!(
-            "NWAStates::process_stack_u16_from_start (input len {}) took: {:?}, closure: {:?}, next_raw: {:?}, results: {:?}",
-            input.len(),
-            now.elapsed(),
-            total_closure_time,
-            total_next_raw_time,
-            total_results_time
-        );
+        println!("NWAStates::process_stack_u16_from_start (input len {}) took: {:?}", input.len(), now.elapsed());
         result
     }
 
@@ -497,12 +476,9 @@ impl NWAStates {
         if !has_epsilons {
             return initial_states;
         }
-        let now = Instant::now();
-        let initial_len = initial_states.len();
 
         let mut closure = initial_states;
         let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
-        let mut transitions_processed = 0;
 
         while let Some(u_id) = worklist.pop_front() {
             let u_weight = closure.get(&u_id).unwrap().clone();
@@ -511,7 +487,6 @@ impl NWAStates {
             }
 
             for (v_id, trans_weight) in &self[u_id].epsilon_transitions {
-                transitions_processed += 1;
                 let new_v_weight = &u_weight & trans_weight;
                 if new_v_weight.is_empty() {
                     continue;
@@ -525,15 +500,6 @@ impl NWAStates {
                     worklist.push_back(*v_id);
                 }
             }
-        }
-        if now.elapsed().as_millis() > 1 {
-            println!(
-                "    epsilon_closure_with_flag (initial_states: {}, final_states: {}, transitions: {}) took: {:?}",
-                initial_len,
-                closure.len(),
-                transitions_processed,
-                now.elapsed()
-            );
         }
         closure
     }
