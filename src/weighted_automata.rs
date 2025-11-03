@@ -958,11 +958,14 @@ impl NWA {
     ///
     /// Returns the new NWA and a map from new state IDs to the set of original automaton states.
     /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
-    pub fn concatenate(
-        &self,
-        other: &NWA,
+    pub fn concatenate_components(
+        nwa1: (&NWAStates, &NWABody),
+        nwa2: (&NWAStates, &NWABody),
         join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
     ) -> (NWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+        let (self_states, self_body) = nwa1;
+        let (other_states, _other_body) = nwa2;
+
         let mut new_nwa = NWA::new();
         new_nwa.states.0.clear();
         new_nwa.body.start_states.clear();
@@ -971,8 +974,8 @@ impl NWA {
         let mut composition_to_new_id: BTreeMap<(StateID, BTreeSet<StateID>), StateID> = BTreeMap::new();
         let mut worklist: VecDeque<(StateID, BTreeSet<StateID>)> = VecDeque::new();
 
-        let sink0 = self.states.len();
-        let sink1 = other.states.len();
+        let sink0 = self_states.len();
+        let sink1 = other_states.len();
 
         let mut get_or_create = |comp: (StateID, BTreeSet<StateID>),
                                  new_nwa: &mut NWA,
@@ -1001,11 +1004,11 @@ impl NWA {
             new_id
         };
 
-        if self.states.is_empty() {
+        if self_states.is_empty() {
             return (NWA::new(), BTreeMap::new());
         }
 
-        for &start0 in &self.body.start_states {
+        for &start0 in &self_body.start_states {
             let start1_set = join_map.get(&start0).cloned().unwrap_or_default();
             let start_comp = (start0, start1_set);
             let new_start_id =
@@ -1015,13 +1018,13 @@ impl NWA {
 
         while let Some((id0, ids1)) = worklist.pop_front() {
             let new_id = *composition_to_new_id.get(&(id0, ids1.clone())).unwrap();
-            let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
+            let s0 = if id0 == sink0 { None } else { Some(&self_states[id0]) };
 
             // Aggregate final weights
             let mut agg_final_weight = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
             for &id1 in &ids1 {
                 if id1 != sink1 {
-                    if let Some(fw) = &other.states[id1].final_weight {
+                    if let Some(fw) = &other_states[id1].final_weight {
                         agg_final_weight |= fw;
                     }
                 }
@@ -1033,7 +1036,7 @@ impl NWA {
             // Epsilon transitions from `other` part (self part is static)
             for &id1 in &ids1 {
                 if id1 != sink1 {
-                    for (t1, w1) in &other.states[id1].epsilon_transitions {
+                    for (t1, w1) in &other_states[id1].epsilon_transitions {
                         let mut next_ids1 = ids1.clone();
                         next_ids1.remove(&id1);
                         next_ids1.insert(*t1);
@@ -1062,7 +1065,7 @@ impl NWA {
                         let mut next_ids1 = BTreeSet::new();
                         for &id1 in &ids1 {
                             if id1 != sink1 {
-                                if let Some(trans1) = if let Some(c) = ch { other.states[id1].transitions.get(c) } else { other.states[id1].transitions.get_default() } {
+                                if let Some(trans1) = if let Some(c) = ch { other_states[id1].transitions.get(c) } else { other_states[id1].transitions.get_default() } {
                                     for (t1, _) in trans1 { next_ids1.insert(*t1); }
                                 }
                             }
@@ -1080,12 +1083,37 @@ impl NWA {
         (new_nwa, mapping)
     }
 
+    pub fn concatenate(
+        &self,
+        other: &NWA,
+        join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
+    ) -> (NWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+        NWA::concatenate_components((&self.states, &self.body), (&other.states, &other.body), join_map)
+    }
+
+    pub fn concatenate_inplace(
+        &mut self,
+        other: &NWA,
+        join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
+    ) {
+        let (new_nwa, _mapping) =
+            NWA::concatenate_components((&self.states, &self.body), (&other.states, &other.body), join_map);
+        self.states = new_nwa.states;
+        self.body = new_nwa.body;
+    }
+
     /// Union of two NWAs.
     /// The new NWA has a new start state with epsilon transitions to the start states
     /// of the original NWAs. The states of both NWAs are copied.
     /// Returns the new NWA and a map from new state IDs to the original automaton states.
     /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
-    pub fn union(&self, other: &NWA) -> (NWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+    pub fn union_components(
+        nwa1: (&NWAStates, &NWABody),
+        nwa2: (&NWAStates, &NWABody),
+    ) -> (NWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+        let (self_states, self_body) = nwa1;
+        let (other_states, other_body) = nwa2;
+
         let mut new_nwa = NWA::new();
         new_nwa.states.0.clear();
         new_nwa.body.start_states.clear();
@@ -1093,13 +1121,13 @@ impl NWA {
         let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
 
         // 1. Copy states from `self`
-        let self_mapping = new_nwa.states.append_copy_from(&self.states);
+        let self_mapping = new_nwa.states.append_copy_from(self_states);
         for (old_id, &new_id) in self_mapping.iter().enumerate() {
             mapping.entry(new_id).or_default().insert((0, old_id));
         }
 
         // 2. Copy states from `other`
-        let other_mapping = new_nwa.states.append_copy_from(&other.states);
+        let other_mapping = new_nwa.states.append_copy_from(other_states);
         for (old_id, &new_id) in other_mapping.iter().enumerate() {
             mapping.entry(new_id).or_default().insert((1, old_id));
         }
@@ -1109,13 +1137,13 @@ impl NWA {
         new_nwa.body.start_states.insert(new_start_id);
 
         // 4. Add epsilon transitions from the new start state
-        for &old_start in &self.body.start_states {
+        for &old_start in &self_body.start_states {
             if old_start < self_mapping.len() {
                 let new_target = self_mapping[old_start];
                 new_nwa.add_epsilon_transition(new_start_id, new_target, Weight::all());
             }
         }
-        for &old_start in &other.body.start_states {
+        for &old_start in &other_body.start_states {
             if old_start < other_mapping.len() {
                 let new_target = other_mapping[old_start];
                 new_nwa.add_epsilon_transition(new_start_id, new_target, Weight::all());
@@ -1123,6 +1151,16 @@ impl NWA {
         }
 
         (new_nwa, mapping)
+    }
+
+    pub fn union(&self, other: &NWA) -> (NWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+        NWA::union_components((&self.states, &self.body), (&other.states, &other.body))
+    }
+
+    pub fn union_inplace(&mut self, other: &NWA) {
+        let (new_nwa, _mapping) = NWA::union_components((&self.states, &self.body), (&other.states, &other.body));
+        self.states = new_nwa.states;
+        self.body = new_nwa.body;
     }
 
     pub fn process_stack_u16(&self, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
@@ -1208,14 +1246,20 @@ impl DWA {
     /// If a transition exists in one but not the other, the other is treated as going to a non-final sink state.
     /// Returns the new DWA and a map from new state IDs to the pair of original automaton states.
     /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
-    pub fn union(&self, other: &DWA) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+    pub fn union_components(
+        dwa1: (&DWAStates, &DWABody),
+        dwa2: (&DWAStates, &DWABody),
+    ) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+        let (self_states, self_body) = dwa1;
+        let (other_states, other_body) = dwa2;
+
         let mut new_dwa = DWA::default();
         let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
         let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
         let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
 
-        let sink0 = self.states.len();
-        let sink1 = other.states.len();
+        let sink0 = self_states.len();
+        let sink1 = other_states.len();
 
         let mut get_or_create = |
             pair: (StateID, StateID),
@@ -1240,17 +1284,17 @@ impl DWA {
             new_id
         };
 
-        if self.states.is_empty() && other.states.is_empty() {
+        if self_states.is_empty() && other_states.is_empty() {
             return (new_dwa, mapping);
         }
 
-        let start_pair = (self.body.start_state, other.body.start_state);
+        let start_pair = (self_body.start_state, other_body.start_state);
         new_dwa.body.start_state = get_or_create(start_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist, &mut mapping);
 
         while let Some((id0, id1)) = worklist.pop_front() {
             let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
-            let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
-            let s1 = if id1 == sink1 { None } else { Some(&other.states[id1]) };
+            let s0 = if id0 == sink0 { None } else { Some(&self_states[id0]) };
+            let s1 = if id1 == sink1 { None } else { Some(&other_states[id1]) };
 
             let new_state = &mut new_dwa.states[new_id];
 
@@ -1304,6 +1348,16 @@ impl DWA {
         (new_dwa, mapping)
     }
 
+    pub fn union(&self, other: &DWA) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+        DWA::union_components((&self.states, &self.body), (&other.states, &other.body))
+    }
+
+    pub fn union_inplace(&mut self, other: &DWA) {
+        let (new_dwa, _mapping) = DWA::union_components((&self.states, &self.body), (&other.states, &other.body));
+        self.states = new_dwa.states;
+        self.body = new_dwa.body;
+    }
+
     /// A flexible concatenation-like operation on two DWAs.
     /// The `join_map` specifies which states in `self` (the left DWA) are "join points".
     /// When a join point `s_left` is entered, it's as if we also simultaneously enter
@@ -1319,11 +1373,14 @@ impl DWA {
     ///
     /// Returns the new DWA and a map from new state IDs to the set of original automaton states.
     /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
-    pub fn concatenate(
-        &self,
-        other: &DWA,
+    pub fn concatenate_components(
+        dwa1: (&DWAStates, &DWABody),
+        dwa2: (&DWAStates, &DWABody),
         join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
     ) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+        let (self_states, self_body) = dwa1;
+        let (other_states, _other_body) = dwa2;
+
         let mut new_dwa = DWA::new();
         new_dwa.states.0.clear(); // start with no states
 
@@ -1331,8 +1388,8 @@ impl DWA {
         let mut composition_to_new_id: BTreeMap<(StateID, BTreeSet<StateID>), StateID> = BTreeMap::new();
         let mut worklist: VecDeque<(StateID, BTreeSet<StateID>)> = VecDeque::new();
 
-        let sink0 = self.states.len();
-        let sink1 = other.states.len();
+        let sink0 = self_states.len();
+        let sink1 = other_states.len();
 
         let mut get_or_create = |comp: (StateID, BTreeSet<StateID>),
                                  new_dwa: &mut DWA,
@@ -1362,11 +1419,11 @@ impl DWA {
             new_id
         };
 
-        if self.states.is_empty() {
+        if self_states.is_empty() {
             return (DWA::new(), BTreeMap::new());
         }
 
-        let start0 = self.body.start_state;
+        let start0 = self_body.start_state;
         let start1_set = join_map.get(&start0).cloned().unwrap_or_default();
         let start_comp = (start0, start1_set);
         new_dwa.body.start_state =
@@ -1374,7 +1431,7 @@ impl DWA {
 
         while let Some((id0, ids1)) = worklist.pop_front() {
             let new_id = *composition_to_new_id.get(&(id0, ids1.clone())).unwrap();
-            let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
+            let s0 = if id0 == sink0 { None } else { Some(&self_states[id0]) };
 
             let new_state = &mut new_dwa.states[new_id];
 
@@ -1383,7 +1440,7 @@ impl DWA {
             let mut agg_final_weight = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
             for &id1 in &ids1 {
                 if id1 != sink1 {
-                    let s1 = &other.states[id1];
+                    let s1 = &other_states[id1];
                     agg_weight |= &s1.weight;
                     if let Some(fw) = &s1.final_weight {
                         agg_final_weight |= fw;
@@ -1402,7 +1459,7 @@ impl DWA {
             }
             for &id1 in &ids1 {
                 if id1 != sink1 {
-                    critical_points.extend(other.states[id1].transitions.exceptions.keys());
+                    critical_points.extend(other_states[id1].transitions.exceptions.keys());
                 }
             }
 
@@ -1413,7 +1470,7 @@ impl DWA {
             // Default transition
             let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
             let mut def_tgts1: BTreeSet<StateID> =
-                ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| other.states[id1].transitions.default.unwrap_or(sink1)).collect();
+                ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| other_states[id1].transitions.default.unwrap_or(sink1)).collect();
             def_tgts1.remove(&sink1);
 
             if let Some(joins) = join_map.get(&def_tgt0) {
@@ -1428,7 +1485,7 @@ impl DWA {
             let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
             for &id1 in &ids1 {
                 if id1 != sink1 {
-                    tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                    tw_def |= &other_states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
                 }
             }
             new_dwa.states[new_id].trans_weight_default = Some(tw_def);
@@ -1437,7 +1494,7 @@ impl DWA {
             for &ch in &critical_points {
                 let tgt0 = get_target(s0, sink0, ch);
                 let mut tgts1: BTreeSet<StateID> =
-                    ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| get_target(Some(&other.states[id1]), sink1, ch)).collect();
+                    ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| get_target(Some(&other_states[id1]), sink1, ch)).collect();
                 tgts1.remove(&sink1);
 
                 if let Some(joins) = join_map.get(&tgt0) {
@@ -1454,7 +1511,7 @@ impl DWA {
                     let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
                     for &id1 in &ids1 {
                         if id1 != sink1 {
-                            tw_exc |= &other.states[id1].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
+                            tw_exc |= &other_states[id1].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
                         }
                     }
                     new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
@@ -1463,6 +1520,25 @@ impl DWA {
         }
 
         (new_dwa, mapping)
+    }
+
+    pub fn concatenate(
+        &self,
+        other: &DWA,
+        join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
+    ) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+        DWA::concatenate_components((&self.states, &self.body), (&other.states, &other.body), join_map)
+    }
+
+    pub fn concatenate_inplace(
+        &mut self,
+        other: &DWA,
+        join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
+    ) {
+        let (new_dwa, _mapping) =
+            DWA::concatenate_components((&self.states, &self.body), (&other.states, &other.body), join_map);
+        self.states = new_dwa.states;
+        self.body = new_dwa.body;
     }
 
     /// Convert this DWA to an NWA.
