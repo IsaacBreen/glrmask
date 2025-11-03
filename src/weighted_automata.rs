@@ -460,53 +460,6 @@ impl DWAState {
 
 // --- Part 5: NWA Processing, Determinization, and DWA Simplification ---
 
-#[derive(Clone, Debug, Default)]
-struct EpsilonCache {
-    closures: Vec<BTreeMap<StateID, Weight>>,
-}
-
-impl EpsilonCache {
-    fn new(states: &NWAStates) -> Self {
-        let mut closures = Vec::with_capacity(states.len());
-        let has_epsilons = true;
-        if !has_epsilons {
-            for i in 0..states.len() {
-                let mut map = BTreeMap::new();
-                map.insert(i, Weight::all());
-                closures.push(map);
-            }
-        } else {
-            for i in 0..states.len() {
-                let mut initial = BTreeMap::new();
-                initial.insert(i, Weight::all());
-                // The debug len is not important here.
-                let closure = states.epsilon_closure_with_flag(initial, true, 0);
-                closures.push(closure);
-            }
-        }
-        Self { closures }
-    }
-
-    fn compute_closure(&self, initial_states: BTreeMap<StateID, Weight>) -> BTreeMap<StateID, Weight> {
-        let mut final_closure = BTreeMap::new();
-        for (start_id, start_weight) in initial_states {
-            if start_weight.is_empty() {
-                continue;
-            }
-            if let Some(cached_closure) = self.closures.get(start_id) {
-                for (target_id, path_weight) in cached_closure {
-                    let new_weight = &start_weight & path_weight;
-                    if !new_weight.is_empty() {
-                        final_closure.entry(*target_id).or_insert_with(Weight::zeros).bitor_assign(&new_weight);
-                    }
-                }
-            }
-        }
-        final_closure
-    }
-}
-// --- Part 5: NWA Processing, Determinization, and DWA Simplification ---
-
 impl NWAStates {
     /// Nondeterministic processing over u16 alphabet.
     ///
@@ -522,22 +475,14 @@ impl NWAStates {
         if self.0.is_empty() {
             return Vec::new();
         }
-        let has_eps = self.0.iter().any(|s| !s.epsilon_transitions.is_empty());
-        let eps_cache = if has_eps { Some(EpsilonCache::new(self)) } else { None };
-        let epsilon_closure = |states| {
-            if let Some(cache) = &eps_cache {
-                cache.compute_closure(states)
-            } else {
-                states
-            }
-        };
+        let has_eps = true;
 
         let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
         for &start_state in start_states {
             current.insert(start_state, Weight::all());
         }
         let eps_now = Instant::now();
-        let mut current = epsilon_closure(current);
+        let mut current = self.epsilon_closure_with_flag(current, has_eps, input.len());
         total_eps_closure_time += eps_now.elapsed();
 
         // deduplicate results by (pos,state) and join weights
@@ -575,7 +520,7 @@ impl NWAStates {
             max_next_raw_states = max_next_raw_states.max(next_raw.len());
 
             let eps_now = Instant::now();
-            current = epsilon_closure(next_raw);
+            current = self.epsilon_closure_with_flag(next_raw, has_eps, input.len());
             total_eps_closure_time += eps_now.elapsed();
         }
 
@@ -675,15 +620,7 @@ impl NWAStates {
             return merged_from;
         }
 
-        let has_epsilons = true;
-        let eps_cache = if has_epsilons { Some(EpsilonCache::new(self)) } else { None };
-        let epsilon_closure = |states| {
-            if let Some(cache) = &eps_cache {
-                cache.compute_closure(states)
-            } else {
-                states
-            }
-        };
+        let has_epsilons = self.0.iter().any(|s| !s.epsilon_transitions.is_empty());
 
         // Canonicalize a composition map into a sorted vector, dropping empty weights.
         let to_key = |comp: BTreeMap<StateID, Weight>| -> Vec<(StateID, Weight)> {
@@ -695,7 +632,7 @@ impl NWAStates {
         for &start_state in &body.start_states {
             start_raw.insert(start_state, Weight::all());
         }
-        let start_map = epsilon_closure(start_raw);
+        let start_map = self.epsilon_closure_with_flag(start_raw, has_epsilons, 0);
         let start_key = to_key(start_map);
         if start_key.is_empty() {
             // No reachable start under epsilon-closure; leave body unchanged.
@@ -739,7 +676,7 @@ impl NWAStates {
             let mut default_target_id: Option<StateID> = None;
             let mut default_vec_bottom: Option<Vec<(StateID, Weight)>> = None;
             if depth < level {
-                let def_closure = epsilon_closure(def_next_raw);
+                let def_closure = self.epsilon_closure_with_flag(def_next_raw, has_epsilons, 0);
                 let def_key = to_key(def_closure);
                 if !def_key.is_empty() {
                     let tid = get_or_create_merged_state(
@@ -789,7 +726,7 @@ impl NWAStates {
                 }
 
                 if depth < level {
-                    let exc_closure = epsilon_closure(exc_next_raw);
+                    let exc_closure = self.epsilon_closure_with_flag(exc_next_raw, has_epsilons, 0);
                     let exc_key = to_key(exc_closure);
                     if exc_key.is_empty() {
                         continue;
@@ -864,15 +801,7 @@ impl NWA {
             return DWA { states: dwa_states, body: dwa_body };
         }
 
-        let has_epsilons = true;
-        let eps_cache = if has_epsilons { Some(EpsilonCache::new(states)) } else { None };
-        let epsilon_closure = |s| {
-            if let Some(cache) = &eps_cache {
-                cache.compute_closure(s)
-            } else {
-                s
-            }
-        };
+        let has_epsilons = states.0.iter().any(|s| !s.epsilon_transitions.is_empty());
 
         let to_key = |comp: BTreeMap<StateID, Weight>| -> Vec<(StateID, Weight)> {
             comp.into_iter().filter(|(_, w)| !w.is_empty()).collect()
@@ -903,7 +832,7 @@ impl NWA {
         for &start_state in &body.start_states {
             start_raw.insert(start_state, Weight::all());
         }
-        let start_map = epsilon_closure(start_raw);
+        let start_map = states.epsilon_closure_with_flag(start_raw, has_epsilons, 0);
         if let Some(start_id) = get_or_create(to_key(start_map), &mut dwa_states, &mut known_states, &mut worklist) {
             dwa_body.start_state = start_id;
         } else {
@@ -946,7 +875,7 @@ impl NWA {
                     }
                 }
             }
-            let def_comp = to_key(epsilon_closure(default_next_raw));
+            let def_comp = to_key(states.epsilon_closure_with_flag(default_next_raw, has_epsilons, 0));
             let def_target = get_or_create(def_comp, &mut dwa_states, &mut known_states, &mut worklist);
             dwa_states[current_dwa_id].transitions.default = def_target;
             if def_target.is_some() {
@@ -969,7 +898,7 @@ impl NWA {
                 if exception_next_raw.is_empty() {
                     continue;
                 }
-                let exc_comp = to_key(epsilon_closure(exception_next_raw));
+                let exc_comp = to_key(states.epsilon_closure_with_flag(exception_next_raw, has_epsilons, 0));
                 let exc_target = get_or_create(exc_comp, &mut dwa_states, &mut known_states, &mut worklist);
 
                 if exc_target != def_target {
