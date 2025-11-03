@@ -505,7 +505,7 @@ impl NWAStates {
         let mut worklist_pushes = 0;
         let mut edges_traversed = 0;
 
-        let mut closure = initial_states;
+        let mut closure = initial_states.clone(); // TEMP: remove this when the println below is removed.
         let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
         worklist_pushes += worklist.len();
 
