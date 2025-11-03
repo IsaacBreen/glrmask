@@ -310,6 +310,23 @@ impl AugmentedNwa {
         AugmentedNwaBody::union_with_on_shared(&mut self.states, &mut self.body, &other_body);
     }
 
+    pub fn simplify_to_level(&mut self, level: usize) {
+        let merged_from = self.states.simplify_to_level(&mut self.body.nwa, level);
+        let old_end_map = self.body.end_map.clone();
+
+        for (new_state, origin_states) in merged_from {
+            let mut stacks_for_new_state = BTreeSet::new();
+            for origin_state in &origin_states {
+                if let Some(stacks) = old_end_map.get(origin_state) {
+                    stacks_for_new_state.extend(stacks.clone());
+                }
+            }
+            if !stacks_for_new_state.is_empty() {
+                self.body.end_map.insert(new_state, stacks_for_new_state);
+            }
+        }
+    }
+
 
     /// Determinize to DWA using combined NWA separation.
     pub fn determinize(&self) -> DWA {
