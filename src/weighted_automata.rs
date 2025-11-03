@@ -395,6 +395,27 @@ impl NWA {
 
 // --- Deterministic Weighted Automaton (DWA) ---
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DWABuildError {
+    TransitionAlreadyExists { from: StateID, on: u16 },
+    DefaultTransitionAlreadyExists { from: StateID },
+    StateOutOfBounds { state: StateID },
+}
+
+impl Display for DWABuildError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DWABuildError::TransitionAlreadyExists { from, on } => {
+                write!(f, "Transition from state {} on char {} already exists", from, on)
+            }
+            DWABuildError::DefaultTransitionAlreadyExists { from } => {
+                write!(f, "Default transition from state {} already exists", from)
+            }
+            DWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DWAState {
     pub transitions: U16Map<StateID>,
@@ -427,6 +448,11 @@ impl Deref for DWAStates {
 impl DWAStates {
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+    pub fn add_state(&mut self) -> StateID {
+        let id = self.0.len();
+        self.0.push(DWAState::default());
+        id
     }
 }
 
@@ -924,6 +950,75 @@ impl NWA {
 
 // DWA simplification utilities
 impl DWA {
+    pub fn new() -> Self {
+        let mut states = DWAStates::default();
+        let start = states.add_state();
+        DWA { states, body: DWABody { start_state: start } }
+    }
+
+    pub fn add_state(&mut self) -> StateID {
+        self.states.add_state()
+    }
+
+    pub fn set_state_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
+        if state >= self.states.len() {
+            return Err(DWABuildError::StateOutOfBounds { state });
+        }
+        self.states[state].weight = weight;
+        Ok(())
+    }
+
+    pub fn set_final_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
+        if state >= self.states.len() {
+            return Err(DWABuildError::StateOutOfBounds { state });
+        }
+        self.states[state].final_weight = Some(weight);
+        Ok(())
+    }
+
+    pub fn add_transition(
+        &mut self,
+        from: StateID,
+        on: u16,
+        to: StateID,
+        weight: Weight,
+    ) -> Result<(), DWABuildError> {
+        if from >= self.states.len() {
+            return Err(DWABuildError::StateOutOfBounds { state: from });
+        }
+        if to >= self.states.len() {
+            return Err(DWABuildError::StateOutOfBounds { state: to });
+        }
+        let from_state = &mut self.states[from];
+        if from_state.transitions.exceptions.contains_key(&on) {
+            return Err(DWABuildError::TransitionAlreadyExists { from, on });
+        }
+        from_state.transitions.exceptions.insert(on, to);
+        from_state.trans_weights_exceptions.insert(on, weight);
+        Ok(())
+    }
+
+    pub fn set_default_transition(
+        &mut self,
+        from: StateID,
+        to: StateID,
+        weight: Weight,
+    ) -> Result<(), DWABuildError> {
+        if from >= self.states.len() {
+            return Err(DWABuildError::StateOutOfBounds { state: from });
+        }
+        if to >= self.states.len() {
+            return Err(DWABuildError::StateOutOfBounds { state: to });
+        }
+        let from_state = &mut self.states[from];
+        if from_state.transitions.default.is_some() {
+            return Err(DWABuildError::DefaultTransitionAlreadyExists { from });
+        }
+        from_state.transitions.default = Some(to);
+        from_state.trans_weight_default = Some(weight);
+        Ok(())
+    }
+
     /// Union of two DWAs via product construction.
     /// The states of the new DWA correspond to pairs of states from the input DWAs.
     /// A state is final if either of the original states is final.
@@ -1873,5 +1968,40 @@ mod tests {
 
         assert!(s7.transitions.exceptions.is_empty());
         assert!(s7.transitions.default.is_none());
+    }
+
+    #[test]
+    fn test_dwa_builder() {
+        let mut dwa = DWA::new();
+        assert_eq!(dwa.states.len(), 1);
+        assert_eq!(dwa.body.start_state, 0);
+
+        let s1 = dwa.add_state();
+        assert_eq!(s1, 1);
+        assert_eq!(dwa.states.len(), 2);
+
+        dwa.set_state_weight(0, SimpleBitset::from_item(10)).unwrap();
+        dwa.set_final_weight(1, SimpleBitset::from_item(20)).unwrap();
+
+        assert_eq!(dwa.states[0].weight, SimpleBitset::from_item(10));
+        assert_eq!(dwa.states[1].final_weight, Some(SimpleBitset::from_item(20)));
+
+        dwa.add_transition(0, b'a' as u16, 1, SimpleBitset::from_item(30)).unwrap();
+        assert_eq!(*dwa.states[0].transitions.get(b'a' as u16).unwrap(), 1);
+        assert_eq!(*dwa.states[0].trans_weights_exceptions.get(&(b'a' as u16)).unwrap(), SimpleBitset::from_item(30));
+
+        // Test error cases
+        let res = dwa.add_transition(0, b'a' as u16, 1, SimpleBitset::zeros());
+        assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: 97 })));
+
+        dwa.set_default_transition(0, 0, SimpleBitset::from_item(40)).unwrap();
+        assert_eq!(dwa.states[0].transitions.default, Some(0));
+        assert_eq!(dwa.states[0].trans_weight_default, Some(SimpleBitset::from_item(40)));
+
+        let res = dwa.set_default_transition(0, 0, SimpleBitset::zeros());
+        assert!(matches!(res, Err(DWABuildError::DefaultTransitionAlreadyExists { from: 0 })));
+
+        let res = dwa.set_final_weight(10, SimpleBitset::zeros());
+        assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
     }
 }
