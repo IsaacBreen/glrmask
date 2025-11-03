@@ -288,8 +288,8 @@ impl AugmentedNwaBody {
         left.end_map = new_end_map;
 
         let result_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
-        crate::debug!(5, "RESULT AugmentedNWA:\n{}", result_nwa_debug);
-        crate::debug!(5, "--- end combine_right_into_on_shared ---");
+        crate::debug!(6, "RESULT AugmentedNWA:\n{}", result_nwa_debug);
+        crate::debug!(6, "--- end combine_right_into_on_shared ---");
 
         println!(
             "    combine_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
