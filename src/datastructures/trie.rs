@@ -2325,11 +2325,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// This function creates a new `Arena`. It clones all reachable nodes from the
     /// `source_arena` into the new arena, preserving their indices. Then, it iterates
     /// through all edges in the original graph and adds a corresponding reversed edge
-    /// to the new graph.
+    /// to the new graph. After reversing, it recomputes `max_depth` for all nodes.
     ///
-    /// Note that `max_depth` values are copied from the original nodes and are not
-    /// recomputed. They will likely be incorrect for the reversed graph. Call
-    /// `recompute_all_max_depths` on the new arena if correct depths are needed.
+    /// `max_depth` is computed using a topological sort. For nodes that are part of a
+    /// cycle in the reversed graph, `max_depth` will be set to `usize::MAX`.
     ///
     /// # Arguments
     /// * `source_arena`: The arena containing the original graph.
@@ -2354,15 +2353,20 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 let new_node = Trie {
                     value: source_guard.value.clone(),
                     children: BTreeMap::new(),
-                    max_depth: source_guard.max_depth,
+                    max_depth: usize::MAX,
                 };
                 new_arena.insert_at(node_idx.as_index(), new_node);
             }
         }
 
         // 2. Iterate through the original graph and add reversed edges to the new one.
+        //    Also, find the roots of the reversed graph (which are the leaves of the original).
+        let mut new_roots = Vec::new();
         for &src_idx in &all_nodes {
             if let Some(src_guard) = src_idx.read(source_arena) {
+                if src_guard.children.is_empty() {
+                    new_roots.push(src_idx);
+                }
                 for (ek, dest_map) in src_guard.children() {
                     for (&dst_idx, ev) in dest_map.iter() {
                         // In the new graph, the edge is from dst_idx to src_idx.
@@ -2374,6 +2378,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     }
                 }
             }
+        }
+
+        // 3. Recompute max depths for the new graph. If there are no roots, the graph
+        //    consists of cycles, and all depths correctly remain usize::MAX.
+        if !new_roots.is_empty() {
+            Self::recompute_all_max_depths(&new_arena, &new_roots);
         }
 
         new_arena
