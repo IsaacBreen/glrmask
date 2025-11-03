@@ -191,6 +191,7 @@ impl AugmentedNwaBody {
         let mut total_process_stack_time = std::time::Duration::new(0, 0);
         let mut total_reachable_time = std::time::Duration::new(0, 0);
         let mut total_end_map_build_time = std::time::Duration::new(0, 0);
+        let mut total_epsilon_add_time = std::time::Duration::new(0, 0);
 
         for (left_end_state, stacks) in left_end_snapshot {
             for left_stack in stacks {
@@ -203,7 +204,10 @@ impl AugmentedNwaBody {
 
                 for (pos, right_stop_state, path_weight) in stops {
                     let combined_weight = &path_weight & weight;
+
+                    let epsilon_add_now = Instant::now();
                     states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
+                    total_epsilon_add_time += epsilon_add_now.elapsed();
 
                     let reachable_now = Instant::now();
                     let reachable = states.reachable_states_ignoring_labels(right_stop_state);
@@ -226,11 +230,12 @@ impl AugmentedNwaBody {
         }
         left.end_map = new_end_map;
         println!(
-            "    combine_right_into_on_shared took: {:?}, process_stack: {:?}, reachable: {:?}, end_map_build: {:?}",
+            "    combine_right_into_on_shared took: {:?}, process_stack: {:?}, reachable: {:?}, end_map_build: {:?}, add_epsilon: {:?}",
             now.elapsed(),
             total_process_stack_time,
             total_reachable_time,
-            total_end_map_build_time
+            total_end_map_build_time,
+            total_epsilon_add_time
         );
         Ok(())
     }

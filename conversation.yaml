@@ -1,8 +1,6 @@
 local_system:
   attached_files:
     - src/weighted_automata.rs
-    - src/precompute4/mod.rs
-    - src/precompute4/characterize.rs
     - src/precompute4/augmented_nwa.rs
     - src/precompute4/full_nwa.rs
   conversation_file:
@@ -1375,200 +1373,6 @@ local_system:
               assert!(s7.transitions.default.is_none());
           }
       }
-    src/precompute4/mod.rs: |
-      pub mod characterize;
-      pub mod augmented_nwa;
-      pub mod full_nwa;
-      pub mod conversion;
-    src/precompute4/characterize.rs: |
-      use crate::glr::parser::GLRParser;
-      use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
-      use std::fmt::{Display, Formatter};
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      pub struct ReduceCharacterization {
-          pub terminal: TerminalID,
-          pub nonterminal: NonTerminalID,
-          // (revealed_state, len, nonterminal)
-          pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          // (revealed_state, goto_state, shift_state)
-          pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
-      }
-
-      impl Display for ReduceCharacterization {
-          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
-              if !self.reveal_and_rereduces.is_empty() {
-                  writeln!(f, "      Reveal-and-rereduces:")?;
-                  for (revealed, len, nt) in &self.reveal_and_rereduces {
-                      writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?;
-                  }
-              }
-              if !self.reveal_goto_shift_escapes.is_empty() {
-                  writeln!(f, "      Reveal-goto-shift escapes:")?;
-                  for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
-                      writeln!(f, "        - revealed: {}, goto: {}, shift: {}", revealed.0, goto.0, shift.0)?;
-                  }
-              }
-              Ok(())
-          }
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct BelowBottomCharacterization {
-          pub terminal: TerminalID,
-          // (initial_state, shift_state)
-          pub initial_shifts: BTreeSet<(StateID, StateID)>,
-          // (initial_state, len, nonterminal)
-          pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
-      }
-
-      impl Display for BelowBottomCharacterization {
-          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
-              if !self.initial_shifts.is_empty() {
-                  writeln!(f, "  Initial Shifts:")?;
-                  for (initial, shift) in &self.initial_shifts {
-                      writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
-                  }
-              }
-              if !self.initial_reduces.is_empty() {
-                  writeln!(f, "  Initial Reduces:")?;
-                  for (initial, len, nt) in &self.initial_reduces {
-                      writeln!(f, "    - initial: {}, len: {}, nt: {}", initial.0, len, nt.0)?;
-                  }
-              }
-              if !self.reduce_characterizations.is_empty() {
-                  writeln!(f, "  Reduce Characterizations:")?;
-                  for rc in self.reduce_characterizations.values() {
-                      write!(f, "{}", rc)?;
-                  }
-              }
-              Ok(())
-          }
-      }
-
-      pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
-          let mut all_chars = BTreeMap::new();
-          for &terminal_id in parser.terminal_map.right_values() {
-              all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
-          }
-          all_chars
-      }
-
-      pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
-          let mut char = BelowBottomCharacterization {
-              terminal: terminal_id,
-              initial_shifts: BTreeSet::new(),
-              initial_reduces: BTreeSet::new(),
-              reduce_characterizations: BTreeMap::new(),
-          };
-
-          // --- 1. Compute initial actions ---
-          for (&initial_state, row) in &parser.table {
-              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
-                  match action {
-                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                          char.initial_shifts.insert((initial_state, *shift_state));
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
-                          if *len > 0 {
-                              char.initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
-                          }
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                          if let Some(shift_state) = shift {
-                              char.initial_shifts.insert((initial_state, *shift_state));
-                          }
-                          for (len, nts) in reduces {
-                              if *len > 0 {
-                                  for (nt_id, _) in nts {
-                                      char.initial_reduces.insert((initial_state, *len - 1, *nt_id));
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-
-          // --- 2. Compute reduce characterizations ---
-          for &nt_id in parser.non_terminal_map.right_values() {
-              let mut reduce_char = ReduceCharacterization {
-                  terminal: terminal_id,
-                  nonterminal: nt_id,
-                  reveal_and_rereduces: BTreeSet::new(),
-                  reveal_goto_shift_escapes: BTreeSet::new(),
-              };
-
-              // Iterate over all possible revealed states
-              for (&revealed_state, row) in &parser.table {
-                  // Check if this state has a GOTO for our non-terminal
-                  if let Some(goto) = row.gotos.get(&nt_id) {
-                      if let Some(goto_state) = goto.state_id {
-                          // This is a valid starting point for a chain.
-                          let mut worklist: VecDeque<StateID> = VecDeque::new();
-                          worklist.push_back(goto_state);
-                          let mut visited: BTreeSet<StateID> = BTreeSet::new();
-                          visited.insert(goto_state);
-
-                          while let Some(current_state) = worklist.pop_front() {
-                              if let Some(action) = parser.table.get(&current_state).and_then(|r| r.shifts_and_reduces_full.get(&terminal_id)) {
-                                  match action {
-                                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                                          reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
-                                          if *len == 1 {
-                                              // Unit reduction chain
-                                              if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                  if let Some(next_goto_state) = next_goto.state_id {
-                                                      if visited.insert(next_goto_state) {
-                                                          worklist.push_back(next_goto_state);
-                                                      }
-                                                  }
-                                              }
-                                          } else if *len > 1 {
-                                              // Pop below revealed state
-                                              reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                          }
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                          if let Some(shift_state) = shift {
-                                              reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                          }
-                                          for (len, nts) in reduces {
-                                              for (reduce_nt, _) in nts {
-                                                  if *len == 1 {
-                                                      if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                          if let Some(next_goto_state) = next_goto.state_id {
-                                                              if visited.insert(next_goto_state) {
-                                                                  worklist.push_back(next_goto_state);
-                                                              }
-                                                          }
-                                                      }
-                                                  } else if *len > 1 {
-                                                      reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                                  }
-                                              }
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-
-              if !reduce_char.reveal_and_rereduces.is_empty() || !reduce_char.reveal_goto_shift_escapes.is_empty() {
-                  char.reduce_characterizations.insert(nt_id, reduce_char);
-              }
-          }
-
-          char
-      }
     src/precompute4/augmented_nwa.rs: |
       use crate::glr::grammar::regex_name;
       use crate::glr::parser::GLRParser;
@@ -1581,6 +1385,7 @@ local_system:
       };
       use std::collections::{BTreeMap, BTreeSet};
       use std::fmt::{Display, Formatter};
+      use std::time::Instant;
 
       /// Error while building an AugmentedNwa.
       #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1755,20 +1560,32 @@ local_system:
               right: &AugmentedNwaBody,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
+              let now = Instant::now();
               let left_end_snapshot = left.end_map.clone();
               let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+
+              let mut total_process_stack_time = std::time::Duration::new(0, 0);
+              let mut total_reachable_time = std::time::Duration::new(0, 0);
+              let mut total_end_map_build_time = std::time::Duration::new(0, 0);
 
               for (left_end_state, stacks) in left_end_snapshot {
                   for left_stack in stacks {
                       let encoded: Vec<u16> =
                           left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
+
+                      let process_now = Instant::now();
                       let stops = states.process_stack_u16_from_start(right.nwa.start_state, &encoded);
+                      total_process_stack_time += process_now.elapsed();
 
                       for (pos, right_stop_state, path_weight) in stops {
                           let combined_weight = &path_weight & weight;
                           states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
 
+                          let reachable_now = Instant::now();
                           let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                          total_reachable_time += reachable_now.elapsed();
+
+                          let end_map_build_now = Instant::now();
                           for r_state in reachable {
                               if let Some(r_stacks) = right.end_map.get(&r_state) {
                                   for r_stack in r_stacks {
@@ -1779,10 +1596,18 @@ local_system:
                                   }
                               }
                           }
+                          total_end_map_build_time += end_map_build_now.elapsed();
                       }
                   }
               }
               left.end_map = new_end_map;
+              println!(
+                  "    combine_right_into_on_shared took: {:?}, process_stack: {:?}, reachable: {:?}, end_map_build: {:?}",
+                  now.elapsed(),
+                  total_process_stack_time,
+                  total_reachable_time,
+                  total_end_map_build_time
+              );
               Ok(())
           }
 
@@ -2319,9 +2144,13 @@ local_system:
                       let combine_elapsed = combine_now.elapsed();
 
                       println!(
-                          "step inner loop: term {:?}, dest {}, append_copy_from: {:?}, combine_right_into: {:?}, shared_states_len: {}",
-                          edge_terminal_opt, dest_idx.as_usize(), copy_elapsed, combine_elapsed, shared_states.borrow().len()
+                          "step inner loop: term {:?}, dest {}, shared_states_len: {}",
+                          edge_terminal_opt,
+                          dest_idx.as_usize(),
+                          shared_states.borrow().len()
                       );
+                      println!("  append_copy_from: {:?}", copy_elapsed);
+                      println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
 
                       results.push((*dest_idx, new_body));
                   }
@@ -2803,22 +2632,32 @@ local_system:
               // frontier: state -> weight
               let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
               current.insert(start_state, Weight::all());
+
+              let initial_closure_now = Instant::now();
               let mut current = self.epsilon_closure_with_flag(current, has_eps);
+              let mut total_closure_time = initial_closure_now.elapsed();
+              let mut total_results_time = std::time::Duration::new(0, 0);
+              let mut total_next_raw_time = std::time::Duration::new(0, 0);
 
               // deduplicate results by (pos,state) and join weights
               let mut results: BTreeMap<(usize, StateID), Weight> = BTreeMap::new();
               let n = input.len();
 
               for pos in 0..=n {
+                  let results_now = Instant::now();
                   for (&sid, path_w) in &current {
                       if self[sid].final_weight.is_some() {
                           results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
                       }
                   }
+                  total_results_time += results_now.elapsed();
+
                   if pos == n {
+                      let results_now_final = Instant::now();
                       for (&sid, path_w) in &current {
                           results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
                       }
+                      total_results_time += results_now_final.elapsed();
                       break;
                   }
 
@@ -2834,11 +2673,22 @@ local_system:
                           }
                       }
                   }
+                  total_next_raw_time += next_raw_now.elapsed();
+
+                  let closure_now = Instant::now();
                   current = self.epsilon_closure_with_flag(next_raw, has_eps);
+                  total_closure_time += closure_now.elapsed();
               }
 
               let result = results.into_iter().map(|((pos, sid), w)| (pos, sid, w)).collect();
-              println!("NWAStates::process_stack_u16_from_start (input len {}) took: {:?}", input.len(), now.elapsed());
+              println!(
+                  "NWAStates::process_stack_u16_from_start (input len {}) took: {:?}, closure: {:?}, next_raw: {:?}, results: {:?}",
+                  input.len(),
+                  now.elapsed(),
+                  total_closure_time,
+                  total_next_raw_time,
+                  total_results_time
+              );
               result
           }
 
@@ -2854,9 +2704,12 @@ local_system:
               if !has_epsilons {
                   return initial_states;
               }
+              let now = Instant::now();
+              let initial_len = initial_states.len();
 
               let mut closure = initial_states;
               let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
+              let mut transitions_processed = 0;
 
               while let Some(u_id) = worklist.pop_front() {
                   let u_weight = closure.get(&u_id).unwrap().clone();
@@ -2865,6 +2718,7 @@ local_system:
                   }
 
                   for (v_id, trans_weight) in &self[u_id].epsilon_transitions {
+                      transitions_processed += 1;
                       let new_v_weight = &u_weight & trans_weight;
                       if new_v_weight.is_empty() {
                           continue;
@@ -2878,6 +2732,15 @@ local_system:
                           worklist.push_back(*v_id);
                       }
                   }
+              }
+              if now.elapsed().as_millis() > 1 {
+                  println!(
+                      "    epsilon_closure_with_flag (initial_states: {}, final_states: {}, transitions: {}) took: {:?}",
+                      initial_len,
+                      closure.len(),
+                      transitions_processed,
+                      now.elapsed()
+                  );
               }
               closure
           }
@@ -3742,200 +3605,6 @@ local_system:
               assert!(s7.transitions.default.is_none());
           }
       }
-    src/precompute4/mod.rs: |
-      pub mod characterize;
-      pub mod augmented_nwa;
-      pub mod full_nwa;
-      pub mod conversion;
-    src/precompute4/characterize.rs: |
-      use crate::glr::parser::GLRParser;
-      use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
-      use std::fmt::{Display, Formatter};
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      pub struct ReduceCharacterization {
-          pub terminal: TerminalID,
-          pub nonterminal: NonTerminalID,
-          // (revealed_state, len, nonterminal)
-          pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          // (revealed_state, goto_state, shift_state)
-          pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
-      }
-
-      impl Display for ReduceCharacterization {
-          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
-              if !self.reveal_and_rereduces.is_empty() {
-                  writeln!(f, "      Reveal-and-rereduces:")?;
-                  for (revealed, len, nt) in &self.reveal_and_rereduces {
-                      writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?;
-                  }
-              }
-              if !self.reveal_goto_shift_escapes.is_empty() {
-                  writeln!(f, "      Reveal-goto-shift escapes:")?;
-                  for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
-                      writeln!(f, "        - revealed: {}, goto: {}, shift: {}", revealed.0, goto.0, shift.0)?;
-                  }
-              }
-              Ok(())
-          }
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct BelowBottomCharacterization {
-          pub terminal: TerminalID,
-          // (initial_state, shift_state)
-          pub initial_shifts: BTreeSet<(StateID, StateID)>,
-          // (initial_state, len, nonterminal)
-          pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
-      }
-
-      impl Display for BelowBottomCharacterization {
-          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
-              if !self.initial_shifts.is_empty() {
-                  writeln!(f, "  Initial Shifts:")?;
-                  for (initial, shift) in &self.initial_shifts {
-                      writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
-                  }
-              }
-              if !self.initial_reduces.is_empty() {
-                  writeln!(f, "  Initial Reduces:")?;
-                  for (initial, len, nt) in &self.initial_reduces {
-                      writeln!(f, "    - initial: {}, len: {}, nt: {}", initial.0, len, nt.0)?;
-                  }
-              }
-              if !self.reduce_characterizations.is_empty() {
-                  writeln!(f, "  Reduce Characterizations:")?;
-                  for rc in self.reduce_characterizations.values() {
-                      write!(f, "{}", rc)?;
-                  }
-              }
-              Ok(())
-          }
-      }
-
-      pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
-          let mut all_chars = BTreeMap::new();
-          for &terminal_id in parser.terminal_map.right_values() {
-              all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
-          }
-          all_chars
-      }
-
-      pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
-          let mut char = BelowBottomCharacterization {
-              terminal: terminal_id,
-              initial_shifts: BTreeSet::new(),
-              initial_reduces: BTreeSet::new(),
-              reduce_characterizations: BTreeMap::new(),
-          };
-
-          // --- 1. Compute initial actions ---
-          for (&initial_state, row) in &parser.table {
-              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
-                  match action {
-                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                          char.initial_shifts.insert((initial_state, *shift_state));
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
-                          if *len > 0 {
-                              char.initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
-                          }
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                          if let Some(shift_state) = shift {
-                              char.initial_shifts.insert((initial_state, *shift_state));
-                          }
-                          for (len, nts) in reduces {
-                              if *len > 0 {
-                                  for (nt_id, _) in nts {
-                                      char.initial_reduces.insert((initial_state, *len - 1, *nt_id));
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-
-          // --- 2. Compute reduce characterizations ---
-          for &nt_id in parser.non_terminal_map.right_values() {
-              let mut reduce_char = ReduceCharacterization {
-                  terminal: terminal_id,
-                  nonterminal: nt_id,
-                  reveal_and_rereduces: BTreeSet::new(),
-                  reveal_goto_shift_escapes: BTreeSet::new(),
-              };
-
-              // Iterate over all possible revealed states
-              for (&revealed_state, row) in &parser.table {
-                  // Check if this state has a GOTO for our non-terminal
-                  if let Some(goto) = row.gotos.get(&nt_id) {
-                      if let Some(goto_state) = goto.state_id {
-                          // This is a valid starting point for a chain.
-                          let mut worklist: VecDeque<StateID> = VecDeque::new();
-                          worklist.push_back(goto_state);
-                          let mut visited: BTreeSet<StateID> = BTreeSet::new();
-                          visited.insert(goto_state);
-
-                          while let Some(current_state) = worklist.pop_front() {
-                              if let Some(action) = parser.table.get(&current_state).and_then(|r| r.shifts_and_reduces_full.get(&terminal_id)) {
-                                  match action {
-                                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                                          reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
-                                          if *len == 1 {
-                                              // Unit reduction chain
-                                              if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                  if let Some(next_goto_state) = next_goto.state_id {
-                                                      if visited.insert(next_goto_state) {
-                                                          worklist.push_back(next_goto_state);
-                                                      }
-                                                  }
-                                              }
-                                          } else if *len > 1 {
-                                              // Pop below revealed state
-                                              reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                          }
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                          if let Some(shift_state) = shift {
-                                              reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                          }
-                                          for (len, nts) in reduces {
-                                              for (reduce_nt, _) in nts {
-                                                  if *len == 1 {
-                                                      if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                          if let Some(next_goto_state) = next_goto.state_id {
-                                                              if visited.insert(next_goto_state) {
-                                                                  worklist.push_back(next_goto_state);
-                                                              }
-                                                          }
-                                                      }
-                                                  } else if *len > 1 {
-                                                      reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                                  }
-                                              }
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-
-              if !reduce_char.reveal_and_rereduces.is_empty() || !reduce_char.reveal_goto_shift_escapes.is_empty() {
-                  char.reduce_characterizations.insert(nt_id, reduce_char);
-              }
-          }
-
-          char
-      }
     src/precompute4/augmented_nwa.rs: |
       use crate::glr::grammar::regex_name;
       use crate::glr::parser::GLRParser;
@@ -4130,6 +3799,7 @@ local_system:
               let mut total_process_stack_time = std::time::Duration::new(0, 0);
               let mut total_reachable_time = std::time::Duration::new(0, 0);
               let mut total_end_map_build_time = std::time::Duration::new(0, 0);
+              let mut total_epsilon_add_time = std::time::Duration::new(0, 0);
 
               for (left_end_state, stacks) in left_end_snapshot {
                   for left_stack in stacks {
@@ -4142,7 +3812,10 @@ local_system:
 
                       for (pos, right_stop_state, path_weight) in stops {
                           let combined_weight = &path_weight & weight;
+
+                          let epsilon_add_now = Instant::now();
                           states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
+                          total_epsilon_add_time += epsilon_add_now.elapsed();
 
                           let reachable_now = Instant::now();
                           let reachable = states.reachable_states_ignoring_labels(right_stop_state);
@@ -4165,11 +3838,12 @@ local_system:
               }
               left.end_map = new_end_map;
               println!(
-                  "    combine_right_into_on_shared took: {:?}, process_stack: {:?}, reachable: {:?}, end_map_build: {:?}",
+                  "    combine_right_into_on_shared took: {:?}, process_stack: {:?}, reachable: {:?}, end_map_build: {:?}, add_epsilon: {:?}",
                   now.elapsed(),
                   total_process_stack_time,
                   total_reachable_time,
-                  total_end_map_build_time
+                  total_end_map_build_time,
+                  total_epsilon_add_time
               );
               Ok(())
           }
@@ -6181,210 +5855,6 @@ messages:
     metadata:
       filename: src/weighted_automata.rs
   - user: |-
-      ```rust "src/precompute4/mod.rs"
-      pub mod characterize;
-      pub mod augmented_nwa;
-      pub mod full_nwa;
-      pub mod conversion;
-
-      ```
-    metadata:
-      filename: src/precompute4/mod.rs
-  - user: |-
-      ```rust "src/precompute4/characterize.rs"
-      use crate::glr::parser::GLRParser;
-      use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
-      use std::fmt::{Display, Formatter};
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      pub struct ReduceCharacterization {
-          pub terminal: TerminalID,
-          pub nonterminal: NonTerminalID,
-          // (revealed_state, len, nonterminal)
-          pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          // (revealed_state, goto_state, shift_state)
-          pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
-      }
-
-      impl Display for ReduceCharacterization {
-          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
-              if !self.reveal_and_rereduces.is_empty() {
-                  writeln!(f, "      Reveal-and-rereduces:")?;
-                  for (revealed, len, nt) in &self.reveal_and_rereduces {
-                      writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?;
-                  }
-              }
-              if !self.reveal_goto_shift_escapes.is_empty() {
-                  writeln!(f, "      Reveal-goto-shift escapes:")?;
-                  for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
-                      writeln!(f, "        - revealed: {}, goto: {}, shift: {}", revealed.0, goto.0, shift.0)?;
-                  }
-              }
-              Ok(())
-          }
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct BelowBottomCharacterization {
-          pub terminal: TerminalID,
-          // (initial_state, shift_state)
-          pub initial_shifts: BTreeSet<(StateID, StateID)>,
-          // (initial_state, len, nonterminal)
-          pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
-      }
-
-      impl Display for BelowBottomCharacterization {
-          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
-              if !self.initial_shifts.is_empty() {
-                  writeln!(f, "  Initial Shifts:")?;
-                  for (initial, shift) in &self.initial_shifts {
-                      writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
-                  }
-              }
-              if !self.initial_reduces.is_empty() {
-                  writeln!(f, "  Initial Reduces:")?;
-                  for (initial, len, nt) in &self.initial_reduces {
-                      writeln!(f, "    - initial: {}, len: {}, nt: {}", initial.0, len, nt.0)?;
-                  }
-              }
-              if !self.reduce_characterizations.is_empty() {
-                  writeln!(f, "  Reduce Characterizations:")?;
-                  for rc in self.reduce_characterizations.values() {
-                      write!(f, "{}", rc)?;
-                  }
-              }
-              Ok(())
-          }
-      }
-
-      pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
-          let mut all_chars = BTreeMap::new();
-          for &terminal_id in parser.terminal_map.right_values() {
-              all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
-          }
-          all_chars
-      }
-
-      pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
-          let mut char = BelowBottomCharacterization {
-              terminal: terminal_id,
-              initial_shifts: BTreeSet::new(),
-              initial_reduces: BTreeSet::new(),
-              reduce_characterizations: BTreeMap::new(),
-          };
-
-          // --- 1. Compute initial actions ---
-          for (&initial_state, row) in &parser.table {
-              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
-                  match action {
-                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                          char.initial_shifts.insert((initial_state, *shift_state));
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
-                          if *len > 0 {
-                              char.initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
-                          }
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                          if let Some(shift_state) = shift {
-                              char.initial_shifts.insert((initial_state, *shift_state));
-                          }
-                          for (len, nts) in reduces {
-                              if *len > 0 {
-                                  for (nt_id, _) in nts {
-                                      char.initial_reduces.insert((initial_state, *len - 1, *nt_id));
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-
-          // --- 2. Compute reduce characterizations ---
-          for &nt_id in parser.non_terminal_map.right_values() {
-              let mut reduce_char = ReduceCharacterization {
-                  terminal: terminal_id,
-                  nonterminal: nt_id,
-                  reveal_and_rereduces: BTreeSet::new(),
-                  reveal_goto_shift_escapes: BTreeSet::new(),
-              };
-
-              // Iterate over all possible revealed states
-              for (&revealed_state, row) in &parser.table {
-                  // Check if this state has a GOTO for our non-terminal
-                  if let Some(goto) = row.gotos.get(&nt_id) {
-                      if let Some(goto_state) = goto.state_id {
-                          // This is a valid starting point for a chain.
-                          let mut worklist: VecDeque<StateID> = VecDeque::new();
-                          worklist.push_back(goto_state);
-                          let mut visited: BTreeSet<StateID> = BTreeSet::new();
-                          visited.insert(goto_state);
-
-                          while let Some(current_state) = worklist.pop_front() {
-                              if let Some(action) = parser.table.get(&current_state).and_then(|r| r.shifts_and_reduces_full.get(&terminal_id)) {
-                                  match action {
-                                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                                          reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
-                                          if *len == 1 {
-                                              // Unit reduction chain
-                                              if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                  if let Some(next_goto_state) = next_goto.state_id {
-                                                      if visited.insert(next_goto_state) {
-                                                          worklist.push_back(next_goto_state);
-                                                      }
-                                                  }
-                                              }
-                                          } else if *len > 1 {
-                                              // Pop below revealed state
-                                              reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                          }
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                          if let Some(shift_state) = shift {
-                                              reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                          }
-                                          for (len, nts) in reduces {
-                                              for (reduce_nt, _) in nts {
-                                                  if *len == 1 {
-                                                      if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                          if let Some(next_goto_state) = next_goto.state_id {
-                                                              if visited.insert(next_goto_state) {
-                                                                  worklist.push_back(next_goto_state);
-                                                              }
-                                                          }
-                                                      }
-                                                  } else if *len > 1 {
-                                                      reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                                  }
-                                              }
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-
-              if !reduce_char.reveal_and_rereduces.is_empty() || !reduce_char.reveal_goto_shift_escapes.is_empty() {
-                  char.reduce_characterizations.insert(nt_id, reduce_char);
-              }
-          }
-
-          char
-      }
-
-      ```
-    metadata:
-      filename: src/precompute4/characterize.rs
-  - user: |-
       ```rust "src/precompute4/augmented_nwa.rs"
       use crate::glr::grammar::regex_name;
       use crate::glr::parser::GLRParser;
@@ -6397,6 +5867,7 @@ messages:
       };
       use std::collections::{BTreeMap, BTreeSet};
       use std::fmt::{Display, Formatter};
+      use std::time::Instant;
 
       /// Error while building an AugmentedNwa.
       #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6571,20 +6042,32 @@ messages:
               right: &AugmentedNwaBody,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
+              let now = Instant::now();
               let left_end_snapshot = left.end_map.clone();
               let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+
+              let mut total_process_stack_time = std::time::Duration::new(0, 0);
+              let mut total_reachable_time = std::time::Duration::new(0, 0);
+              let mut total_end_map_build_time = std::time::Duration::new(0, 0);
 
               for (left_end_state, stacks) in left_end_snapshot {
                   for left_stack in stacks {
                       let encoded: Vec<u16> =
                           left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
+
+                      let process_now = Instant::now();
                       let stops = states.process_stack_u16_from_start(right.nwa.start_state, &encoded);
+                      total_process_stack_time += process_now.elapsed();
 
                       for (pos, right_stop_state, path_weight) in stops {
                           let combined_weight = &path_weight & weight;
                           states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
 
+                          let reachable_now = Instant::now();
                           let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                          total_reachable_time += reachable_now.elapsed();
+
+                          let end_map_build_now = Instant::now();
                           for r_state in reachable {
                               if let Some(r_stacks) = right.end_map.get(&r_state) {
                                   for r_stack in r_stacks {
@@ -6595,10 +6078,18 @@ messages:
                                   }
                               }
                           }
+                          total_end_map_build_time += end_map_build_now.elapsed();
                       }
                   }
               }
               left.end_map = new_end_map;
+              println!(
+                  "    combine_right_into_on_shared took: {:?}, process_stack: {:?}, reachable: {:?}, end_map_build: {:?}",
+                  now.elapsed(),
+                  total_process_stack_time,
+                  total_reachable_time,
+                  total_end_map_build_time
+              );
               Ok(())
           }
 
@@ -7140,9 +6631,13 @@ messages:
                       let combine_elapsed = combine_now.elapsed();
 
                       println!(
-                          "step inner loop: term {:?}, dest {}, append_copy_from: {:?}, combine_right_into: {:?}, shared_states_len: {}",
-                          edge_terminal_opt, dest_idx.as_usize(), copy_elapsed, combine_elapsed, shared_states.borrow().len()
+                          "step inner loop: term {:?}, dest {}, shared_states_len: {}",
+                          edge_terminal_opt,
+                          dest_idx.as_usize(),
+                          shared_states.borrow().len()
                       );
+                      println!("  append_copy_from: {:?}", copy_elapsed);
+                      println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
 
                       results.push((*dest_idx, new_body));
                   }
@@ -7205,6 +6700,37 @@ messages:
 
       ...
 
+      ```
+      [...~100x more lines like this]
+      NWAStates::process_stack_u16_from_start (input len 3) took: 12.308375ms
+      NWAStates::process_stack_u16_from_start (input len 3) took: 12.447125ms
+      NWAStates::process_stack_u16_from_start (input len 3) took: 12.301125ms
+      NWAStates::process_stack_u16_from_start (input len 2) took: 12.42425ms
+      NWAStates::process_stack_u16_from_start (input len 3) took: 12.429583ms
+      NWAStates::process_stack_u16_from_start (input len 3) took: 12.314167ms
+          combine_right_into_on_shared took: 5.593100084s, process_stack: 5.587107497s, reachable: 2.06783ms, end_map_build: 188.902µs
+      step inner loop: term Some(TerminalID(96)), dest 0, shared_states_len: 5778484
+        append_copy_from: 1.088041ms
+        combine_right_into_on_shared (caller): 5.5931185s
+      step closure took: 5.594268125s
+      merge closure (union_with_on_shared) took: 2.958µs
+      NWAStates::append_copy_from (1017 states) took: 179.666µs
+      NWAStates::process_stack_u16_from_start (input len 2) took: 5.5735ms
+      NWAStates::process_stack_u16_from_start (input len 3) took: 5.487917ms
+      NWAStates::process_stack_u16_from_start (input len 3) took: 5.58725ms
+      ...
+      NWAStates::process_stack_u16_from_start (input len 2) took: 5.602292ms
+      ```
+      It appears `process_stack_u16_from_start` is taking a lot of time. This'd be because the NWA get very large. But it still shouldn't *really* take that long for it to run. The stacks being fed in here are tiny - like len 2 or 3. Unless there's a huge number of epsilon transitions - like, exponential (seems unlikely?) - that stack should get run down quite fast.
+
+      OH or maybe it's because every time we do `union_with_on_shared` it creates epsilon transitions to a new state. So say we have A -> B -> C, but there are actually 50 edges A -> B and 50 edges B -> C. Then for A -> B when we merge into B we create around 100 extra epsilon edges, and similarly for B -> C... I guess this could compound somehow? Like leave us traversing 10k edges in the NWA. Can't see exactly how. But anyway, this seems suspect.
+
+      Whatever your solution, make sure it's elegant and understandable, not just a slap-on fix. Think mathematically. Rigorously prove yourself.
+
+      Modify WaNWABody so that it stores a set of start states rather than just a single one. Make sure to update its usages. Rewrite process_stack_u16_from_start to take a set of start states.
+
+      ...
+
       Don't try fix it. Instead, just add timings to parts of the code that are suspect and print times so we can trace it.
       Don't use time_it. Time it yourself manually using std lib stuff.
 
@@ -7228,114 +6754,180 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The exponential slowdown during the trie traversal is likely due to the repeated processing of increasingly complex `AugmentedNwaBody` structures. As the traversal progresses, the NWA graphs being combined grow larger, and the `end_map` can accumulate many stacks. This makes operations like `clone()`, `process_stack_u16_from_start`, and `reachable_states_ignoring_labels` progressively more expensive.
+      Of course. Based on your analysis, the performance bottleneck seems to be within `process_stack_u16_from_start`, likely due to the NWA growing very large and complex, especially with numerous epsilon transitions. To diagnose this further, I'll add more granular timing instrumentation to pinpoint exactly where the time is being spent.
 
-      Here are the step-by-step instructions to add more detailed timing information to `combine_right_into_on_shared` and clean up the logging in `full_nwa.rs` to help diagnose the bottleneck.
+      Here are the step-by-step instructions to apply the changes, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **File: `src/precompute4/augmented_nwa.rs`**
-          *   Add an import for `std::time::Instant` at the top of the file.
-          *   Replace the existing `combine_right_into_on_shared` function with a new version that contains detailed timing instrumentation. This new version will measure the total execution time and break it down into time spent on processing stacks, finding reachable states, and building the new `end_map`.
+      1.  **File: `src/weighted_automata.rs`**
 
-      2.  **File: `src/precompute4/full_nwa.rs`**
-          *   In the `precompute4` function, locate the `special_map_grouped` call.
-          *   Inside its step closure, find the `println!` that logs the details of each step.
-          *   Replace that single `println!` statement with three separate ones to improve log readability. This will display the timings for copying states and for the combination step on separate, indented lines, making the output easier to follow.
+          *   **Instrument `NWAStates::process_stack_u16_from_start`:**
+              *   Navigate to the `process_stack_u16_from_start` function.
+              *   Before the main `for` loop, initialize three `std::time::Duration` variables: `total_closure_time`, `total_results_time`, and `total_next_raw_time`.
+              *   Wrap the initial call to `epsilon_closure_with_flag` with `Instant::now()` and store the elapsed time in `total_closure_time`.
+              *   Inside the `for pos in 0..=n` loop:
+                  *   Wrap the block that collects final weights into the `results` map with timing logic, adding the elapsed time to `total_results_time`. Do this for both the main case and the `if pos == n` case.
+                  *   Wrap the block that computes `next_raw` with timing logic, adding the elapsed time to `total_next_raw_time`.
+                  *   Wrap the call to `epsilon_closure_with_flag` at the end of the loop with timing logic, adding the elapsed time to `total_closure_time`.
+              *   Modify the final `println!` statement to include the breakdowns for `closure`, `next_raw`, and `results` times.
+
+          *   **Instrument `NWAStates::epsilon_closure_with_flag`:**
+              *   Navigate to the `epsilon_closure_with_flag` function.
+              *   At the beginning of the function, add an `Instant::now()` timer and store the length of `initial_states`.
+              *   Initialize a counter `transitions_processed` to zero before the `while` loop.
+              *   Inside the `for (v_id, trans_weight) in &self[u_id].epsilon_transitions` loop, increment `transitions_processed`.
+              *   At the end of the function, add a conditional `println!` that fires only if the function took longer than 1 millisecond. This log should report the initial and final number of states, the total epsilon transitions processed, and the elapsed time.
+
+      2.  **File: `src/precompute4/augmented_nwa.rs`**
+
+          *   **Instrument `AugmentedNwaBody::combine_right_into_on_shared`:**
+              *   Navigate to the `combine_right_into_on_shared` function.
+              *   At the beginning of the function, initialize a new `total_epsilon_add_time` duration counter.
+              *   Inside the `for (pos, right_stop_state, path_weight) in stops` loop, wrap the call to `states.add_epsilon_transition(...)` with timing logic, adding the elapsed time to `total_epsilon_add_time`.
+              *   Update the final `println!` at the end of the function to include the `add_epsilon` timing.
 
       ### Git Diffs
 
-      Here are the git diffs corresponding to the changes described above.
+      Here are the git diffs to apply these changes.
 
       ```diff
-      diff --git a/src/precompute4/augmented_nwa.rs b/src/precompute4/augmented_nwa.rs
       --- a/src/precompute4/augmented_nwa.rs
       +++ b/src/precompute4/augmented_nwa.rs
-      @@ -8,6 +8,7 @@
-       };
-       use std::collections::{BTreeMap, BTreeSet};
-       use std::fmt::{Display, Formatter};
-      +use std::time::Instant;
+      @@ -201,6 +201,7 @@
+               let mut total_process_stack_time = std::time::Duration::new(0, 0);
+               let mut total_reachable_time = std::time::Duration::new(0, 0);
+               let mut total_end_map_build_time = std::time::Duration::new(0, 0);
+      +        let mut total_epsilon_add_time = std::time::Duration::new(0, 0);
        
-       /// Error while building an AugmentedNwa.
-       #[derive(Debug, Clone, PartialEq, Eq)]
-      @@ -166,33 +167,53 @@
-               right: &AugmentedNwaBody,
-               weight: &WaWeight,
-           ) -> Result<(), AugmentedNwaBuildError> {
-      +        let now = Instant::now();
-               let left_end_snapshot = left.end_map.clone();
-               let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-       
-      +        let mut total_process_stack_time = std::time::Duration::new(0, 0);
-      +        let mut total_reachable_time = std::time::Duration::new(0, 0);
-      +        let mut total_end_map_build_time = std::time::Duration::new(0, 0);
-      +
                for (left_end_state, stacks) in left_end_snapshot {
                    for left_stack in stacks {
-                       let encoded: Vec<u16> =
-                           left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
-      +
-      +                let process_now = Instant::now();
-                       let stops = states.process_stack_u16_from_start(right.nwa.start_state, &encoded);
-      +                total_process_stack_time += process_now.elapsed();
+      @@ -212,7 +213,10 @@
        
                        for (pos, right_stop_state, path_weight) in stops {
                            let combined_weight = &path_weight & weight;
-                           states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
-       
-      +                    let reachable_now = Instant::now();
-                           let reachable = states.reachable_states_ignoring_labels(right_stop_state);
-      +                    total_reachable_time += reachable_now.elapsed();
       +
-      +                    let end_map_build_now = Instant::now();
-                           for r_state in reachable {
-                               if let Some(r_stacks) = right.end_map.get(&r_state) {
-                                   for r_stack in r_stacks {
-                                       let keep_len = left_stack.len().saturating_sub(pos);
-                                       let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
-                                       combined.extend(r_stack.iter().cloned());
-                                       new_end_map.entry(r_state).or_default().insert(combined);
-                                   }
-                               }
+      +                    let epsilon_add_now = Instant::now();
+                           states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
+      +                    total_epsilon_add_time += epsilon_add_now.elapsed();
+       
+                           let reachable_now = Instant::now();
+                           let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+      @@ -234,11 +238,12 @@
+               }
+               left.end_map = new_end_map;
+               println!(
+      -            "    combine_right_into_on_shared took: {:?}, process_stack: {:?}, reachable: {:?}, end_map_build: {:?}",
+      +            "    combine_right_into_on_shared took: {:?}, process_stack: {:?}, reachable: {:?}, end_map_build: {:?}, add_epsilon: {:?}",
+                   now.elapsed(),
+                   total_process_stack_time,
+                   total_reachable_time,
+      -            total_end_map_build_time
+      +            total_end_map_build_time,
+      +            total_epsilon_add_time
+               );
+               Ok(())
+           }
+
+      ```
+
+      ```diff
+      --- a/src/weighted_automata.rs
+      +++ b/src/weighted_automata.rs
+      @@ -461,21 +461,34 @@
+               // frontier: state -> weight
+               let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
+               current.insert(start_state, Weight::all());
+      +
+      +        let initial_closure_now = Instant::now();
+               let mut current = self.epsilon_closure_with_flag(current, has_eps);
+      +        let mut total_closure_time = initial_closure_now.elapsed();
+      +        let mut total_results_time = std::time::Duration::new(0, 0);
+      +        let mut total_next_raw_time = std::time::Duration::new(0, 0);
+       
+               // deduplicate results by (pos,state) and join weights
+               let mut results: BTreeMap<(usize, StateID), Weight> = BTreeMap::new();
+               let n = input.len();
+       
+               for pos in 0..=n {
+      +            let results_now = Instant::now();
+                   for (&sid, path_w) in &current {
+                       if self[sid].final_weight.is_some() {
+                           results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
+                       }
+                   }
+      +            total_results_time += results_now.elapsed();
+      +
+                   if pos == n {
+      +                let results_now_final = Instant::now();
+                       for (&sid, path_w) in &current {
+                           results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
+                       }
+      +                total_results_time += results_now_final.elapsed();
+                       break;
+                   }
+       
+      @@ -492,11 +505,21 @@
                            }
-      +                    total_end_map_build_time += end_map_build_now.elapsed();
+                       }
+                   }
+      +            total_next_raw_time += next_raw_now.elapsed();
+      +
+      +            let closure_now = Instant::now();
+                   current = self.epsilon_closure_with_flag(next_raw, has_eps);
+      +            total_closure_time += closure_now.elapsed();
+               }
+       
+               let result = results.into_iter().map(|((pos, sid), w)| (pos, sid, w)).collect();
+      -        println!("NWAStates::process_stack_u16_from_start (input len {}) took: {:?}", input.len(), now.elapsed());
+      +        println!(
+      +            "NWAStates::process_stack_u16_from_start (input len {}) took: {:?}, closure: {:?}, next_raw: {:?}, results: {:?}",
+      +            input.len(),
+      +            now.elapsed(),
+      +            total_closure_time,
+      +            total_next_raw_time,
+      +            total_results_time
+      +        );
+               result
+           }
+       
+      @@ -511,11 +534,14 @@
+               if !has_epsilons {
+                   return initial_states;
+               }
+      +        let now = Instant::now();
+      +        let initial_len = initial_states.len();
+       
+               let mut closure = initial_states;
+               let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
+      +        let mut transitions_processed = 0;
+       
+               while let Some(u_id) = worklist.pop_front() {
+                   let u_weight = closure.get(&u_id).unwrap().clone();
+      @@ -524,6 +550,7 @@
+                   }
+       
+                   for (v_id, trans_weight) in &self[u_id].epsilon_transitions {
+      +                transitions_processed += 1;
+                       let new_v_weight = &u_weight & trans_weight;
+                       if new_v_weight.is_empty() {
+                           continue;
+      @@ -538,6 +565,15 @@
                        }
                    }
                }
-               left.end_map = new_end_map;
-      +        println!(
-      +            "    combine_right_into_on_shared took: {:?}, process_stack: {:?}, reachable: {:?}, end_map_build: {:?}",
-      +            now.elapsed(),
-      +            total_process_stack_time,
-      +            total_reachable_time,
-      +            total_end_map_build_time
-      +        );
-               Ok(())
+      +        if now.elapsed().as_millis() > 1 {
+      +            println!(
+      +                "    epsilon_closure_with_flag (initial_states: {}, final_states: {}, transitions: {}) took: {:?}",
+      +                initial_len,
+      +                closure.len(),
+      +                transitions_processed,
+      +                now.elapsed()
+      +            );
+      +        }
+               closure
            }
-       
-
-      ``````diff
-      diff --git a/src/precompute4/full_nwa.rs b/src/precompute4/full_nwa.rs
-      --- a/src/precompute4/full_nwa.rs
-      +++ b/src/precompute4/full_nwa.rs
-      @@ -118,11 +118,15 @@
-                       ).expect("Combine failed");
-                       let combine_elapsed = combine_now.elapsed();
-       
-                       println!(
-      -                    "step inner loop: term {:?}, dest {}, append_copy_from: {:?}, combine_right_into: {:?}, shared_states_len: {}",
-      -                    edge_terminal_opt, dest_idx.as_usize(), copy_elapsed, combine_elapsed, shared_states.borrow().len()
-      +                    "step inner loop: term {:?}, dest {}, shared_states_len: {}",
-      +                    edge_terminal_opt,
-      +                    dest_idx.as_usize(),
-      +                    shared_states.borrow().len()
-                       );
-      +                println!("  append_copy_from: {:?}", copy_elapsed);
-      +                println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
-       
-                       results.push((*dest_idx, new_body));
-                   }
+       }
 
       ```
     metadata:
@@ -7349,11 +6941,11 @@ messages:
       Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
 
       --- Processing Diff Block 2 ---
-      Identified target file: src/precompute4/full_nwa.rs
-      Applying patch to 'src/precompute4/full_nwa.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/full_nwa.rs.
+      Identified target file: src/weighted_automata.rs
+      Applying patch to 'src/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Trace: Add detailed timing to NWA combination
-      and improve precompute4 step logging"'
+  - user: 'Changes committed with message: "Add detailed timing instrumentation to
+      precompute4 traversal and NWA state processing"'
     metadata:
 ...
