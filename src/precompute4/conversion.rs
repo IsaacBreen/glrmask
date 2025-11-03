@@ -14,7 +14,7 @@ pub fn dwa_to_precompute3(
     let all_parser_states = StateIDBV::ones(max_parser_state_id + 1);
 
     // Create all nodes first
-    for (dwa_id, dwa_state) in dwa.states.states.iter().enumerate() {
+    for (dwa_id, dwa_state) in dwa.states.0.iter().enumerate() {
         let live_tokens = LLMTokenBV::from(dwa_state.weight.0.clone());
         // All nodes from DWA states are internal; a shared 'end_node' will represent final states.
         let contents = PrecomputedNodeContents { end: false, live_tokens };
@@ -25,7 +25,7 @@ pub fn dwa_to_precompute3(
     let end_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::leaf())));
 
     // Create edges
-    for (dwa_id, dwa_state) in dwa.states.states.iter().enumerate() {
+    for (dwa_id, dwa_state) in dwa.states.0.iter().enumerate() {
         let src_trie_node = *dwa_state_to_trie_node.get(&dwa_id).unwrap();
         let is_root = dwa_id == dwa.body.start_state;
         let pop_len = if is_root { 0 } else { 1 };

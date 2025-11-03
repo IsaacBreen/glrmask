@@ -1,7 +1,7 @@
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
-use crate::weighted_automata::{DWA, NWAStates as WaNWAStates, NWABody as WaNWABody, Weight as WaWeight};
+use crate::weighted_automata::{DWA, NWA as WaNWA, NWAStates as WaNWAStates, NWABody as WaNWABody, Weight as WaWeight};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::datastructures::trie::Trie;
@@ -118,7 +118,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     // 4. Convert final NWA bodies to DWAs and simplify.
     let mut precomputed4: Precomputed4 = BTreeMap::new();
     for (sid, aug_body) in final_nwas {
-        let mut dwa = shared_states.borrow().determinize(&aug_body.nwa);
+        let mut dwa = WaNWA::determinize_components(&shared_states.borrow(), &aug_body.nwa);
         dwa.simplify();
         precomputed4.insert(sid, dwa);
     }

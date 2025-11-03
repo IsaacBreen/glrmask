@@ -5,7 +5,7 @@ use crate::precompute4::characterize::{
     compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
 };
 use crate::weighted_automata::{
-    DWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID, Weight as WaWeight,
+    DWA, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID, Weight as WaWeight,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
@@ -256,10 +256,13 @@ impl AugmentedNwa {
         AugmentedNwaBody::union_with_on_shared(&mut self.states, &mut self.body, &other_body);
     }
 
+
+    /// Determinize to DWA using combined NWA separation.
     pub fn determinize(&self) -> DWA {
-        self.states.determinize(&self.body.nwa)
+        WaNWA::determinize_components(&self.states, &self.body.nwa)
     }
 }
+
 
 impl Display for AugmentedNwa {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
