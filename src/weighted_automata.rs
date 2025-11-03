@@ -1355,54 +1355,19 @@ impl DWA {
     /// - normalize redundant edges,
     /// - partition-refinement minimization,
     /// - prune unreachable.
-    pub fn simplify(&mut self) -> BTreeMap<StateID, BTreeSet<StateID>> {
-        let end_states: BTreeSet<StateID> = self.states.0.iter().enumerate()
-            .filter(|(_, s)| s.final_weight.is_some())
-            .map(|(i, _)| i)
-            .collect();
-        Self::simplify_components(&mut self.states, &mut self.body, &end_states)
+    pub fn simplify(&mut self) {
+        Self::simplify_components(&mut self.states, &mut self.body)
     }
 
-    pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody, end_states: &BTreeSet<StateID>) -> BTreeMap<StateID, BTreeSet<StateID>> {
+    pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody) {
         let now = Instant::now();
         let initial_len = states.len();
         if states.0.is_empty() {
-            return BTreeMap::new();
+            return;
         }
-
-        let mut total_mapping: BTreeMap<StateID, BTreeSet<StateID>> =
-            (0..initial_len).map(|i| (i, BTreeSet::from([i]))).collect();
-        let mut any_map_returned = false;
-
-        let compose_mappings = |
-            map1: &BTreeMap<StateID, BTreeSet<StateID>>, // S' -> S
-            map2: &BTreeMap<StateID, BTreeSet<StateID>>  // S'' -> S'
-        | -> BTreeMap<StateID, BTreeSet<StateID>> {
-            let mut composed: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
-            for (new_id, old_ids_set) in map2 {
-                let mut original_ids = BTreeSet::new();
-                for old_id in old_ids_set {
-                    if let Some(orig_set) = map1.get(old_id) {
-                        original_ids.extend(orig_set.iter().cloned());
-                    }
-                }
-                composed.insert(*new_id, original_ids);
-            }
-            composed
-        };
-
-        let mut current_end_states = end_states.clone();
 
         Self::normalize_edges_inplace(states);
-        let (pruned, prune_map) = Self::prune_unreachable(states, body, &current_end_states);
-        if pruned {
-            any_map_returned = true;
-            total_mapping = compose_mappings(&total_mapping, &prune_map);
-            current_end_states = prune_map.iter()
-                .filter(|(_, old_ids)| old_ids.iter().any(|old_id| current_end_states.contains(old_id)))
-                .map(|(new_id, _)| *new_id)
-                .collect();
-        }
+        Self::prune_unreachable(states, body);
 
         let mut changed_any = true;
         let mut passes = 0usize;
@@ -1412,32 +1377,17 @@ impl DWA {
             if Self::normalize_edges_inplace(states) {
                 changed_any = true;
             }
-            let (minimized, min_map) = Self::minimize_partition_refinement(states, body);
-            if minimized {
+            if Self::minimize_partition_refinement(states, body) {
                 changed_any = true;
-                any_map_returned = true;
-                total_mapping = compose_mappings(&total_mapping, &min_map);
-                current_end_states = min_map.iter()
-                    .filter(|(_, old_ids)| old_ids.iter().any(|old_id| current_end_states.contains(old_id)))
-                    .map(|(new_id, _)| *new_id)
-                    .collect();
             }
             if Self::normalize_edges_inplace(states) {
                 changed_any = true;
             }
-            let (pruned, prune_map) = Self::prune_unreachable(states, body, &current_end_states);
-            if pruned {
+            if Self::prune_unreachable(states, body) {
                 changed_any = true;
-                any_map_returned = true;
-                total_mapping = compose_mappings(&total_mapping, &prune_map);
-                current_end_states = prune_map.iter()
-                    .filter(|(_, old_ids)| old_ids.iter().any(|old_id| current_end_states.contains(old_id)))
-                    .map(|(new_id, _)| *new_id)
-                    .collect();
             }
         }
         println!("DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
-        if any_map_returned { total_mapping } else { BTreeMap::new() }
     }
 
     /// Drop exceptions equal to default, and remove dangling per-exception weights.
@@ -1463,10 +1413,10 @@ impl DWA {
     /// - and exception targets per character (up to default-equivalence).
     ///
     /// This is a language-preserving quotient under a bisimulation-like signature.
-    pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> (bool, BTreeMap<StateID, BTreeSet<StateID>>) {
+    pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> bool {
         let n = states.0.len();
         if n <= 1 {
-            return (false, BTreeMap::new());
+            return false;
         }
         let sink_pid: usize = n;
 
@@ -1514,7 +1464,7 @@ impl DWA {
             groups.entry(*p).or_default().push(i);
         }
         if groups.len() == n {
-            return (false, BTreeMap::new());
+            return false;
         }
 
         // Build representatives
@@ -1595,93 +1545,58 @@ impl DWA {
         let start_pid = part[body.start_state];
         body.start_state = *pid_to_new.get(&start_pid).unwrap();
 
-        let mut mapping: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
-        for (pid, members) in &groups {
-            let new_id = *pid_to_new.get(pid).unwrap();
-            mapping.insert(new_id, BTreeSet::from_iter(members.iter().cloned()));
-        }
-        (true, mapping)
+        true
     }
 
     /// Remove states unreachable from `start_state` and renumber them densely.
-    pub fn prune_unreachable(states: &mut DWAStates, body: &mut DWABody, end_states: &BTreeSet<StateID>) -> (bool, BTreeMap<StateID, BTreeSet<StateID>>) {
+    pub fn prune_unreachable(states: &mut DWAStates, body: &mut DWABody) -> bool {
         if states.0.is_empty() {
-            return (false, BTreeMap::new());
+            return false;
         }
         let n = states.0.len();
 
         // 1. Forward reachability from start_state
-        let mut reachable = vec![false; n];
+        let mut visited = vec![false; n];
         let mut q: VecDeque<usize> = VecDeque::new();
         if body.start_state < n {
-            reachable[body.start_state] = true;
+            visited[body.start_state] = true;
             q.push_back(body.start_state);
         }
 
         while let Some(u) = q.pop_front() {
             if let Some(d) = states[u].transitions.default {
-                if d < n && !reachable[d] {
-                    reachable[d] = true;
+                if d < n && !visited[d] {
+                    visited[d] = true;
                     q.push_back(d);
                 }
             }
             for &v in states[u].transitions.exceptions.values() {
-                if v < n && !reachable[v] {
-                    reachable[v] = true;
+                if v < n && !visited[v] {
+                    visited[v] = true;
                     q.push_back(v);
                 }
             }
         }
 
-        // 2. Backward reachability from end_states
-        let mut rev_adj: Vec<Vec<usize>> = vec![vec![]; n];
-        for u in 0..n {
-            if let Some(d) = states[u].transitions.default { if d < n { rev_adj[d].push(u); } }
-            for &v in states[u].transitions.exceptions.values() { if v < n { rev_adj[v].push(u); } }
-        }
-
-        let mut co_reachable = vec![false; n];
-        let mut q: VecDeque<usize> = VecDeque::new();
-        for &end_state in end_states {
-            if end_state < n && !co_reachable[end_state] {
-                co_reachable[end_state] = true;
-                q.push_back(end_state);
-            }
-        }
-
-        while let Some(u) = q.pop_front() {
-            for &v in &rev_adj[u] {
-                if !co_reachable[v] {
-                    co_reachable[v] = true;
-                    q.push_back(v);
-                }
-            }
-        }
-
-        // 3. Live states are intersection
-        let live: Vec<bool> = (0..n).map(|i| reachable[i] && co_reachable[i]).collect();
-
-        if live.iter().all(|&b| b) && n > 0 {
-            return (false, BTreeMap::new());
+        if visited.iter().all(|&b| b) {
+            return false;
         }
 
         // 4. Remap
         let mut map = vec![usize::MAX; n];
         let mut next_id = 0usize;
-        let mut mapping: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
         for i in 0..n {
-            if live[i] {
+            if visited[i] {
                 map[i] = next_id;
-                mapping.insert(next_id, BTreeSet::from([i]));
                 next_id += 1;
             }
         }
 
-        if next_id == n { return (false, BTreeMap::new()); }
+        if next_id == n { return false; }
 
         let mut new_states: Vec<DWAState> = Vec::with_capacity(next_id);
         for old in 0..n {
-            if !live[old] {
+            if !visited[old] {
                 continue;
             }
             let mut st = states[old].clone();
@@ -1697,7 +1612,7 @@ impl DWA {
         }
         states.0 = new_states;
         body.start_state = map[body.start_state];
-        (true, mapping)
+        true
     }
 }
 
