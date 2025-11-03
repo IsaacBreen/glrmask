@@ -464,61 +464,6 @@ impl NWAStates {
         result
     }
 
-    /// Nondeterministic processing over u16 alphabet, from multiple start states.
-    ///
-    /// Returns all stops as triples (pos, stop_state, path_weight), where path_weight
-    /// is a meet (∩) along edges and joins (∪) when multiple paths converge.
-    pub fn process_stack_u16_from_starts(&self, start_states: &BTreeSet<StateID>, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
-        let now = Instant::now();
-        if self.0.is_empty() {
-            return Vec::new();
-        }
-        let has_eps = true;
-
-        // frontier: state -> weight
-        let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
-        for &start_state in start_states {
-            current.insert(start_state, Weight::all());
-        }
-        let mut current = self.epsilon_closure_with_flag(current, has_eps);
-
-        // deduplicate results by (pos,state) and join weights
-        let mut results: BTreeMap<(usize, StateID), Weight> = BTreeMap::new();
-        let n = input.len();
-
-        for pos in 0..=n {
-            for (&sid, path_w) in &current {
-                if self[sid].final_weight.is_some() {
-                    results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
-                }
-            }
-            if pos == n {
-                for (&sid, path_w) in &current {
-                    results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
-                }
-                break;
-            }
-
-            let ch = input[pos];
-            let mut next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
-            for (&sid, path_w) in &current {
-                if let Some(transitions) = self[sid].transitions.get(ch) {
-                    for (to, w) in transitions {
-                        let w2 = path_w & w;
-                        if !w2.is_empty() {
-                            next_raw.entry(*to).or_insert_with(Weight::zeros).bitor_assign(&w2);
-                        }
-                    }
-                }
-            }
-            current = self.epsilon_closure_with_flag(next_raw, has_eps);
-        }
-
-        let result = results.into_iter().map(|((pos, sid), w)| (pos, sid, w)).collect();
-        println!("NWAStates::process_stack_u16_from_starts (input len {}) took: {:?}", input.len(), now.elapsed());
-        result
-    }
-
     /// Epsilon-closure: least fixed point of the monotone operator
     /// F(X)(v) = ⋃_{u∈X} (w(u) ∧ w(u→ε v))
     /// computed by worklist. Because join is idempotent and monotone,
@@ -576,11 +521,6 @@ impl NWA {
     }
 
     pub fn determinize_components(states: &NWAStates, body: &NWABody) -> DWA {
-        let starts = BTreeSet::from([body.start_state]);
-        Self::determinize_components_from_starts(states, &starts)
-    }
-
-    pub fn determinize_components_from_starts(states: &NWAStates, start_states: &BTreeSet<StateID>) -> DWA {
         let now = Instant::now();
         let mut dwa_states = DWAStates::default();
         let mut dwa_body = DWABody::default();
@@ -616,10 +556,7 @@ impl NWA {
             Some(new_id)
         };
 
-        let mut start_raw = BTreeMap::new();
-        for &start_state in start_states {
-            start_raw.insert(start_state, Weight::all());
-        }
+        let start_raw = BTreeMap::from([(body.start_state, Weight::all())]);
         let start_map = states.epsilon_closure_with_flag(start_raw, has_epsilons);
         if let Some(start_id) = get_or_create(to_key(start_map), &mut dwa_states, &mut known_states, &mut worklist) {
             dwa_body.start_state = start_id;
