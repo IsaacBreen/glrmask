@@ -420,7 +420,7 @@ impl NWAStates {
         if self.0.is_empty() {
             return Vec::new();
         }
-        let has_eps = self.0.iter().any(|s| !s.epsilon_transitions.is_empty());
+        let has_eps = true;
 
         // frontier: state -> weight
         let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
