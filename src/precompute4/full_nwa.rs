@@ -4,6 +4,7 @@ use crate::tokenizer::TokenizerStateID;
 use crate::weighted_automata::{DWA, NWA as WaNWA, NWAStates as WaNWAStates, NWABody as WaNWABody, Weight as WaWeight};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::BitOrAssign;
 use crate::datastructures::trie::Trie;
 use crate::precompute4::augmented_nwa::{AugmentedNwa, AugmentedNwaBody};
 use crate::glr::table::TerminalID;

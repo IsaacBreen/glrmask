@@ -7,8 +7,9 @@ use crate::precompute4::characterize::{
 use crate::weighted_automata::{
     DWA, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID, Weight as WaWeight,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{Display, Formatter};
+use std::ops::BitOrAssign;
 use std::time::Instant;
 
 /// Error while building an AugmentedNwa.
