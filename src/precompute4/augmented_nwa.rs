@@ -282,6 +282,23 @@ impl AugmentedNwaBody {
             left.nwa.start_states.insert(start);
         }
     }
+
+    pub fn simplify_to_level_on_shared(&mut self, states: &mut WaNWAStates, level: usize) {
+        let merged_from = states.simplify_to_level(&mut self.nwa, level);
+        let old_end_map = self.end_map.clone();
+
+        for (new_state, origin_states) in merged_from {
+            let mut stacks_for_new_state = BTreeSet::new();
+            for origin_state in &origin_states {
+                if let Some(stacks) = old_end_map.get(origin_state) {
+                    stacks_for_new_state.extend(stacks.clone());
+                }
+            }
+            if !stacks_for_new_state.is_empty() {
+                self.end_map.insert(new_state, stacks_for_new_state);
+            }
+        }
+    }
 }
 
 impl AugmentedNwa {
@@ -311,20 +328,7 @@ impl AugmentedNwa {
     }
 
     pub fn simplify_to_level(&mut self, level: usize) {
-        let merged_from = self.states.simplify_to_level(&mut self.body.nwa, level);
-        let old_end_map = self.body.end_map.clone();
-
-        for (new_state, origin_states) in merged_from {
-            let mut stacks_for_new_state = BTreeSet::new();
-            for origin_state in &origin_states {
-                if let Some(stacks) = old_end_map.get(origin_state) {
-                    stacks_for_new_state.extend(stacks.clone());
-                }
-            }
-            if !stacks_for_new_state.is_empty() {
-                self.body.end_map.insert(new_state, stacks_for_new_state);
-            }
-        }
+        self.body.simplify_to_level_on_shared(&mut self.states, level);
     }
 
 

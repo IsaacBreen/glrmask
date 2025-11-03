@@ -129,6 +129,14 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
         // process function
         |_node_data, node_idx, aug_body| {
+            let simplify_now = Instant::now();
+            aug_body.simplify_to_level_on_shared(&mut shared_states.borrow_mut(), 3);
+            println!(
+                "simplify_to_level(3) in process fn for node {} took: {:?}",
+                node_idx.as_usize(),
+                simplify_now.elapsed()
+            );
+
             if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
                 final_nwas.insert(*tokenizer_state_id, aug_body.clone());
             }
