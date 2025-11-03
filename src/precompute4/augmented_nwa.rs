@@ -185,6 +185,7 @@ impl AugmentedNwaBody {
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
         crate::debug!(5, "--- combine_right_into_on_shared ---");
+        crate::debug!(5, "--- WEIGHT: {} ---", weight);
         let left_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
         crate::debug!(5, "LEFT AugmentedNWA:\n{}", left_nwa_debug);
         let right_nwa_debug = AugmentedNwa { states: states.clone(), body: right.clone() };
