@@ -117,12 +117,15 @@ pub fn build_augmented_nwa_from_characterization(
 ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
     let mut states = WaNWAStates::default();
     let start = states.add_state();
-    let end_state = states.add_state();
     let mut body = AugmentedNwaBody {
         nwa: WaNWABody { start_states: BTreeSet::from([start]) },
         nt_nodes: BTreeMap::new(),
         end_map: BTreeMap::new(),
     };
+
+    // One end node per (Option<NonTerminalID>, revealed_state) combination.
+    // For initial shifts, NonTerminalID is None.
+    let mut escape_end_nodes: BTreeMap<(Option<NonTerminalID>, ParserStateID), WaStateID> = BTreeMap::new();
 
     for &nt in parser.non_terminal_map.right_values() {
         let id = states.add_state();
@@ -133,6 +136,7 @@ pub fn build_augmented_nwa_from_characterization(
 
     for &(initial_state, shift_state) in &bb.initial_shifts {
         let ch = encode_symbol(initial_state)?;
+        let end_state = *escape_end_nodes.entry((None, initial_state)).or_insert_with(|| states.add_state());
         states.add_transition(start, ch, end_state, w_all.clone());
         body.end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
     }
@@ -174,6 +178,8 @@ pub fn build_augmented_nwa_from_characterization(
 
         for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
             let ch = encode_symbol(revealed_state)?;
+            let end_state =
+                *escape_end_nodes.entry((Some(*nt), revealed_state)).or_insert_with(|| states.add_state());
             states.add_transition(src_nt, ch, end_state, w_all.clone());
             body.end_map.entry(end_state).or_default().insert(vec![revealed_state, goto_state, shift_state]);
         }

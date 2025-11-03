@@ -1194,10 +1194,9 @@ local_system:
 
       // --- Display Implementations for Debugging ---
 
-      impl Display for NWA {
+      impl Display for NWAStates {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
-              for (id, state) in self.states.0.iter().enumerate() {
+              for (id, state) in self.0.iter().enumerate() {
                   writeln!(f, "  State {}:", id)?;
                   if let Some(w) = &state.final_weight {
                       writeln!(f, "    final_weight: {}", w)?;
@@ -1226,6 +1225,13 @@ local_system:
                   }
               }
               Ok(())
+          }
+      }
+
+      impl Display for NWA {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
+              write!(f, "{}", self.states)
           }
       }
 
@@ -4606,12 +4612,15 @@ local_system:
       ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
           let mut states = WaNWAStates::default();
           let start = states.add_state();
-          let end_state = states.add_state();
           let mut body = AugmentedNwaBody {
               nwa: WaNWABody { start_states: BTreeSet::from([start]) },
               nt_nodes: BTreeMap::new(),
               end_map: BTreeMap::new(),
           };
+
+          // One end node per (Option<NonTerminalID>, revealed_state) combination.
+          // For initial shifts, NonTerminalID is None.
+          let mut escape_end_nodes: BTreeMap<(Option<NonTerminalID>, ParserStateID), WaStateID> = BTreeMap::new();
 
           for &nt in parser.non_terminal_map.right_values() {
               let id = states.add_state();
@@ -4622,6 +4631,7 @@ local_system:
 
           for &(initial_state, shift_state) in &bb.initial_shifts {
               let ch = encode_symbol(initial_state)?;
+              let end_state = *escape_end_nodes.entry((None, initial_state)).or_insert_with(|| states.add_state());
               states.add_transition(start, ch, end_state, w_all.clone());
               body.end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
           }
@@ -4663,6 +4673,8 @@ local_system:
 
               for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
                   let ch = encode_symbol(revealed_state)?;
+                  let end_state =
+                      *escape_end_nodes.entry((Some(*nt), revealed_state)).or_insert_with(|| states.add_state());
                   states.add_transition(src_nt, ch, end_state, w_all.clone());
                   body.end_map.entry(end_state).or_default().insert(vec![revealed_state, goto_state, shift_state]);
               }
@@ -6900,10 +6912,9 @@ messages:
 
       // --- Display Implementations for Debugging ---
 
-      impl Display for NWA {
+      impl Display for NWAStates {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
-              for (id, state) in self.states.0.iter().enumerate() {
+              for (id, state) in self.0.iter().enumerate() {
                   writeln!(f, "  State {}:", id)?;
                   if let Some(w) = &state.final_weight {
                       writeln!(f, "    final_weight: {}", w)?;
@@ -6932,6 +6943,13 @@ messages:
                   }
               }
               Ok(())
+          }
+      }
+
+      impl Display for NWA {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
+              write!(f, "{}", self.states)
           }
       }
 
@@ -8572,7 +8590,10 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: Implement Display for NWAStates
+  - user: |-
+      I need to fix the logic in `build_augmented_nwa_from_characterization`. Right now, it creates one shared end node.
+      We instead need one end node per (nonterminal, revealed state) combination.
+      This applies to both shift and reduce escapes.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8592,140 +8613,115 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement `Display` for `NWAStates` and refactor the existing `Display` implementation for `NWA`, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to modify `build_augmented_nwa_from_characterization` to use unique end nodes for different escape conditions, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/weighted_automata.rs`**.
+      I will modify `src/precompute4/augmented_nwa.rs` to create unique end nodes for shift and reduce escapes.
 
-      2.  **Add the `Display` implementation for `NWAStates`**.
-          Navigate to the `--- Display Implementations for Debugging ---` section (around line 1202). Before the `impl Display for NWA` block, insert the following code. This implementation will format and print all states within an `NWAStates` struct.
+      1.  **Open `src/precompute4/augmented_nwa.rs`**.
 
+      2.  **Navigate to the `build_augmented_nwa_from_characterization` function.**
+
+      3.  **Remove the shared `end_state`:**
+          Delete this line near the beginning of the function:
           ```rust
-          impl Display for NWAStates {
-              fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-                  for (id, state) in self.0.iter().enumerate() {
-                      writeln!(f, "  State {}:", id)?;
-                      if let Some(w) = &state.final_weight {
-                          writeln!(f, "    final_weight: {}", w)?;
-                      }
-                      for (to, weight) in &state.epsilon_transitions {
-                          writeln!(f, "    ε -> {} (weight: {})", to, weight)?;
-                      }
-                      if let Some(default) = &state.transitions.default {
-                          for (to, weight) in default {
-                              writeln!(f, "    * -> {} (weight: {})", to, weight)?;
-                          }
-                      }
-                      for (on, transitions) in &state.transitions.exceptions {
-                          for (to, weight) in transitions {
-                              let char_repr = if let Some(c) = char::from_u32(*on as u32) {
-                                  if c.is_ascii_graphic() || c == ' ' {
-                                      format!("'{}'", c)
-                                  } else {
-                                      format!("{}", *on)
-                                  }
-                              } else {
-                                  format!("{}", *on)
-                              };
-                              writeln!(f, "    {} -> {} (weight: {})", char_repr, to, weight)?;
-                          }
-                      }
-                  }
-                  Ok(())
-              }
+          - let end_state = states.add_state();
+          ```
+
+      4.  **Add a map for unique end nodes:**
+          After the `body` variable is initialized, add the following code to manage the creation of unique end nodes. This map will use a combination of an optional nonterminal ID and a parser state ID as the key.
+          ```rust
+          + // One end node per (Option<NonTerminalID>, revealed_state) combination.
+          + // For initial shifts, NonTerminalID is None.
+          + let mut escape_end_nodes: BTreeMap<(Option<NonTerminalID>, ParserStateID), WaStateID> = BTreeMap::new();
+          ```
+
+      5.  **Modify the initial shifts loop:**
+          In the loop over `bb.initial_shifts`, you will now get or create a unique end state for each `initial_state`.
+          Change this:
+          ```rust
+          for &(initial_state, shift_state) in &bb.initial_shifts {
+              let ch = encode_symbol(initial_state)?;
+              states.add_transition(start, ch, end_state, w_all.clone());
+              body.end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
+          }
+          ```
+          To this:
+          ```rust
+          for &(initial_state, shift_state) in &bb.initial_shifts {
+              let ch = encode_symbol(initial_state)?;
+              let end_state = *escape_end_nodes.entry((None, initial_state)).or_insert_with(|| states.add_state());
+              states.add_transition(start, ch, end_state, w_all.clone());
+              body.end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
           }
           ```
 
-      3.  **Refactor the `Display` implementation for `NWA`**.
-          Now that `NWAStates` has its own `Display` implementation, you can simplify the `impl Display for NWA` block to delegate the state printing. Replace the entire body of `fn fmt` inside `impl Display for NWA` with the following two lines:
-
+      6.  **Modify the reduce escapes loop:**
+          Similarly, in the nested loop over `rc.reveal_goto_shift_escapes`, get or create a unique end state based on both the current nonterminal (`nt`) and the `revealed_state`.
+          Change this:
           ```rust
-          writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
-          write!(f, "{}", self.states)
+          for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+              let ch = encode_symbol(revealed_state)?;
+              states.add_transition(src_nt, ch, end_state, w_all.clone());
+              body.end_map.entry(end_state).or_default().insert(vec![revealed_state, goto_state, shift_state]);
+          }
           ```
+          To this:
+          ```rust
+          for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+              let ch = encode_symbol(revealed_state)?;
+              let end_state =
+                  *escape_end_nodes.entry((Some(*nt), revealed_state)).or_insert_with(|| states.add_state());
+              states.add_transition(src_nt, ch, end_state, w_all.clone());
+              body.end_map.entry(end_state).or_default().insert(vec![revealed_state, goto_state, shift_state]);
+          }
+          ```
+
+      These changes will ensure that distinct end nodes are created for each unique escape condition, as you requested.
 
       ### Git Diff
 
-      Here is the git patch that applies the changes described above.
+      Here is the git diff for the changes described above.
 
       ```diff
-      --- a/src/weighted_automata.rs
-      +++ b/src/weighted_automata.rs
-      @@ -1202,42 +1202,40 @@
+      --- a/src/precompute4/augmented_nwa.rs
+      +++ b/src/precompute4/augmented_nwa.rs
+      @@ -128,12 +128,16 @@
+       ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
+           let mut states = WaNWAStates::default();
+           let start = states.add_state();
+      -    let end_state = states.add_state();
+           let mut body = AugmentedNwaBody {
+               nwa: WaNWABody { start_states: BTreeSet::from([start]) },
+               nt_nodes: BTreeMap::new(),
+               end_map: BTreeMap::new(),
+           };
        
-       // --- Display Implementations for Debugging ---
-       
-      +impl Display for NWAStates {
-      +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-      +        for (id, state) in self.0.iter().enumerate() {
-      +            writeln!(f, "  State {}:", id)?;
-      +            if let Some(w) = &state.final_weight {
-      +                writeln!(f, "    final_weight: {}", w)?;
-      +            }
-      +            for (to, weight) in &state.epsilon_transitions {
-      +                writeln!(f, "    ε -> {} (weight: {})", to, weight)?;
-      +            }
-      +            if let Some(default) = &state.transitions.default {
-      +                for (to, weight) in default {
-      +                    writeln!(f, "    * -> {} (weight: {})", to, weight)?;
-      +                }
-      +            }
-      +            for (on, transitions) in &state.transitions.exceptions {
-      +                for (to, weight) in transitions {
-      +                    let char_repr = if let Some(c) = char::from_u32(*on as u32) {
-      +                        if c.is_ascii_graphic() || c == ' ' {
-      +                            format!("'{}'", c)
-      +                        } else {
-      +                            format!("{}", *on)
-      +                        }
-      +                    } else {
-      +                        format!("{}", *on)
-      +                    };
-      +                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, weight)?;
-      +                }
-      +            }
-      +        }
-      +        Ok(())
-      +    }
-      +}
+      +    // One end node per (Option<NonTerminalID>, revealed_state) combination.
+      +    // For initial shifts, NonTerminalID is None.
+      +    let mut escape_end_nodes: BTreeMap<(Option<NonTerminalID>, ParserStateID), WaStateID> = BTreeMap::new();
       +
-       impl Display for NWA {
-           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-               writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
-      -        for (id, state) in self.states.0.iter().enumerate() {
-      -            writeln!(f, "  State {}:", id)?;
-      -            if let Some(w) = &state.final_weight {
-      -                writeln!(f, "    final_weight: {}", w)?;
-      -            }
-      -            for (to, weight) in &state.epsilon_transitions {
-      -                writeln!(f, "    ε -> {} (weight: {})", to, weight)?;
-      -            }
-      -            if let Some(default) = &state.transitions.default {
-      -                for (to, weight) in default {
-      -                    writeln!(f, "    * -> {} (weight: {})", to, weight)?;
-      -                }
-      -            }
-      -            for (on, transitions) in &state.transitions.exceptions {
-      -                for (to, weight) in transitions {
-      -                    let char_repr = if let Some(c) = char::from_u32(*on as u32) {
-      -                        if c.is_ascii_graphic() || c == ' ' {
-      -                            format!("'{}'", c)
-      -                        } else {
-      -                            format!("{}", *on)
-      -                        }
-      -                    } else {
-      -                        format!("{}", *on)
-      -                    };
-      -                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, weight)?;
-      -                }
-      -            }
-      -        }
-      -        Ok(())
-      +        write!(f, "{}", self.states)
-           }
-       }
+           for &nt in parser.non_terminal_map.right_values() {
+               let id = states.add_state();
+               body.nt_nodes.insert(nt, id);
+      @@ -143,6 +147,7 @@
        
+           for &(initial_state, shift_state) in &bb.initial_shifts {
+               let ch = encode_symbol(initial_state)?;
+      +        let end_state = *escape_end_nodes.entry((None, initial_state)).or_insert_with(|| states.add_state());
+               states.add_transition(start, ch, end_state, w_all.clone());
+               body.end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
+           }
+      @@ -179,6 +184,8 @@
+       
+               for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+                   let ch = encode_symbol(revealed_state)?;
+      +            let end_state =
+      +                *escape_end_nodes.entry((Some(*nt), revealed_state)).or_insert_with(|| states.add_state());
+                   states.add_transition(src_nt, ch, end_state, w_all.clone());
+                   body.end_map.entry(end_state).or_default().insert(vec![revealed_state, goto_state, shift_state]);
+               }
 
       ```
     metadata:
@@ -8734,11 +8730,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/weighted_automata.rs
-      Applying patch to 'src/weighted_automata.rs' using custom patcher...
-      Successfully applied patch and wrote to src/weighted_automata.rs.
+      Identified target file: src/precompute4/augmented_nwa.rs
+      Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
     metadata:
-  - user: 'Changes committed with message: "Implement Display for NWAStates and refactor
-      NWA::Display"'
+  - user: 'Changes committed with message: "Fix: Use unique end nodes per escape condition
+      in build_augmented_nwa_from_characterization"'
     metadata:
 ...
