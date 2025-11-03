@@ -132,7 +132,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         // process function
         |node_data, node_idx, aug_body| {
             if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                final_nwas.insert(*tokenizer_state_id, aug_body.clone());
+                // Apply a small epsilon-free front-end simplification (depth 3) before determinization.
+                // This merges start states and removes epsilons for the next few steps while preserving semantics
+                // by reconnecting boundary states to the original graph.
+                let mut simplified = aug_body.clone();
+                simplified.simplify_front_k_epsilon_free(&mut shared_states.borrow_mut(), 3);
+                final_nwas.insert(*tokenizer_state_id, simplified);
             }
             true // continue traversal
         },
