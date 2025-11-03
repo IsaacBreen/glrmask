@@ -311,7 +311,7 @@ impl NWAStates {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NWABody {
-    pub start_state: StateID,
+    pub start_states: BTreeSet<StateID>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -324,7 +324,7 @@ impl NWA {
     pub fn new() -> Self {
         let mut states = NWAStates::default();
         let start = states.add_state();
-        NWA { states, body: NWABody { start_state: start } }
+        NWA { states, body: NWABody { start_states: BTreeSet::from([start]) } }
     }
     pub fn add_state(&mut self) -> StateID {
         self.states.add_state()
@@ -415,16 +415,17 @@ impl NWAStates {
     ///
     /// Returns all stops as triples (pos, stop_state, path_weight), where path_weight
     /// is a meet (∩) along edges and joins (∪) when multiple paths converge.
-    pub fn process_stack_u16_from_start(&self, start_state: StateID, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
+    pub fn process_stack_u16_from_starts(&self, start_states: &BTreeSet<StateID>, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
         let now = Instant::now();
         if self.0.is_empty() {
             return Vec::new();
         }
         let has_eps = true;
 
-        // frontier: state -> weight
         let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
-        current.insert(start_state, Weight::all());
+        for &start_state in start_states {
+            current.insert(start_state, Weight::all());
+        }
         let mut current = self.epsilon_closure_with_flag(current, has_eps);
 
         // deduplicate results by (pos,state) and join weights
@@ -460,7 +461,7 @@ impl NWAStates {
         }
 
         let result = results.into_iter().map(|((pos, sid), w)| (pos, sid, w)).collect();
-        println!("NWAStates::process_stack_u16_from_start (input len {}) took: {:?}", input.len(), now.elapsed());
+        println!("NWAStates::process_stack_u16_from_starts (input len {}) took: {:?}", input.len(), now.elapsed());
         result
     }
 
@@ -556,7 +557,10 @@ impl NWA {
             Some(new_id)
         };
 
-        let start_raw = BTreeMap::from([(body.start_state, Weight::all())]);
+        let mut start_raw = BTreeMap::new();
+        for &start_state in &body.start_states {
+            start_raw.insert(start_state, Weight::all());
+        }
         let start_map = states.epsilon_closure_with_flag(start_raw, has_epsilons);
         if let Some(start_id) = get_or_create(to_key(start_map), &mut dwa_states, &mut known_states, &mut worklist) {
             dwa_body.start_state = start_id;
@@ -643,7 +647,7 @@ impl NWA {
     }
 
     pub fn process_stack_u16(&self, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
-        self.states.process_stack_u16_from_start(self.body.start_state, input)
+        self.states.process_stack_u16_from_starts(&self.body.start_states, input)
     }
 }
 
@@ -909,7 +913,7 @@ impl DWA {
 
 impl Display for NWA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "NWA (start: {})", self.body.start_state)?;
+        writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
         for (id, state) in self.states.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
             if let Some(w) = &state.final_weight {
@@ -1069,7 +1073,7 @@ mod tests {
         for _ in 0..20 {
             nwa.add_state();
         }
-        nwa.body.start_state = 1;
+        nwa.body.start_states = BTreeSet::from([1]);
 
         let w0 = SimpleBitset::from_item(0);
         let w1 = SimpleBitset::from_item(1);
@@ -1258,7 +1262,7 @@ mod tests {
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
         let s3 = nwa.add_state();
-        nwa.body.start_state = s1;
+        nwa.body.start_states = BTreeSet::from([s1]);
 
         let w01 = SimpleBitset::from_iter(0..=1);
         let w0 = SimpleBitset::from_item(0);

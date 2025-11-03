@@ -60,7 +60,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
     // The initial body: single start that is final, with end_map containing empty stack.
     let initial_aug_body = AugmentedNwaBody {
-        nwa: WaNWABody { start_state: initial_state },
+        nwa: WaNWABody { start_states: BTreeSet::from([initial_state]) },
         nt_nodes: BTreeMap::new(),
         end_map: BTreeMap::from([]),
     };
@@ -141,7 +141,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
     crate::debug!(5, "\n--- Final NWA Bodies Before Determinization ---");
     for (sid, aug_body) in &final_nwas {
-        crate::debug!(5, "Tokenizer State ID {:?}: start={}, end_map_keys={:?}", sid, aug_body.nwa.start_state, aug_body.end_map.keys().collect::<Vec<_>>());
+        crate::debug!(5, "Tokenizer State ID {:?}: starts={:?}, end_map_keys={:?}", sid, aug_body.nwa.start_states, aug_body.end_map.keys().collect::<Vec<_>>());
     }
     crate::debug!(5, "--- End Final NWA Bodies Before Determinization ---\n");
 

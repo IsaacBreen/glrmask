@@ -52,7 +52,7 @@ pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
     AugmentedNwa {
         states,
         body: AugmentedNwaBody {
-            nwa: WaNWABody { start_state },
+            nwa: WaNWABody { start_states: BTreeSet::from([start_state]) },
             nt_nodes: BTreeMap::new(),
             end_map,
         },
@@ -96,7 +96,7 @@ pub fn build_augmented_nwa_from_characterization(
     let start = states.add_state();
     let end_state = states.add_state();
     let mut body = AugmentedNwaBody {
-        nwa: WaNWABody { start_state: start },
+        nwa: WaNWABody { start_states: BTreeSet::from([start]) },
         nt_nodes: BTreeMap::new(),
         end_map: BTreeMap::new(),
     };
@@ -161,7 +161,7 @@ pub fn build_augmented_nwa_from_characterization(
 
 impl AugmentedNwaBody {
     pub fn remap_states(&mut self, mapping: &[WaStateID]) {
-        self.nwa.start_state = mapping[self.nwa.start_state];
+        self.nwa.start_states = self.nwa.start_states.iter().map(|&s| mapping[s]).collect();
         for v in self.nt_nodes.values_mut() {
             *v = mapping[*v];
         }
@@ -175,7 +175,7 @@ impl AugmentedNwaBody {
     ) -> Result<Vec<(WaStateID, WaStateID, WaWeight)>, AugmentedNwaBuildError> {
         let encoded: Vec<u16> =
             stack.iter().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
-        Ok(states.process_stack_u16_from_start(self.nwa.start_state, &encoded))
+        Ok(states.process_stack_u16_from_starts(&self.nwa.start_states, &encoded))
     }
 
     pub fn combine_right_into_on_shared(
@@ -198,7 +198,7 @@ impl AugmentedNwaBody {
                     left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
 
                 let process_now = Instant::now();
-                let stops = states.process_stack_u16_from_start(right.nwa.start_state, &encoded);
+                let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
                 total_process_stack_time += process_now.elapsed();
 
                 for (pos, right_stop_state, path_weight) in stops {
@@ -236,18 +236,16 @@ impl AugmentedNwaBody {
     }
 
     pub fn union_with_on_shared(
-        states: &mut WaNWAStates,
+        _states: &mut WaNWAStates,
         left: &mut AugmentedNwaBody,
         right: &AugmentedNwaBody,
     ) {
         for (other_end_state, stacks) in &right.end_map {
             left.end_map.entry(*other_end_state).or_default().extend(stacks.clone());
         }
-
-        let new_start = states.add_state();
-        states.add_epsilon_transition(new_start, left.nwa.start_state, WaWeight::all());
-        states.add_epsilon_transition(new_start, right.nwa.start_state, WaWeight::all());
-        left.nwa.start_state = new_start;
+        for &start in &right.nwa.start_states {
+            left.nwa.start_states.insert(start);
+        }
     }
 }
 
@@ -302,7 +300,7 @@ impl Display for AugmentedNwa {
                 }
             }
         }
-        writeln!(f, "  Underlying NWA (start: {}):", self.body.nwa.start_state)?;
+        writeln!(f, "  Underlying NWA (starts: {:?}):", self.body.nwa.start_states)?;
         for (id, state) in self.states.0.iter().enumerate() {
             writeln!(f, "    State {}:", id)?;
             if let Some(w) = &state.final_weight {
@@ -363,7 +361,7 @@ mod tests {
         AugmentedNwa {
             states,
             body: AugmentedNwaBody {
-                nwa: WaNWABody { start_state: start },
+                nwa: WaNWABody { start_states: BTreeSet::from([start]) },
                 nt_nodes: BTreeMap::new(),
                 end_map,
             },
@@ -397,7 +395,7 @@ mod tests {
         let expected_aug_nwa = AugmentedNwa {
             states,
             body: AugmentedNwaBody {
-                nwa: WaNWABody { start_state: s0 },
+                nwa: WaNWABody { start_states: BTreeSet::from([s0]) },
                 nt_nodes: BTreeMap::new(),
                 end_map: expected_end_map,
             },
@@ -413,7 +411,7 @@ mod tests {
     fn test_combine_with_ignore_on_right() {
         let mut lhs = build_simple_aug_nwa();
         let mut rhs = build_augmented_nwa_for_ignore_terminal();
-        rhs.states.set_final_weight(rhs.body.nwa.start_state, WaWeight::all());
+        rhs.states.set_final_weight(*rhs.body.nwa.start_states.iter().next().unwrap(), WaWeight::all());
         let weight = WaWeight::all();
 
         lhs.combine_right_into(&rhs, &weight).unwrap();
@@ -432,7 +430,7 @@ mod tests {
         let expected_aug_nwa = AugmentedNwa {
             states,
             body: AugmentedNwaBody {
-                nwa: WaNWABody { start_state: s0 },
+                nwa: WaNWABody { start_states: BTreeSet::from([s0]) },
                 nt_nodes: BTreeMap::new(),
                 end_map: expected_end_map,
             },
@@ -460,7 +458,7 @@ mod tests {
 
         AugmentedNwa {
             states,
-            body: AugmentedNwaBody { nwa: WaNWABody { start_state }, nt_nodes, end_map },
+            body: AugmentedNwaBody { nwa: WaNWABody { start_states: BTreeSet::from([start_state]) }, nt_nodes, end_map },
         }
     }
 
@@ -482,7 +480,7 @@ mod tests {
         AugmentedNwa {
             states,
             body: AugmentedNwaBody {
-                nwa: WaNWABody { start_state },
+                nwa: WaNWABody { start_states: BTreeSet::from([start_state]) },
                 nt_nodes,
                 end_map: BTreeMap::new(),
             },
@@ -508,7 +506,7 @@ mod tests {
 
         AugmentedNwa {
             states,
-            body: AugmentedNwaBody { nwa: WaNWABody { start_state }, nt_nodes, end_map },
+            body: AugmentedNwaBody { nwa: WaNWABody { start_states: BTreeSet::from([start_state]) }, nt_nodes, end_map },
         }
     }
 
@@ -520,7 +518,7 @@ mod tests {
         let mut current_aug_nwa = AugmentedNwa {
             states: states.clone(),
             body: AugmentedNwaBody {
-                nwa: WaNWABody { start_state: initial_state },
+                nwa: WaNWABody { start_states: BTreeSet::from([initial_state]) },
                 nt_nodes: BTreeMap::new(),
                 end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
             },
@@ -563,7 +561,7 @@ mod tests {
 
         AugmentedNwa {
             states,
-            body: AugmentedNwaBody { nwa: WaNWABody { start_state }, nt_nodes, end_map },
+            body: AugmentedNwaBody { nwa: WaNWABody { start_states: BTreeSet::from([start_state]) }, nt_nodes, end_map },
         }
     }
 
@@ -590,7 +588,7 @@ mod tests {
 
         AugmentedNwa {
             states,
-            body: AugmentedNwaBody { nwa: WaNWABody { start_state }, nt_nodes: BTreeMap::new(), end_map },
+            body: AugmentedNwaBody { nwa: WaNWABody { start_states: BTreeSet::from([start_state]) }, nt_nodes: BTreeMap::new(), end_map },
         }
     }
 
@@ -644,7 +642,7 @@ mod tests {
         let expected_aug_nwa = AugmentedNwa {
             states,
             body: AugmentedNwaBody {
-                nwa: WaNWABody { start_state },
+                nwa: WaNWABody { start_states: BTreeSet::from([start_state]) },
                 nt_nodes: expected_nt_nodes,
                 end_map: expected_end_map,
             },
