@@ -27,6 +27,8 @@ pub fn dwa_to_precompute3(
     // Create edges
     for (dwa_id, dwa_state) in dwa.states.states.iter().enumerate() {
         let src_trie_node = *dwa_state_to_trie_node.get(&dwa_id).unwrap();
+        let is_root = dwa_id == dwa.body.start_state;
+        let pop_len = if is_root { 0 } else { 1 };
 
         // Edge to the shared end node for final states
         if let Some(final_weight) = &dwa_state.final_weight {
@@ -50,7 +52,7 @@ pub fn dwa_to_precompute3(
             let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
 
             if !trans_weight_bv.is_empty() {
-                let edge_key = (1, trans_weight_bv); // pop 1
+                let edge_key = (pop_len as isize, trans_weight_bv); // pop 1
                 let mut edge_val = StateIDBV::zeros();
                 edge_val.insert(parser_state_id);
                 trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
@@ -64,7 +66,7 @@ pub fn dwa_to_precompute3(
             let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
 
             if !trans_weight_bv.is_empty() {
-                let edge_key = (1, trans_weight_bv); // pop 1
+                let edge_key = (pop_len as isize, trans_weight_bv); // pop 1
                 let edge_val = &all_parser_states - &handled_exceptions;
                 if !edge_val.is_empty() {
                     trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
