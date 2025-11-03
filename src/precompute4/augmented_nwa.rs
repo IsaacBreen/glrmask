@@ -206,7 +206,7 @@ impl AugmentedNwaBody {
                     states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
 
                     let reachable_now = Instant::now();
-                    let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                    let reachable = states.reachable_states_via_epsilons_only(right_stop_state);
                     total_reachable_time += reachable_now.elapsed();
 
                     let end_map_build_now = Instant::now();

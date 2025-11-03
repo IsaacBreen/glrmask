@@ -307,6 +307,27 @@ impl NWAStates {
         }
         visited
     }
+
+    /// Reachability via epsilon-transitions only.
+    ///
+    /// This deliberately avoids traversing default or labeled exception edges.
+    /// Use this when no remaining input is available to consume (e.g., when
+    /// stitching NWAs together with epsilon links).
+    pub fn reachable_states_via_epsilons_only(&self, from: StateID) -> BTreeSet<StateID> {
+        let mut visited: BTreeSet<StateID> = BTreeSet::new();
+        let mut q: VecDeque<StateID> = VecDeque::new();
+        if from >= self.0.len() {
+            return visited;
+        }
+        visited.insert(from);
+        q.push_back(from);
+        while let Some(u) = q.pop_front() {
+            for (v, _) in &self[u].epsilon_transitions {
+                if visited.insert(*v) { q.push_back(*v); }
+            }
+        }
+        visited
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
