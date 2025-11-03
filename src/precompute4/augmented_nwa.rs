@@ -7,9 +7,9 @@ use crate::precompute4::characterize::{
 use crate::weighted_automata::{
     DWA, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates, StateID as WaStateID, Weight as WaWeight,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
-use std::ops::BitOrAssign;
+use std::time::Instant;
 
 /// Error while building an AugmentedNwa.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,46 +213,64 @@ impl AugmentedNwaBody {
         right: &AugmentedNwaBody,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
-        let left_end_snapshot = left.end_map.clone();
-        let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-
-        // Cache reachability from any right stop state to speed up end_map propagation.
-        let mut reach_cache: HashMap<WaStateID, BTreeSet<WaStateID>> = HashMap::new();
-        let right_has_end_map = !right.end_map.is_empty();
-
         crate::debug!(6, "--- concatenate_right_into_on_shared ---");
         crate::debug!(6, "--- WEIGHT: {} ---", weight);
         crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
         crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
+        crate::debug!(6, "States before concatenate:\n{}", states);
 
+        let now = Instant::now();
+        let left_end_snapshot = left.end_map.clone();
+        let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+
+        let mut total_stacks = 0;
+        let mut unique_stacks = BTreeSet::new();
+        let mut total_stack_len = 0;
+        let mut max_stack_len = 0;
+        for stacks in left_end_snapshot.values() {
+            total_stacks += stacks.len();
+            for stack in stacks {
+                unique_stacks.insert(stack.clone());
+                let len = stack.len();
+                total_stack_len += len;
+                if len > max_stack_len {
+                    max_stack_len = len;
+                }
+            }
+        }
+        let avg_stack_len = if total_stacks > 0 { total_stack_len as f64 / total_stacks as f64 } else { 0.0 };
+
+        let mut total_process_stack_time = std::time::Duration::new(0, 0);
+        let mut total_reachable_time = std::time::Duration::new(0, 0);
+        let mut total_end_map_build_time = std::time::Duration::new(0, 0);
+        let mut stops_count = 0;
+        let mut reachable_count = 0;
+ 
         for (left_end_state, stacks) in &left_end_snapshot {
-            // Aggregate epsilon weights per target to avoid duplicating edges.
-            let mut eps_agg: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
-
             for left_stack in stacks {
                 let encoded: Vec<u16> =
                     left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
 
+                let process_now = Instant::now();
                 let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
-                crate::debug!(6, "  Concatenating left end state {} with stack {:?} => stops: {:?}", left_end_state, left_stack, stops);
+                crate::debug!(6, "  Concatenating left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
+                stops_count += stops.len();
+                total_process_stack_time += process_now.elapsed();
 
                 for (pos, right_stop_state, path_weight) in stops {
-                    let combined_weight = &path_weight & weight; // meet with external weight
-                    if combined_weight.is_empty() {
-                        continue;
-                    }
-                    eps_agg.entry(right_stop_state).or_insert_with(WaWeight::zeros).bitor_assign(&combined_weight);
+                    let combined_weight = &path_weight & weight;
+                    states.add_epsilon_transition(*left_end_state, right_stop_state, combined_weight);
 
-                    if !right_has_end_map {
+                    if right.end_map.values().all(|stacks| stacks.is_empty()) {
                         continue;
                     }
 
-                    // Propagate end_map entries through all states reachable from this right stop.
-                    let reachable = reach_cache
-                        .entry(right_stop_state)
-                        .or_insert_with(|| states.reachable_states_ignoring_labels(right_stop_state))
-                        .clone();
+                    let reachable_now = Instant::now();
+                    let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                    reachable_count += reachable.len();
+                    total_reachable_time += reachable_now.elapsed();
 
+                    let end_map_build_now = Instant::now();
                     for r_state in reachable {
                         if let Some(r_stacks) = right.end_map.get(&r_state) {
                             for r_stack in r_stacks {
@@ -263,18 +281,32 @@ impl AugmentedNwaBody {
                             }
                         }
                     }
+                    total_end_map_build_time += end_map_build_now.elapsed();
                 }
-            }
-
-            // Add one epsilon per target with aggregated weight (mirrors NWA concatenation edge-adding style).
-            for (to, w) in eps_agg {
-                states.add_epsilon_transition(*left_end_state, to, w);
             }
         }
         left.end_map = new_end_map;
 
         crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
         crate::debug!(6, "--- end concatenate_right_into_on_shared ---");
+
+        println!(
+            "    concatenate_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
+            now.elapsed(),
+            total_process_stack_time,
+            stops_count,
+            total_reachable_time,
+            reachable_count,
+            total_end_map_build_time
+        );
+        println!(
+            "      left_end_snapshot stats: end_states={}, total_stacks={}, unique_stacks={}, max_stack_len={}, avg_stack_len={:.2}",
+            left_end_snapshot.len(),
+            total_stacks,
+            unique_stacks.len(),
+            max_stack_len,
+            avg_stack_len
+        );
         Ok(())
     }
 
