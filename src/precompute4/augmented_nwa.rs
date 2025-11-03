@@ -9,6 +9,7 @@ use crate::weighted_automata::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
+use std::time::Instant;
 
 /// Error while building an AugmentedNwa.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,15 +184,42 @@ impl AugmentedNwaBody {
         right: &AugmentedNwaBody,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
+        let now = Instant::now();
         let left_end_snapshot = left.end_map.clone();
         let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
 
+        let mut total_stacks = 0;
+        let mut unique_stacks = BTreeSet::new();
+        let mut total_stack_len = 0;
+        let mut max_stack_len = 0;
+        for stacks in left_end_snapshot.values() {
+            total_stacks += stacks.len();
+            for stack in stacks {
+                unique_stacks.insert(stack.clone());
+                let len = stack.len();
+                total_stack_len += len;
+                if len > max_stack_len {
+                    max_stack_len = len;
+                }
+            }
+        }
+        let avg_stack_len = if total_stacks > 0 { total_stack_len as f64 / total_stacks as f64 } else { 0.0 };
+
+        let mut total_process_stack_time = std::time::Duration::new(0, 0);
+        let mut total_reachable_time = std::time::Duration::new(0, 0);
+        let mut total_end_map_build_time = std::time::Duration::new(0, 0);
+        let mut stops_count = 0;
+        let mut reachable_count = 0;
+ 
         for (left_end_state, stacks) in &left_end_snapshot {
             for left_stack in stacks {
                 let encoded: Vec<u16> =
                     left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
 
+                let process_now = Instant::now();
                 let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+                stops_count += stops.len();
+                total_process_stack_time += process_now.elapsed();
 
                 for (pos, right_stop_state, path_weight) in stops {
                     let combined_weight = &path_weight & weight;
@@ -201,7 +229,12 @@ impl AugmentedNwaBody {
                         continue;
                     }
 
+                    let reachable_now = Instant::now();
                     let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                    reachable_count += reachable.len();
+                    total_reachable_time += reachable_now.elapsed();
+
+                    let end_map_build_now = Instant::now();
                     for r_state in reachable {
                         if let Some(r_stacks) = right.end_map.get(&r_state) {
                             for r_stack in r_stacks {
@@ -212,10 +245,28 @@ impl AugmentedNwaBody {
                             }
                         }
                     }
+                    total_end_map_build_time += end_map_build_now.elapsed();
                 }
             }
         }
         left.end_map = new_end_map;
+        println!(
+            "    combine_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
+            now.elapsed(),
+            total_process_stack_time,
+            stops_count,
+            total_reachable_time,
+            reachable_count,
+            total_end_map_build_time
+        );
+        println!(
+            "      left_end_snapshot stats: end_states={}, total_stacks={}, unique_stacks={}, max_stack_len={}, avg_stack_len={:.2}",
+            left_end_snapshot.len(),
+            total_stacks,
+            unique_stacks.len(),
+            max_stack_len,
+            avg_stack_len
+        );
         Ok(())
     }
 
