@@ -78,6 +78,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
             for (dest_idx, llm_token_bv) in dest_map.iter() {
                 // Map the template_aug's states into the shared arena.
+                println!("Copying states for terminal {:?} into shared states. Len template states = {}, len shared states = {}, total len end stacks = {}",
+                    edge_terminal_opt,
+                    template_aug.states.len(),
+                    shared_states.borrow().len(),
+                    current_aug_body.end_map.values().map(|stacks| stacks.len()).sum::<usize>(),
+                );
                 let mapping = shared_states.borrow_mut().append_copy_from(&template_aug.states);
                 let mut left_body = template_aug.body.clone();
                 left_body.remap_states(&mapping);
