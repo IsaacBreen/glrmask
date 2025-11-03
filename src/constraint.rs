@@ -1126,24 +1126,23 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
         precompute0_cache: Option<Precompute0Cache>,
     ) -> Self {
-        if !config.use_dummy_terminals {
-            // If dummy terminals are disabled, just compile the grammar and proceed.
-            let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
-            return Self::new_with_config_and_precompute0_cache(
-                compiled_grammar.tokenizer,
-                compiled_grammar.glr_parser,
-                llm_token_map,
-                compiled_grammar.definition.terminal_to_group_id().clone(),
-                max_original_llm_token_id,
-                config,
-                precompute0_cache,
-            );
-        }
-
         // This function assumes dummy terminals (e.g., `__DUMMY_TERMINAL_.*__`) are defined in the grammar.
         // It will group real terminals under these dummies based on the structural similarity of their
         // corresponding Trie3 templates.
         let initial_compiled_grammar = CompiledGrammar::from_definition(grammar_definition.clone());
+
+        if !config.use_dummy_terminals {
+            return Self::new_with_config_and_precompute0_cache(
+                initial_compiled_grammar.tokenizer,
+                initial_compiled_grammar.glr_parser,
+                llm_token_map,
+                initial_compiled_grammar.definition.terminal_to_group_id().clone(),
+                max_original_llm_token_id,
+                &config,
+                precompute0_cache,
+            );
+        }
+
         let parser = &initial_compiled_grammar.glr_parser;
 
         // We need internal_max_llm_token to build templates, so we compute it early.
