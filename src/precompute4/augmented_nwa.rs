@@ -9,7 +9,6 @@ use crate::weighted_automata::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
-use std::time::{Duration, Instant};
 
 /// Error while building an AugmentedNwa.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,7 +183,6 @@ impl AugmentedNwaBody {
         right: &AugmentedNwaBody,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
-        let mut total_process_stack_time = Duration::new(0, 0);
         let left_end_snapshot = left.end_map.clone();
         let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
 
@@ -192,9 +190,7 @@ impl AugmentedNwaBody {
             for left_stack in stacks {
                 let encoded: Vec<u16> =
                     left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
-                let process_stack_start = Instant::now();
                 let stops = states.process_stack_u16_from_start(right.nwa.start_state, &encoded);
-                total_process_stack_time += process_stack_start.elapsed();
 
                 for (pos, right_stop_state, path_weight) in stops {
                     let combined_weight = &path_weight & weight;
@@ -215,12 +211,6 @@ impl AugmentedNwaBody {
             }
         }
         left.end_map = new_end_map;
-        println!(
-            "combine_right_into_on_shared: process_stack={:?}, total stacks={}, total states={}",
-            total_process_stack_time,
-            left_end_snapshot.values().map(|s| s.len()).sum::<usize>(),
-            states.len()
-        );
         Ok(())
     }
 
