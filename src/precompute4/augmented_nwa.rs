@@ -187,7 +187,6 @@ impl AugmentedNwaBody {
         let now = Instant::now();
         let left_end_snapshot = left.end_map.clone();
         let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-        let mut reachable_cache: BTreeMap<WaStateID, BTreeSet<WaStateID>> = BTreeMap::new();
 
         let mut total_process_stack_time = std::time::Duration::new(0, 0);
         let mut total_reachable_time = std::time::Duration::new(0, 0);
@@ -207,19 +206,17 @@ impl AugmentedNwaBody {
                     states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
 
                     let reachable_now = Instant::now();
-                    let reachable = reachable_cache
-                        .entry(right_stop_state)
-                        .or_insert_with(|| states.reachable_states_ignoring_labels(right_stop_state));
+                    let reachable = states.reachable_states_ignoring_labels(right_stop_state);
                     total_reachable_time += reachable_now.elapsed();
 
                     let end_map_build_now = Instant::now();
                     for r_state in reachable {
-                        if let Some(r_stacks) = right.end_map.get(r_state) {
+                        if let Some(r_stacks) = right.end_map.get(&r_state) {
                             for r_stack in r_stacks {
                                 let keep_len = left_stack.len().saturating_sub(pos);
                                 let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
                                 combined.extend(r_stack.iter().cloned());
-                                new_end_map.entry(*r_state).or_default().insert(combined);
+                                new_end_map.entry(r_state).or_default().insert(combined);
                             }
                         }
                     }
