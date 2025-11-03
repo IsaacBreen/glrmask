@@ -1867,17 +1867,17 @@ local_system:
               Ok(states.process_stack_u16_from_starts(&self.nwa.start_states, &encoded))
           }
 
-          pub fn combine_right_into_on_shared(
+          pub fn concatenate_right_into_on_shared(
               states: &mut WaNWAStates,
               left: &mut AugmentedNwaBody,
               right: &AugmentedNwaBody,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
-              crate::debug!(6, "--- combine_right_into_on_shared ---");
+              crate::debug!(6, "--- concatenate_right_into_on_shared ---");
               crate::debug!(6, "--- WEIGHT: {} ---", weight);
               crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
               crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
-              crate::debug!(6, "States before combine:\n{}", states);
+              crate::debug!(6, "States before concatenate:\n{}", states);
 
               let now = Instant::now();
               let left_end_snapshot = left.end_map.clone();
@@ -1913,7 +1913,7 @@ local_system:
 
                       let process_now = Instant::now();
                       let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
-                      crate::debug!(6, "  Combining left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
+                      crate::debug!(6, "  Concatenating left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
                       stops_count += stops.len();
                       total_process_stack_time += process_now.elapsed();
 
@@ -1948,10 +1948,10 @@ local_system:
               left.end_map = new_end_map;
 
               crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
-              crate::debug!(6, "--- end combine_right_into_on_shared ---");
+              crate::debug!(6, "--- end concatenate_right_into_on_shared ---");
 
               println!(
-                  "    combine_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
+                  "    concatenate_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
                   now.elapsed(),
                   total_process_stack_time,
                   stops_count,
@@ -2002,8 +2002,8 @@ local_system:
       }
 
       impl AugmentedNwa {
-          /// Implementation note: rebase the right's states/body into `self` first, then combine on shared states.
-          pub fn combine_right_into(
+          /// Implementation note: rebase the right's states/body into `self` first, then concatenate on shared states.
+          pub fn concatenate_right_into(
               &mut self,
               right: &AugmentedNwa,
               weight: &WaWeight,
@@ -2011,7 +2011,7 @@ local_system:
               let mapping = self.states.append_copy_from(&right.states);
               let mut mapped_right_body = right.body.clone();
               mapped_right_body.remap_states(&mapping);
-              AugmentedNwaBody::combine_right_into_on_shared(
+              AugmentedNwaBody::concatenate_right_into_on_shared(
                   &mut self.states,
                   &mut self.body,
                   &mapped_right_body,
@@ -2112,7 +2112,7 @@ local_system:
           }
 
           #[test]
-          fn test_combine_with_ignore_on_left() {
+          fn test_concatenate_with_ignore_on_left() {
               let mut lhs = build_augmented_nwa_for_ignore_terminal();
               let mut rhs = build_simple_aug_nwa();
               let end_state = rhs.body.end_map.keys().cloned().next().unwrap();
@@ -2122,7 +2122,7 @@ local_system:
               crate::debug!(5, "Left NWA (ignore):\n{}", lhs);
               crate::debug!(5, "Right NWA (simple):\n{}", rhs);
 
-              lhs.combine_right_into(&rhs, &weight).unwrap();
+              lhs.concatenate_right_into(&rhs, &weight).unwrap();
 
               let mut states = WaNWAStates::default();
               let s0 = states.add_state();
@@ -2151,13 +2151,13 @@ local_system:
           }
 
           #[test]
-          fn test_combine_with_ignore_on_right() {
+          fn test_concatenate_with_ignore_on_right() {
               let mut lhs = build_simple_aug_nwa();
               let mut rhs = build_augmented_nwa_for_ignore_terminal();
               rhs.states.set_final_weight(*rhs.body.nwa.start_states.iter().next().unwrap(), WaWeight::all());
               let weight = WaWeight::all();
 
-              lhs.combine_right_into(&rhs, &weight).unwrap();
+              lhs.concatenate_right_into(&rhs, &weight).unwrap();
 
               let mut states = WaNWAStates::default();
               let s0 = states.add_state();
@@ -2254,7 +2254,7 @@ local_system:
           }
 
           #[test]
-          fn test_right_to_left_combination() {
+          fn test_right_to_left_concatenation() {
               let mut states = WaNWAStates::default();
               let initial_state = states.add_state();
               states.set_final_weight(initial_state, WaWeight::all());
@@ -2272,15 +2272,15 @@ local_system:
               let weight = WaWeight::all();
 
               for (i, (term_id, term_nwa)) in terminal_nwas_with_id.iter().rev().enumerate() {
-                  crate::debug!(5, "\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
+                  crate::debug!(5, "\n--- Concatenation Step {} (Term {} on LEFT) ---", i, term_id);
                   crate::debug!(5, "LEFT NWA (Term {}):\n{}", term_id, term_nwa);
                   crate::debug!(5, "RIGHT NWA (Current):\n{}", current_aug_nwa);
 
                   let mut new_current = term_nwa.clone();
-                  new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
+                  new_current.concatenate_right_into(&current_aug_nwa, &weight).unwrap();
                   current_aug_nwa = new_current;
 
-                  crate::debug!(5, "Resulting Combined NWA:\n{}", current_aug_nwa);
+                  crate::debug!(5, "Resulting Concatenated NWA:\n{}", current_aug_nwa);
               }
 
               assert_eq!(current_aug_nwa.states.len(), 13);
@@ -2336,16 +2336,16 @@ local_system:
           }
 
           #[test]
-          fn test_combination_from_prompt_example() {
+          fn test_concatenation_from_prompt_example() {
               let mut self_nwa = build_nwa_from_prompt_left();
               let right_nwa = build_nwa_from_prompt_right();
               let weight = WaWeight::all();
               crate::debug!(5, "RIGHT NWA:\n{}", right_nwa);
               crate::debug!(5, "LEFT NWA:\n{}", self_nwa);
 
-              self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
+              self_nwa.concatenate_right_into(&right_nwa, &weight).unwrap();
 
-              crate::debug!(5, "Resulting NWA after combination:\n{}", self_nwa);
+              crate::debug!(5, "Resulting NWA after concatenation:\n{}", self_nwa);
 
               // Build expected result
               let mut states = WaNWAStates::default();
@@ -2764,15 +2764,15 @@ local_system:
                       left_body.remap_states(&mapping);
 
                       let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                      // Combine into a new body (mutating the shared graph with epsilon links).
+                      // Concatenate into a new body (mutating the shared graph with epsilon links).
                       let combine_now = Instant::now();
                       let mut new_body = left_body.clone();
-                      AugmentedNwaBody::combine_right_into_on_shared(
+                      AugmentedNwaBody::concatenate_right_into_on_shared(
                           &mut shared_states.borrow_mut(),
                           &mut new_body,
                           &current_aug_body,
                           &weight,
-                      ).expect("Combine failed");
+                      ).expect("Concatenate failed");
                       let combine_elapsed = combine_now.elapsed();
 
                       println!(
@@ -2782,7 +2782,7 @@ local_system:
                           shared_states.borrow().len()
                       );
                       println!("  append_copy_from: {:?}", copy_elapsed);
-                      println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
+                      println!("  concatenate_right_into_on_shared (caller): {:?}", combine_elapsed);
 
                       results.push((*dest_idx, new_body));
                   }
@@ -3781,43 +3781,196 @@ local_system:
 
       // DWA simplification utilities
       impl DWA {
+          /// Union of two DWAs via product construction.
+          /// The states of the new DWA correspond to pairs of states from the input DWAs.
+          /// A state is final if either of the original states is final.
+          /// A transition exists if it exists in at least one of the original DWAs.
+          /// If a transition exists in one but not the other, the other is treated as going to a non-final sink state.
+          /// Returns the new DWA and a map from new state IDs to the pair of original automaton states.
+          /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
+          pub fn union(&self, other: &DWA) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+              let mut new_dwa = DWA::default();
+              let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
+              let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
+              let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
+
+              let sink0 = self.states.len();
+              let sink1 = other.states.len();
+
+              let mut get_or_create = |
+                  pair: (StateID, StateID),
+                  new_dwa: &mut DWA,
+                  pair_to_new_id: &mut BTreeMap<(StateID, StateID), StateID>,
+                  worklist: &mut VecDeque<(StateID, StateID)>,
+                  mapping: &mut BTreeMap<StateID, BTreeSet<(usize, StateID)>>
+              | -> StateID {
+                  if let Some(&id) = pair_to_new_id.get(&pair) {
+                      return id;
+                  }
+                  let new_id = new_dwa.states.0.len();
+                  new_dwa.states.0.push(DWAState::default());
+                  pair_to_new_id.insert(pair, new_id);
+                  worklist.push_back(pair);
+                  
+                  let mut merged_from = BTreeSet::new();
+                  if pair.0 != sink0 { merged_from.insert((0, pair.0)); }
+                  if pair.1 != sink1 { merged_from.insert((1, pair.1)); }
+                  mapping.insert(new_id, merged_from);
+
+                  new_id
+              };
+
+              if self.states.is_empty() && other.states.is_empty() {
+                  return (new_dwa, mapping);
+              }
+
+              let start_pair = (self.body.start_state, other.body.start_state);
+              new_dwa.body.start_state = get_or_create(start_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist, &mut mapping);
+
+              while let Some((id0, id1)) = worklist.pop_front() {
+                  let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
+                  let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
+                  let s1 = if id1 == sink1 { None } else { Some(&other.states[id1]) };
+
+                  let new_state = &mut new_dwa.states[new_id];
+
+                  let w0 = s0.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
+                  let w1 = s1.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
+                  new_state.weight = w0 | w1;
+
+                  let fw0 = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                  let fw1 = s1.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                  let final_w = fw0 | fw1;
+                  if !final_w.is_empty() {
+                      new_state.final_weight = Some(final_w);
+                  }
+
+                  let mut critical_points = BTreeSet::new();
+                  if let Some(s) = s0 { critical_points.extend(s.transitions.exceptions.keys()); }
+                  if let Some(s) = s1 { critical_points.extend(s.transitions.exceptions.keys()); }
+
+                  let get_target = |s: Option<&DWAState>, sink: StateID, ch: u16| -> StateID {
+                      s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
+                  };
+
+                  // Default transition
+                  let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
+                  let def_tgt1 = s1.and_then(|s| s.transitions.default).unwrap_or(sink1);
+                  let def_pair = (def_tgt0, def_tgt1);
+                  let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist, &mut mapping);
+                  new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+
+                  let tw_def0 = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                  let tw_def1 = s1.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                  new_dwa.states[new_id].trans_weight_default = Some(tw_def0 | tw_def1);
+
+                  // Exception transitions
+                  for &ch in &critical_points {
+                      let tgt0 = get_target(s0, sink0, ch);
+                      let tgt1 = get_target(s1, sink1, ch);
+                      let exc_pair = (tgt0, tgt1);
+
+                      if exc_pair != def_pair {
+                          let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist, &mut mapping);
+                          new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
+
+                          let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+                          let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+                          new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc0 | tw_exc1);
+                      }
+                  }
+              }
+
+              (new_dwa, mapping)
+          }
+
           /// Simplify by iterating a small pipeline until stable (or pass limit):
           /// - normalize redundant edges,
           /// - partition-refinement minimization,
           /// - prune unreachable.
-          pub fn simplify(&mut self) {
-              Self::simplify_components(&mut self.states, &mut self.body)
+          pub fn simplify(&mut self) -> BTreeMap<StateID, BTreeSet<StateID>> {
+              let end_states: BTreeSet<StateID> = self.states.0.iter().enumerate()
+                  .filter(|(_, s)| s.final_weight.is_some())
+                  .map(|(i, _)| i)
+                  .collect();
+              Self::simplify_components(&mut self.states, &mut self.body, &end_states)
           }
 
-          pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody) {
+          pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody, end_states: &BTreeSet<StateID>) -> BTreeMap<StateID, BTreeSet<StateID>> {
               let now = Instant::now();
               let initial_len = states.len();
               if states.0.is_empty() {
-                  return;
+                  return BTreeMap::new();
               }
+
+              let mut total_mapping: BTreeMap<StateID, BTreeSet<StateID>> =
+                  (0..initial_len).map(|i| (i, BTreeSet::from([i]))).collect();
+              let mut any_map_returned = false;
+
+              let compose_mappings = |
+                  map1: &BTreeMap<StateID, BTreeSet<StateID>>, // S' -> S
+                  map2: &BTreeMap<StateID, BTreeSet<StateID>>  // S'' -> S'
+              | -> BTreeMap<StateID, BTreeSet<StateID>> {
+                  let mut composed: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
+                  for (new_id, old_ids_set) in map2 {
+                      let mut original_ids = BTreeSet::new();
+                      for old_id in old_ids_set {
+                          if let Some(orig_set) = map1.get(old_id) {
+                              original_ids.extend(orig_set.iter().cloned());
+                          }
+                      }
+                      composed.insert(*new_id, original_ids);
+                  }
+                  composed
+              };
+
+              let mut current_end_states = end_states.clone();
+
               Self::normalize_edges_inplace(states);
-              Self::prune_unreachable(states, body);
+              let (pruned, prune_map) = Self::prune_unreachable(states, body, &current_end_states);
+              if pruned {
+                  any_map_returned = true;
+                  total_mapping = compose_mappings(&total_mapping, &prune_map);
+                  current_end_states = prune_map.iter()
+                      .filter(|(_, old_ids)| old_ids.iter().any(|old_id| current_end_states.contains(old_id)))
+                      .map(|(new_id, _)| *new_id)
+                      .collect();
+              }
 
               let mut changed_any = true;
               let mut passes = 0usize;
               while changed_any && passes < 10 {
                   passes += 1;
                   changed_any = false;
-
                   if Self::normalize_edges_inplace(states) {
                       changed_any = true;
                   }
-                  if Self::minimize_partition_refinement(states, body) {
+                  let (minimized, min_map) = Self::minimize_partition_refinement(states, body);
+                  if minimized {
                       changed_any = true;
+                      any_map_returned = true;
+                      total_mapping = compose_mappings(&total_mapping, &min_map);
+                      current_end_states = min_map.iter()
+                          .filter(|(_, old_ids)| old_ids.iter().any(|old_id| current_end_states.contains(old_id)))
+                          .map(|(new_id, _)| *new_id)
+                          .collect();
                   }
                   if Self::normalize_edges_inplace(states) {
                       changed_any = true;
                   }
-                  if Self::prune_unreachable(states, body) {
+                  let (pruned, prune_map) = Self::prune_unreachable(states, body, &current_end_states);
+                  if pruned {
                       changed_any = true;
+                      any_map_returned = true;
+                      total_mapping = compose_mappings(&total_mapping, &prune_map);
+                      current_end_states = prune_map.iter()
+                          .filter(|(_, old_ids)| old_ids.iter().any(|old_id| current_end_states.contains(old_id)))
+                          .map(|(new_id, _)| *new_id)
+                          .collect();
                   }
               }
               println!("DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+              if any_map_returned { total_mapping } else { BTreeMap::new() }
           }
 
           /// Drop exceptions equal to default, and remove dangling per-exception weights.
@@ -3843,10 +3996,10 @@ local_system:
           /// - and exception targets per character (up to default-equivalence).
           ///
           /// This is a language-preserving quotient under a bisimulation-like signature.
-          pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> bool {
+          pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> (bool, BTreeMap<StateID, BTreeSet<StateID>>) {
               let n = states.0.len();
               if n <= 1 {
-                  return false;
+                  return (false, BTreeMap::new());
               }
               let sink_pid: usize = n;
 
@@ -3894,7 +4047,7 @@ local_system:
                   groups.entry(*p).or_default().push(i);
               }
               if groups.len() == n {
-                  return false;
+                  return (false, BTreeMap::new());
               }
 
               // Build representatives
@@ -3974,50 +4127,94 @@ local_system:
               Self::normalize_edges_inplace(states);
               let start_pid = part[body.start_state];
               body.start_state = *pid_to_new.get(&start_pid).unwrap();
-              true
+
+              let mut mapping: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
+              for (pid, members) in &groups {
+                  let new_id = *pid_to_new.get(pid).unwrap();
+                  mapping.insert(new_id, BTreeSet::from_iter(members.iter().cloned()));
+              }
+              (true, mapping)
           }
 
           /// Remove states unreachable from `start_state` and renumber them densely.
-          pub fn prune_unreachable(states: &mut DWAStates, body: &mut DWABody) -> bool {
+          pub fn prune_unreachable(states: &mut DWAStates, body: &mut DWABody, end_states: &BTreeSet<StateID>) -> (bool, BTreeMap<StateID, BTreeSet<StateID>>) {
               if states.0.is_empty() {
-                  return false;
+                  return (false, BTreeMap::new());
               }
               let n = states.0.len();
-              let mut visited = vec![false; n];
+
+              // 1. Forward reachability from start_state
+              let mut reachable = vec![false; n];
               let mut q: VecDeque<usize> = VecDeque::new();
-              visited[body.start_state] = true;
-              q.push_back(body.start_state);
+              if body.start_state < n {
+                  reachable[body.start_state] = true;
+                  q.push_back(body.start_state);
+              }
 
               while let Some(u) = q.pop_front() {
                   if let Some(d) = states[u].transitions.default {
-                      if !visited[d] {
-                          visited[d] = true;
+                      if d < n && !reachable[d] {
+                          reachable[d] = true;
                           q.push_back(d);
                       }
                   }
                   for &v in states[u].transitions.exceptions.values() {
-                      if !visited[v] {
-                          visited[v] = true;
+                      if v < n && !reachable[v] {
+                          reachable[v] = true;
                           q.push_back(v);
                       }
                   }
               }
-              if visited.iter().all(|&b| b) {
-                  return false;
+
+              // 2. Backward reachability from end_states
+              let mut rev_adj: Vec<Vec<usize>> = vec![vec![]; n];
+              for u in 0..n {
+                  if let Some(d) = states[u].transitions.default { if d < n { rev_adj[d].push(u); } }
+                  for &v in states[u].transitions.exceptions.values() { if v < n { rev_adj[v].push(u); } }
               }
 
+              let mut co_reachable = vec![false; n];
+              let mut q: VecDeque<usize> = VecDeque::new();
+              for &end_state in end_states {
+                  if end_state < n && !co_reachable[end_state] {
+                      co_reachable[end_state] = true;
+                      q.push_back(end_state);
+                  }
+              }
+
+              while let Some(u) = q.pop_front() {
+                  for &v in &rev_adj[u] {
+                      if !co_reachable[v] {
+                          co_reachable[v] = true;
+                          q.push_back(v);
+                      }
+                  }
+              }
+
+              // 3. Live states are intersection
+              let live: Vec<bool> = (0..n).map(|i| reachable[i] && co_reachable[i]).collect();
+
+              if live.iter().all(|&b| b) && n > 0 {
+                  return (false, BTreeMap::new());
+              }
+
+              // 4. Remap
               let mut map = vec![usize::MAX; n];
               let mut next_id = 0usize;
+              let mut mapping: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
               for i in 0..n {
-                  if visited[i] {
+                  if live[i] {
                       map[i] = next_id;
+                      mapping.insert(next_id, BTreeSet::from([i]));
                       next_id += 1;
                   }
               }
 
+              if next_id == n { return (false, BTreeMap::new()); }
+
               let mut new_states: Vec<DWAState> = Vec::with_capacity(next_id);
               for old in 0..n {
-                  if !visited[old] {
+                  if !live[old] {
                       continue;
                   }
                   let mut st = states[old].clone();
@@ -4033,7 +4230,7 @@ local_system:
               }
               states.0 = new_states;
               body.start_state = map[body.start_state];
-              true
+              (true, mapping)
           }
       }
 
@@ -7604,17 +7801,17 @@ messages:
               Ok(states.process_stack_u16_from_starts(&self.nwa.start_states, &encoded))
           }
 
-          pub fn combine_right_into_on_shared(
+          pub fn concatenate_right_into_on_shared(
               states: &mut WaNWAStates,
               left: &mut AugmentedNwaBody,
               right: &AugmentedNwaBody,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
-              crate::debug!(6, "--- combine_right_into_on_shared ---");
+              crate::debug!(6, "--- concatenate_right_into_on_shared ---");
               crate::debug!(6, "--- WEIGHT: {} ---", weight);
               crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
               crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
-              crate::debug!(6, "States before combine:\n{}", states);
+              crate::debug!(6, "States before concatenate:\n{}", states);
 
               let now = Instant::now();
               let left_end_snapshot = left.end_map.clone();
@@ -7650,7 +7847,7 @@ messages:
 
                       let process_now = Instant::now();
                       let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
-                      crate::debug!(6, "  Combining left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
+                      crate::debug!(6, "  Concatenating left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
                       stops_count += stops.len();
                       total_process_stack_time += process_now.elapsed();
 
@@ -7685,10 +7882,10 @@ messages:
               left.end_map = new_end_map;
 
               crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
-              crate::debug!(6, "--- end combine_right_into_on_shared ---");
+              crate::debug!(6, "--- end concatenate_right_into_on_shared ---");
 
               println!(
-                  "    combine_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
+                  "    concatenate_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
                   now.elapsed(),
                   total_process_stack_time,
                   stops_count,
@@ -7739,8 +7936,8 @@ messages:
       }
 
       impl AugmentedNwa {
-          /// Implementation note: rebase the right's states/body into `self` first, then combine on shared states.
-          pub fn combine_right_into(
+          /// Implementation note: rebase the right's states/body into `self` first, then concatenate on shared states.
+          pub fn concatenate_right_into(
               &mut self,
               right: &AugmentedNwa,
               weight: &WaWeight,
@@ -7748,7 +7945,7 @@ messages:
               let mapping = self.states.append_copy_from(&right.states);
               let mut mapped_right_body = right.body.clone();
               mapped_right_body.remap_states(&mapping);
-              AugmentedNwaBody::combine_right_into_on_shared(
+              AugmentedNwaBody::concatenate_right_into_on_shared(
                   &mut self.states,
                   &mut self.body,
                   &mapped_right_body,
@@ -7849,7 +8046,7 @@ messages:
           }
 
           #[test]
-          fn test_combine_with_ignore_on_left() {
+          fn test_concatenate_with_ignore_on_left() {
               let mut lhs = build_augmented_nwa_for_ignore_terminal();
               let mut rhs = build_simple_aug_nwa();
               let end_state = rhs.body.end_map.keys().cloned().next().unwrap();
@@ -7859,7 +8056,7 @@ messages:
               crate::debug!(5, "Left NWA (ignore):\n{}", lhs);
               crate::debug!(5, "Right NWA (simple):\n{}", rhs);
 
-              lhs.combine_right_into(&rhs, &weight).unwrap();
+              lhs.concatenate_right_into(&rhs, &weight).unwrap();
 
               let mut states = WaNWAStates::default();
               let s0 = states.add_state();
@@ -7888,13 +8085,13 @@ messages:
           }
 
           #[test]
-          fn test_combine_with_ignore_on_right() {
+          fn test_concatenate_with_ignore_on_right() {
               let mut lhs = build_simple_aug_nwa();
               let mut rhs = build_augmented_nwa_for_ignore_terminal();
               rhs.states.set_final_weight(*rhs.body.nwa.start_states.iter().next().unwrap(), WaWeight::all());
               let weight = WaWeight::all();
 
-              lhs.combine_right_into(&rhs, &weight).unwrap();
+              lhs.concatenate_right_into(&rhs, &weight).unwrap();
 
               let mut states = WaNWAStates::default();
               let s0 = states.add_state();
@@ -7991,7 +8188,7 @@ messages:
           }
 
           #[test]
-          fn test_right_to_left_combination() {
+          fn test_right_to_left_concatenation() {
               let mut states = WaNWAStates::default();
               let initial_state = states.add_state();
               states.set_final_weight(initial_state, WaWeight::all());
@@ -8009,15 +8206,15 @@ messages:
               let weight = WaWeight::all();
 
               for (i, (term_id, term_nwa)) in terminal_nwas_with_id.iter().rev().enumerate() {
-                  crate::debug!(5, "\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
+                  crate::debug!(5, "\n--- Concatenation Step {} (Term {} on LEFT) ---", i, term_id);
                   crate::debug!(5, "LEFT NWA (Term {}):\n{}", term_id, term_nwa);
                   crate::debug!(5, "RIGHT NWA (Current):\n{}", current_aug_nwa);
 
                   let mut new_current = term_nwa.clone();
-                  new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
+                  new_current.concatenate_right_into(&current_aug_nwa, &weight).unwrap();
                   current_aug_nwa = new_current;
 
-                  crate::debug!(5, "Resulting Combined NWA:\n{}", current_aug_nwa);
+                  crate::debug!(5, "Resulting Concatenated NWA:\n{}", current_aug_nwa);
               }
 
               assert_eq!(current_aug_nwa.states.len(), 13);
@@ -8073,16 +8270,16 @@ messages:
           }
 
           #[test]
-          fn test_combination_from_prompt_example() {
+          fn test_concatenation_from_prompt_example() {
               let mut self_nwa = build_nwa_from_prompt_left();
               let right_nwa = build_nwa_from_prompt_right();
               let weight = WaWeight::all();
               crate::debug!(5, "RIGHT NWA:\n{}", right_nwa);
               crate::debug!(5, "LEFT NWA:\n{}", self_nwa);
 
-              self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
+              self_nwa.concatenate_right_into(&right_nwa, &weight).unwrap();
 
-              crate::debug!(5, "Resulting NWA after combination:\n{}", self_nwa);
+              crate::debug!(5, "Resulting NWA after concatenation:\n{}", self_nwa);
 
               // Build expected result
               let mut states = WaNWAStates::default();
@@ -8516,15 +8713,15 @@ messages:
                       left_body.remap_states(&mapping);
 
                       let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                      // Combine into a new body (mutating the shared graph with epsilon links).
+                      // Concatenate into a new body (mutating the shared graph with epsilon links).
                       let combine_now = Instant::now();
                       let mut new_body = left_body.clone();
-                      AugmentedNwaBody::combine_right_into_on_shared(
+                      AugmentedNwaBody::concatenate_right_into_on_shared(
                           &mut shared_states.borrow_mut(),
                           &mut new_body,
                           &current_aug_body,
                           &weight,
-                      ).expect("Combine failed");
+                      ).expect("Concatenate failed");
                       let combine_elapsed = combine_now.elapsed();
 
                       println!(
@@ -8534,7 +8731,7 @@ messages:
                           shared_states.borrow().len()
                       );
                       println!("  append_copy_from: {:?}", copy_elapsed);
-                      println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
+                      println!("  concatenate_right_into_on_shared (caller): {:?}", combine_elapsed);
 
                       results.push((*dest_idx, new_body));
                   }
@@ -8614,7 +8811,9 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: Use proper terminology. Not combine, concatenate.
+  - user: |-
+      Implement union for DWA. Return from it a map from each newly created state to a set of states that it was merged from.
+      Also modify DWA simplification to return map from new state to set of merged states. And modify it to take a set of states to treat as end states for the purpose of pruning.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8633,236 +8832,416 @@ messages:
       kind: mode-guidance
       mode: git-llm
       phase: default
-  - assistant: |-
-      Of course. Here are the step-by-step instructions to apply the changes, followed by the git diffs.
+  - assistant: |+
+      Here are the step-by-step instructions to implement the requested changes, followed by the git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **File: `src/precompute4/augmented_nwa.rs`**
+      #### 1. File: `src/weighted_automata.rs`
 
-          *   Rename the function `AugmentedNwaBody::combine_right_into_on_shared` to `AugmentedNwaBody::concatenate_right_into_on_shared`.
-          *   In the renamed function, update the `crate::debug!` and `println!` messages to use "concatenate" instead of "combine". For example, change `--- combine_right_into_on_shared ---` to `--- concatenate_right_into_on_shared ---`.
-          *   Rename the function `AugmentedNwa::combine_right_into` to `AugmentedNwa::concatenate_right_into`.
-          *   Update its documentation to reflect the name change.
-          *   Update the call within `concatenate_right_into` to `AugmentedNwaBody::concatenate_right_into_on_shared`.
-          *   In the `tests` module at the end of the file:
-              *   Rename the test `test_combine_with_ignore_on_left` to `test_concatenate_with_ignore_on_left` and update the `lhs.combine_right_into(...)` call to `lhs.concatenate_right_into(...)`.
-              *   Rename the test `test_combine_with_ignore_on_right` to `test_concatenate_with_ignore_on_right` and update the `lhs.combine_right_into(...)` call to `lhs.concatenate_right_into(...)`.
-              *   Rename the test `test_right_to_left_combination` to `test_right_to_left_concatenation`. Inside, update the debug messages and the `new_current.combine_right_into(...)` call to use "concatenate".
-              *   Rename the test `test_combination_from_prompt_example` to `test_concatenation_from_prompt_example`. Inside, update the debug messages and the `self_nwa.combine_right_into(...)` call to use "concatenate".
+      I will make the following changes to this file:
 
-      2.  **File: `src/precompute4/full_nwa.rs`**
+      1.  **Implement `DWA::union`**: I will add a new method `union` to the `impl DWA` block. This method will perform a product construction of two DWAs to compute their union. It will handle DWAs with partial transition functions by introducing a conceptual sink state during the construction. The method will return the new union DWA and a mapping from the new state IDs to pairs of `(automaton_index, original_state_id)` indicating their origin.
 
-          *   Locate the `Trie::special_map_grouped` call.
-          *   Inside its `step function` closure, find the comment `// Combine into a new body...` and change it to `// Concatenate into a new body...`.
-          *   Change the subsequent function call from `AugmentedNwaBody::combine_right_into_on_shared(...)` to `AugmentedNwaBody::concatenate_right_into_on_shared(...)`.
-          *   Update the `.expect("Combine failed")` to `.expect("Concatenate failed")`.
-          *   In the `println!` statement that follows, change `"  combine_right_into_on_shared (caller): {:?}"` to `"  concatenate_right_into_on_shared (caller): {:?}"`.
+      2.  **Modify `DWA::prune_unreachable`**:
+          *   The signature will be changed to `pub fn prune_unreachable(states: &mut DWAStates, body: &mut DWABody, end_states: &BTreeSet<StateID>) -> (bool, BTreeMap<StateID, BTreeSet<StateID>>)`.
+          *   It will now take an additional `end_states` argument.
+          *   The implementation will be updated to prune states that are either unreachable from the start state or cannot reach any of the specified `end_states` (co-reachability).
+          *   It will return a boolean indicating if any states were pruned, and a map from the new state IDs to the set of original state IDs they correspond to (which will be a singleton set).
+
+      3.  **Modify `DWA::minimize_partition_refinement`**:
+          *   The signature will be changed to `pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> (bool, BTreeMap<StateID, BTreeSet<StateID>>)`.
+          *   It will now return a tuple containing a boolean (indicating if changes were made) and a map from new state IDs to the set of original state IDs that were merged into them.
+          *   The implementation will be adjusted to build and return this mapping.
+
+      4.  **Modify `DWA::simplify_components`**:
+          *   The signature will be changed to `pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody, end_states: &BTreeSet<StateID>) -> BTreeMap<StateID, BTreeSet<StateID>>`.
+          *   It will take `end_states` to pass to `prune_unreachable`.
+          *   The implementation will be updated to call the modified `prune_unreachable` and `minimize_partition_refinement` methods.
+          *   It will track the transformations by composing the returned mappings to produce a final mapping from the simplified DWA's states back to the original state IDs.
+          *   It will also update the set of `end_states` as state IDs change during simplification passes.
+
+      5.  **Modify `DWA::simplify`**:
+          *   The signature will be changed to `pub fn simplify(&mut self) -> BTreeMap<StateID, BTreeSet<StateID>>`.
+          *   It will now return the mapping from new state IDs to original state IDs.
+          *   The implementation will be updated to determine the set of end states (any state with a `final_weight`) and call the new `simplify_components` method.
+
+      These changes fulfill all aspects of your request.
 
       ### Git Diffs
 
+      Here are the git diffs to apply to your files.
+
       ```diff
-      diff --git a/src/precompute4/augmented_nwa.rs b/src/precompute4/augmented_nwa.rs
-      --- a/src/precompute4/augmented_nwa.rs
-      +++ b/src/precompute4/augmented_nwa.rs
-      @@ -228,16 +228,16 @@
-               Ok(states.process_stack_u16_from_starts(&self.nwa.start_states, &encoded))
-           }
+      --- a/src/weighted_automata.rs
+      +++ b/src/weighted_automata.rs
+      @@ -581,6 +581,111 @@
        
-      -    pub fn combine_right_into_on_shared(
-      +    pub fn concatenate_right_into_on_shared(
-               states: &mut WaNWAStates,
-               left: &mut AugmentedNwaBody,
-               right: &AugmentedNwaBody,
-               weight: &WaWeight,
-           ) -> Result<(), AugmentedNwaBuildError> {
-      -        crate::debug!(6, "--- combine_right_into_on_shared ---");
-      +        crate::debug!(6, "--- concatenate_right_into_on_shared ---");
-               crate::debug!(6, "--- WEIGHT: {} ---", weight);
-               crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
-               crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
-      -        crate::debug!(6, "States before combine:\n{}", states);
-      +        crate::debug!(6, "States before concatenate:\n{}", states);
-       
+       // DWA simplification utilities
+       impl DWA {
+      +    /// Union of two DWAs via product construction.
+      +    /// The states of the new DWA correspond to pairs of states from the input DWAs.
+      +    /// A state is final if either of the original states is final.
+      +    /// A transition exists if it exists in at least one of the original DWAs.
+      +    /// If a transition exists in one but not the other, the other is treated as going to a non-final sink state.
+      +    /// Returns the new DWA and a map from new state IDs to the pair of original automaton states.
+      +    /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
+      +    pub fn union(&self, other: &DWA) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+      +        let mut new_dwa = DWA::default();
+      +        let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
+      +        let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
+      +        let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
+      +
+      +        let sink0 = self.states.len();
+      +        let sink1 = other.states.len();
+      +
+      +        let mut get_or_create = |
+      +            pair: (StateID, StateID),
+      +            new_dwa: &mut DWA,
+      +            pair_to_new_id: &mut BTreeMap<(StateID, StateID), StateID>,
+      +            worklist: &mut VecDeque<(StateID, StateID)>,
+      +            mapping: &mut BTreeMap<StateID, BTreeSet<(usize, StateID)>>
+      +        | -> StateID {
+      +            if let Some(&id) = pair_to_new_id.get(&pair) {
+      +                return id;
+      +            }
+      +            let new_id = new_dwa.states.0.len();
+      +            new_dwa.states.0.push(DWAState::default());
+      +            pair_to_new_id.insert(pair, new_id);
+      +            worklist.push_back(pair);
+      +            
+      +            let mut merged_from = BTreeSet::new();
+      +            if pair.0 != sink0 { merged_from.insert((0, pair.0)); }
+      +            if pair.1 != sink1 { merged_from.insert((1, pair.1)); }
+      +            mapping.insert(new_id, merged_from);
+      +
+      +            new_id
+      +        };
+      +
+      +        if self.states.is_empty() && other.states.is_empty() {
+      +            return (new_dwa, mapping);
+      +        }
+      +
+      +        let start_pair = (self.body.start_state, other.body.start_state);
+      +        new_dwa.body.start_state = get_or_create(start_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist, &mut mapping);
+      +
+      +        while let Some((id0, id1)) = worklist.pop_front() {
+      +            let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
+      +            let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
+      +            let s1 = if id1 == sink1 { None } else { Some(&other.states[id1]) };
+      +
+      +            let new_state = &mut new_dwa.states[new_id];
+      +
+      +            let w0 = s0.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
+      +            let w1 = s1.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
+      +            new_state.weight = w0 | w1;
+      +
+      +            let fw0 = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      +            let fw1 = s1.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      +            let final_w = fw0 | fw1;
+      +            if !final_w.is_empty() {
+      +                new_state.final_weight = Some(final_w);
+      +            }
+      +
+      +            let mut critical_points = BTreeSet::new();
+      +            if let Some(s) = s0 { critical_points.extend(s.transitions.exceptions.keys()); }
+      +            if let Some(s) = s1 { critical_points.extend(s.transitions.exceptions.keys()); }
+      +
+      +            let get_target = |s: Option<&DWAState>, sink: StateID, ch: u16| -> StateID {
+      +                s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
+      +            };
+      +
+      +            // Default transition
+      +            let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
+      +            let def_tgt1 = s1.and_then(|s| s.transitions.default).unwrap_or(sink1);
+      +            let def_pair = (def_tgt0, def_tgt1);
+      +            let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist, &mut mapping);
+      +            new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+      +
+      +            let tw_def0 = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      +            let tw_def1 = s1.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      +            new_dwa.states[new_id].trans_weight_default = Some(tw_def0 | tw_def1);
+      +
+      +            // Exception transitions
+      +            for &ch in &critical_points {
+      +                let tgt0 = get_target(s0, sink0, ch);
+      +                let tgt1 = get_target(s1, sink1, ch);
+      +                let exc_pair = (tgt0, tgt1);
+      +
+      +                if exc_pair != def_pair {
+      +                    let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist, &mut mapping);
+      +                    new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
+      +
+      +                    let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+      +                    let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+      +                    new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc0 | tw_exc1);
+      +                }
+      +            }
+      +        }
+      +
+      +        (new_dwa, mapping)
+      +    }
+      +
+           /// Simplify by iterating a small pipeline until stable (or pass limit):
+           /// - normalize redundant edges,
+           /// - partition-refinement minimization,
+      @@ -588,34 +693,75 @@
+           /// - partition-refinement minimization,
+           /// - prune unreachable.
+      -    pub fn simplify(&mut self) {
+      -        Self::simplify_components(&mut self.states, &mut self.body)
+      -    }
+      -
+      -    pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody) {
+      +    pub fn simplify(&mut self) -> BTreeMap<StateID, BTreeSet<StateID>> {
+      +        let end_states: BTreeSet<StateID> = self.states.0.iter().enumerate()
+      +            .filter(|(_, s)| s.final_weight.is_some())
+      +            .map(|(i, _)| i)
+      +            .collect();
+      +        Self::simplify_components(&mut self.states, &mut self.body, &end_states)
+      +    }
+      +
+      +    pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody, end_states: &BTreeSet<StateID>) -> BTreeMap<StateID, BTreeSet<StateID>> {
                let now = Instant::now();
-               let left_end_snapshot = left.end_map.clone();
-      @@ -269,7 +269,7 @@
+               let initial_len = states.len();
+               if states.0.is_empty() {
+      -            return;
+      -        }
+      +            return BTreeMap::new();
+      +        }
+      +
+      +        let mut total_mapping: BTreeMap<StateID, BTreeSet<StateID>> =
+      +            (0..initial_len).map(|i| (i, BTreeSet::from([i]))).collect();
+      +        let mut any_map_returned = false;
+      +
+      +        let compose_mappings = |
+      +            map1: &BTreeMap<StateID, BTreeSet<StateID>>, // S' -> S
+      +            map2: &BTreeMap<StateID, BTreeSet<StateID>>  // S'' -> S'
+      +        | -> BTreeMap<StateID, BTreeSet<StateID>> {
+      +            let mut composed: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
+      +            for (new_id, old_ids_set) in map2 {
+      +                let mut original_ids = BTreeSet::new();
+      +                for old_id in old_ids_set {
+      +                    if let Some(orig_set) = map1.get(old_id) {
+      +                        original_ids.extend(orig_set.iter().cloned());
+      +                    }
+      +                }
+      +                composed.insert(*new_id, original_ids);
+      +            }
+      +            composed
+      +        };
+      +
+      +        let mut current_end_states = end_states.clone();
+      +
+               Self::normalize_edges_inplace(states);
+      -        Self::prune_unreachable(states, body);
+      +        let (pruned, prune_map) = Self::prune_unreachable(states, body, &current_end_states);
+      +        if pruned {
+      +            any_map_returned = true;
+      +            total_mapping = compose_mappings(&total_mapping, &prune_map);
+      +            current_end_states = prune_map.iter()
+      +                .filter(|(_, old_ids)| old_ids.iter().any(|old_id| current_end_states.contains(old_id)))
+      +                .map(|(new_id, _)| *new_id)
+      +                .collect();
+      +        }
        
-                       let process_now = Instant::now();
-                       let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
-      -                crate::debug!(6, "  Combining left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
-      +                crate::debug!(6, "  Concatenating left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
-                       stops_count += stops.len();
-                       total_process_stack_time += process_now.elapsed();
-       
-      @@ -301,10 +301,10 @@
-               left.end_map = new_end_map;
-       
-               crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
-      -        crate::debug!(6, "--- end combine_right_into_on_shared ---");
-      +        crate::debug!(6, "--- end concatenate_right_into_on_shared ---");
-       
-               println!(
-      -            "    combine_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
-      +            "    concatenate_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
-                   now.elapsed(),
-                   total_process_stack_time,
-                   stops_count,
-      @@ -347,16 +347,16 @@
-       }
-       
-       impl AugmentedNwa {
-      -    /// Implementation note: rebase the right's states/body into `self` first, then combine on shared states.
-      -    pub fn combine_right_into(
-      +    /// Implementation note: rebase the right's states/body into `self` first, then concatenate on shared states.
-      +    pub fn concatenate_right_into(
-               &mut self,
-               right: &AugmentedNwa,
-               weight: &WaWeight,
-           ) -> Result<(), AugmentedNwaBuildError> {
-               let mapping = self.states.append_copy_from(&right.states);
-               let mut mapped_right_body = right.body.clone();
-               mapped_right_body.remap_states(&mapping);
-      -        AugmentedNwaBody::combine_right_into_on_shared(
-      +        AugmentedNwaBody::concatenate_right_into_on_shared(
-                   &mut self.states,
-                   &mut self.body,
-                   &mapped_right_body,
-      @@ -446,7 +446,7 @@
+               let mut changed_any = true;
+               let mut passes = 0usize;
+               while changed_any && passes < 10 {
+                   passes += 1;
+                   changed_any = false;
+      -
+                   if Self::normalize_edges_inplace(states) {
+                       changed_any = true;
+                   }
+      -            if Self::minimize_partition_refinement(states, body) {
+      +            let (minimized, min_map) = Self::minimize_partition_refinement(states, body);
+      +            if minimized {
+                       changed_any = true;
+      +                any_map_returned = true;
+      +                total_mapping = compose_mappings(&total_mapping, &min_map);
+      +                current_end_states = min_map.iter()
+      +                    .filter(|(_, old_ids)| old_ids.iter().any(|old_id| current_end_states.contains(old_id)))
+      +                    .map(|(new_id, _)| *new_id)
+      +                    .collect();
+                   }
+                   if Self::normalize_edges_inplace(states) {
+                       changed_any = true;
+                   }
+      -            if Self::prune_unreachable(states, body) {
+      +            let (pruned, prune_map) = Self::prune_unreachable(states, body, &current_end_states);
+      +            if pruned {
+                       changed_any = true;
+      +                any_map_returned = true;
+      +                total_mapping = compose_mappings(&total_mapping, &prune_map);
+      +                current_end_states = prune_map.iter()
+      +                    .filter(|(_, old_ids)| old_ids.iter().any(|old_id| current_end_states.contains(old_id)))
+      +                    .map(|(new_id, _)| *new_id)
+      +                    .collect();
+                   }
+               }
+               println!("DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+      +        if any_map_returned { total_mapping } else { BTreeMap::new() }
            }
        
-           #[test]
-      -    fn test_combine_with_ignore_on_left() {
-      +    fn test_concatenate_with_ignore_on_left() {
-               let mut lhs = build_augmented_nwa_for_ignore_terminal();
-               let mut rhs = build_simple_aug_nwa();
-               let end_state = rhs.body.end_map.keys().cloned().next().unwrap();
-      @@ -456,7 +456,7 @@
-               crate::debug!(5, "Left NWA (ignore):\n{}", lhs);
-               crate::debug!(5, "Right NWA (simple):\n{}", rhs);
+           /// Drop exceptions equal to default, and remove dangling per-exception weights.
+      @@ -640,13 +786,13 @@
+           /// - default target's partition,
+           /// - and exception targets per character (up to default-equivalence).
+           ///
+           /// This is a language-preserving quotient under a bisimulation-like signature.
+      -    pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> bool {
+      +    pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> (bool, BTreeMap<StateID, BTreeSet<StateID>>) {
+               let n = states.0.len();
+               if n <= 1 {
+      -            return false;
+      +            return (false, BTreeMap::new());
+               }
+               let sink_pid: usize = n;
        
-      -        lhs.combine_right_into(&rhs, &weight).unwrap();
-      +        lhs.concatenate_right_into(&rhs, &weight).unwrap();
-       
-               let mut states = WaNWAStates::default();
-               let s0 = states.add_state();
-      @@ -482,13 +482,13 @@
-           }
-       
-           #[test]
-      -    fn test_combine_with_ignore_on_right() {
-      +    fn test_concatenate_with_ignore_on_right() {
-               let mut lhs = build_simple_aug_nwa();
-               let mut rhs = build_augmented_nwa_for_ignore_terminal();
-               rhs.states.set_final_weight(*rhs.body.nwa.start_states.iter().next().unwrap(), WaWeight::all());
-               let weight = WaWeight::all();
-       
-      -        lhs.combine_right_into(&rhs, &weight).unwrap();
-      +        lhs.concatenate_right_into(&rhs, &weight).unwrap();
-       
-               let mut states = WaNWAStates::default();
-               let s0 = states.add_state();
-      @@ -577,7 +577,7 @@
-           }
-       
-           #[test]
-      -    fn test_right_to_left_combination() {
-      +    fn test_right_to_left_concatenation() {
-               let mut states = WaNWAStates::default();
-               let initial_state = states.add_state();
-               states.set_final_weight(initial_state, WaWeight::all());
-      @@ -595,15 +595,15 @@
-               let weight = WaWeight::all();
-       
-               for (i, (term_id, term_nwa)) in terminal_nwas_with_id.iter().rev().enumerate() {
-      -            crate::debug!(5, "\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
-      +            crate::debug!(5, "\n--- Concatenation Step {} (Term {} on LEFT) ---", i, term_id);
-                   crate::debug!(5, "LEFT NWA (Term {}):\n{}", term_id, term_nwa);
-                   crate::debug!(5, "RIGHT NWA (Current):\n{}", current_aug_nwa);
-       
-                   let mut new_current = term_nwa.clone();
-      -            new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
-      +            new_current.concatenate_right_into(&current_aug_nwa, &weight).unwrap();
-                   current_aug_nwa = new_current;
-       
-      -            crate::debug!(5, "Resulting Combined NWA:\n{}", current_aug_nwa);
-      +            crate::debug!(5, "Resulting Concatenated NWA:\n{}", current_aug_nwa);
+      @@ -687,7 +833,7 @@
+                   groups.entry(*p).or_default().push(i);
+               }
+               if groups.len() == n {
+      -            return false;
+      +            return (false, BTreeMap::new());
                }
        
-               assert_eq!(current_aug_nwa.states.len(), 13);
-      @@ -651,15 +651,15 @@
+               // Build representatives
+      @@ -765,58 +911,90 @@
+               Self::normalize_edges_inplace(states);
+               let start_pid = part[body.start_state];
+               body.start_state = *pid_to_new.get(&start_pid).unwrap();
+      -        true
+      +
+      +        let mut mapping: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
+      +        for (pid, members) in &groups {
+      +            let new_id = *pid_to_new.get(pid).unwrap();
+      +            mapping.insert(new_id, BTreeSet::from_iter(members.iter().cloned()));
+      +        }
+      +        (true, mapping)
            }
        
-           #[test]
-      -    fn test_combination_from_prompt_example() {
-      +    fn test_concatenation_from_prompt_example() {
-               let mut self_nwa = build_nwa_from_prompt_left();
-               let right_nwa = build_nwa_from_prompt_right();
-               let weight = WaWeight::all();
-               crate::debug!(5, "RIGHT NWA:\n{}", right_nwa);
-               crate::debug!(5, "LEFT NWA:\n{}", self_nwa);
-       
-      -        self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
-      -
-      -        crate::debug!(5, "Resulting NWA after combination:\n{}", self_nwa);
-      +        self_nwa.concatenate_right_into(&right_nwa, &weight).unwrap();
+           /// Remove states unreachable from `start_state` and renumber them densely.
+      -    pub fn prune_unreachable(states: &mut DWAStates, body: &mut DWABody) -> bool {
+      +    pub fn prune_unreachable(states: &mut DWAStates, body: &mut DWABody, end_states: &BTreeSet<StateID>) -> (bool, BTreeMap<StateID, BTreeSet<StateID>>) {
+               if states.0.is_empty() {
+      -            return false;
+      +            return (false, BTreeMap::new());
+               }
+               let n = states.0.len();
+      -        let mut visited = vec![false; n];
       +
-      +        crate::debug!(5, "Resulting NWA after concatenation:\n{}", self_nwa);
+      +        // 1. Forward reachability from start_state
+      +        let mut reachable = vec![false; n];
+               let mut q: VecDeque<usize> = VecDeque::new();
+      -        visited[body.start_state] = true;
+      -        q.push_back(body.start_state);
+      +        if body.start_state < n {
+      +            reachable[body.start_state] = true;
+      +            q.push_back(body.start_state);
+      +        }
        
-               // Build expected result
-               let mut states = WaNWAStates::default();
-
-      ```
-      ```diff
-      diff --git a/src/precompute4/full_nwa.rs b/src/precompute4/full_nwa.rs
-      --- a/src/precompute4/full_nwa.rs
-      +++ b/src/precompute4/full_nwa.rs
-      @@ -92,14 +92,14 @@
-                       left_body.remap_states(&mapping);
-       
-                       let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
-      -                // Combine into a new body (mutating the shared graph with epsilon links).
-      +                // Concatenate into a new body (mutating the shared graph with epsilon links).
-                       let combine_now = Instant::now();
-                       let mut new_body = left_body.clone();
-      -                AugmentedNwaBody::combine_right_into_on_shared(
-      +                AugmentedNwaBody::concatenate_right_into_on_shared(
-                           &mut shared_states.borrow_mut(),
-                           &mut new_body,
-                           &current_aug_body,
-                           &weight,
-      -                ).expect("Combine failed");
-      +                ).expect("Concatenate failed");
-                       let combine_elapsed = combine_now.elapsed();
-       
-                       println!(
-      @@ -109,7 +109,7 @@
-                           shared_states.borrow().len()
-                       );
-                       println!("  append_copy_from: {:?}", copy_elapsed);
-      -                println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
-      +                println!("  concatenate_right_into_on_shared (caller): {:?}", combine_elapsed);
-       
-                       results.push((*dest_idx, new_body));
+               while let Some(u) = q.pop_front() {
+                   if let Some(d) = states[u].transitions.default {
+      -                if !visited[d] {
+      -                    visited[d] = true;
+      +                if d < n && !reachable[d] {
+      +                    reachable[d] = true;
+                           q.push_back(d);
+                       }
                    }
+                   for &v in states[u].transitions.exceptions.values() {
+      -                if !visited[v] {
+      -                    visited[v] = true;
+      +                if v < n && !reachable[v] {
+      +                    reachable[v] = true;
+                           q.push_back(v);
+                       }
+                   }
+               }
+      -        if visited.iter().all(|&b| b) {
+      -            return false;
+      -        }
+      -
+      +
+      +        // 2. Backward reachability from end_states
+      +        let mut rev_adj: Vec<Vec<usize>> = vec![vec![]; n];
+      +        for u in 0..n {
+      +            if let Some(d) = states[u].transitions.default { if d < n { rev_adj[d].push(u); } }
+      +            for &v in states[u].transitions.exceptions.values() { if v < n { rev_adj[v].push(u); } }
+      +        }
+      +
+      +        let mut co_reachable = vec![false; n];
+      +        let mut q: VecDeque<usize> = VecDeque::new();
+      +        for &end_state in end_states {
+      +            if end_state < n && !co_reachable[end_state] {
+      +                co_reachable[end_state] = true;
+      +                q.push_back(end_state);
+      +            }
+      +        }
+      +
+      +        while let Some(u) = q.pop_front() {
+      +            for &v in &rev_adj[u] {
+      +                if !co_reachable[v] {
+      +                    co_reachable[v] = true;
+      +                    q.push_back(v);
+      +                }
+      +            }
+      +        }
+      +
+      +        // 3. Live states are intersection
+      +        let live: Vec<bool> = (0..n).map(|i| reachable[i] && co_reachable[i]).collect();
+      +
+      +        if live.iter().all(|&b| b) && n > 0 {
+      +            return (false, BTreeMap::new());
+      +        }
+      +
+      +        // 4. Remap
+               let mut map = vec![usize::MAX; n];
+               let mut next_id = 0usize;
+      +        let mut mapping: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
+               for i in 0..n {
+      -            if visited[i] {
+      +            if live[i] {
+                       map[i] = next_id;
+      +                mapping.insert(next_id, BTreeSet::from([i]));
+                       next_id += 1;
+                   }
+               }
+       
+      +        if next_id == n { return (false, BTreeMap::new()); }
+      +
+               let mut new_states: Vec<DWAState> = Vec::with_capacity(next_id);
+               for old in 0..n {
+      -            if !visited[old] {
+      +            if !live[old] {
+                       continue;
+                   }
+                   let mut st = states[old].clone();
+      @@ -831,7 +1009,7 @@
+               }
+               states.0 = new_states;
+               body.start_state = map[body.start_state];
+      -        true
+      +        (true, mapping)
+           }
+       }
+       
 
       ```
+
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/augmented_nwa.rs
-      Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/precompute4/full_nwa.rs
-      Applying patch to 'src/precompute4/full_nwa.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/full_nwa.rs.
+      Identified target file: src/weighted_automata.rs
+      Applying patch to 'src/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Rename NWA body combination
-      to concatenation for clarity"'
+  - user: 'Changes committed with message: "Implement DWA::union and modify simplification
+      methods to return state mappings and use end states for pruning"'
     metadata:
 ...
