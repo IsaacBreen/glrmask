@@ -1,5 +1,5 @@
 // src/precompute4/conversion.rs
-use crate::constraint::{PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
+use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
 use crate::datastructures::trie::Trie;
 use crate::weighted_automata::{DWA, StateID as WaStateID, Weight as WaWeight};
 use std::collections::BTreeMap;
