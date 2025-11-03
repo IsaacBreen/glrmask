@@ -199,36 +199,6 @@ impl AugmentedNwaBody {
         let mut total_reachable_time = std::time::Duration::new(0, 0);
         let mut total_end_map_build_time = std::time::Duration::new(0, 0);
 
-        // Helper to get reachable end stacks from a state using the precomputed map (if available),
-        // or fall back to a forward reachability scan against right.end_map if not.
-        let mut tmp_buf: BTreeSet<Vec<ParserStateID>> = BTreeSet::new();
-        let get_end_stacks = |s: WaStateID,
-                              tmp: &mut BTreeSet<Vec<ParserStateID>>|
-         -> &BTreeSet<Vec<ParserStateID>> {
-            if let Some(cache) = right_end_reach {
-                if let Some(set) = cache.get(&s) {
-                    return set;
-                } else {
-                    tmp.clear();
-                    return tmp;
-                }
-            }
-            // Fallback (legacy path): scan reachable and pick those present in right.end_map
-            tmp.clear();
-            let reachable_now = Instant::now();
-            let reachable = states.reachable_states_ignoring_labels(s);
-            // accumulate stacks from end_map for all reachable states
-            for r_state in reachable {
-                if let Some(r_stacks) = right.end_map.get(&r_state) {
-                    for st in r_stacks {
-                        tmp.insert(st.clone());
-                    }
-                }
-            }
-            total_reachable_time += reachable_now.elapsed();
-            tmp
-        };
-
         for (left_end_state, stacks) in left_end_snapshot {
             for left_stack in stacks {
                 let encoded: Vec<u16> =
@@ -240,15 +210,29 @@ impl AugmentedNwaBody {
 
                 for (pos, right_stop_state, path_weight) in stops {
                     let combined_weight = &path_weight & weight;
-                    states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
-
-                    if right.end_map.values().all(|stacks| stacks.is_empty()) {
-                        continue;
-                    }
 
                     let end_map_build_now = Instant::now();
-                    let r_sets = get_end_stacks(right_stop_state, &mut tmp_buf);
-                    for r_stack in r_sets {
+                    let r_sets = if !right.end_map.is_empty() {
+                        if let Some(cache) = right_end_reach {
+                            cache.get(&right_stop_state).cloned().unwrap_or_default()
+                        } else {
+                            let mut tmp = BTreeSet::new();
+                            let reachable_now = Instant::now();
+                            let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                            for r_state in reachable {
+                                if let Some(r_stacks) = right.end_map.get(&r_state) {
+                                    tmp.extend(r_stacks.clone());
+                                }
+                            }
+                            total_reachable_time += reachable_now.elapsed();
+                            tmp
+                        }
+                    } else {
+                        BTreeSet::new()
+                    };
+                    states.add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
+
+                    for r_stack in &r_sets {
                         let keep_len = left_stack.len().saturating_sub(pos);
                         let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
                         combined.extend(r_stack.iter().cloned());
@@ -403,17 +387,15 @@ impl AugmentedNwaBody {
         // Known compositions -> new summary state id.
         let mut comp2id: HashMap<Vec<(WaStateID, WaWeight)>, WaStateID> = HashMap::new();
         let mut work: VecDeque<(Vec<(WaStateID, WaWeight)>, usize)> = VecDeque::new();
-        let mut get_or_create = |key: Vec<(WaStateID, WaWeight)>, lvl: usize| -> WaStateID {
-            if let Some(id) = comp2id.get(&key).cloned() {
-                return id;
-            }
+
+        let new_start = if let Some(&id) = comp2id.get(&start_key) {
+            id
+        } else {
             let id = states.add_state();
-            comp2id.insert(key.clone(), id);
-            work.push_back((key, lvl));
+            comp2id.insert(start_key.clone(), id);
+            work.push_back((start_key, 0));
             id
         };
-
-        let new_start = get_or_create(start_key, 0);
         // Replace body's starts with the single merged start.
         self.nwa.start_states.clear();
         self.nwa.start_states.insert(new_start);
@@ -457,7 +439,14 @@ impl AugmentedNwaBody {
                     let def_closure = if has_epsilons { states.epsilon_closure(def_next_raw) } else { def_next_raw };
                     let def_key = to_key(&def_closure);
                     if !def_key.is_empty() {
-                        let tid = get_or_create(def_key, lvl + 1);
+                        let tid = if let Some(&id) = comp2id.get(&def_key) {
+                            id
+                        } else {
+                            let id = states.add_state();
+                            comp2id.insert(def_key.clone(), id);
+                            work.push_back((def_key, lvl + 1));
+                            id
+                        };
                         states.add_default_transition(sid, tid, def_weight_agg);
                     }
                 } else {
@@ -491,7 +480,14 @@ impl AugmentedNwaBody {
                     let closure = if has_epsilons { states.epsilon_closure(next_raw) } else { next_raw };
                     let key = to_key(&closure);
                     if !key.is_empty() {
-                        let tid = get_or_create(key, lvl + 1);
+                        let tid = if let Some(&id) = comp2id.get(&key) {
+                            id
+                        } else {
+                            let id = states.add_state();
+                            comp2id.insert(key.clone(), id);
+                            work.push_back((key, lvl + 1));
+                            id
+                        };
                         states.add_transition(sid, ch, tid, ch_weight_agg);
                     }
                 } else {
