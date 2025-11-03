@@ -434,12 +434,12 @@ fn build_super_edges_via_trie(
     }
     let super_seen: RefCell<HashSet<SuperKey>> = RefCell::new(HashSet::new());
 
-    Trie::special_map_grouped::<ValueBag, _, _>(
+    Trie::special_map_grouped::<ValueBag, _, _, _>(
         &gc.trie1_god,
         &traversal,
         initial_nodes_and_values,
         // step
-        |values, ek, dsts| {
+        |values: &_, ek, dsts| {
             let mut out: Vec<(PrecomputeNode1Index, ValueBag)> = Vec::new();
 
             let term = match ek {

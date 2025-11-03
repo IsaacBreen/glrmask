@@ -2722,7 +2722,7 @@ impl GrammarConstraint {
             &traversal_data,
             initial_values_for_map,
             // step: merge current set into a single node, then attach the terminal template or direct LLM edges
-            |(current_tokens, current_nodes_set), edge_grammar_token_opt, destinations_map| {
+            |(current_tokens, current_nodes_set): &(LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>), edge_grammar_token_opt, destinations_map| {
                 // Merge current set into a single node with unconditional edges
                 let merged = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
                 for src in current_nodes_set.iter() {
@@ -2803,7 +2803,7 @@ impl GrammarConstraint {
             // process: when we reach Trie1 end, attach nodes to a shared trie3_end node and continue
             |precomputed_node_data, _, (tokens, nodes_set)| {
                 if tokens.is_empty() {
-                    return false;
+                    return None;
                 }
                 if precomputed_node_data.value.end {
                     for src in nodes_set.iter() {
@@ -2815,7 +2815,7 @@ impl GrammarConstraint {
                         inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge from nodes_set");
                     }
                 }
-                true
+                Some(nodes_set)
             },
         );
 

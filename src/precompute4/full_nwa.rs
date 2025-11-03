@@ -145,7 +145,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
                 final_nwas.insert(*tokenizer_state_id, aug_body.clone());
             }
-            true // continue traversal
+            Some(aug_body) // continue traversal
         },
     );
     println!("special_map_unified took: {:?}", now.elapsed());
