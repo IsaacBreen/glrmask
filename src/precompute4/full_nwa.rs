@@ -104,9 +104,23 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         // merge function: union two rests that reside in the same shared states
         |aug_nwa1: &mut AugmentedNwaRest, aug_nwa2: AugmentedNwaRest| {
             // Merge end_maps
-            for (st, stacks) in &aug_nwa2.end_map {
-                aug_nwa1.end_map.entry(*st).or_default().extend(stacks.clone());
+            for (st, stacks) in aug_nwa2.end_map {
+                aug_nwa1.end_map.entry(st).or_default().extend(stacks);
             }
+
+            // Merge nt_nodes
+            for (nt, st2) in aug_nwa2.nt_nodes {
+                if let Some(st1) = aug_nwa1.nt_nodes.get_mut(&nt) {
+                    // Collision: create a new state and epsilon-transition to both
+                    let new_nt_start = shared_states.borrow_mut().add_state();
+                    shared_states.borrow_mut().add_epsilon_transition(new_nt_start, *st1, WaWeight::all());
+                    shared_states.borrow_mut().add_epsilon_transition(new_nt_start, st2, WaWeight::all());
+                    *st1 = new_nt_start;
+                } else {
+                    aug_nwa1.nt_nodes.insert(nt, st2);
+                }
+            }
+
             // Create new start in shared states and epsilon to both old starts.
             let new_start = shared_states.borrow_mut().add_state();
             shared_states.borrow_mut().add_epsilon_transition(new_start, aug_nwa1.nwa.start_state, WaWeight::all());
