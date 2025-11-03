@@ -240,14 +240,6 @@ impl NWAStates {
     pub fn add_epsilon_transition(&mut self, from: StateID, to: StateID, weight: Weight) {
         self[from].epsilon_transitions.push((to, weight));
     }
-    /// Add an epsilon edge; if one to the same target already exists, merge weights instead of duplicating edges.
-    pub fn add_or_merge_epsilon_transition(&mut self, from: StateID, to: StateID, weight: Weight) {
-        if let Some((_, w)) = self[from].epsilon_transitions.iter_mut().find(|(v, _)| *v == to) {
-            *w |= &weight;
-        } else {
-            self[from].epsilon_transitions.push((to, weight));
-        }
-    }
     pub fn set_final_weight(&mut self, state: StateID, weight: Weight) {
         self[state].final_weight = Some(weight);
     }
@@ -308,48 +300,6 @@ impl NWAStates {
             for vec in self[u].transitions.exceptions.values() {
                 for (v, _) in vec {
                     if visited.insert(*v) {
-                        q.push_back(*v);
-                    }
-                }
-            }
-        }
-        visited
-    }
-
-    /// Reachability ignoring labels/weights, restricted to an allowed subset (if provided).
-    pub fn reachable_states_ignoring_labels_subset(
-        &self,
-        from: StateID,
-        allowed: Option<&BTreeSet<StateID>>,
-    ) -> BTreeSet<StateID> {
-        let mut visited: BTreeSet<StateID> = BTreeSet::new();
-        let mut q: VecDeque<StateID> = VecDeque::new();
-        if from >= self.0.len() {
-            return visited;
-        }
-        if let Some(allow) = allowed {
-            if !allow.contains(&from) {
-                return visited;
-            }
-        }
-        visited.insert(from);
-        q.push_back(from);
-        while let Some(u) = q.pop_front() {
-            for (v, _) in &self[u].epsilon_transitions {
-                if allowed.map_or(true, |allow| allow.contains(v)) && visited.insert(*v) {
-                    q.push_back(*v);
-                }
-            }
-            if let Some(def) = self[u].transitions.default.as_ref() {
-                for (v, _) in def {
-                    if allowed.map_or(true, |allow| allow.contains(v)) && visited.insert(*v) {
-                        q.push_back(*v);
-                    }
-                }
-            }
-            for vec in self[u].transitions.exceptions.values() {
-                for (v, _) in vec {
-                    if allowed.map_or(true, |allow| allow.contains(v)) && visited.insert(*v) {
                         q.push_back(*v);
                     }
                 }
@@ -552,111 +502,6 @@ impl NWAStates {
             }
         }
         closure
-    }
-}
-
-impl NWAStates {
-    /// Epsilon-closure restricted to an allowed subset (if provided).
-    fn epsilon_closure_with_restriction(
-        &self,
-        initial_states: BTreeMap<StateID, Weight>,
-        has_epsilons: bool,
-        allowed: Option<&BTreeSet<StateID>>,
-    ) -> BTreeMap<StateID, Weight> {
-        if !has_epsilons {
-            // Filter to allowed if provided
-            return if let Some(allow) = allowed {
-                initial_states.into_iter().filter(|(s, _)| allow.contains(s)).collect()
-            } else {
-                initial_states
-            };
-        }
-        let mut closure: BTreeMap<StateID, Weight> = if let Some(allow) = allowed {
-            initial_states.into_iter().filter(|(s, _)| allow.contains(s)).collect()
-        } else {
-            initial_states
-        };
-        let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
-        while let Some(u_id) = worklist.pop_front() {
-            let u_weight = closure.get(&u_id).unwrap().clone();
-            if u_weight.is_empty() {
-                continue;
-            }
-            for (v_id, trans_weight) in &self[u_id].epsilon_transitions {
-                if allowed.map_or(true, |allow| allow.contains(v_id)) {
-                    let new_v_weight = &u_weight & trans_weight;
-                    if new_v_weight.is_empty() {
-                        continue;
-                    }
-                    let current_v_weight = closure.entry(*v_id).or_insert_with(Weight::zeros);
-                    let old_len = current_v_weight.len();
-                    *current_v_weight |= &new_v_weight;
-                    if current_v_weight.len() > old_len {
-                        worklist.push_back(*v_id);
-                    }
-                }
-            }
-        }
-        closure
-    }
-
-    /// Nondeterministic processing over u16 alphabet, restricted to an allowed subset.
-    ///
-    /// Returns all stops as triples (pos, stop_state, path_weight).
-    pub fn process_stack_u16_from_start_restricted(
-        &self,
-        start_state: StateID,
-        input: &[u16],
-        allowed: Option<&BTreeSet<StateID>>,
-    ) -> Vec<(usize, StateID, Weight)> {
-        let now = Instant::now();
-        if self.0.is_empty() {
-            return Vec::new();
-        }
-        let has_eps = true;
-        let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
-        if allowed.map_or(true, |allow| allow.contains(&start_state)) {
-            current.insert(start_state, Weight::all());
-        }
-        let mut current = self.epsilon_closure_with_restriction(current, has_eps, allowed);
-        let mut results: BTreeMap<(usize, StateID), Weight> = BTreeMap::new();
-        let n = input.len();
-
-        for pos in 0..=n {
-            for (&sid, path_w) in &current {
-                if self[sid].final_weight.is_some() {
-                    results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
-                }
-            }
-            if pos == n {
-                for (&sid, path_w) in &current {
-                    results.entry((pos, sid)).or_insert_with(Weight::zeros).bitor_assign(path_w);
-                }
-                break;
-            }
-            let ch = input[pos];
-            let mut next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
-            for (&sid, path_w) in &current {
-                if let Some(transitions) = self[sid].transitions.get(ch) {
-                    for (to, w) in transitions {
-                        if allowed.map_or(true, |allow| allow.contains(to)) {
-                            let w2 = path_w & w;
-                            if !w2.is_empty() {
-                                next_raw.entry(*to).or_insert_with(Weight::zeros).bitor_assign(&w2);
-                            }
-                        }
-                    }
-                }
-            }
-            current = self.epsilon_closure_with_restriction(next_raw, has_eps, allowed);
-        }
-        let result = results.into_iter().map(|((pos, sid), w)| (pos, sid, w)).collect();
-        println!(
-            "NWAStates::process_stack_u16_from_start_restricted (input len {}) took: {:?}",
-            input.len(),
-            now.elapsed()
-        );
-        result
     }
 }
 
