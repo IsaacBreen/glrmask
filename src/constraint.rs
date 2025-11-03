@@ -690,7 +690,7 @@ impl Default for GrammarConstraintConfig {
             intermediate_trie3_main: IntermediateTrie3Config::default(),
             dummy_terminal_map: BTreeMap::new(),
             dummy_terminal_penalties: BTreeMap::new(),
-            use_dummy_terminals: false,
+            use_dummy_terminals: true,
         }
     }
 }
