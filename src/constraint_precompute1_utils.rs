@@ -43,7 +43,7 @@ impl Default for Trie1Config {
             minimize_by_signature: false,
             merge_equivalent_llm_tokens: true,
             reorder_llm_tokens: true,
-            prune_on_no_terminal_follow: true,
+            prune_on_no_terminal_follow: false,
             prune_nodes_not_reaching_end: true,
             prune_dead_paths: true,
             gc: true,
