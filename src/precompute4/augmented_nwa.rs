@@ -289,45 +289,37 @@ impl AugmentedNwaBody {
         right: &AugmentedNwaBody,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
-        let mut right_body_to_use = right.clone();
-        if !weight.is_empty() && weight != &WaWeight::all() {
-            let mut new_right_starts = BTreeSet::new();
-            for &start in &right.nwa.start_states {
-                let proxy_start = states.add_state();
-                states.add_epsilon_transition(proxy_start, start, weight.clone());
-                new_right_starts.insert(proxy_start);
-            }
-            right_body_to_use.nwa.start_states = new_right_starts;
-        }
-
-        let mut join_map: BTreeMap<WaStateID, BTreeSet<WaStateID>> = BTreeMap::new();
-        for &end_state in left.end_map.keys() {
-            join_map.insert(end_state, right_body_to_use.nwa.start_states.clone());
-        }
-
-        let old_left_nt_nodes = left.nt_nodes.clone();
-        let mapping = WaNWA::concatenate_components(states, &mut left.nwa, &right_body_to_use.nwa, &join_map);
-
+        let left_end_snapshot = left.end_map.clone();
         let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-        let mut new_nt_nodes: BTreeMap<NonTerminalID, WaStateID> = BTreeMap::new();
+ 
+        for (left_end_state, stacks) in &left_end_snapshot {
+            for left_stack in stacks {
+                let encoded: Vec<u16> =
+                    left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
 
-        for (new_id, old_ids) in &mapping {
-            for &(automaton_idx, old_id) in old_ids {
-                if automaton_idx == 0 { // From left
-                    if let Some(nt_id) = old_left_nt_nodes.iter().find(|(_, &v)| v == old_id).map(|(k, _)| *k) {
-                        new_nt_nodes.insert(nt_id, *new_id);
-                    }
-                } else { // From right
-                    if let Some(stacks) = right.end_map.get(&old_id) {
-                        new_end_map.entry(*new_id).or_default().extend(stacks.clone());
+                let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+
+                for (pos, right_stop_state, path_weight) in stops {
+                    let combined_weight = &path_weight & weight;
+                    states.add_epsilon_transition(*left_end_state, right_stop_state, combined_weight);
+
+                    if !right.end_map.is_empty() {
+                        let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                        for r_state in reachable {
+                            if let Some(r_stacks) = right.end_map.get(&r_state) {
+                                for r_stack in r_stacks {
+                                    let keep_len = left_stack.len().saturating_sub(pos);
+                                    let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
+                                    combined.extend(r_stack.iter().cloned());
+                                    new_end_map.entry(r_state).or_default().insert(combined);
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
-
         left.end_map = new_end_map;
-        left.nt_nodes = new_nt_nodes;
-
         Ok(())
     }
 

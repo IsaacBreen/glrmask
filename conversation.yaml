@@ -3030,37 +3030,100 @@ local_system:
               right: &AugmentedNwaBody,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
+              crate::debug!(6, "--- concatenate_right_into_on_shared ---");
+              crate::debug!(6, "--- WEIGHT: {} ---", weight);
+              crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
+              crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
+              crate::debug!(6, "States before concatenate:\n{}", states);
+
+              let now = Instant::now();
               let left_end_snapshot = left.end_map.clone();
               let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+
+              let mut total_stacks = 0;
+              let mut unique_stacks = BTreeSet::new();
+              let mut total_stack_len = 0;
+              let mut max_stack_len = 0;
+              for stacks in left_end_snapshot.values() {
+                  total_stacks += stacks.len();
+                  for stack in stacks {
+                      unique_stacks.insert(stack.clone());
+                      let len = stack.len();
+                      total_stack_len += len;
+                      if len > max_stack_len {
+                          max_stack_len = len;
+                      }
+                  }
+              }
+              let avg_stack_len = if total_stacks > 0 { total_stack_len as f64 / total_stacks as f64 } else { 0.0 };
+
+              let mut total_process_stack_time = std::time::Duration::new(0, 0);
+              let mut total_reachable_time = std::time::Duration::new(0, 0);
+              let mut total_end_map_build_time = std::time::Duration::new(0, 0);
+              let mut stops_count = 0;
+              let mut reachable_count = 0;
        
               for (left_end_state, stacks) in &left_end_snapshot {
                   for left_stack in stacks {
                       let encoded: Vec<u16> =
                           left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
 
+                      let process_now = Instant::now();
                       let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+                      crate::debug!(6, "  Concatenating left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
+                      stops_count += stops.len();
+                      total_process_stack_time += process_now.elapsed();
 
                       for (pos, right_stop_state, path_weight) in stops {
                           let combined_weight = &path_weight & weight;
                           states.add_epsilon_transition(*left_end_state, right_stop_state, combined_weight);
 
-                          if !right.end_map.is_empty() {
-                              let reachable = states.reachable_states_ignoring_labels(right_stop_state);
-                              for r_state in reachable {
-                                  if let Some(r_stacks) = right.end_map.get(&r_state) {
-                                      for r_stack in r_stacks {
-                                          let keep_len = left_stack.len().saturating_sub(pos);
-                                          let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
-                                          combined.extend(r_stack.iter().cloned());
-                                          new_end_map.entry(r_state).or_default().insert(combined);
-                                      }
+                          if right.end_map.values().all(|stacks| stacks.is_empty()) {
+                              continue;
+                          }
+
+                          let reachable_now = Instant::now();
+                          let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                          reachable_count += reachable.len();
+                          total_reachable_time += reachable_now.elapsed();
+
+                          let end_map_build_now = Instant::now();
+                          for r_state in reachable {
+                              if let Some(r_stacks) = right.end_map.get(&r_state) {
+                                  for r_stack in r_stacks {
+                                      let keep_len = left_stack.len().saturating_sub(pos);
+                                      let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
+                                      combined.extend(r_stack.iter().cloned());
+                                      new_end_map.entry(r_state).or_default().insert(combined);
                                   }
                               }
                           }
+                          total_end_map_build_time += end_map_build_now.elapsed();
                       }
                   }
               }
               left.end_map = new_end_map;
+
+              crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
+              crate::debug!(6, "--- end concatenate_right_into_on_shared ---");
+
+              println!(
+                  "    concatenate_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
+                  now.elapsed(),
+                  total_process_stack_time,
+                  stops_count,
+                  total_reachable_time,
+                  reachable_count,
+                  total_end_map_build_time
+              );
+              println!(
+                  "      left_end_snapshot stats: end_states={}, total_stacks={}, unique_stacks={}, max_stack_len={}, avg_stack_len={:.2}",
+                  left_end_snapshot.len(),
+                  total_stacks,
+                  unique_stacks.len(),
+                  max_stack_len,
+                  avg_stack_len
+              );
               Ok(())
           }
 
@@ -5058,29 +5121,9 @@ local_system:
                           new_epsilon_transitions.push((new_target_id, w0.clone()));
                       }
 
-                      // Character transitions driven by `self` (other part follows)
-                      let mut process_char_transitions = |ch: Option<u16>, trans0: &Vec<(StateID, Weight)>| {
-                          for (t0, w0) in trans0 {
-                              let mut next_ids1 = BTreeSet::new();
-                              for (id1_ref, s1) in &s1_infos {
-                                  if let Some(trans1) = if let Some(c) = ch { s1.transitions.get(c) } else { s1.transitions.get_default() } {
-                                      for (t1, _) in trans1 { next_ids1.insert(*t1); }
-                                  }
-                              }
-                              if let Some(joins) = join_map.get(t0) { next_ids1.extend(joins); }
-                              let next_comp = (*t0, next_ids1);
-                              let new_target_id = get_or_create(next_comp, states, &mut composition_to_new_id, &mut worklist, &mut mapping);
-
-                              let trans_list = if let Some(c) = ch {
-                                  new_transitions.exceptions.entry(c).or_default()
-                              } else {
-                                  new_transitions.default.get_or_insert_with(Vec::new)
-                              };
-                              trans_list.push((new_target_id, w0.clone()));
-                          }
-                      };
-                      if let Some(trans0) = s0.transitions.get_default() { process_char_transitions(None, trans0); }
-                      for (ch, trans0) in s0.transitions.iter_exceptions() { process_char_transitions(Some(*ch), trans0); }
+                      // Character transitions are driven by left; right follows.
+                      // This part is complex and not needed for the current refactoring.
+                      // The current use case only involves epsilon transitions for joining.
                   }
                   
                   let new_state = &mut states[new_id];
@@ -7053,45 +7096,37 @@ local_system:
               right: &AugmentedNwaBody,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
-              let mut right_body_to_use = right.clone();
-              if !weight.is_empty() && weight != &WaWeight::all() {
-                  let mut new_right_starts = BTreeSet::new();
-                  for &start in &right.nwa.start_states {
-                      let proxy_start = states.add_state();
-                      states.add_epsilon_transition(proxy_start, start, weight.clone());
-                      new_right_starts.insert(proxy_start);
-                  }
-                  right_body_to_use.nwa.start_states = new_right_starts;
-              }
-
-              let mut join_map: BTreeMap<WaStateID, BTreeSet<WaStateID>> = BTreeMap::new();
-              for &end_state in left.end_map.keys() {
-                  join_map.insert(end_state, right_body_to_use.nwa.start_states.clone());
-              }
-
-              let old_left_nt_nodes = left.nt_nodes.clone();
-              let mapping = WaNWA::concatenate_components(states, &mut left.nwa, &right_body_to_use.nwa, &join_map);
-
+              let left_end_snapshot = left.end_map.clone();
               let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-              let mut new_nt_nodes: BTreeMap<NonTerminalID, WaStateID> = BTreeMap::new();
+       
+              for (left_end_state, stacks) in &left_end_snapshot {
+                  for left_stack in stacks {
+                      let encoded: Vec<u16> =
+                          left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
 
-              for (new_id, old_ids) in &mapping {
-                  for &(automaton_idx, old_id) in old_ids {
-                      if automaton_idx == 0 { // From left
-                          if let Some(nt_id) = old_left_nt_nodes.iter().find(|(_, &v)| v == old_id).map(|(k, _)| *k) {
-                              new_nt_nodes.insert(nt_id, *new_id);
-                          }
-                      } else { // From right
-                          if let Some(stacks) = right.end_map.get(&old_id) {
-                              new_end_map.entry(*new_id).or_default().extend(stacks.clone());
+                      let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+
+                      for (pos, right_stop_state, path_weight) in stops {
+                          let combined_weight = &path_weight & weight;
+                          states.add_epsilon_transition(*left_end_state, right_stop_state, combined_weight);
+
+                          if !right.end_map.is_empty() {
+                              let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                              for r_state in reachable {
+                                  if let Some(r_stacks) = right.end_map.get(&r_state) {
+                                      for r_stack in r_stacks {
+                                          let keep_len = left_stack.len().saturating_sub(pos);
+                                          let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
+                                          combined.extend(r_stack.iter().cloned());
+                                          new_end_map.entry(r_state).or_default().insert(combined);
+                                      }
+                                  }
+                              }
                           }
                       }
                   }
               }
-
               left.end_map = new_end_map;
-              left.nt_nodes = new_nt_nodes;
-
               Ok(())
           }
 
@@ -11111,37 +11146,100 @@ messages:
               right: &AugmentedNwaBody,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
+              crate::debug!(6, "--- concatenate_right_into_on_shared ---");
+              crate::debug!(6, "--- WEIGHT: {} ---", weight);
+              crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
+              crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
+              crate::debug!(6, "States before concatenate:\n{}", states);
+
+              let now = Instant::now();
               let left_end_snapshot = left.end_map.clone();
               let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+
+              let mut total_stacks = 0;
+              let mut unique_stacks = BTreeSet::new();
+              let mut total_stack_len = 0;
+              let mut max_stack_len = 0;
+              for stacks in left_end_snapshot.values() {
+                  total_stacks += stacks.len();
+                  for stack in stacks {
+                      unique_stacks.insert(stack.clone());
+                      let len = stack.len();
+                      total_stack_len += len;
+                      if len > max_stack_len {
+                          max_stack_len = len;
+                      }
+                  }
+              }
+              let avg_stack_len = if total_stacks > 0 { total_stack_len as f64 / total_stacks as f64 } else { 0.0 };
+
+              let mut total_process_stack_time = std::time::Duration::new(0, 0);
+              let mut total_reachable_time = std::time::Duration::new(0, 0);
+              let mut total_end_map_build_time = std::time::Duration::new(0, 0);
+              let mut stops_count = 0;
+              let mut reachable_count = 0;
        
               for (left_end_state, stacks) in &left_end_snapshot {
                   for left_stack in stacks {
                       let encoded: Vec<u16> =
                           left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
 
+                      let process_now = Instant::now();
                       let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+                      crate::debug!(6, "  Concatenating left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
+                      stops_count += stops.len();
+                      total_process_stack_time += process_now.elapsed();
 
                       for (pos, right_stop_state, path_weight) in stops {
                           let combined_weight = &path_weight & weight;
                           states.add_epsilon_transition(*left_end_state, right_stop_state, combined_weight);
 
-                          if !right.end_map.is_empty() {
-                              let reachable = states.reachable_states_ignoring_labels(right_stop_state);
-                              for r_state in reachable {
-                                  if let Some(r_stacks) = right.end_map.get(&r_state) {
-                                      for r_stack in r_stacks {
-                                          let keep_len = left_stack.len().saturating_sub(pos);
-                                          let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
-                                          combined.extend(r_stack.iter().cloned());
-                                          new_end_map.entry(r_state).or_default().insert(combined);
-                                      }
+                          if right.end_map.values().all(|stacks| stacks.is_empty()) {
+                              continue;
+                          }
+
+                          let reachable_now = Instant::now();
+                          let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+                          reachable_count += reachable.len();
+                          total_reachable_time += reachable_now.elapsed();
+
+                          let end_map_build_now = Instant::now();
+                          for r_state in reachable {
+                              if let Some(r_stacks) = right.end_map.get(&r_state) {
+                                  for r_stack in r_stacks {
+                                      let keep_len = left_stack.len().saturating_sub(pos);
+                                      let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
+                                      combined.extend(r_stack.iter().cloned());
+                                      new_end_map.entry(r_state).or_default().insert(combined);
                                   }
                               }
                           }
+                          total_end_map_build_time += end_map_build_now.elapsed();
                       }
                   }
               }
               left.end_map = new_end_map;
+
+              crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
+              crate::debug!(6, "--- end concatenate_right_into_on_shared ---");
+
+              println!(
+                  "    concatenate_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
+                  now.elapsed(),
+                  total_process_stack_time,
+                  stops_count,
+                  total_reachable_time,
+                  reachable_count,
+                  total_end_map_build_time
+              );
+              println!(
+                  "      left_end_snapshot stats: end_states={}, total_stacks={}, unique_stacks={}, max_stack_len={}, avg_stack_len={:.2}",
+                  left_end_snapshot.len(),
+                  total_stacks,
+                  unique_stacks.len(),
+                  max_stack_len,
+                  avg_stack_len
+              );
               Ok(())
           }
 
@@ -12116,7 +12214,7 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: Make concatenate_right_into_on_shared simpler.
+  - user: Remove the stats/debugging/extra stuff from concatenate_right_into_on_shared.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -12136,172 +12234,162 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to simplify the NWA concatenation logic, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to remove the statistics and debugging code from `concatenate_right_into_on_shared`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I'll guide you through two main changes:
-      1.  First, we'll implement the `NWA::concatenate_components` function in `src/weighted_automata.rs`. It's currently a stub for character transitions, and we'll fill it in to perform a proper product construction for concatenation, similar to its `DWA` counterpart.
-      2.  Second, we'll refactor `AugmentedNwaBody::concatenate_right_into_on_shared` in `src/precompute4/augmented_nwa.rs`. The current implementation is complex and performs a special-purpose "apply" operation. We will replace it with a much simpler version that uses the newly implemented `NWA::concatenate_components`, making it a standard concatenation. This aligns its behavior with the DWA concatenation logic, improving consistency.
+      1.  **Open the file `src/precompute4/augmented_nwa.rs`**.
 
-      #### File: `src/weighted_automata.rs`
+      2.  **Navigate to the `concatenate_right_into_on_shared` function**. It is located within the `impl AugmentedNwaBody`.
 
-      1.  **Navigate to `impl NWA`** and find the function `concatenate_components`.
-      2.  **Locate the `while` loop** inside this function. We will be adding logic to handle character-based transitions.
-      3.  **Inside the `if let Some(s0) = s0_info` block**, find the comment `// Character transitions are driven by left; right follows.`.
-      4.  **Replace that comment and the two lines below it** with a new implementation that processes default and exception transitions. This logic will be similar to the `NWA::concatenate` function, but adapted to work on the shared `states` arena.
+      3.  **Remove the debugging and performance tracking code**:
+          *   Delete the five `crate::debug!` macro calls at the beginning of the function.
+          *   Delete the `let now = Instant::now();` line.
+          *   Delete the block of code that calculates stack statistics (from `let mut total_stacks = 0;` through `let avg_stack_len = ...;`).
+          *   Delete the block that initializes timing and counter variables (from `let mut total_process_stack_time = ...` through `let mut reachable_count = 0;`).
+          *   In the nested loops, remove the timing and counter updates:
+              *   Delete `let process_now = Instant::now();`, `stops_count += stops.len();`, and `total_process_stack_time += process_now.elapsed();`.
+              *   Delete `let reachable_now = Instant::now();`, `reachable_count += reachable.len();`, and `total_reachable_time += reachable_now.elapsed();`.
+              *   Delete `let end_map_build_now = Instant::now();` and `total_end_map_build_time += end_map_build_now.elapsed();`.
+          *   At the end of the function, delete the final two `crate::debug!` calls and the two `println!` calls that print the collected statistics.
 
-          The new logic will iterate through the transitions of the left component (`s0`), determine the corresponding target states in the right component, create a new composite state, and add a transition to it.
+      4.  **Slightly refactor the end map logic**:
+          *   Find the line `if right.end_map.values().all(|stacks| stacks.is_empty()) {`.
+          *   Replace this condition and its `continue` body with a single `if !right.end_map.is_empty() { ... }` block that wraps the subsequent logic for updating `new_end_map`.
 
-      #### File: `src/precompute4/augmented_nwa.rs`
-
-      1.  **Navigate to `impl AugmentedNwaBody`** and find the function `concatenate_right_into_on_shared`.
-      2.  **Delete the entire body of this function.**
-      3.  **Replace it with a new implementation** that performs a standard concatenation. The new logic will be:
-          *   If a `weight` is provided, create new proxy start states for the `right` NWA with epsilon-transitions weighted by `weight`. This isolates the weight application from the main `right` NWA.
-          *   Create a `join_map` that connects every end state of the `left` NWA to the (potentially new) start states of the `right` NWA.
-          *   Call the now-complete `WaNWA::concatenate_components` function from `weighted_automata.rs` to perform the product construction.
-          *   Update the `nt_nodes` and `end_map` of the `left` body based on the mapping returned by `concatenate_components`. The new `end_map` will be the remapped `end_map` from the `right` NWA, which is consistent with how the DWA concatenation works.
-
-      This change makes the function conceptually simpler by replacing a bespoke, manual composition with a call to a general-purpose concatenation component.
+      After these changes, the function will be significantly cleaner and focused only on its core logic.
 
       ### Git Diffs
 
-      Here are the git diffs corresponding to the changes described above.
+      Here is the git diff to apply the changes to `src/precompute4/augmented_nwa.rs`.
 
       ```diff
       --- a/src/precompute4/augmented_nwa.rs
       +++ b/src/precompute4/augmented_nwa.rs
-      @@ -318,41 +318,43 @@
+      @@ -351,78 +351,33 @@
                right: &AugmentedNwaBody,
                weight: &WaWeight,
            ) -> Result<(), AugmentedNwaBuildError> {
-      -        let left_end_snapshot = left.end_map.clone();
-      -        let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-      - 
-      -        for (left_end_state, stacks) in &left_end_snapshot {
-      -            for left_stack in stacks {
-      -                let encoded: Vec<u16> =
-      -                    left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
+      -        crate::debug!(6, "--- concatenate_right_into_on_shared ---");
+      -        crate::debug!(6, "--- WEIGHT: {} ---", weight);
+      -        crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
+      -        crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
+      -        crate::debug!(6, "States before concatenate:\n{}", states);
       -
-      -                let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+      -        let now = Instant::now();
+               let left_end_snapshot = left.end_map.clone();
+               let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
       -
-      -                for (pos, right_stop_state, path_weight) in stops {
-      -                    let combined_weight = &path_weight & weight;
-      -                    states.add_epsilon_transition(*left_end_state, right_stop_state, combined_weight);
+      -        let mut total_stacks = 0;
+      -        let mut unique_stacks = BTreeSet::new();
+      -        let mut total_stack_len = 0;
+      -        let mut max_stack_len = 0;
+      -        for stacks in left_end_snapshot.values() {
+      -            total_stacks += stacks.len();
+      -            for stack in stacks {
+      -                unique_stacks.insert(stack.clone());
+      -                let len = stack.len();
+      -                total_stack_len += len;
+      -                if len > max_stack_len {
+      -                    max_stack_len = len;
+      -                }
+      -            }
+      -        }
+      -        let avg_stack_len = if total_stacks > 0 { total_stack_len as f64 / total_stacks as f64 } else { 0.0 };
       -
-      -                    if !right.end_map.is_empty() {
-      -                        let reachable = states.reachable_states_ignoring_labels(right_stop_state);
-      -                        for r_state in reachable {
-      -                            if let Some(r_stacks) = right.end_map.get(&r_state) {
-      -                                for r_stack in r_stacks {
-      -                                    let keep_len = left_stack.len().saturating_sub(pos);
-      -                                    let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
-      -                                    combined.extend(r_stack.iter().cloned());
-      -                                    new_end_map.entry(r_state).or_default().insert(combined);
-      -                                }
-      -                            }
-      -                        }
+      -        let mut total_process_stack_time = std::time::Duration::new(0, 0);
+      -        let mut total_reachable_time = std::time::Duration::new(0, 0);
+      -        let mut total_end_map_build_time = std::time::Duration::new(0, 0);
+      -        let mut stops_count = 0;
+      -        let mut reachable_count = 0;
+        
+               for (left_end_state, stacks) in &left_end_snapshot {
+                   for left_stack in stacks {
+                       let encoded: Vec<u16> =
+                           left_stack.iter().rev().map(|&s| encode_symbol(s)).collect::<Result<_, _>>()?;
+       
+      -                let process_now = Instant::now();
+                       let stops = states.process_stack_u16_from_starts(&right.nwa.start_states, &encoded);
+      -                crate::debug!(6, "  Concatenating left end state {} with stack {:?} into right stops: {:?}", left_end_state, left_stack, stops);
+      -                stops_count += stops.len();
+      -                total_process_stack_time += process_now.elapsed();
+       
+                       for (pos, right_stop_state, path_weight) in stops {
+                           let combined_weight = &path_weight & weight;
+                           states.add_epsilon_transition(*left_end_state, right_stop_state, combined_weight);
+       
+      -                    if right.end_map.values().all(|stacks| stacks.is_empty()) {
+      -                        continue;
       -                    }
-      +        let mut right_body_to_use = right.clone();
-      +        if !weight.is_empty() && weight != &WaWeight::all() {
-      +            let mut new_right_starts = BTreeSet::new();
-      +            for &start in &right.nwa.start_states {
-      +                let proxy_start = states.add_state();
-      +                states.add_epsilon_transition(proxy_start, start, weight.clone());
-      +                new_right_starts.insert(proxy_start);
-      +            }
-      +            right_body_to_use.nwa.start_states = new_right_starts;
-      +        }
-      +
-      +        let mut join_map: BTreeMap<WaStateID, BTreeSet<WaStateID>> = BTreeMap::new();
-      +        for &end_state in left.end_map.keys() {
-      +            join_map.insert(end_state, right_body_to_use.nwa.start_states.clone());
-      +        }
-      +
-      +        let old_left_nt_nodes = left.nt_nodes.clone();
-      +        let mapping = WaNWA::concatenate_components(states, &mut left.nwa, &right_body_to_use.nwa, &join_map);
-      +
-      +        let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-      +        let mut new_nt_nodes: BTreeMap<NonTerminalID, WaStateID> = BTreeMap::new();
-      +
-      +        for (new_id, old_ids) in &mapping {
-      +            for &(automaton_idx, old_id) in old_ids {
-      +                if automaton_idx == 0 { // From left
-      +                    if let Some(nt_id) = old_left_nt_nodes.iter().find(|(_, &v)| v == old_id).map(|(k, _)| *k) {
-      +                        new_nt_nodes.insert(nt_id, *new_id);
-      +                    }
-      +                } else { // From right
-      +                    if let Some(stacks) = right.end_map.get(&old_id) {
-      +                        new_end_map.entry(*new_id).or_default().extend(stacks.clone());
-      +                    }
+      -
+      -                    let reachable_now = Instant::now();
+      -                    let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+      -                    reachable_count += reachable.len();
+      -                    total_reachable_time += reachable_now.elapsed();
+      -
+      -                    let end_map_build_now = Instant::now();
+      -                    for r_state in reachable {
+      -                        if let Some(r_stacks) = right.end_map.get(&r_state) {
+      -                            for r_stack in r_stacks {
+      -                                let keep_len = left_stack.len().saturating_sub(pos);
+      -                                let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
+      -                                combined.extend(r_stack.iter().cloned());
+      -                                new_end_map.entry(r_state).or_default().insert(combined);
+      +                    if !right.end_map.is_empty() {
+      +                        let reachable = states.reachable_states_ignoring_labels(right_stop_state);
+      +                        for r_state in reachable {
+      +                            if let Some(r_stacks) = right.end_map.get(&r_state) {
+      +                                for r_stack in r_stacks {
+      +                                    let keep_len = left_stack.len().saturating_sub(pos);
+      +                                    let mut combined: Vec<ParserStateID> = left_stack[..keep_len].to_vec();
+      +                                    combined.extend(r_stack.iter().cloned());
+      +                                    new_end_map.entry(r_state).or_default().insert(combined);
+      +                                }
+                                   }
+                               }
+                           }
+      -                    total_end_map_build_time += end_map_build_now.elapsed();
                        }
                    }
                }
-      -        left.end_map = new_end_map;
-      +
-      +        left.end_map = new_end_map;
-      +        left.nt_nodes = new_nt_nodes;
-      +
+               left.end_map = new_end_map;
+      -
+      -        crate::debug!(6, "RESULT AugmentedNWA:\n{}\n{}", left, states);
+      -        crate::debug!(6, "--- end concatenate_right_into_on_shared ---");
+      -
+      -        println!(
+      -            "    concatenate_right_into_on_shared took: {:?}, process_stack: {:?} ({} stops), reachable: {:?} ({} states), end_map_build: {:?}",
+      -            now.elapsed(),
+      -            total_process_stack_time,
+      -            stops_count,
+      -            total_reachable_time,
+      -            reachable_count,
+      -            total_end_map_build_time
+      -        );
+      -        println!(
+      -            "      left_end_snapshot stats: end_states={}, total_stacks={}, unique_stacks={}, max_stack_len={}, avg_stack_len={:.2}",
+      -            left_end_snapshot.len(),
+      -            total_stacks,
+      -            unique_stacks.len(),
+      -            max_stack_len,
+      -            avg_stack_len
+      -        );
                Ok(())
            }
        
 
       ```
-      ```diff
-      --- a/src/weighted_automata.rs
-      +++ b/src/weighted_automata.rs
-      @@ -1100,8 +1100,29 @@
-                           new_epsilon_transitions.push((new_target_id, w0.clone()));
-                       }
-       
-      -                // Character transitions are driven by left; right follows.
-      -                // This part is complex and not needed for the current refactoring.
-      -                // The current use case only involves epsilon transitions for joining.
-      +                // Character transitions driven by `self` (other part follows)
-      +                let mut process_char_transitions = |ch: Option<u16>, trans0: &Vec<(StateID, Weight)>| {
-      +                    for (t0, w0) in trans0 {
-      +                        let mut next_ids1 = BTreeSet::new();
-      +                        for (id1_ref, s1) in &s1_infos {
-      +                            if let Some(trans1) = if let Some(c) = ch { s1.transitions.get(c) } else { s1.transitions.get_default() } {
-      +                                for (t1, _) in trans1 { next_ids1.insert(*t1); }
-      +                            }
-      +                        }
-      +                        if let Some(joins) = join_map.get(t0) { next_ids1.extend(joins); }
-      +                        let next_comp = (*t0, next_ids1);
-      +                        let new_target_id = get_or_create(next_comp, states, &mut composition_to_new_id, &mut worklist, &mut mapping);
-      +
-      +                        let trans_list = if let Some(c) = ch {
-      +                            new_transitions.exceptions.entry(c).or_default()
-      +                        } else {
-      +                            new_transitions.default.get_or_insert_with(Vec::new)
-      +                        };
-      +                        trans_list.push((new_target_id, w0.clone()));
-      +                    }
-      +                };
-      +                if let Some(trans0) = s0.transitions.get_default() { process_char_transitions(None, trans0); }
-      +                for (ch, trans0) in s0.transitions.iter_exceptions() { process_char_transitions(Some(*ch), trans0); }
-                   }
-                   
-                   let new_state = &mut states[new_id];
-
-      ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/precompute4/augmented_nwa.rs
       Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/weighted_automata.rs
-      Applying patch to 'src/weighted_automata.rs' using custom patcher...
-      Successfully applied patch and wrote to src/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Simplify AugmentedNwaBody concatenation
-      and complete NWA::concatenate_components"'
+  - user: 'Changes committed with message: "Refactor: Remove stats/debugging from
+      AugmentedNwaBody::concatenate_right_into_on_shared"'
     metadata:
 ...
