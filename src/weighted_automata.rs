@@ -820,10 +820,14 @@ impl NWA {
     }
 
     pub fn determinize_components(states: &NWAStates, body: &NWABody) -> DWA {
+        Self::determinize_components_with_composition(states, body).0
+    }
+
+    pub fn determinize_components_with_composition(states: &NWAStates, body: &NWABody) -> (DWA, BTreeMap<StateID, Vec<(StateID, Weight)>>) {
         let now = Instant::now();
         let mut dwa_states = DWAStates::default();
         let mut dwa_body = DWABody::default();
-
+    
         if states.0.is_empty() {
             return DWA { states: dwa_states, body: dwa_body };
         }
@@ -836,11 +840,13 @@ impl NWA {
 
         let mut known_states: HashMap<Vec<(StateID, Weight)>, StateID> = HashMap::new();
         let mut worklist: VecDeque<Vec<(StateID, Weight)>> = VecDeque::new();
+        let mut composition_map: BTreeMap<StateID, Vec<(StateID, Weight)>> = BTreeMap::new();
 
         let mut get_or_create = |comp_key: Vec<(StateID, Weight)>,
                                  dwa_states: &mut DWAStates,
                                  known: &mut HashMap<Vec<(StateID, Weight)>, StateID>,
-                                 work: &mut VecDeque<Vec<(StateID, Weight)>>|
+                                 work: &mut VecDeque<Vec<(StateID, Weight)>>,
+                                 comp_map: &mut BTreeMap<StateID, Vec<(StateID, Weight)>>|
          -> Option<StateID> {
             if comp_key.is_empty() {
                 return None;
@@ -851,7 +857,8 @@ impl NWA {
             let new_id = dwa_states.0.len();
             dwa_states.0.push(DWAState::default());
             known.insert(comp_key.clone(), new_id);
-            work.push_back(comp_key);
+            work.push_back(comp_key.clone());
+            comp_map.insert(new_id, comp_key);
             Some(new_id)
         };
 
@@ -860,10 +867,10 @@ impl NWA {
             start_raw.insert(start_state, Weight::all());
         }
         let start_map = states.epsilon_closure_with_flag(start_raw, has_epsilons, 0);
-        if let Some(start_id) = get_or_create(to_key(start_map), &mut dwa_states, &mut known_states, &mut worklist) {
+        if let Some(start_id) = get_or_create(to_key(start_map), &mut dwa_states, &mut known_states, &mut worklist, &mut composition_map) {
             dwa_body.start_state = start_id;
         } else {
-            return DWA { states: dwa_states, body: dwa_body };
+            return (DWA { states: dwa_states, body: dwa_body }, composition_map);
         }
 
         while let Some(current_composition) = worklist.pop_front() {
@@ -903,7 +910,7 @@ impl NWA {
                 }
             }
             let def_comp = to_key(states.epsilon_closure_with_flag(default_next_raw, has_epsilons, 0));
-            let def_target = get_or_create(def_comp, &mut dwa_states, &mut known_states, &mut worklist);
+            let def_target = get_or_create(def_comp, &mut dwa_states, &mut known_states, &mut worklist, &mut composition_map);
             dwa_states[current_dwa_id].transitions.default = def_target;
             if def_target.is_some() {
                 dwa_states[current_dwa_id].trans_weight_default = Some(default_weight_agg);
@@ -926,7 +933,7 @@ impl NWA {
                     continue;
                 }
                 let exc_comp = to_key(states.epsilon_closure_with_flag(exception_next_raw, has_epsilons, 0));
-                let exc_target = get_or_create(exc_comp, &mut dwa_states, &mut known_states, &mut worklist);
+                let exc_target = get_or_create(exc_comp, &mut dwa_states, &mut known_states, &mut worklist, &mut composition_map);
 
                 if exc_target != def_target {
                     if let Some(tid) = exc_target {
@@ -940,8 +947,8 @@ impl NWA {
         }
 
         let result = DWA { states: dwa_states, body: dwa_body };
-        println!("NWA::determinize_components ({} NWA states -> {} DWA states) took: {:?}", states.len(), result.states.len(), now.elapsed());
-        result
+        println!("NWA::determinize_components_with_composition ({} NWA states -> {} DWA states) took: {:?}", states.len(), result.states.len(), now.elapsed());
+        (result, composition_map)
     }
 
     pub fn concatenate_components(

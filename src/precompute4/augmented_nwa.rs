@@ -4,8 +4,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{
     compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
 };
-use crate::weighted_automata::{
-    DWA, DWAState, DWAStates, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates,
+use crate::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA as WaNWA, NWABody as WaNWABody, NWAStates as WaNWAStates,
     StateID as WaStateID, Weight as WaWeight,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,7 +57,7 @@ fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
     u16::try_from(id.0).map_err(|_| AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id: id })
 }
 
-pub fn build_augmented_nwa_for_terminal(
+fn build_augmented_nwa_for_terminal(
     parser: &GLRParser,
     terminal_id: TerminalID,
 ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
@@ -67,7 +66,7 @@ pub fn build_augmented_nwa_for_terminal(
 }
 
 /// Identity NWA for ignore terminals: passes through any stack unchanged.
-pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
+fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
     let mut states = WaNWAStates::default();
     let start_state = states.add_state();
     let mut end_map = BTreeMap::new();
@@ -83,7 +82,20 @@ pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
     }
 }
 
-pub fn build_augmented_nwas(
+pub fn build_augmented_dwa_for_ignore_terminal() -> AugmentedDwa {
+    let nwa = build_augmented_nwa_for_ignore_terminal();
+    nwa.determinize()
+}
+
+pub fn build_augmented_dwa_for_terminal(
+    parser: &GLRParser,
+    terminal_id: TerminalID,
+) -> Result<AugmentedDwa, AugmentedNwaBuildError> {
+    let nwa = build_augmented_nwa_for_terminal(parser, terminal_id)?;
+    Ok(nwa.determinize())
+}
+
+fn build_augmented_nwas(
     parser: &GLRParser,
 ) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> {
     let all = compute_all_characterizations(parser);
@@ -103,6 +115,17 @@ pub fn build_augmented_nwas(
     Ok(out)
 }
 
+pub fn build_augmented_dwas(
+    parser: &GLRParser,
+) -> Result<BTreeMap<TerminalID, AugmentedDwa>, AugmentedNwaBuildError> {
+    let all_nwas = build_augmented_nwas(parser)?;
+    let mut dwas = BTreeMap::new();
+    for (term, nwa) in all_nwas {
+        dwas.insert(term, nwa.determinize());
+    }
+    Ok(dwas)
+}
+
 /// Core builder: turns a BelowBottomCharacterization into an AugmentedNwa.
 ///
 /// Construction rules:
@@ -112,7 +135,7 @@ pub fn build_augmented_nwas(
 /// - Per-nonterminal reduces:
 ///   - Reveal-and-rereduces (revealed_state, len, reduce_nt): first on revealed_state, then len default steps to reduce_nt.
 ///   - Reveal-goto-shift escapes: from nt node, on revealed_state go to end_state; record [revealed_state, goto_state, shift_state].
-pub fn build_augmented_nwa_from_characterization(
+fn build_augmented_nwa_from_characterization(
     parser: &GLRParser,
     bb: &BelowBottomCharacterization,
 ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
@@ -187,6 +210,58 @@ pub fn build_augmented_nwa_from_characterization(
     }
 
     Ok(AugmentedNwa { states, body })
+}
+
+#[derive(Debug, Clone)]
+pub struct AugmentedDwa {
+    pub states: DWAStates,
+    pub body: AugmentedDwaBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AugmentedDwaBody {
+    pub dwa: DWABody,
+    pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
+    pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
+}
+
+impl AugmentedNwa {
+    pub fn determinize(&self) -> AugmentedDwa {
+        let (dwa, composition_map) = WaNWA::determinize_components_with_composition(&self.states, &self.body.nwa);
+
+        let mut new_nt_nodes = BTreeMap::new();
+        let mut new_end_map = BTreeMap::new();
+
+        let nwa_state_to_nt: BTreeMap<WaStateID, NonTerminalID> =
+            self.body.nt_nodes.iter().map(|(k, v)| (*v, *k)).collect();
+
+        for (dwa_id, composition) in &composition_map {
+            let mut end_stacks_for_dwa_state = BTreeSet::new();
+            for (nwa_id, _weight) in composition {
+                if let Some(nt_id) = nwa_state_to_nt.get(nwa_id) {
+                    // Assumption: an NT is represented by a unique state in the NWA,
+                    // and compositions for DWA states will not merge two distinct NT representative states.
+                    // So we can just insert. If the key already exists, it should be for the same DWA state.
+                    new_nt_nodes.insert(*nt_id, *dwa_id);
+                }
+                if let Some(stacks) = self.body.end_map.get(nwa_id) {
+                    end_stacks_for_dwa_state.extend(stacks.clone());
+                }
+            }
+            if !end_stacks_for_dwa_state.is_empty() {
+                new_end_map.insert(*dwa_id, end_stacks_for_dwa_state);
+            }
+        }
+
+        AugmentedDwa {
+            states: dwa.states,
+            body: AugmentedDwaBody {
+                dwa: dwa.body,
+                nt_nodes: new_nt_nodes,
+                end_map: new_end_map,
+            },
+        }
+    }
 }
 
 impl AugmentedNwaBody {
@@ -392,12 +467,6 @@ impl AugmentedNwa {
 
     pub fn simplify_to_level(&mut self, level: usize) {
         self.body.simplify_to_level_on_shared(&mut self.states, level);
-    }
-
-
-    /// Determinize to DWA using combined NWA separation.
-    pub fn determinize(&self) -> DWA {
-        WaNWA::determinize_components(&self.states, &self.body.nwa)
     }
 }
 
