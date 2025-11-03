@@ -71,56 +71,64 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
 
     let now = Instant::now();
-    Trie::special_map_grouped(
+    Trie::special_map_unified(
         &reversed_trie1_god,
         &traversal_data,
         initial_values,
-        // step function
-        |current_aug_body, edge_terminal_opt, dest_map| {
-            let step_now = Instant::now();
+        // process_and_step function
+        |node_data, node_idx, current_aug_body| {
+            // Process part: check if this node corresponds to a final NWA
+            if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
+                final_nwas.insert(*tokenizer_state_id, current_aug_body.clone());
+            }
+
+            // Step part: propagate to children
+            let process_and_step_now = Instant::now();
             let mut results: Vec<(PrecomputeNode1Index, AugmentedNwaBody)> = Vec::new();
 
-            // Prepare the LEFT body by mapping the terminal's NWA into the shared states.
-            let template_aug: &AugmentedNwa = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
-                let terminal_id = edge_terminal_opt.unwrap();
-                augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id))
-            } else {
-                &ignore_nwa
-            };
+            for (edge_terminal_opt, dest_map) in node_data.children() {
+                // Prepare the LEFT body by mapping the terminal's NWA into the shared states.
+                let template_aug: &AugmentedNwa = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                    let terminal_id = edge_terminal_opt.unwrap();
+                    augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id))
+                } else {
+                    &ignore_nwa
+                };
 
-            for (dest_idx, llm_token_bv) in dest_map.iter() {
-                // Map the template_aug's states into the shared arena.
-                let copy_now = Instant::now();
-                let mapping = shared_states.borrow_mut().append_copy_from(&template_aug.states);
-                let copy_elapsed = copy_now.elapsed();
+                for (dest_idx, llm_token_bv) in dest_map.iter() {
+                    // Map the template_aug's states into the shared arena.
+                    let copy_now = Instant::now();
+                    let mapping = shared_states.borrow_mut().append_copy_from(&template_aug.states);
+                    let copy_elapsed = copy_now.elapsed();
 
-                let mut left_body = template_aug.body.clone();
-                left_body.remap_states(&mapping);
+                    let mut left_body = template_aug.body.clone();
+                    left_body.remap_states(&mapping);
 
-                let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                // Combine into a new body (mutating the shared graph with epsilon links).
-                let combine_now = Instant::now();
-                let mut new_body = left_body.clone();
-                AugmentedNwaBody::combine_right_into_on_shared(
-                    &mut shared_states.borrow_mut(),
-                    &mut new_body,
-                    &current_aug_body,
-                    &weight,
-                ).expect("Combine failed");
-                let combine_elapsed = combine_now.elapsed();
+                    let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                    // Combine into a new body (mutating the shared graph with epsilon links).
+                    let combine_now = Instant::now();
+                    let mut new_body = left_body.clone();
+                    AugmentedNwaBody::combine_right_into_on_shared(
+                        &mut shared_states.borrow_mut(),
+                        &mut new_body,
+                        &current_aug_body,
+                        &weight,
+                    ).expect("Combine failed");
+                    let combine_elapsed = combine_now.elapsed();
 
-                println!(
-                    "step inner loop: term {:?}, dest {}, shared_states_len: {}",
-                    edge_terminal_opt,
-                    dest_idx.as_usize(),
-                    shared_states.borrow().len()
-                );
-                println!("  append_copy_from: {:?}", copy_elapsed);
-                println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
+                    println!(
+                        "step inner loop: term {:?}, dest {}, shared_states_len: {}",
+                        edge_terminal_opt,
+                        dest_idx.as_usize(),
+                        shared_states.borrow().len()
+                    );
+                    println!("  append_copy_from: {:?}", copy_elapsed);
+                    println!("  combine_right_into_on_shared (caller): {:?}", combine_elapsed);
 
-                results.push((*dest_idx, new_body));
+                    results.push((*dest_idx, new_body));
+                }
             }
-            println!("step closure took: {:?}", step_now.elapsed());
+            println!("process_and_step closure took: {:?}", process_and_step_now.elapsed());
             results
         },
         // merge function
@@ -129,15 +137,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             AugmentedNwaBody::union_with_on_shared(&mut shared_states.borrow_mut(), aug_body1, &aug_body2);
             println!("merge closure (union_with_on_shared) took: {:?}", merge_now.elapsed());
         },
-        // process function
-        |node_data, node_idx, aug_body| {
-            if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                final_nwas.insert(*tokenizer_state_id, aug_body.clone());
-            }
-            true // continue traversal
-        },
     );
-    println!("special_map_grouped took: {:?}", now.elapsed());
+    println!("special_map_unified took: {:?}", now.elapsed());
 
     crate::debug!(5, "\n--- Final NWA Bodies Before Determinization ---");
     for (sid, aug_body) in &final_nwas {
