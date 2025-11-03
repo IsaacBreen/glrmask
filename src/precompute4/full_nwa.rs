@@ -42,7 +42,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     println!("Trie::reverse took: {:?}", now.elapsed());
     let reversed_trie_root = leaf_node;
     let options = crate::datastructures::trie::PrettyPrintOptions::default();
-    crate::debug!(2, "\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+    crate::debug!(5, "\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
 
     // 3. Traverse the reversed trie.
     let now_traversal_data = Instant::now();
