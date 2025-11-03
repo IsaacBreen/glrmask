@@ -337,6 +337,27 @@ impl AugmentedNwaBody {
     }
 }
 
+/// Helper to compute final_weight aggregate for a composition.
+fn aggregate_final_weight(
+    states: &WaNWAStates,
+    comp_map: &BTreeMap<WaStateID, WaWeight>,
+) -> Option<WaWeight> {
+    let mut agg: Option<WaWeight> = None;
+    for (sid, pw) in comp_map {
+        if let Some(fw) = &states[*sid].final_weight {
+            let w = pw & fw;
+            if !w.is_empty() {
+                if let Some(ref mut a) = agg {
+                    *a |= &w;
+                } else {
+                    agg = Some(w);
+                }
+            }
+        }
+    }
+    agg
+}
+
 impl AugmentedNwaBody {
     /// Local epsilon-closure helper (no debug). Initial map is state -> path-weight.
     fn epsilon_closure_map(
@@ -405,103 +426,105 @@ impl AugmentedNwaBody {
         comp_to_map.insert(start_key.clone(), start_comp);
         work.push_back((start_key, 0));
 
-        // Helper to compute final_weight aggregate for a composition.
-        let mut aggregate_final = |comp_map: &BTreeMap<WaStateID, WaWeight>| -> Option<WaWeight> {
-            let mut agg: Option<WaWeight> = None;
-            for (sid, pw) in comp_map {
-                if let Some(fw) = &states[*sid].final_weight {
-                    let w = pw & fw;
-                    if !w.is_empty() {
-                        if let Some(ref mut a) = agg { *a |= &w; } else { agg = Some(w); }
-                    }
-                }
-            }
-            agg
-        };
-
         while let Some((comp_key, depth)) = work.pop_front() {
             let cur_id = *comp_to_id.get(&comp_key).unwrap();
             let comp_map = comp_to_map.get(&comp_key).unwrap();
 
-            // Final weight for this front-end state
-            if let Some(final_w) = aggregate_final(comp_map) {
-                states[cur_id].final_weight = Some(final_w);
-            }
+            // --- READ PHASE ---
+            let final_w = aggregate_final_weight(states, comp_map);
+            let mut boundary_epsilons = Vec::new();
+            let mut default_to_process = None;
+            let mut exceptions_to_process = Vec::new();
 
             if depth == k {
-                // Boundary: reconnect to original states by epsilon edges with their path weights.
                 for (sid, pw) in comp_map {
-                    states[cur_id].epsilon_transitions.push((*sid, pw.clone()));
+                    boundary_epsilons.push((*sid, pw.clone()));
                 }
-                continue;
-            }
-
-            // Collect critical points (exception alphabet) from underlying states.
-            let mut critical_points: BTreeSet<u16> = BTreeSet::new();
-            for (sid, _) in comp_map {
-                for &ch in states[*sid].transitions.exceptions.keys() {
-                    critical_points.insert(ch);
-                }
-            }
-
-            // Default transition aggregate
-            let mut default_next_raw: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
-            let mut default_weight_agg = WaWeight::zeros();
-            for (sid, pw) in comp_map {
-                if let Some(def) = states[*sid].transitions.get_default() {
-                    for (to, tw) in def {
-                        let w = pw & tw;
-                        if !w.is_empty() {
-                            default_next_raw.entry(*to).or_insert_with(WaWeight::zeros).bitor_assign(&w);
-                            default_weight_agg |= &w;
-                        }
+            } else {
+                let mut critical_points: BTreeSet<u16> = BTreeSet::new();
+                for (sid, _) in comp_map {
+                    for &ch in states[*sid].transitions.exceptions.keys() {
+                        critical_points.insert(ch);
                     }
                 }
-            }
-            if !default_next_raw.is_empty() {
-                let next_map = Self::epsilon_closure_map(states, default_next_raw);
-                let next_key = to_key(&next_map);
-                if !next_key.is_empty() {
-                    let tgt_id = *comp_to_id.entry(next_key.clone()).or_insert_with(|| {
-                        let nid = states.add_state();
-                        comp_to_map.insert(next_key.clone(), next_map);
-                        work.push_back((next_key.clone(), depth + 1));
-                        nid
-                    });
-                    states[cur_id].transitions.default.get_or_insert_with(Vec::new).push((tgt_id, default_weight_agg));
-                }
-            }
 
-            // Exception transitions
-            for ch in critical_points {
-                let mut next_raw: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
-                let mut ex_weight_agg = WaWeight::zeros();
+                let mut default_next_raw: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
+                let mut default_weight_agg = WaWeight::zeros();
                 for (sid, pw) in comp_map {
-                    if let Some(vec) = states[*sid].transitions.exceptions.get(&ch) {
-                        for (to, tw) in vec {
+                    if let Some(def) = states[*sid].transitions.get_default() {
+                        for (to, tw) in def {
                             let w = pw & tw;
                             if !w.is_empty() {
-                                next_raw.entry(*to).or_insert_with(WaWeight::zeros).bitor_assign(&w);
-                                ex_weight_agg |= &w;
+                                default_next_raw.entry(*to).or_default().bitor_assign(&w);
+                                default_weight_agg |= &w;
                             }
                         }
                     }
                 }
-                if next_raw.is_empty() {
-                    continue;
+                if !default_next_raw.is_empty() {
+                    default_to_process = Some((default_next_raw, default_weight_agg));
                 }
+
+                for ch in critical_points {
+                    let mut next_raw: BTreeMap<WaStateID, WaWeight> = BTreeMap::new();
+                    let mut ex_weight_agg = WaWeight::zeros();
+                    for (sid, pw) in comp_map {
+                        if let Some(vec) = states[*sid].transitions.exceptions.get(&ch) {
+                            for (to, tw) in vec {
+                                let w = pw & tw;
+                                if !w.is_empty() {
+                                    next_raw.entry(*to).or_default().bitor_assign(&w);
+                                    ex_weight_agg |= &w;
+                                }
+                            }
+                        }
+                    }
+                    if !next_raw.is_empty() {
+                        exceptions_to_process.push((ch, next_raw, ex_weight_agg));
+                    }
+                }
+            }
+
+            // --- WRITE PHASE ---
+            if let Some(final_w) = final_w {
+                states[cur_id].final_weight = Some(final_w);
+            }
+            for (sid, pw) in boundary_epsilons {
+                states[cur_id].epsilon_transitions.push((sid, pw));
+            }
+
+            if let Some((default_next_raw, default_weight_agg)) = default_to_process {
+                let next_map = Self::epsilon_closure_map(states, default_next_raw);
+                let next_key = to_key(&next_map);
+                if !next_key.is_empty() {
+                    let tgt_id = if let Some(id) = comp_to_id.get(&next_key) {
+                        *id
+                    } else {
+                        let nid = states.add_state();
+                        comp_to_id.insert(next_key.clone(), nid);
+                        comp_to_map.insert(next_key.clone(), next_map);
+                        work.push_back((next_key, depth + 1));
+                        nid
+                    };
+                    states[cur_id].transitions.default.get_or_insert_with(Vec::new).push((tgt_id, default_weight_agg));
+                }
+            }
+
+            for (ch, next_raw, ex_weight_agg) in exceptions_to_process {
                 let next_map = Self::epsilon_closure_map(states, next_raw);
                 let next_key = to_key(&next_map);
-                if next_key.is_empty() {
-                    continue;
+                if !next_key.is_empty() {
+                    let tgt_id = if let Some(id) = comp_to_id.get(&next_key) {
+                        *id
+                    } else {
+                        let nid = states.add_state();
+                        comp_to_id.insert(next_key.clone(), nid);
+                        comp_to_map.insert(next_key.clone(), next_map);
+                        work.push_back((next_key, depth + 1));
+                        nid
+                    };
+                    states[cur_id].transitions.exceptions.entry(ch).or_default().push((tgt_id, ex_weight_agg));
                 }
-                let tgt_id = *comp_to_id.entry(next_key.clone()).or_insert_with(|| {
-                    let nid = states.add_state();
-                    comp_to_map.insert(next_key.clone(), next_map);
-                    work.push_back((next_key.clone(), depth + 1));
-                    nid
-                });
-                states[cur_id].transitions.exceptions.entry(ch).or_default().push((tgt_id, ex_weight_agg));
             }
         }
 
