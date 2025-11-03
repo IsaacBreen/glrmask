@@ -7,6 +7,7 @@ use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
+use std::time::Instant;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut};
 
 // --- Part 1: SimpleBitset ---
@@ -246,6 +247,7 @@ impl NWAStates {
     /// Append a deep copy of `other` into `self`, returning `other_id -> new_id`.
     /// All transition targets (exceptions, default, epsilons) are remapped.
     pub fn append_copy_from(&mut self, other: &NWAStates) -> Vec<StateID> {
+        let now = Instant::now();
         let base = self.0.len();
         let count = other.0.len();
         let mapping: Vec<StateID> = (0..count).map(|i| base + i).collect();
@@ -269,6 +271,7 @@ impl NWAStates {
             }
             dst.transitions = new_map;
         }
+        println!("NWAStates::append_copy_from ({} states) took: {:?}", other.len(), now.elapsed());
         mapping
     }
 
@@ -413,6 +416,7 @@ impl NWAStates {
     /// Returns all stops as triples (pos, stop_state, path_weight), where path_weight
     /// is a meet (∩) along edges and joins (∪) when multiple paths converge.
     pub fn process_stack_u16_from_start(&self, start_state: StateID, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
+        let now = Instant::now();
         if self.0.is_empty() {
             return Vec::new();
         }
@@ -455,7 +459,9 @@ impl NWAStates {
             current = self.epsilon_closure_with_flag(next_raw, has_eps);
         }
 
-        results.into_iter().map(|((pos, sid), w)| (pos, sid, w)).collect()
+        let result = results.into_iter().map(|((pos, sid), w)| (pos, sid, w)).collect();
+        println!("NWAStates::process_stack_u16_from_start (input len {}) took: {:?}", input.len(), now.elapsed());
+        result
     }
 
     /// Epsilon-closure: least fixed point of the monotone operator
@@ -515,6 +521,7 @@ impl NWA {
     }
 
     pub fn determinize_components(states: &NWAStates, body: &NWABody) -> DWA {
+        let now = Instant::now();
         let mut dwa_states = DWAStates::default();
         let mut dwa_body = DWABody::default();
 
@@ -630,7 +637,9 @@ impl NWA {
             }
         }
 
-        DWA { states: dwa_states, body: dwa_body }
+        let result = DWA { states: dwa_states, body: dwa_body };
+        println!("NWA::determinize_components ({} NWA states -> {} DWA states) took: {:?}", states.len(), result.states.len(), now.elapsed());
+        result
     }
 
     pub fn process_stack_u16(&self, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
@@ -649,6 +658,8 @@ impl DWA {
     }
 
     pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody) {
+        let now = Instant::now();
+        let initial_len = states.len();
         if states.0.is_empty() {
             return;
         }
@@ -674,6 +685,7 @@ impl DWA {
                 changed_any = true;
             }
         }
+        println!("DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
     }
 
     /// Drop exceptions equal to default, and remove dangling per-exception weights.

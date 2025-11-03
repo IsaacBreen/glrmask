@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Display};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::time::{Duration, Instant};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
@@ -1967,6 +1968,11 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         //  - Process SCCs in topological order.
         //  - Inside each SCC, run a local worklist until stabilization.
         // ------------------------------------------------------------------
+        let mut step_duration = Duration::new(0, 0);
+        let mut merge_duration = Duration::new(0, 0);
+        let mut process_duration = Duration::new(0, 0);
+        let total_now = Instant::now();
+
         use std::collections::VecDeque;
 
         let mut values: HashMap<usize, V> = HashMap::new();
@@ -1976,11 +1982,13 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         let total_edges = Self::count_all_edges(arena, &initial_nodes);
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
         for (node_idx, v0) in initial_nodes_and_values {
+            let merge_now = Instant::now();
             let ptr = node_idx.as_usize();
             values
                 .entry(ptr)
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
+            merge_duration += merge_now.elapsed();
         }
 
         // Use pre-computed traversal data.
@@ -2021,10 +2029,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     None => continue,
                 };
 
+                let process_now = Instant::now();
                 let proceed = {
                     let guard = node_idx.read(arena).expect("poison");
                     process(&guard, node_idx, &mut agg_v)
                 };
+                process_duration += process_now.elapsed();
                 if !proceed {
                     stopped_nodes.insert(u);
                     continue;
@@ -2044,16 +2054,20 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                         let _ = pb.update(valid_edges_count);
                     }
 
+                    let step_now = Instant::now();
                     let new_values_for_children = step(&agg_v, &ek, &dest_map);
+                    step_duration += step_now.elapsed();
                     for (child_idx, new_v) in new_values_for_children {
                         let child_u = child_idx.as_usize();
                         if stopped_nodes.contains(&child_u) {
                             continue;
                         }
+                        let merge_now = Instant::now();
                         values
                             .entry(child_u)
                             .and_modify(|old| merge(old, new_v.clone()))
                             .or_insert(new_v);
+                        merge_duration += merge_now.elapsed();
 
                         // If the child is in the same SCC, schedule immediately in local queue.
                         if let Some(&child_pos) = pos_of_u.get(&child_u) {
@@ -2075,6 +2089,13 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 }
             }
         }
+        println!(
+            "special_map_grouped finished in {:?}. Time in step: {:?}, merge: {:?}, process: {:?}",
+            total_now.elapsed(),
+            step_duration,
+            merge_duration,
+            process_duration
+        );
     }
 
     /// Creates a deep copy of the trie and randomly removes edges.
