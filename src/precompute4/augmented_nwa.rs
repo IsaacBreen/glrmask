@@ -289,8 +289,9 @@ impl AugmentedNwaBody {
         right: &AugmentedNwaBody,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
-        // Keep the parameter to preserve API; weighting is handled in the DWA variant.
-        let _ = weight;
+        let mut right = right.clone();
+
+        WaNWA::apply_weight_components(states, &mut right.nwa, weight);
 
         // 1) Build a join-map from each left end-state to all right starts.
         let mut join_map: BTreeMap<WaStateID, BTreeSet<WaStateID>> = BTreeMap::new();
