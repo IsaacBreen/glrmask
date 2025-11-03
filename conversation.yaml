@@ -1678,6 +1678,29 @@ local_system:
           pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
       }
 
+      impl Display for AugmentedNwaBody {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "  Starts: {:?}", self.nwa.start_states)?;
+              if !self.nt_nodes.is_empty() {
+                  writeln!(f, "  Nonterminal Nodes:")?;
+                  for (nt, state) in &self.nt_nodes {
+                      writeln!(f, "    - NT {}: State {}", nt.0, state)?;
+                  }
+              }
+              if !self.end_map.is_empty() {
+                  writeln!(f, "  End Map:")?;
+                  for (state, stacks) in &self.end_map {
+                      writeln!(f, "    - State {}:", state)?;
+                      for stack in stacks {
+                          let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
+                          writeln!(f, "      - [{}]", stack_str.join(", "))?;
+                      }
+                  }
+              }
+              Ok(())
+          }
+      }
+
       #[derive(Debug, Clone, PartialEq, Eq)]
       pub struct AugmentedNwa {
           pub states: WaNWAStates,
@@ -1840,6 +1863,7 @@ local_system:
           ) -> Result<(), AugmentedNwaBuildError> {
               crate::debug!(6, "--- combine_right_into_on_shared ---");
               crate::debug!(6, "--- WEIGHT: {} ---", weight);
+              crate::debug!(6, "States before combine:\n{}", states);
               crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
               crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
 
@@ -2007,21 +2031,8 @@ local_system:
       impl Display for AugmentedNwa {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
               writeln!(f, "Augmented NWA")?;
-              writeln!(f, "  Nonterminal Nodes:")?;
-              for (nt, state) in &self.body.nt_nodes {
-                  writeln!(f, "    - NT {}: State {}", nt.0, state)?;
-              }
-              if !self.body.end_map.is_empty() {
-                  writeln!(f, "  End Map:")?;
-                  for (state, stacks) in &self.body.end_map {
-                      writeln!(f, "    - State {}:", state)?;
-                      for stack in stacks {
-                          let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
-                          writeln!(f, "      - [{}]", stack_str.join(", "))?;
-                      }
-                  }
-              }
-              writeln!(f, "  Underlying NWA (starts: {:?}):", self.body.nwa.start_states)?;
+              write!(f, "{}", self.body)?;
+              writeln!(f, "  Underlying NWA states:")?;
               for (id, state) in self.states.0.iter().enumerate() {
                   writeln!(f, "    State {}:", id)?;
                   if let Some(w) = &state.final_weight {
@@ -4012,10 +4023,9 @@ local_system:
 
       // --- Display Implementations for Debugging ---
 
-      impl Display for NWA {
+      impl Display for NWAStates {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
-              for (id, state) in self.states.0.iter().enumerate() {
+              for (id, state) in self.0.iter().enumerate() {
                   writeln!(f, "  State {}:", id)?;
                   if let Some(w) = &state.final_weight {
                       writeln!(f, "    final_weight: {}", w)?;
@@ -4044,6 +4054,13 @@ local_system:
                   }
               }
               Ok(())
+          }
+      }
+
+      impl Display for NWA {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
+              write!(f, "{}", self.states)
           }
       }
 
@@ -4681,8 +4698,8 @@ local_system:
           ) -> Result<(), AugmentedNwaBuildError> {
               crate::debug!(6, "--- combine_right_into_on_shared ---");
               crate::debug!(6, "--- WEIGHT: {} ---", weight);
-              let left_nwa_debug = AugmentedNwa { states: states.clone(), body: left.clone() };
-              crate::debug!(6, "LEFT AugmentedNWA:\n{}", left_nwa_debug);
+              crate::debug!(6, "States before combine:\n{}", states);
+              crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
               crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
 
               let now = Instant::now();
@@ -7372,6 +7389,29 @@ messages:
           pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
       }
 
+      impl Display for AugmentedNwaBody {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "  Starts: {:?}", self.nwa.start_states)?;
+              if !self.nt_nodes.is_empty() {
+                  writeln!(f, "  Nonterminal Nodes:")?;
+                  for (nt, state) in &self.nt_nodes {
+                      writeln!(f, "    - NT {}: State {}", nt.0, state)?;
+                  }
+              }
+              if !self.end_map.is_empty() {
+                  writeln!(f, "  End Map:")?;
+                  for (state, stacks) in &self.end_map {
+                      writeln!(f, "    - State {}:", state)?;
+                      for stack in stacks {
+                          let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
+                          writeln!(f, "      - [{}]", stack_str.join(", "))?;
+                      }
+                  }
+              }
+              Ok(())
+          }
+      }
+
       #[derive(Debug, Clone, PartialEq, Eq)]
       pub struct AugmentedNwa {
           pub states: WaNWAStates,
@@ -7534,6 +7574,7 @@ messages:
           ) -> Result<(), AugmentedNwaBuildError> {
               crate::debug!(6, "--- combine_right_into_on_shared ---");
               crate::debug!(6, "--- WEIGHT: {} ---", weight);
+              crate::debug!(6, "States before combine:\n{}", states);
               crate::debug!(6, "LEFT AugmentedNWA:\n{}", left);
               crate::debug!(6, "RIGHT AugmentedNWA:\n{}", right);
 
@@ -7701,21 +7742,8 @@ messages:
       impl Display for AugmentedNwa {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
               writeln!(f, "Augmented NWA")?;
-              writeln!(f, "  Nonterminal Nodes:")?;
-              for (nt, state) in &self.body.nt_nodes {
-                  writeln!(f, "    - NT {}: State {}", nt.0, state)?;
-              }
-              if !self.body.end_map.is_empty() {
-                  writeln!(f, "  End Map:")?;
-                  for (state, stacks) in &self.body.end_map {
-                      writeln!(f, "    - State {}:", state)?;
-                      for stack in stacks {
-                          let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
-                          writeln!(f, "      - [{}]", stack_str.join(", "))?;
-                      }
-                  }
-              }
-              writeln!(f, "  Underlying NWA (starts: {:?}):", self.body.nwa.start_states)?;
+              write!(f, "{}", self.body)?;
+              writeln!(f, "  Underlying NWA states:")?;
               for (id, state) in self.states.0.iter().enumerate() {
                   writeln!(f, "    State {}:", id)?;
                   if let Some(w) = &state.final_weight {
@@ -8544,7 +8572,7 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: Implement Display for AugmentedNwaBody
+  - user: Implement Display for NWAStates
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8564,50 +8592,97 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement the `Display` trait for `AugmentedNwaBody` and refactor the `Display` implementation for `AugmentedNwa`, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to implement `Display` for `NWAStates` and refactor the existing `Display` implementation for `NWA`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      #### 1. File: `src/precompute4/augmented_nwa.rs`
+      1.  **Open the file `src/weighted_automata.rs`**.
 
-      1.  **Implement `Display` for `AugmentedNwaBody`**:
-          *   Open the file `src/precompute4/augmented_nwa.rs`.
-          *   After the definition of the `AugmentedNwaBody` struct (around line 25), add a new `impl Display for AugmentedNwaBody` block.
-          *   This implementation will format and print the `start_states` from the `nwa` field, the `nt_nodes`, and the `end_map`. This will be useful for debugging.
+      2.  **Add the `Display` implementation for `NWAStates`**.
+          Navigate to the `--- Display Implementations for Debugging ---` section (around line 1202). Before the `impl Display for NWA` block, insert the following code. This implementation will format and print all states within an `NWAStates` struct.
 
-      2.  **Refactor `Display` for `AugmentedNwa`**:
-          *   In the same file, locate the existing `impl Display for AugmentedNwa` (around line 361).
-          *   Modify this implementation to delegate the formatting of the body to the new `Display` implementation of `AugmentedNwaBody`.
-          *   The updated implementation will first print "Augmented NWA", then print the formatted `body`, and finally print the "Underlying NWA states:" followed by the detailed state information. This removes duplicated formatting logic.
+          ```rust
+          impl Display for NWAStates {
+              fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                  for (id, state) in self.0.iter().enumerate() {
+                      writeln!(f, "  State {}:", id)?;
+                      if let Some(w) = &state.final_weight {
+                          writeln!(f, "    final_weight: {}", w)?;
+                      }
+                      for (to, weight) in &state.epsilon_transitions {
+                          writeln!(f, "    ε -> {} (weight: {})", to, weight)?;
+                      }
+                      if let Some(default) = &state.transitions.default {
+                          for (to, weight) in default {
+                              writeln!(f, "    * -> {} (weight: {})", to, weight)?;
+                          }
+                      }
+                      for (on, transitions) in &state.transitions.exceptions {
+                          for (to, weight) in transitions {
+                              let char_repr = if let Some(c) = char::from_u32(*on as u32) {
+                                  if c.is_ascii_graphic() || c == ' ' {
+                                      format!("'{}'", c)
+                                  } else {
+                                      format!("{}", *on)
+                                  }
+                              } else {
+                                  format!("{}", *on)
+                              };
+                              writeln!(f, "    {} -> {} (weight: {})", char_repr, to, weight)?;
+                          }
+                      }
+                  }
+                  Ok(())
+              }
+          }
+          ```
 
-      ### Git Diffs
+      3.  **Refactor the `Display` implementation for `NWA`**.
+          Now that `NWAStates` has its own `Display` implementation, you can simplify the `impl Display for NWA` block to delegate the state printing. Replace the entire body of `fn fmt` inside `impl Display for NWA` with the following two lines:
 
-      Here is the git diff for the changes:
+          ```rust
+          writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
+          write!(f, "{}", self.states)
+          ```
+
+      ### Git Diff
+
+      Here is the git patch that applies the changes described above.
 
       ```diff
-      diff --git a/src/precompute4/augmented_nwa.rs b/src/precompute4/augmented_nwa.rs
-      --- a/src/precompute4/augmented_nwa.rs
-      +++ b/src/precompute4/augmented_nwa.rs
-      @@ -21,6 +21,29 @@
-           pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
-       }
+      --- a/src/weighted_automata.rs
+      +++ b/src/weighted_automata.rs
+      @@ -1202,42 +1202,40 @@
        
-      +impl Display for AugmentedNwaBody {
+       // --- Display Implementations for Debugging ---
+       
+      +impl Display for NWAStates {
       +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-      +        writeln!(f, "  Starts: {:?}", self.nwa.start_states)?;
-      +        if !self.nt_nodes.is_empty() {
-      +            writeln!(f, "  Nonterminal Nodes:")?;
-      +            for (nt, state) in &self.nt_nodes {
-      +                writeln!(f, "    - NT {}: State {}", nt.0, state)?;
+      +        for (id, state) in self.0.iter().enumerate() {
+      +            writeln!(f, "  State {}:", id)?;
+      +            if let Some(w) = &state.final_weight {
+      +                writeln!(f, "    final_weight: {}", w)?;
       +            }
-      +        }
-      +        if !self.end_map.is_empty() {
-      +            writeln!(f, "  End Map:")?;
-      +            for (state, stacks) in &self.end_map {
-      +                writeln!(f, "    - State {}:", state)?;
-      +                for stack in stacks {
-      +                    let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
-      +                    writeln!(f, "      - [{}]", stack_str.join(", "))?;
+      +            for (to, weight) in &state.epsilon_transitions {
+      +                writeln!(f, "    ε -> {} (weight: {})", to, weight)?;
+      +            }
+      +            if let Some(default) = &state.transitions.default {
+      +                for (to, weight) in default {
+      +                    writeln!(f, "    * -> {} (weight: {})", to, weight)?;
+      +                }
+      +            }
+      +            for (on, transitions) in &state.transitions.exceptions {
+      +                for (to, weight) in transitions {
+      +                    let char_repr = if let Some(c) = char::from_u32(*on as u32) {
+      +                        if c.is_ascii_graphic() || c == ' ' {
+      +                            format!("'{}'", c)
+      +                        } else {
+      +                            format!("{}", *on)
+      +                        }
+      +                    } else {
+      +                        format!("{}", *on)
+      +                    };
+      +                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, weight)?;
       +                }
       +            }
       +        }
@@ -8615,33 +8690,42 @@ messages:
       +    }
       +}
       +
-       #[derive(Debug, Clone, PartialEq, Eq)]
-       pub struct AugmentedNwa {
-           pub states: WaNWAStates,
-      @@ -361,24 +384,8 @@
-       impl Display for AugmentedNwa {
+       impl Display for NWA {
            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-               writeln!(f, "Augmented NWA")?;
-      -        writeln!(f, "  Nonterminal Nodes:")?;
-      -        for (nt, state) in &self.body.nt_nodes {
-      -            writeln!(f, "    - NT {}: State {}", nt.0, state)?;
-      -        }
-      -        if !self.body.end_map.is_empty() {
-      -            writeln!(f, "  End Map:")?;
-      -            for (state, stacks) in &self.body.end_map {
-      -                writeln!(f, "    - State {}:", state)?;
-      -                for stack in stacks {
-      -                    let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
-      -                    writeln!(f, "      - [{}]", stack_str.join(", "))?;
+               writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
+      -        for (id, state) in self.states.0.iter().enumerate() {
+      -            writeln!(f, "  State {}:", id)?;
+      -            if let Some(w) = &state.final_weight {
+      -                writeln!(f, "    final_weight: {}", w)?;
+      -            }
+      -            for (to, weight) in &state.epsilon_transitions {
+      -                writeln!(f, "    ε -> {} (weight: {})", to, weight)?;
+      -            }
+      -            if let Some(default) = &state.transitions.default {
+      -                for (to, weight) in default {
+      -                    writeln!(f, "    * -> {} (weight: {})", to, weight)?;
+      -                }
+      -            }
+      -            for (on, transitions) in &state.transitions.exceptions {
+      -                for (to, weight) in transitions {
+      -                    let char_repr = if let Some(c) = char::from_u32(*on as u32) {
+      -                        if c.is_ascii_graphic() || c == ' ' {
+      -                            format!("'{}'", c)
+      -                        } else {
+      -                            format!("{}", *on)
+      -                        }
+      -                    } else {
+      -                        format!("{}", *on)
+      -                    };
+      -                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, weight)?;
       -                }
       -            }
       -        }
-      -        writeln!(f, "  Underlying NWA (starts: {:?}):", self.body.nwa.start_states)?;
-      +        write!(f, "{}", self.body)?;
-      +        writeln!(f, "  Underlying NWA states:")?;
-               for (id, state) in self.states.0.iter().enumerate() {
-                   writeln!(f, "    State {}:", id)?;
-                   if let Some(w) = &state.final_weight {
+      -        Ok(())
+      +        write!(f, "{}", self.states)
+           }
+       }
+       
 
       ```
     metadata:
@@ -8650,11 +8734,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/augmented_nwa.rs
-      Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
+      Identified target file: src/weighted_automata.rs
+      Applying patch to 'src/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Implement Display for AugmentedNwaBody
-      and refactor AugmentedNwa::fmt"'
+  - user: 'Changes committed with message: "Implement Display for NWAStates and refactor
+      NWA::Display"'
     metadata:
 ...

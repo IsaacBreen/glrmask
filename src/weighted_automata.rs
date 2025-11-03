@@ -1182,10 +1182,9 @@ impl DWA {
 
 // --- Display Implementations for Debugging ---
 
-impl Display for NWA {
+impl Display for NWAStates {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
-        for (id, state) in self.states.0.iter().enumerate() {
+        for (id, state) in self.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
             if let Some(w) = &state.final_weight {
                 writeln!(f, "    final_weight: {}", w)?;
@@ -1214,6 +1213,13 @@ impl Display for NWA {
             }
         }
         Ok(())
+    }
+}
+
+impl Display for NWA {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "NWA (starts: {:?})", self.body.start_states)?;
+        write!(f, "{}", self.states)
     }
 }
 
