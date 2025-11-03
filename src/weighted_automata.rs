@@ -219,7 +219,57 @@ impl Deref for NWAStates {
     }
 }
 
+// --- Part 5: NWA Processing, Determinization, and DWA Simplification ---
+
+/// Helper for simplify_to_level: find existing merged state or create a new one.
+fn get_or_create_merged_state(
+    states: &mut NWAStates,
+    comp_key: Vec<(StateID, Weight)>,
+    depth: usize,
+    comp2id: &mut HashMap<Vec<(StateID, Weight)>, StateID>,
+    depth_of: &mut HashMap<StateID, usize>,
+    work: &mut VecDeque<(Vec<(StateID, Weight)>, StateID, usize)>,
+    merged_from: &mut BTreeMap<StateID, BTreeSet<StateID>>,
+) -> StateID {
+    if let Some(&id) = comp2id.get(&comp_key) {
+        return id;
+    }
+
+    // Read from states before mutating, to satisfy borrow checker.
+    let mut agg_final = Weight::zeros();
+    let mut is_final = false;
+    for (sid, path_w) in &comp_key {
+        if let Some(fw) = &states[*sid].final_weight {
+            let v = path_w & fw;
+            if !v.is_empty() {
+                is_final = true;
+                agg_final |= &v;
+            }
+        }
+    }
+
+    // Now mutate: add the new state and initialize it.
+    let id = states.add_state();
+    states[id].epsilon_transitions.clear();
+    states[id].transitions = U16Map::new();
+    states[id].final_weight = if is_final { Some(agg_final) } else { None };
+
+    // Update metadata and worklist.
+    let mut set = BTreeSet::new();
+    for (sid, _) in &comp_key {
+        set.insert(*sid);
+    }
+    merged_from.insert(id, set);
+
+    comp2id.insert(comp_key.clone(), id);
+    depth_of.insert(id, depth);
+    work.push_back((comp_key, id, depth));
+    id
+}
+
 impl NWAStates {
+    /// Nondeterministic processing over u16 alphabet.
+    ///
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -577,47 +627,6 @@ impl NWAStates {
             comp.into_iter().filter(|(_, w)| !w.is_empty()).collect()
         };
 
-        // Global memo for compositions -> new state ID, and BFS worklist.
-        let mut comp2id: HashMap<Vec<(StateID, Weight)>, StateID> = HashMap::new();
-        let mut depth_of: HashMap<StateID, usize> = HashMap::new();
-        let mut work: VecDeque<(Vec<(StateID, Weight)>, StateID, usize)> = VecDeque::new();
-
-        // get_or_create for merged states
-        let mut get_or_create = |comp_key: Vec<(StateID, Weight)>, depth: usize| -> StateID {
-            if let Some(&id) = comp2id.get(&comp_key) {
-                return id;
-            }
-            let id = self.add_state();
-            // Aggregate final weight: ⋃_{s} (w_s ∧ final_w(s))
-            let mut agg_final = Weight::zeros();
-            let mut is_final = false;
-            for (sid, path_w) in &comp_key {
-                if let Some(fw) = &self[*sid].final_weight {
-                    let v = path_w & fw;
-                    if !v.is_empty() {
-                        is_final = true;
-                        agg_final |= &v;
-                    }
-                }
-            }
-            // Initialize the new state (no epsilons; transitions filled later).
-            self[id].epsilon_transitions.clear();
-            self[id].transitions = U16Map::new();
-            self[id].final_weight = if is_final { Some(agg_final) } else { None };
-
-            // Track provenance (states merged)
-            let mut set = BTreeSet::new();
-            for (sid, _) in &comp_key {
-                set.insert(*sid);
-            }
-            merged_from.insert(id, set);
-
-            comp2id.insert(comp_key.clone(), id);
-            depth_of.insert(id, depth);
-            work.push_back((comp_key, id, depth));
-            id
-        };
-
         // Start composition: starts with ALL weight and epsilon-closure.
         let mut start_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
         for &start_state in &body.start_states {
@@ -629,7 +638,14 @@ impl NWAStates {
             // No reachable start under epsilon-closure; leave body unchanged.
             return merged_from;
         }
-        let new_start_id = get_or_create(start_key, 0);
+
+        // Global memo for compositions -> new state ID, and BFS worklist.
+        let mut comp2id: HashMap<Vec<(StateID, Weight)>, StateID> = HashMap::new();
+        let mut depth_of: HashMap<StateID, usize> = HashMap::new();
+        let mut work: VecDeque<(Vec<(StateID, Weight)>, StateID, usize)> = VecDeque::new();
+        let new_start_id = get_or_create_merged_state(
+            self, start_key, 0, &mut comp2id, &mut depth_of, &mut work, &mut merged_from,
+        );
 
         // Process merged states breadth-first up to given level.
         while let Some((comp, agg_id, depth)) = work.pop_front() {
@@ -663,7 +679,9 @@ impl NWAStates {
                 let def_closure = self.epsilon_closure_with_flag(def_next_raw, has_epsilons, 0);
                 let def_key = to_key(def_closure);
                 if !def_key.is_empty() {
-                    let tid = get_or_create(def_key, depth + 1);
+                    let tid = get_or_create_merged_state(
+                        self, def_key, depth + 1, &mut comp2id, &mut depth_of, &mut work, &mut merged_from,
+                    );
                     default_target_id = Some(tid);
                 }
             } else {
@@ -713,7 +731,9 @@ impl NWAStates {
                     if exc_key.is_empty() {
                         continue;
                     }
-                    let tid = get_or_create(exc_key, depth + 1);
+                    let tid = get_or_create_merged_state(
+                        self, exc_key, depth + 1, &mut comp2id, &mut depth_of, &mut work, &mut merged_from,
+                    );
                     let exc_vec = vec![(tid, exc_agg_weight.clone())];
 
                     // Deduplicate vs default if identical (target and weight are equal).
