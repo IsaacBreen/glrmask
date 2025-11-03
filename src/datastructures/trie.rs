@@ -2098,6 +2098,128 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         );
     }
 
+    /// A variant of `special_map_grouped` with a unified `process_and_step` callback.
+    /// This gives the user more control over traversal. The callback receives the current
+    /// node and its aggregated value, and is responsible for iterating edges and
+    /// returning new values for children.
+    #[time_it]
+    pub fn special_map_unified<V, F, I>(
+        arena: &Arena<Trie<EK, EV, T>>,
+        traversal_data: &TrieTraversalData,
+        initial_nodes_and_values: Vec<(Trie2Index, V)>,
+        mut process_and_step: F,
+        mut merge: impl FnMut(&mut V, V),
+    )
+    where
+        V: Clone,
+        F: FnMut(
+            &Trie<EK, EV, T>, // current node
+            Trie2Index,       // current node index
+            &mut V            // aggregated value for current node
+        ) -> I,
+        I: IntoIterator<Item = (Trie2Index, V)>,
+    {
+        // ------------------------------------------------------------------
+        //  SCC-aware scheduler:
+        //  - Process SCCs in topological order.
+        //  - Inside each SCC, run a local worklist until stabilization.
+        // ------------------------------------------------------------------
+        let mut process_and_step_duration = Duration::new(0, 0);
+        let mut merge_duration = Duration::new(0, 0);
+        let total_now = Instant::now();
+
+        use std::collections::VecDeque;
+
+        let mut values: HashMap<usize, V> = HashMap::new();
+
+        for (node_idx, v0) in initial_nodes_and_values {
+            let merge_now = Instant::now();
+            let ptr = node_idx.as_usize();
+            values
+                .entry(ptr)
+                .and_modify(|old| merge(old, v0.clone()))
+                .or_insert(v0);
+            merge_duration += merge_now.elapsed();
+        }
+
+        // Use pre-computed traversal data.
+        let nodes = &traversal_data.nodes;
+        let pos_of_u = &traversal_data.pos_of_u;
+        let comp_id = &traversal_data.comp_id;
+        let sccs = &traversal_data.sccs;
+        let topo = &traversal_data.topo;
+
+        // Worklist inside each SCC until stabilization; process SCCs in topological order.
+        let mut in_queue: HashSet<usize> = HashSet::new(); // node.usize currently in the local SCC queue
+        for &s in topo {
+            // Seed local queue with nodes in this SCC that currently have pending values.
+            let mut local_queue: VecDeque<usize> = VecDeque::new(); // holds positions (indices into `nodes`)
+            for &pos in &sccs[s] {
+                let u = nodes[pos].as_usize();
+                if values.contains_key(&u) {
+                    if in_queue.insert(u) {
+                        local_queue.push_back(pos);
+                    }
+                }
+            }
+            if local_queue.is_empty() {
+                continue; // nothing pending in this SCC yet
+            }
+
+            while let Some(pos) = local_queue.pop_front() {
+                let node_idx = nodes[pos];
+                let u = node_idx.as_usize();
+                // We are about to process u; mark as not in queue until we decide to requeue.
+                in_queue.remove(&u);
+
+                let mut agg_v = match values.remove(&u) {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+                let process_and_step_now = Instant::now();
+                let new_values_for_children = {
+                    let guard = node_idx.read(arena).expect("poison");
+                    process_and_step(&guard, node_idx, &mut agg_v)
+                };
+                process_and_step_duration += process_and_step_now.elapsed();
+
+                for (child_idx, new_v) in new_values_for_children {
+                    let child_u = child_idx.as_usize();
+                    let merge_now = Instant::now();
+                    values
+                        .entry(child_u)
+                        .and_modify(|old| merge(old, new_v.clone()))
+                        .or_insert(new_v);
+                    merge_duration += merge_now.elapsed();
+
+                    // If the child is in the same SCC, schedule immediately in local queue.
+                    if let Some(&child_pos) = pos_of_u.get(&child_u) {
+                        if comp_id[child_pos] == s {
+                            if in_queue.insert(child_u) {
+                                local_queue.push_back(child_pos);
+                            }
+                        }
+                        // If in a different SCC, it will be picked up when that SCC is reached in topo order.
+                    }
+                }
+
+                // If new inputs accumulated for this node while it was processing, re-queue it to continue local fixpoint.
+                if values.contains_key(&u) {
+                    if in_queue.insert(u) {
+                        local_queue.push_back(pos);
+                    }
+                }
+            }
+        }
+        println!(
+            "special_map_unified finished in {:?}. Time in process_and_step: {:?}, merge: {:?}",
+            total_now.elapsed(),
+            process_and_step_duration,
+            merge_duration
+        );
+    }
+
     /// Creates a deep copy of the trie and randomly removes edges.
     ///
     /// This is useful for fuzz testing to simplify a complex graph.
