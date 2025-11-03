@@ -1162,7 +1162,7 @@ impl DWA {
         (new_dwa, mapping)
     }
 
-    /// Join two DWAs. This is a flexible concatenation-like operation.
+    /// A flexible concatenation-like operation on two DWAs.
     /// The `join_map` specifies which states in `self` (the left DWA) are "join points".
     /// When a join point `s_left` is entered, it's as if we also simultaneously enter
     /// all states from `other` (the right DWA) associated with `s_left` in the `join_map`.
@@ -1170,9 +1170,14 @@ impl DWA {
     /// This is implemented via a product-like construction where states in the new DWA
     /// are compositions of a state from `self` and a set of states from `other`.
     ///
+    /// Note: This is not a standard concatenation. The final states of the resulting
+    /// automaton are the union of final states from both components. For example, if
+    /// `join_map` connects final states of `self` to the start of `other`, the
+    /// resulting language is closer to `L(self) ∪ L(self)L(other)`.
+    ///
     /// Returns the new DWA and a map from new state IDs to the set of original automaton states.
     /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
-    pub fn join(
+    pub fn concatenate(
         &self,
         other: &DWA,
         join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
