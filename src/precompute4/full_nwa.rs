@@ -128,7 +128,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             println!("merge closure (union_with_on_shared) took: {:?}", merge_now.elapsed());
         },
         // process function
-        |_node_data, node_idx, aug_body| {
+        |_node_data, node_idx, mut aug_body| {
             println!(
                 "In process fn for node {}, shared_states_len: {}",
                 node_idx.as_usize(),

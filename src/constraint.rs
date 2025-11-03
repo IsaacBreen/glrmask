@@ -2815,7 +2815,7 @@ impl GrammarConstraint {
                         inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge from nodes_set");
                     }
                 }
-                Some(nodes_set)
+                Some((tokens, nodes_set))
             },
         );
 
@@ -4055,7 +4055,7 @@ impl<'a> GrammarConstraintState<'a> {
             traversal_data,
             initial_values_for_map,
             // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
-            |glr_s, (pop, llm_token_bv_from_edge), dest_map| {
+            |glr_s: &GLRParserState, (pop, llm_token_bv_from_edge), dest_map| {
                 let popped = glr_s.active_state.stack.popn(*pop as usize);
                 let mut results = Vec::new();
 
@@ -4097,7 +4097,7 @@ impl<'a> GrammarConstraintState<'a> {
                         *final_mask_internal.borrow_mut() |= &glr_active_tokens;
                     }
                 }
-                keep_going
+                keep_going.then(|| glr_s)
             },
         );
 

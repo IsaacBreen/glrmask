@@ -439,7 +439,7 @@ fn build_super_edges_via_trie(
         &traversal,
         initial_nodes_and_values,
         // step
-        |values: &_, ek, dsts| {
+        |values: &ValueBag, ek, dsts| {
             let mut out: Vec<(PrecomputeNode1Index, ValueBag)> = Vec::new();
 
             let term = match ek {
@@ -560,7 +560,7 @@ fn build_super_edges_via_trie(
             acc.append(&mut other);
         },
         // process (unused)
-        |_node, _idx, _v| false,
+        |_node, _idx, v| Some(v),
     );
 
     (super_edges_out.into_inner(), end_nodes)
