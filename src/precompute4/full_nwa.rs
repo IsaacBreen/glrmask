@@ -62,7 +62,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let initial_aug_body = AugmentedNwaBody {
         nwa: WaNWABody { start_states: BTreeSet::from([initial_state]) },
         nt_nodes: BTreeMap::new(),
-        end_map: BTreeMap::from([]),
+        end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
     };
 
     let initial_values = vec![(reversed_trie_root, initial_aug_body)];
@@ -78,6 +78,9 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         // step function
         |current_aug_body, edge_terminal_opt, dest_map| {
             let step_now = Instant::now();
+            // Precompute end-reach for the right operand once per step to avoid per-stop BFS.
+            let right_end_reach = current_aug_body.compute_end_reach_map(&shared_states.borrow());
+
             let mut results: Vec<(PrecomputeNode1Index, AugmentedNwaBody)> = Vec::new();
 
             // Prepare the LEFT body by mapping the terminal's NWA into the shared states.
@@ -89,6 +92,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             };
 
             for (dest_idx, llm_token_bv) in dest_map.iter() {
+
                 // Map the template_aug's states into the shared arena.
                 let copy_now = Instant::now();
                 let mapping = shared_states.borrow_mut().append_copy_from(&template_aug.states);
@@ -106,8 +110,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                     &mut new_body,
                     &current_aug_body,
                     &weight,
+                    Some(&right_end_reach),
                 ).expect("Combine failed");
                 let combine_elapsed = combine_now.elapsed();
+
+                // Build a shallow, epsilon-free, k-depth (k=3) determinized front to reduce local explosion.
+                new_body.simplify_front_k_inplace(&mut shared_states.borrow_mut(), 3);
 
                 println!(
                     "step inner loop: term {:?}, dest {}, shared_states_len: {}",
@@ -131,6 +139,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
         // process function
         |node_data, node_idx, aug_body| {
+            // no-op here; the bodies were simplified in the step closure already.
             if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
                 final_nwas.insert(*tokenizer_state_id, aug_body.clone());
             }

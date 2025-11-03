@@ -309,6 +309,16 @@ impl NWAStates {
     }
 }
 
+impl NWAStates {
+    /// Public epsilon-closure utility: wraps the internal closure with automatic epsilon detection.
+    pub fn epsilon_closure(
+        &self,
+        initial_states: BTreeMap<StateID, Weight>,
+    ) -> BTreeMap<StateID, Weight> {
+        self.epsilon_closure_with_flag(initial_states, self.0.iter().any(|s| !s.epsilon_transitions.is_empty()), 0)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NWABody {
     pub start_states: BTreeSet<StateID>,
