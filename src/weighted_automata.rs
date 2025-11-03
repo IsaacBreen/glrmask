@@ -461,16 +461,10 @@ pub struct DWABody {
     pub start_state: StateID,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DWA {
     pub states: DWAStates,
     pub body: DWABody,
-}
-
-impl Default for DWA {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl DWAState {
@@ -947,40 +941,6 @@ impl NWA {
         let result = DWA { states: dwa_states, body: dwa_body };
         println!("NWA::determinize_components ({} NWA states -> {} DWA states) took: {:?}", states.len(), result.states.len(), now.elapsed());
         result
-    }
-
-    /// Concatenate two NWAs.
-    ///
-    /// Creates a new NWA that accepts the language L(self)L(other).
-    /// It works by taking all final states of `self`, removing their final weight,
-    /// and adding epsilon transitions from them to the start states of `other`,
-    /// using the removed final weight as the transition weight.
-    /// The start states of the new NWA are the start states of `self`.
-    /// The final states of the new NWA are the final states of `other`.
-    pub fn concatenate(&self, other: &NWA) -> NWA {
-        if self.states.is_empty() {
-            return other.clone();
-        }
-        if other.states.is_empty() {
-            return self.clone();
-        }
-
-        let mut new_states = self.states.clone();
-        let self_len = self.states.len();
-        let mapping = new_states.append_copy_from(&other.states);
-
-        // For each state in the original `self` part that was final,
-        // add epsilon transitions to the start states of `other`.
-        for i in 0..self_len {
-            if let Some(fw) = new_states[i].final_weight.take() { // take() removes it
-                if fw.is_empty() { continue; }
-                for &other_start in &other.body.start_states {
-                    new_states.add_epsilon_transition(i, mapping[other_start], fw.clone());
-                }
-            }
-        }
-
-        NWA { states: new_states, body: self.body.clone() }
     }
 
     pub fn process_stack_u16(&self, input: &[u16]) -> Vec<(StateID, StateID, Weight)> {
