@@ -9,6 +9,7 @@ use crate::weighted_automata::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 use std::fmt::{Display, Formatter};
+use std::ops::BitOrAssign;
 use std::time::Instant;
 
 /// Error while building an AugmentedNwa.
