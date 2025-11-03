@@ -829,7 +829,7 @@ impl NWA {
         let mut dwa_body = DWABody::default();
     
         if states.0.is_empty() {
-            return DWA { states: dwa_states, body: dwa_body };
+            return (DWA { states: dwa_states, body: dwa_body }, BTreeMap::new());
         }
 
         let has_epsilons = states.0.iter().any(|s| !s.epsilon_transitions.is_empty());

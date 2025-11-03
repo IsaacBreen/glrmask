@@ -66,7 +66,7 @@ fn build_augmented_nwa_for_terminal(
 }
 
 /// Identity NWA for ignore terminals: passes through any stack unchanged.
-fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
+pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
     let mut states = WaNWAStates::default();
     let start_state = states.add_state();
     let mut end_map = BTreeMap::new();
@@ -95,7 +95,7 @@ pub fn build_augmented_dwa_for_terminal(
     Ok(nwa.determinize())
 }
 
-fn build_augmented_nwas(
+pub fn build_augmented_nwas(
     parser: &GLRParser,
 ) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> {
     let all = compute_all_characterizations(parser);
