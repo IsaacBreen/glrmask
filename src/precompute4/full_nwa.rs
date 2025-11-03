@@ -129,6 +129,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
         // process function
         |_node_data, node_idx, aug_body| {
+            println!(
+                "In process fn for node {}, shared_states_len: {}",
+                node_idx.as_usize(),
+                shared_states.borrow().len()
+            );
             let simplify_now = Instant::now();
             aug_body.simplify_to_level_on_shared(&mut shared_states.borrow_mut(), 3);
             println!(
