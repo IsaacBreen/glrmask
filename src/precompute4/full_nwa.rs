@@ -2,6 +2,7 @@ use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
 use crate::weighted_automata::{DWA, NWAStates as WaNWAStates, NWABody as WaNWABody, Weight as WaWeight};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::datastructures::trie::Trie;
 use crate::precompute4::augmented_nwa::{AugmentedNwa, AugmentedNwaBody};
@@ -42,9 +43,9 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     // 3. Traverse the reversed trie.
 
     // Shared NWA states arena for the entire traversal. This lets us share subgraphs between paths.
-    let mut shared_states = WaNWAStates::default();
-    let initial_state = shared_states.add_state();
-    shared_states.set_final_weight(initial_state, WaWeight::all());
+    let shared_states = RefCell::new(WaNWAStates::default());
+    let initial_state = shared_states.borrow_mut().add_state();
+    shared_states.borrow_mut().set_final_weight(initial_state, WaWeight::all());
 
     // The initial body: single start that is final, with end_map containing empty stack.
     let initial_aug_body = AugmentedNwaBody {
@@ -77,7 +78,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
             for (dest_idx, llm_token_bv) in dest_map.iter() {
                 // Map the template_aug's states into the shared arena.
-                let mapping = shared_states.append_copy_from(&template_aug.states);
+                let mapping = shared_states.borrow_mut().append_copy_from(&template_aug.states);
                 let mut left_body = template_aug.body.clone();
                 left_body.remap_states(&mapping);
 
@@ -85,7 +86,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 // Combine into a new body (mutating the shared graph with epsilon links).
                 let mut new_body = left_body.clone();
                 AugmentedNwaBody::combine_right_into_on_shared(
-                    &mut shared_states,
+                    &mut shared_states.borrow_mut(),
                     &mut new_body,
                     &current_aug_body,
                     &weight,
@@ -97,7 +98,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
         // merge function
         |aug_body1, aug_body2| {
-            AugmentedNwaBody::union_with_on_shared(&mut shared_states, aug_body1, &aug_body2);
+            AugmentedNwaBody::union_with_on_shared(&mut shared_states.borrow_mut(), aug_body1, &aug_body2);
         },
         // process function
         |node_data, node_idx, aug_body| {
@@ -117,7 +118,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     // 4. Convert final NWA bodies to DWAs and simplify.
     let mut precomputed4: Precomputed4 = BTreeMap::new();
     for (sid, aug_body) in final_nwas {
-        let mut dwa = shared_states.determinize(&aug_body.nwa);
+        let mut dwa = shared_states.borrow().determinize(&aug_body.nwa);
         dwa.simplify();
         precomputed4.insert(sid, dwa);
     }
