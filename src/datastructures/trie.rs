@@ -1954,7 +1954,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         initial_nodes_and_values: Vec<(Trie2Index, V)>,
         mut step: S,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&Trie<EK, EV, T>, Trie2Index, &mut V) -> Option<U>,
+        mut process: impl FnMut(&Trie<EK, EV, T>, Trie2Index, V) -> Option<U>,
     )
     where
         V: Clone,
@@ -2024,7 +2024,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 if stopped_nodes.contains(&u) {
                     continue;
                 }
-                let mut agg_v = match values.remove(&u) {
+                let agg_v = match values.remove(&u) {
                     Some(v) => v,
                     None => continue,
                 };
@@ -2032,7 +2032,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 let process_now = Instant::now();
                 let processed_value = {
                     let guard = node_idx.read(arena).expect("poison");
-                    process(&guard, node_idx, &mut agg_v)
+                    process(&guard, node_idx, agg_v)
                 };
                 process_duration += process_now.elapsed();
                 let proceed_value = match processed_value {
