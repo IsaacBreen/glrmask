@@ -682,7 +682,7 @@ impl Default for GrammarConstraintConfig {
             skip_precomputation: false,
             precompute0_only: false,
             trie0: Trie0Config::off(),
-            trie1: Trie1Config::off(),
+            trie1: Trie1Config::default(),
             trie2: Trie2Config::off(),
             trie3: Trie3Config::off(),
             intermediate_trie3_templates: IntermediateTrie3Config::default(),
@@ -690,7 +690,7 @@ impl Default for GrammarConstraintConfig {
             intermediate_trie3_main: IntermediateTrie3Config::default(),
             dummy_terminal_map: BTreeMap::new(),
             dummy_terminal_penalties: BTreeMap::new(),
-            use_dummy_terminals: true,
+            use_dummy_terminals: false,
         }
     }
 }

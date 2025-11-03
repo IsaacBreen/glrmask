@@ -826,7 +826,6 @@ pub fn rewrite_productions_with_dummies(
     original_productions: &[Production],
     dummy_map: &BTreeMap<String, BTreeSet<Terminal>>,
 ) -> (Vec<Production>, BTreeSet<Terminal>) {
-    return (original_productions.to_vec(), BTreeSet::new());
     if dummy_map.is_empty() {
         return (original_productions.to_vec(), BTreeSet::new());
     }
