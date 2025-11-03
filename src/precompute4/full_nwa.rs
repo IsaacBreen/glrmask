@@ -3,6 +3,7 @@ use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
 use crate::weighted_automata::{DWA, NWA as WaNWA, NWAStates as WaNWAStates, NWARest as WaNWARest, Weight as WaWeight};
 use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
 use crate::datastructures::trie::Trie;
 use crate::precompute4::augmented_nwa::{AugmentedNwa, AugmentedNwaRest};
 use crate::glr::table::TerminalID;
@@ -42,11 +43,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     // 3. Traverse the reversed trie.
 
     // Shared global states store: all automata for this traversal live here.
-    let mut shared_states = WaNWAStates::default();
+    let shared_states = RefCell::new(WaNWAStates::default());
 
     // Initial NWA rest: one final start state with empty stack
-    let initial_state = shared_states.add_state();
-    shared_states.set_final_weight(initial_state, WaWeight::all());
+    let initial_state = shared_states.borrow_mut().add_state();
+    shared_states.borrow_mut().set_final_weight(initial_state, WaWeight::all());
     let initial_rest = AugmentedNwaRest {
         nwa: WaNWARest { start_state: initial_state },
         nt_nodes: BTreeMap::new(),
@@ -76,24 +77,24 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 aug_nwa = &ignore_nwa;
             }
             crate::debug!(5, "Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
-            let dbg_left = AugmentedNwa { states: shared_states.clone(), rest: current_rest.clone() };
+            let dbg_left = AugmentedNwa { states: shared_states.borrow().clone(), rest: current_rest.clone() };
             crate::debug!(5, "--- RIGHT: Incoming aug_nwa ---\n{}", dbg_left);
             crate::debug!(5, "--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
             for (dest_idx, llm_token_bv) in dest_map.iter() {
                 // Clone the left rest and rebase onto shared states.
                 let mut new_rest = aug_nwa.rest.clone();
-                AugmentedNwa::rebase_onto_shared(&mut shared_states, &aug_nwa.states, &mut new_rest);
+                AugmentedNwa::rebase_onto_shared(&mut shared_states.borrow_mut(), &aug_nwa.states, &mut new_rest);
 
                 let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
 
                 // Combine using shared states (no copying of current_rest)
                 AugmentedNwa::combine_right_into_on_shared_states(
-                    &mut shared_states,
+                    &mut shared_states.borrow_mut(),
                     &mut new_rest,
                     current_rest,
                     &weight,
                 ).expect("Combine failed");
-                let dbg_combined = AugmentedNwa { states: shared_states.clone(), rest: new_rest.clone() };
+                let dbg_combined = AugmentedNwa { states: shared_states.borrow().clone(), rest: new_rest.clone() };
                 crate::debug!(5, "For dest_idx {:?} with token bv (WEIGHT) {:?}:", dest_idx, llm_token_bv);
                 crate::debug!(5, "--- COMBINED: Resulting aug_nwa ---\n{}", dbg_combined);
                 results.push((*dest_idx, new_rest));
@@ -107,9 +108,9 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 aug_nwa1.end_map.entry(*st).or_default().extend(stacks.clone());
             }
             // Create new start in shared states and epsilon to both old starts.
-            let new_start = shared_states.add_state();
-            shared_states.add_epsilon_transition(new_start, aug_nwa1.nwa.start_state, WaWeight::all());
-            shared_states.add_epsilon_transition(new_start, aug_nwa2.nwa.start_state, WaWeight::all());
+            let new_start = shared_states.borrow_mut().add_state();
+            shared_states.borrow_mut().add_epsilon_transition(new_start, aug_nwa1.nwa.start_state, WaWeight::all());
+            shared_states.borrow_mut().add_epsilon_transition(new_start, aug_nwa2.nwa.start_state, WaWeight::all());
             aug_nwa1.nwa.start_state = new_start;
         },
         // process function
@@ -123,7 +124,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
     crate::debug!(5, "\n--- Final NWA Rests Before Determinization ---");
     for (sid, aug_rest) in &final_nwas {
-        let dbg = AugmentedNwa { states: shared_states.clone(), rest: aug_rest.clone() };
+        let dbg = AugmentedNwa { states: shared_states.borrow().clone(), rest: aug_rest.clone() };
         crate::debug!(5, "Tokenizer State ID {:?}:\n{}", sid, dbg);
     }
     crate::debug!(5, "--- End Final NWA Rests Before Determinization ---\n");
@@ -131,7 +132,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     // 4. Convert final NWAs to DWAs and simplify.
     let mut precomputed4: Precomputed4 = BTreeMap::new();
     for (sid, aug_rest) in final_nwas {
-        let mut dwa = WaNWA::determinize_components(&shared_states, &aug_rest.nwa);
+        let mut dwa = WaNWA::determinize_components(&shared_states.borrow(), &aug_rest.nwa);
         dwa.simplify();
         precomputed4.insert(sid, dwa);
     }
