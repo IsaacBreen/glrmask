@@ -60,7 +60,7 @@ pub fn precompute4(
         &traversal_data,
         initial_values,
         // step function
-        |current_dwa, _edge_terminal_opt, dest_map| {
+        |current_dwa: &DWA, _edge_terminal_opt, dest_map| {
             let process_and_step_now = Instant::now();
             let mut results: Vec<(PrecomputeNode1Index, DWA)> = Vec::new();
 
