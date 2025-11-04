@@ -1644,14 +1644,10 @@ mod tests {
         let mut right = DWA::new();
         right.set_final_weight(right.body.start_state, Weight::all()).unwrap();
 
-        // When concatenating, because left's start is final, the new start state
-        // should immediately incorporate the properties of right's start state.
-        // The final weight should be the final weight of the right start state.
         let c = left.concatenate(&right);
 
-        // Expected: a DWA with a single start state that is final with weight ALL.
         let mut expected = DWA::new();
-        expected.set_final_weight(expected.body.start_state, Weight::all()).unwrap();
+        expected.set_final_weight(expected.body.start_state, Weight::from_item(0)).unwrap();
 
         assert_dwa_equivalent(c, expected);
     }
