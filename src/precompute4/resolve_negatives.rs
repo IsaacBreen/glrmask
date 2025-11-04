@@ -526,6 +526,9 @@ mod tests {
             expected.add_transition(s_after_7, i, s_final, Weight::all()).unwrap();
         }
 
+        d.simplify();
+        expected.simplify();
+
         assert_dwa_equivalent(d, expected);
     }
 }
