@@ -2207,6 +2207,68 @@ local_system:
 
               assert_dwa_equivalent(d, expected);
           }
+
+          #[test]
+          fn test_resolve_negatives_isolated_path_from_tokenizer_0() {
+              let mut d = DWA::new();
+              // Path: 0 -> 1(s5) -> 2(s10) -> 3(s13) -> 4(s15) -> 5(s22) -> 6(s27) -> 7(s29) -> 8(s30)
+              // Transitions: 7, -7, -3, 3, 7, -7, -1, -2
+              let s5 = d.add_state(); // 1
+              let s10 = d.add_state(); // 2
+              let s13 = d.add_state(); // 3
+              let s15 = d.add_state(); // 4
+              let s22 = d.add_state(); // 5
+              let s27 = d.add_state(); // 6
+              let s29 = d.add_state(); // 7
+              let s30 = d.add_state(); // 8
+
+              d.add_transition(d.body.start_state, 7, s5, Weight::from_item(2)).unwrap();
+              d.add_transition(s5, -7, s10, Weight::all()).unwrap();
+              d.add_transition(s10, -3, s13, Weight::all()).unwrap();
+              d.add_transition(s13, 3, s15, Weight::from_item(2)).unwrap();
+              d.add_transition(s15, 7, s22, Weight::all()).unwrap();
+              d.add_transition(s22, -7, s27, Weight::all()).unwrap();
+              d.add_transition(s27, -1, s29, Weight::all()).unwrap();
+              d.add_transition(s29, -2, s30, Weight::all()).unwrap();
+              d.set_final_weight(s30, Weight::all()).unwrap();
+
+              resolve_negative_codes_in_dwa(&mut d);
+
+              let mut expected = DWA::new();
+              let s_final = expected.add_state();
+              expected.add_transition(expected.body.start_state, 7, s_final, Weight::from_item(2)).unwrap();
+              expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
+
+              assert_dwa_equivalent(d, expected);
+          }
+
+          #[test]
+          fn test_resolve_negatives_isolated_path_from_tokenizer_1() {
+              let mut d = DWA::new();
+              // Path: 0 -> 1(s5) -> 2(s10) -> 3(s13) -> 4(s15) -> 5(s22) -> 6(s27) -> 7(s29) -> 8(s30)
+              // Transitions: 7, -7, -3, 3, 7, -7, -1, -2
+              let s5 = d.add_state(); // 1
+              let s10 = d.add_state(); // 2
+              let s13 = d.add_state(); // 3
+              let s15 = d.add_state(); // 4
+              let s22 = d.add_state(); // 5
+              let s27 = d.add_state(); // 6
+              let s29 = d.add_state(); // 7
+              let s30 = d.add_state(); // 8
+
+              d.add_transition(d.body.start_state, 7, s5, Weight::from_item(2)).unwrap();
+              d.add_transition(s5, -7, s30, Weight::all()).unwrap();
+              d.set_final_weight(s30, Weight::all()).unwrap();
+
+              resolve_negative_codes_in_dwa(&mut d);
+
+              let mut expected = DWA::new();
+              let s_final = expected.add_state();
+              expected.add_transition(expected.body.start_state, 7, s_final, Weight::from_item(2)).unwrap();
+              expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
+
+              assert_dwa_equivalent(d, expected);
+          }
       }
   prev_file_contents:
     src/precompute4/weighted_automata.rs: |
@@ -4435,6 +4497,26 @@ local_system:
               d.add_transition(s27, -1, s29, Weight::all()).unwrap();
               d.add_transition(s29, -2, s30, Weight::all()).unwrap();
               d.set_final_weight(s30, Weight::all()).unwrap();
+
+              resolve_negative_codes_in_dwa(&mut d);
+
+              let mut expected = DWA::new();
+              let s_final = expected.add_state();
+              expected.add_transition(expected.body.start_state, 7, s_final, Weight::from_item(2)).unwrap();
+              expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
+
+              assert_dwa_equivalent(d, expected);
+          }
+
+          #[test]
+          fn test_resolve_negatives_isolated_path_from_tokenizer_1() {
+              let mut d = DWA::new();
+              let s1 = d.add_state();
+              let s2 = d.add_state();
+
+              d.add_transition(d.body.start_state, 7, s1, Weight::from_item(2)).unwrap();
+              d.add_transition(s1, -7, s2, Weight::all()).unwrap();
+              d.set_final_weight(s2, Weight::all()).unwrap();
 
               resolve_negative_codes_in_dwa(&mut d);
 
@@ -6696,154 +6778,7 @@ messages:
 
               assert_dwa_equivalent(d, expected);
           }
-      }
 
-      ```
-    metadata:
-      filename: src/precompute4/resolve_negatives.rs
-  - user: |-
-      Tokenizer State ID: 0
-      DWA (start: 0)
-        State 0:
-          weight: []
-          1 -> 1 (trans_weight: [2])
-          3 -> 2 (trans_weight: [2])
-          4 -> 3 (trans_weight: [2])
-          6 -> 4 (trans_weight: [2])
-          7 -> 5 (trans_weight: [2])
-          8 -> 6 (trans_weight: [2])
-        State 1:
-          weight: []
-          -1 -> 7 (trans_weight: ALL)
-        State 2:
-          weight: []
-          7 -> 8 (trans_weight: ALL)
-        State 3:
-          weight: []
-          * -> 2 (trans_weight: ALL)
-        State 4:
-          weight: []
-          * -> 9 (trans_weight: ALL)
-        State 5:
-          weight: []
-          -7 -> 10 (trans_weight: ALL)
-        State 6:
-          weight: []
-        State 7:
-          weight: []
-          -4 -> 11 (trans_weight: ALL)
-        State 8:
-          weight: []
-          -7 -> 12 (trans_weight: ALL)
-        State 9:
-          weight: []
-        State 10:
-          weight: []
-          -3 -> 13 (trans_weight: ALL)
-        State 11:
-          weight: []
-          1 -> 14 (trans_weight: [2])
-          3 -> 15 (trans_weight: [2])
-          4 -> 16 (trans_weight: [2])
-          6 -> 17 (trans_weight: [2])
-          7 -> 18 (trans_weight: [2])
-          8 -> 19 (trans_weight: [2])
-        State 12:
-          weight: []
-          -1 -> 20 (trans_weight: ALL)
-        State 13:
-          weight: []
-          1 -> 14 (trans_weight: [2])
-          3 -> 15 (trans_weight: [2])
-          4 -> 16 (trans_weight: [2])
-          6 -> 17 (trans_weight: [2])
-          7 -> 18 (trans_weight: [2])
-          8 -> 19 (trans_weight: [2])
-        State 14:
-          weight: []
-          -1 -> 21 (trans_weight: ALL)
-        State 15:
-          weight: []
-          7 -> 22 (trans_weight: ALL)
-        State 16:
-          weight: []
-          * -> 15 (trans_weight: ALL)
-        State 17:
-          weight: []
-          * -> 23 (trans_weight: ALL)
-        State 18:
-          weight: []
-          -7 -> 24 (trans_weight: ALL)
-        State 19:
-          weight: []
-        State 20:
-          weight: []
-          -4 -> 25 (trans_weight: ALL)
-        State 21:
-          weight: []
-          -2 -> 26 (trans_weight: ALL)
-        State 22:
-          weight: []
-          -7 -> 27 (trans_weight: ALL)
-        State 23:
-          weight: []
-        State 24:
-          weight: []
-          -1 -> 28 (trans_weight: ALL)
-        State 25:
-          weight: []
-          1 -> 14 (trans_weight: [2])
-          3 -> 15 (trans_weight: [2])
-          4 -> 16 (trans_weight: [2])
-          6 -> 17 (trans_weight: [2])
-          7 -> 18 (trans_weight: [2])
-          8 -> 19 (trans_weight: [2])
-        State 26:
-          weight: []
-          final_weight: ALL
-        State 27:
-          weight: []
-          -1 -> 29 (trans_weight: ALL)
-        State 28:
-          weight: []
-          final_weight: ALL
-        State 29:
-          weight: []
-          -2 -> 30 (trans_weight: ALL)
-        State 30:
-          weight: []
-          final_weight: ALL
-    metadata:
-  - user: Add a new test that kind of mirrors the current one, ie for this DWA, BUT
-      which just isolates the DWA for the path 0 7 5 10 13 15 22 27 29 30.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
-                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      Of course. Here are the step-by-step instructions to add the new test, followed by the corresponding git diff.
-
-      ### Instructions
-
-      1.  Open the file `src/precompute4/resolve_negatives.rs`.
-      2.  Locate the `mod tests { ... }` block at the end of the file.
-      3.  Inside this block, after the `test_resolve_negatives_tokenizer_0` test function, add the following new test function:
-
-      ```rust
           #[test]
           fn test_resolve_negatives_isolated_path_from_tokenizer_0() {
               let mut d = DWA::new();
@@ -6877,7 +6812,102 @@ messages:
 
               assert_dwa_equivalent(d, expected);
           }
+
+          #[test]
+          fn test_resolve_negatives_isolated_path_from_tokenizer_1() {
+              let mut d = DWA::new();
+              // Path: 0 -> 1(s5) -> 2(s10) -> 3(s13) -> 4(s15) -> 5(s22) -> 6(s27) -> 7(s29) -> 8(s30)
+              // Transitions: 7, -7, -3, 3, 7, -7, -1, -2
+              let s5 = d.add_state(); // 1
+              let s10 = d.add_state(); // 2
+              let s13 = d.add_state(); // 3
+              let s15 = d.add_state(); // 4
+              let s22 = d.add_state(); // 5
+              let s27 = d.add_state(); // 6
+              let s29 = d.add_state(); // 7
+              let s30 = d.add_state(); // 8
+
+              d.add_transition(d.body.start_state, 7, s5, Weight::from_item(2)).unwrap();
+              d.add_transition(s5, -7, s30, Weight::all()).unwrap();
+              d.set_final_weight(s30, Weight::all()).unwrap();
+
+              resolve_negative_codes_in_dwa(&mut d);
+
+              let mut expected = DWA::new();
+              let s_final = expected.add_state();
+              expected.add_transition(expected.body.start_state, 7, s_final, Weight::from_item(2)).unwrap();
+              expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
+
+              assert_dwa_equivalent(d, expected);
+          }
+      }
+
       ```
+    metadata:
+      filename: src/precompute4/resolve_negatives.rs
+  - user: Simplify test_resolve_negatives_isolated_path_from_tokenizer_1
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to simplify the test, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      I will simplify the test case `test_resolve_negatives_isolated_path_from_tokenizer_1` in the file `src/precompute4/resolve_negatives.rs`. The current version contains a misleading comment and several unused state variables which make it hard to understand. The simplification will remove this noise and clarify the test's intent.
+
+      1.  **Open the file:**
+          `src/precompute4/resolve_negatives.rs`
+
+      2.  **Locate the test function:**
+          Find the test function `test_resolve_negatives_isolated_path_from_tokenizer_1`.
+
+      3.  **Replace the test body:**
+          Replace the existing implementation of the test setup (from the comment down to the `set_final_weight` call) with a cleaner version.
+
+          Specifically, replace this code block:
+          ```rust
+              // Path: 0 -> 1(s5) -> 2(s10) -> 3(s13) -> 4(s15) -> 5(s22) -> 6(s27) -> 7(s29) -> 8(s30)
+              // Transitions: 7, -7, -3, 3, 7, -7, -1, -2
+              let s5 = d.add_state(); // 1
+              let s10 = d.add_state(); // 2
+              let s13 = d.add_state(); // 3
+              let s15 = d.add_state(); // 4
+              let s22 = d.add_state(); // 5
+              let s27 = d.add_state(); // 6
+              let s29 = d.add_state(); // 7
+              let s30 = d.add_state(); // 8
+
+              d.add_transition(d.body.start_state, 7, s5, Weight::from_item(2)).unwrap();
+              d.add_transition(s5, -7, s30, Weight::all()).unwrap();
+              d.set_final_weight(s30, Weight::all()).unwrap();
+          ```
+          with the following simplified block, which removes the unused states and the incorrect comment, and uses clearer variable names (`s1`, `s2`):
+          ```rust
+              let s1 = d.add_state();
+              let s2 = d.add_state();
+
+              d.add_transition(d.body.start_state, 7, s1, Weight::from_item(2)).unwrap();
+              d.add_transition(s1, -7, s2, Weight::all()).unwrap();
+              d.set_final_weight(s2, Weight::all()).unwrap();
+          ```
+
+      The rest of the test function, which calls the resolver and asserts the equivalence, will remain unchanged.
 
       ### Git Diff
 
@@ -6886,45 +6916,33 @@ messages:
       ```diff
       --- a/src/precompute4/resolve_negatives.rs
       +++ b/src/precompute4/resolve_negatives.rs
-      @@ -428,4 +428,32 @@
+      @@ -482,23 +482,13 @@
+           #[test]
+           fn test_resolve_negatives_isolated_path_from_tokenizer_1() {
+               let mut d = DWA::new();
+      -        // Path: 0 -> 1(s5) -> 2(s10) -> 3(s13) -> 4(s15) -> 5(s22) -> 6(s27) -> 7(s29) -> 8(s30)
+      -        // Transitions: 7, -7, -3, 3, 7, -7, -1, -2
+      -        let s5 = d.add_state(); // 1
+      -        let s10 = d.add_state(); // 2
+      -        let s13 = d.add_state(); // 3
+      -        let s15 = d.add_state(); // 4
+      -        let s22 = d.add_state(); // 5
+      -        let s27 = d.add_state(); // 6
+      -        let s29 = d.add_state(); // 7
+      -        let s30 = d.add_state(); // 8
+      -
+      -        d.add_transition(d.body.start_state, 7, s5, Weight::from_item(2)).unwrap();
+      -        d.add_transition(s5, -7, s30, Weight::all()).unwrap();
+      -        d.set_final_weight(s30, Weight::all()).unwrap();
+      +        let s1 = d.add_state();
+      +        let s2 = d.add_state();
+      +
+      +        d.add_transition(d.body.start_state, 7, s1, Weight::from_item(2)).unwrap();
+      +        d.add_transition(s1, -7, s2, Weight::all()).unwrap();
+      +        d.set_final_weight(s2, Weight::all()).unwrap();
        
-               assert_dwa_equivalent(d, expected);
-           }
-      +
-      +    #[test]
-      +    fn test_resolve_negatives_isolated_path_from_tokenizer_0() {
-      +        let mut d = DWA::new();
-      +        // Path: 0 -> 1(s5) -> 2(s10) -> 3(s13) -> 4(s15) -> 5(s22) -> 6(s27) -> 7(s29) -> 8(s30)
-      +        // Transitions: 7, -7, -3, 3, 7, -7, -1, -2
-      +        let s5 = d.add_state(); // 1
-      +        let s10 = d.add_state(); // 2
-      +        let s13 = d.add_state(); // 3
-      +        let s15 = d.add_state(); // 4
-      +        let s22 = d.add_state(); // 5
-      +        let s27 = d.add_state(); // 6
-      +        let s29 = d.add_state(); // 7
-      +        let s30 = d.add_state(); // 8
-      +
-      +        d.add_transition(d.body.start_state, 7, s5, Weight::from_item(2)).unwrap();
-      +        d.add_transition(s5, -7, s10, Weight::all()).unwrap();
-      +        d.add_transition(s10, -3, s13, Weight::all()).unwrap();
-      +        d.add_transition(s13, 3, s15, Weight::from_item(2)).unwrap();
-      +        d.add_transition(s15, 7, s22, Weight::all()).unwrap();
-      +        d.add_transition(s22, -7, s27, Weight::all()).unwrap();
-      +        d.add_transition(s27, -1, s29, Weight::all()).unwrap();
-      +        d.add_transition(s29, -2, s30, Weight::all()).unwrap();
-      +        d.set_final_weight(s30, Weight::all()).unwrap();
-      +
-      +        resolve_negative_codes_in_dwa(&mut d);
-      +
-      +        let mut expected = DWA::new();
-      +        let s_final = expected.add_state();
-      +        expected.add_transition(expected.body.start_state, 7, s_final, Weight::from_item(2)).unwrap();
-      +        expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
-      +
-      +        assert_dwa_equivalent(d, expected);
-      +    }
-       }
+               resolve_negative_codes_in_dwa(&mut d);
+       
 
       ```
     metadata:
@@ -6937,7 +6955,7 @@ messages:
       Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Add isolated path test for negative
-      code resolution in DWA"'
+  - user: 'Changes committed with message: "Simplify test_resolve_negatives_isolated_path_from_tokenizer_1
+      by cleaning up state declarations"'
     metadata:
 ...
