@@ -292,61 +292,71 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         }
     }
 
-    // Stage C: Remove remaining internal negative edges (those not going to final states).
+    // Stage D: Remove negative edges to final states ("epsilon replacement").
+    // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
+    // This needs to be a fixpoint iteration to propagate finality backwards.
     {
-        let n = dwa.states.len();
-        for a_id in 0..n {
-            // Collect keys to remove to avoid mutating while iterating.
-            let to_remove: Vec<i16> = dwa.states[a_id]
-                .transitions
-                .exceptions
-                .iter()
-                .filter_map(|(&ch, &tgt)| {
-                    if is_negative_code(ch) && !is_final_nonempty(&dwa.states[tgt]) {
-                        Some(ch)
-                    } else {
-                        None
+        let mut changed_any = true;
+        let mut guard_rounds = 0usize;
+        while changed_any && guard_rounds < 64 {
+            changed_any = false;
+            guard_rounds += 1;
+
+            let n = dwa.states.len();
+            for a_id in 0..n {
+                // Capture all negatives-to-final to process.
+                let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
+                    .transitions
+                    .exceptions
+                    .iter()
+                    .filter_map(|(&ch, &tgt)| {
+                        if is_negative_code(ch) && is_final_nonempty(&dwa.states[tgt]) {
+                            Some((ch, tgt))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if neg_to_final.is_empty() {
+                    continue;
+                }
+
+                for (ch, tgt) in neg_to_final {
+                    let edge_w = dwa.states[a_id]
+                        .trans_weights_exceptions
+                        .get(&ch)
+                        .cloned()
+                        .unwrap_or_else(Weight::all);
+                    if let Some(fw) = &dwa.states[tgt].final_weight {
+                        let inc = &edge_w & fw;
+                        if !inc.is_empty() {
+                            if union_into_option(&mut dwa.states[a_id].final_weight, &inc) {
+                                changed_any = true;
+                            }
+                        }
                     }
-                })
-                .collect();
-            for ch in to_remove {
-                dwa.states[a_id].transitions.exceptions.remove(&ch);
-                dwa.states[a_id].trans_weights_exceptions.remove(&ch);
+                    // Remove the negative edge itself.
+                    dwa.states[a_id].transitions.exceptions.remove(&ch);
+                    dwa.states[a_id].trans_weights_exceptions.remove(&ch);
+                }
             }
         }
     }
 
-    // Stage D: Remove negative edges to final states ("epsilon replacement").
-    // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
+    // Stage C: Remove any remaining negative edges. After the fixpoint above, any
+    // negative edge that could lead to a final state has been processed and removed.
+    // Any that remain are part of cycles or lead to non-final sinks, and can be pruned.
     {
         let n = dwa.states.len();
         for a_id in 0..n {
-            // Capture all negatives-to-final to process.
-            let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
+            let to_remove: Vec<i16> = dwa.states[a_id]
                 .transitions
                 .exceptions
                 .iter()
-                .filter_map(|(&ch, &tgt)| {
-                    if is_negative_code(ch) && is_final_nonempty(&dwa.states[tgt]) {
-                        Some((ch, tgt))
-                    } else {
-                        None
-                    }
-                })
+                .filter_map(|(&ch, _)| if is_negative_code(ch) { Some(ch) } else { None })
                 .collect();
-            for (ch, tgt) in neg_to_final {
-                let edge_w = dwa.states[a_id]
-                    .trans_weights_exceptions
-                    .get(&ch)
-                    .cloned()
-                    .unwrap_or_else(Weight::all);
-                if let Some(fw) = &dwa.states[tgt].final_weight {
-                    let inc = &edge_w & fw;
-                    if !inc.is_empty() {
-                        union_into_option(&mut dwa.states[a_id].final_weight, &inc);
-                    }
-                }
-                // Remove the negative edge itself.
+            for ch in to_remove {
                 dwa.states[a_id].transitions.exceptions.remove(&ch);
                 dwa.states[a_id].trans_weights_exceptions.remove(&ch);
             }
