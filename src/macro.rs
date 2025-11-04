@@ -14,10 +14,20 @@ macro_rules! choice_fast {
     };
 }
 
+use once_cell::sync::Lazy;
+use std::env;
+
 // Import the Local timezone functionality
 
-/// The compile-time debug level. Messages with a level greater than this will be ignored.
-pub const MACRO_DEBUG_LEVEL: usize = 5;
+/// Returns the current debug level, read from the `MACRO_DEBUG_LEVEL` environment variable.
+///
+/// This function reads the environment variable once and caches the result for subsequent calls.
+/// If `MACRO_DEBUG_LEVEL` is not set or contains an invalid value, it defaults to `5`.
+pub fn get_macro_debug_level() -> usize {
+    static MACRO_DEBUG_LEVEL: Lazy<usize> =
+        Lazy::new(|| env::var("MACRO_DEBUG_LEVEL").ok().and_then(|s| s.parse().ok()).unwrap_or(5));
+    *MACRO_DEBUG_LEVEL
+}
 
 /// A list of filenames (not full paths) to allow debug messages from.
 /// If this list is empty, all files are allowed (respecting `MACRO_DEBUG_LEVEL`).
@@ -31,7 +41,7 @@ pub const ALLOWED_FILES: &[&str] = &[
 
 /// Checks if a given debug level is enabled based on `MACRO_DEBUG_LEVEL`.
 pub fn is_debug_level_enabled(level: usize) -> bool {
-    level <= MACRO_DEBUG_LEVEL
+    level <= get_macro_debug_level()
 }
 
 /// Internal implementation detail for the `debug!` macro.
@@ -42,7 +52,7 @@ pub fn is_debug_level_enabled(level: usize) -> bool {
 macro_rules! __debug_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         // Runtime check against the message's level and file path
-        if $level <= $crate::r#macro::MACRO_DEBUG_LEVEL {
+        if $level <= $crate::r#macro::get_macro_debug_level() {
             let current_file_path = std::path::Path::new(file!());
             // Extract the filename, default to empty string if extraction fails
             let current_filename = current_file_path.file_name()
