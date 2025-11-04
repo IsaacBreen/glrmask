@@ -585,11 +585,8 @@ impl DWA {
     /// A state is final if either of the original states is final.
     /// A transition exists if it exists in at least one of the original DWAs.
     /// If a transition exists in one but not the other, the other is treated as going to a non-final sink state.
-    /// Returns the new DWA and a map from new state IDs to the pair of original automaton states.
-    /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
-    pub fn union(&self, other: &DWA) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+    pub fn union(&self, other: &DWA) -> DWA {
         let mut new_dwa = DWA::default();
-        let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
         let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
         let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
 
@@ -600,8 +597,7 @@ impl DWA {
             pair: (StateID, StateID),
             new_dwa: &mut DWA,
             pair_to_new_id: &mut BTreeMap<(StateID, StateID), StateID>,
-            worklist: &mut VecDeque<(StateID, StateID)>,
-            mapping: &mut BTreeMap<StateID, BTreeSet<(usize, StateID)>>
+            worklist: &mut VecDeque<(StateID, StateID)>
         | -> StateID {
             if let Some(&id) = pair_to_new_id.get(&pair) {
                 return id;
@@ -610,21 +606,15 @@ impl DWA {
             new_dwa.states.0.push(DWAState::default());
             pair_to_new_id.insert(pair, new_id);
             worklist.push_back(pair);
-            
-            let mut merged_from = BTreeSet::new();
-            if pair.0 != sink0 { merged_from.insert((0, pair.0)); }
-            if pair.1 != sink1 { merged_from.insert((1, pair.1)); }
-            mapping.insert(new_id, merged_from);
-
             new_id
         };
 
         if self.states.is_empty() && other.states.is_empty() {
-            return (new_dwa, mapping);
+            return new_dwa;
         }
 
         let start_pair = (self.body.start_state, other.body.start_state);
-        new_dwa.body.start_state = get_or_create(start_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist, &mut mapping);
+        new_dwa.body.start_state = get_or_create(start_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
 
         while let Some((id0, id1)) = worklist.pop_front() {
             let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
@@ -656,7 +646,7 @@ impl DWA {
             let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
             let def_tgt1 = s1.and_then(|s| s.transitions.default).unwrap_or(sink1);
             let def_pair = (def_tgt0, def_tgt1);
-            let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist, &mut mapping);
+            let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
             new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
 
             let tw_def0 = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
@@ -670,7 +660,7 @@ impl DWA {
                 let exc_pair = (tgt0, tgt1);
 
                 if exc_pair != def_pair {
-                    let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist, &mut mapping);
+                    let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
                     new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
 
                     let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
@@ -680,28 +670,25 @@ impl DWA {
             }
         }
 
-        (new_dwa, mapping)
+        new_dwa
     }
 
     /// Concatenation-like operation on two DWAs.
-    /// The `join_map` specifies which states in `self` (the left DWA) are "join points".
-    /// When a join point `s_left` is entered, it's as if we also simultaneously enter
-    /// all states from `other` (the right DWA) associated with `s_left` in the `join_map`.
+    /// "Join all ends to all starts": whenever the left component reaches a final state,
+    /// we also (lazily) activate the right automaton's start state. If the left start is final,
+    /// the composition starts with the right start already active.
     ///
     /// This is implemented via a product-like construction where states in the new DWA
     /// are compositions of a state from `self` and a set of states from `other`.
     ///
-    /// Returns the new DWA and a map from new state IDs to the set of original automaton states.
-    /// The BTreeSet in the return value contains tuples of (automaton_index, state_id).
+    /// Returns the new DWA.
     pub fn concatenate(
         &self,
         other: &DWA,
-        join_map: &BTreeMap<StateID, BTreeSet<StateID>>,
-    ) -> (DWA, BTreeMap<StateID, BTreeSet<(usize, StateID)>>) {
+    ) -> DWA {
         let mut new_dwa = DWA::new();
         new_dwa.states.0.clear(); // start with no states
 
-        let mut mapping: BTreeMap<StateID, BTreeSet<(usize, StateID)>> = BTreeMap::new();
         let mut composition_to_new_id: BTreeMap<(StateID, BTreeSet<StateID>), StateID> = BTreeMap::new();
         let mut worklist: VecDeque<(StateID, BTreeSet<StateID>)> = VecDeque::new();
 
@@ -711,8 +698,7 @@ impl DWA {
         let mut get_or_create = |comp: (StateID, BTreeSet<StateID>),
                                  new_dwa: &mut DWA,
                                  comp_to_new_id: &mut BTreeMap<(StateID, BTreeSet<StateID>), StateID>,
-                                 worklist: &mut VecDeque<(StateID, BTreeSet<StateID>)>,
-                                 mapping: &mut BTreeMap<StateID, BTreeSet<(usize, StateID)>>|
+                                 worklist: &mut VecDeque<(StateID, BTreeSet<StateID>)>|
          -> StateID {
             if let Some(&id) = comp_to_new_id.get(&comp) {
                 return id;
@@ -722,29 +708,26 @@ impl DWA {
             comp_to_new_id.insert(comp.clone(), new_id);
             worklist.push_back(comp.clone());
 
-            let mut merged_from = BTreeSet::new();
-            if comp.0 != sink0 {
-                merged_from.insert((0, comp.0));
-            }
-            for &s1 in &comp.1 {
-                if s1 != sink1 {
-                    merged_from.insert((1, s1));
-                }
-            }
-            mapping.insert(new_id, merged_from);
-
             new_id
         };
 
         if self.states.is_empty() {
-            return (DWA::new(), BTreeMap::new());
+            return DWA::new();
         }
 
         let start0 = self.body.start_state;
-        let start1_set = join_map.get(&start0).cloned().unwrap_or_default();
+        let mut start1_set: BTreeSet<StateID> = BTreeSet::new();
+        if self.states[start0].final_weight.as_ref().map_or(false, |w| !w.is_empty()) {
+            start1_set.insert(other.body.start_state);
+        }
         let start_comp = (start0, start1_set);
         new_dwa.body.start_state =
-            get_or_create(start_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist, &mut mapping);
+            get_or_create(start_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
+
+        let right_start = other.body.start_state;
+        let is_final_left = |i: StateID| -> bool {
+            i != sink0 && self.states[i].final_weight.as_ref().map_or(false, |w| !w.is_empty())
+        };
 
         while let Some((id0, ids1)) = worklist.pop_front() {
             let new_id = *composition_to_new_id.get(&(id0, ids1.clone())).unwrap();
@@ -789,14 +772,13 @@ impl DWA {
             let mut def_tgts1: BTreeSet<StateID> =
                 ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| other.states[id1].transitions.default.unwrap_or(sink1)).collect();
             def_tgts1.remove(&sink1);
-
-            if let Some(joins) = join_map.get(&def_tgt0) {
-                def_tgts1.extend(joins);
+            if is_final_left(def_tgt0) {
+                def_tgts1.insert(right_start);
             }
 
             let def_comp = (def_tgt0, def_tgts1);
             let new_def_tgt =
-                get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist, &mut mapping);
+                get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
             new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
 
             let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
@@ -813,16 +795,15 @@ impl DWA {
                 let mut tgts1: BTreeSet<StateID> =
                     ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| get_target(Some(&other.states[id1]), sink1, ch)).collect();
                 tgts1.remove(&sink1);
-
-                if let Some(joins) = join_map.get(&tgt0) {
-                    tgts1.extend(joins);
+                if is_final_left(tgt0) {
+                    tgts1.insert(right_start);
                 }
 
                 let exc_comp = (tgt0, tgts1);
 
                 if exc_comp != def_comp {
                     let new_exc_tgt =
-                        get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist, &mut mapping);
+                        get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
                     new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
 
                     let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
@@ -836,7 +817,7 @@ impl DWA {
             }
         }
 
-        (new_dwa, mapping)
+        new_dwa
     }
 
     /// Apply a weight gate to the DWA by introducing a new start state that forwards to the
@@ -1077,13 +1058,11 @@ mod tests {
         d2.set_final_weight(t1, SimpleBitset::from_item(2)).unwrap();
 
         // Union
-        let (u, _) = d1.union(&d2);
+        let u = d1.union(&d2);
         assert_eq!(u.states.len() >= 2, true);
 
-        // Concatenate: join final(d1) -> start(d2)
-        let mut join_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-        join_map.insert(s1, BTreeSet::from([d2.body.start_state]));
-        let (c, _) = d1.concatenate(&d2, &join_map);
+        // Concatenate: ends of d1 join to start of d2
+        let c = d1.concatenate(&d2);
         assert!(c.states.len() >= 2);
     }
 
@@ -1200,7 +1179,7 @@ mod tests {
         expected.set_final_weight(s_a, Weight::from_item(1)).unwrap();
         expected.set_final_weight(s_b, Weight::from_item(2)).unwrap();
 
-        let (u, _) = d1.union(&d2);
+        let u = d1.union(&d2);
         assert_dwa_equivalent(u, expected);
     }
 
@@ -1220,7 +1199,7 @@ mod tests {
         expected.set_final_weight(s_a, Weight::from_iter(vec![1, 2])).unwrap();
         expected.set_final_weight(s_b, Weight::from_item(3)).unwrap();
 
-        let (u, _) = d1.union(&d2);
+        let u = d1.union(&d2);
         assert_dwa_equivalent(u, expected);
     }
 
@@ -1228,9 +1207,7 @@ mod tests {
     fn test_concatenate_simple() {
         let d1 = dwa_accepts_char('a', Weight::from_item(1)); // Final state is 1
         let d2 = dwa_accepts_char('b', Weight::from_item(2));
-        let mut join_map = BTreeMap::new();
-        join_map.insert(1, BTreeSet::from([d2.body.start_state]));
-        let (c, _) = d1.concatenate(&d2, &join_map);
+        let c = d1.concatenate(&d2);
         let expected = dwa_from_str("ab", Weight::from_item(2));
         assert_dwa_equivalent(c, expected);
     }
@@ -1355,34 +1332,13 @@ mod tests {
     }
 
     #[test]
-    fn test_union_transition_weight_union_and_mapping() {
+    fn test_union_transition_weight_union() {
         fn build(ch: char, ew: usize, fw: usize) -> DWA {
             dwa_with_char_and_weights(ch, Weight::from_item(ew), Weight::from_item(fw))
         }
         let d1 = build('x', 10, 1);
         let d2 = build('x', 20, 2);
-        let (u, mapping) = d1.union(&d2);
-
-        // Mapping for the start state should contain both component starts.
-        let start_u = u.body.start_state;
-        let start_map = mapping.get(&start_u).unwrap();
-        assert!(start_map.contains(&(0, d1.body.start_state)));
-        assert!(start_map.contains(&(1, d2.body.start_state)));
-
-        // The 'x' target should map to (some) d1 state and (some) d2 state.
-        let tgt_u = *u.states[start_u]
-            .transitions
-            .get('x' as i16)
-            .expect("union should have 'x' edge");
-        let tgt_map = mapping.get(&tgt_u).unwrap();
-        assert!(
-            tgt_map.iter().any(|&(i, s)| i == 0 && s != d1.body.start_state),
-            "target should include a non-start d1 state"
-        );
-        assert!(
-            tgt_map.iter().any(|&(i, s)| i == 1 && s != d2.body.start_state),
-            "target should include a non-start d2 state"
-        );
+        let u = d1.union(&d2);
 
         // Expected automaton with unioned transition and final weights on 'x'.
         let mut expected = DWA::new();
@@ -1398,10 +1354,11 @@ mod tests {
     }
 
     #[test]
-    fn test_concatenate_weight_aggregation_and_mapping() {
-        // Left automaton with weight {10} on start
+    fn test_concatenate_weight_aggregation() {
+        // Left automaton with weight {10} on start; mark it final so right is activated immediately.
         let mut left = DWA::new();
         left.set_state_weight(left.body.start_state, Weight::from_item(10)).unwrap();
+        left.set_final_weight(left.body.start_state, Weight::from_item(1)).unwrap();
 
         // Right automaton with two states having weights {20} and {30}
         let mut right = DWA::new();
@@ -1411,23 +1368,11 @@ mod tests {
         let r2 = right.add_state();
         right.set_state_weight(r2, Weight::from_item(30)).unwrap();
 
-        let mut join_map = BTreeMap::new();
-        join_map.insert(
-            left.body.start_state,
-            BTreeSet::from([right.body.start_state, r2]),
-        );
+        let c = left.concatenate(&right);
 
-        let (c, mapping) = left.concatenate(&right, &join_map);
-
-        // The composed start state's weight should be the union of all constituent weights.
+        // The composed start state's weight should be the union of left.start and right.start weights.
         let w_start = &c.states[c.body.start_state].weight;
-        assert_eq!(*w_start, Weight::from_iter(vec![10, 20, 30]));
-
-        // Mapping of the composed start should include all constituents.
-        let comp_start_map = mapping.get(&c.body.start_state).unwrap();
-        assert!(comp_start_map.contains(&(0, left.body.start_state)));
-        assert!(comp_start_map.contains(&(1, right.body.start_state)));
-        assert!(comp_start_map.contains(&(1, r2)));
+        assert_eq!(*w_start, Weight::from_iter(vec![10, 20]));
     }
 
     #[test]

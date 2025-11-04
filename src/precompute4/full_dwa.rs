@@ -86,8 +86,8 @@ fn build_template_dwas(
     let mut out = BTreeMap::new();
     for (term, bb) in all {
         let dwa = build_template_dwa_from_characterization(&bb)?;
-        println!("Built template DWA for terminal {:?}:", term);
-        println!("{}", dwa);
+        crate::debug!(5, "Built template DWA for terminal {:?}:", term);
+        crate::debug!(5, "{}", dwa);
         out.insert(term, dwa);
     }
     Ok(out)
@@ -181,16 +181,16 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 left.apply_weight(&weight);
 
                 // Concatenate: left then current (right)
-                let join_map = join_map_final_to_start(&left, &current_dwa);
-                let (mut composed, _) = left.concatenate(&current_dwa, &join_map);
+                crate::debug!(5, "Concatenating DWAs with join_map:\nLEFT:\n{}\nRIGHT:\n{}", left, current_dwa);
+                let mut composed = left.concatenate(&current_dwa);
+                crate::debug!(5, "Resulting composed DWA:\n{}", composed);
                 results.push((*dest_idx, composed));
             }
             results
         },
         // merge function: union them
         |dwa1, dwa2| {
-            let (mut u, _) = dwa1.union(&dwa2);
-            *dwa1 = u;
+            *dwa1 = dwa1.union(&dwa2);
         },
         // process function: capture at original roots
         |_node_data, node_idx, mut dwa| {
