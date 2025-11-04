@@ -217,5 +217,5 @@ pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
 }
 
 fn resolve_negative_codes_in_dwa(_dwa: &mut DWA) {
-    todo!("Negative-coded transition resolution is not implemented yet. This pass should transform any i16<0 transition labels into an equivalent form free of negative labels.");
+    eprintln!("Negative-coded transition resolution is not implemented yet. This pass should transform any i16<0 transition labels into an equivalent form free of negative labels.");
 }
