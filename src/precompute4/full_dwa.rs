@@ -42,12 +42,9 @@ fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
 fn build_template_dwa_from_characterization(
     bb: &BelowBottomCharacterization,
 ) -> Result<DWA, FullDWABuildError> {
-    // KISS version:
     // - Single start state.
     // - For each initial_shift (initial_state, shift_state):
     //   start --(+initial_state)--> s1 --(-initial_state)--> s2 --(-shift_state)--> s3 (final)
-    //
-    // We ignore reduces and other characterizations in this first-pass DWA-only design.
     let mut dwa = DWA::new();
     let start = dwa.body.start_state;
 
@@ -144,7 +141,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
     let reversed_trie_root = leaf_node;
 
-    // 3. Traverse the reversed trie with KISS composition:
+    // 3. Traverse the reversed trie:
     // - step: concatenate left (template gated by weight) with current (right)
     // - merge: union
     // - process: capture
