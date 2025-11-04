@@ -1,6 +1,5 @@
 use crate::precompute4::full_dwa::Precomputed4;
 use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, StateID, Weight};
-use std::collections::BTreeMap;
 
 pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
     for (_sid, dwa) in precomputed4.iter_mut() {
@@ -9,95 +8,7 @@ pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
 }
 
 fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-    if dwa.states.is_empty() {
-        return;
-    }
-
-    // 1. Build reverse adjacency list for positive edges to find potential cancellations.
-    let mut pos_rev_adj: Vec<Vec<(i16, Weight)>> = vec![vec![]; dwa.states.len()];
-    for (from_id, from_state) in dwa.states.0.iter().enumerate() {
-        for (&ch, &to_id) in &from_state.transitions.exceptions {
-            if ch >= 0 && to_id < dwa.states.len() {
-                let weight = from_state
-                    .trans_weights_exceptions
-                    .get(&ch)
-                    .cloned()
-                    .unwrap_or_else(Weight::all);
-                pos_rev_adj[to_id].push((ch, weight));
-            }
-        }
-    }
-
-    // 2. Propagate finality backwards over negative edges until a fixed point is reached.
-    loop {
-        let mut changed = false;
-        let current_final_weights = dwa
-            .states
-            .0
-            .iter()
-            .map(|s| s.final_weight.clone().unwrap_or_else(Weight::zeros))
-            .collect::<Vec<_>>();
-
-        for s_id in 0..dwa.states.len() {
-            let s = &dwa.states[s_id].clone(); // Clone to avoid borrow checker issues
-            for (&neg_code, &b_id) in s.transitions.exceptions.iter().filter(|(&ch, _)| ch < 0) {
-                if b_id >= dwa.states.len() {
-                    continue;
-                }
-
-                let b_final_weight = &current_final_weights[b_id];
-                if b_final_weight.is_empty() {
-                    continue;
-                }
-
-                let w_neg = s
-                    .trans_weights_exceptions
-                    .get(&neg_code)
-                    .cloned()
-                    .unwrap_or_else(Weight::all);
-
-                let pos_code = if neg_code != i16::MIN { -neg_code } else { i16::MAX };
-
-                let mut incoming_pos_weights = Weight::zeros();
-                let mut has_matching_pos_edge = false;
-                for &(ch, ref w_pos) in &pos_rev_adj[s_id] {
-                    if ch == pos_code {
-                        incoming_pos_weights |= w_pos;
-                        has_matching_pos_edge = true;
-                    }
-                }
-
-                let w_prop = if has_matching_pos_edge {
-                    b_final_weight & &w_neg & &incoming_pos_weights
-                } else {
-                    b_final_weight & &w_neg
-                };
-
-                if !w_prop.is_empty() {
-                    let old_fw = &dwa.states[s_id].final_weight.clone().unwrap_or_else(Weight::zeros);
-                    let mut new_fw = old_fw.clone();
-                    new_fw |= &w_prop;
-                    if &new_fw != old_fw {
-                        dwa.states[s_id].final_weight = Some(new_fw);
-                        changed = true;
-                    }
-                }
-            }
-        }
-
-        if !changed {
-            break;
-        }
-    }
-
-    // 4. Remove all negative transitions.
-    for state in &mut dwa.states.0 {
-        state.transitions.exceptions.retain(|&ch, _| ch >= 0);
-        state.trans_weights_exceptions.retain(|&ch, _| ch >= 0);
-    }
-
-    // 5. Simplify to remove newly unreachable/redundant states.
-    dwa.simplify();
+    todo!()
 }
 
 #[cfg(test)]
