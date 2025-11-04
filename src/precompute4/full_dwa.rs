@@ -1,10 +1,10 @@
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
-use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, Weight};
+use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, Weight, StateID};
 use std::collections::{BTreeMap, BTreeSet};
 use crate::datastructures::trie::Trie;
-use crate::glr::table::{TerminalID, StateID as ParserStateID};
+use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
 use range_set_blaze::RangeSetBlaze;
@@ -42,36 +42,105 @@ fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
 fn build_template_dwa_from_characterization(
     bb: &BelowBottomCharacterization,
 ) -> Result<DWA, FullDWABuildError> {
-    // - Single start state.
-    // - For each initial_shift (initial_state, shift_state):
-    //   start --(+initial_state)--> s1 --(-initial_state)--> s2 --(-shift_state)--> s3 (final)
     let mut dwa = DWA::new();
+    let w_all = Weight::all();
+
+    // Create a node for each non-terminal, similar to the NWA construction.
+    let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
+    for &nt in &bb.all_nts {
+        let id = dwa.add_state();
+        nt_nodes.insert(nt, id);
+    }
+
     let start = dwa.body.start_state;
 
+    // --- Initial Actions from Start State ---
+
     for &(initial_state, shift_state) in &bb.initial_shifts {
-        let pos = encode_symbol_i16(initial_state)?;
+        let pos_initial = encode_symbol_i16(initial_state)?;
         let neg_initial = encode_negative_i16(initial_state)?;
         let neg_shift = encode_negative_i16(shift_state)?;
 
-        // Create the chain of states
         let s1 = dwa.add_state();
         let s2 = dwa.add_state();
         let s3 = dwa.add_state();
 
-        // start -> s1 on +initial_state
-        dwa.states[start].transitions.exceptions.insert(pos, s1);
-        dwa.states[start].trans_weights_exceptions.insert(pos, Weight::all());
-
-        // s1 -> s2 on -initial_state
+        // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
+        dwa.states[start].transitions.exceptions.insert(pos_initial, s1);
+        dwa.states[start].trans_weights_exceptions.insert(pos_initial, w_all.clone());
         dwa.states[s1].transitions.exceptions.insert(neg_initial, s2);
-        dwa.states[s1].trans_weights_exceptions.insert(neg_initial, Weight::all());
-
-        // s2 -> s3 on -shift_state
+        dwa.states[s1].trans_weights_exceptions.insert(neg_initial, w_all.clone());
         dwa.states[s2].transitions.exceptions.insert(neg_shift, s3);
-        dwa.states[s2].trans_weights_exceptions.insert(neg_shift, Weight::all());
+        dwa.states[s2].trans_weights_exceptions.insert(neg_shift, w_all.clone());
+        dwa.states[s3].final_weight = Some(w_all.clone());
+    }
 
-        // Mark s3 as final
-        dwa.states[s3].final_weight = Some(Weight::all());
+    for &(initial_state, len, nt) in &bb.initial_reduces {
+        let pos_initial = encode_symbol_i16(initial_state)?;
+        let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
+
+        // Create a chain of default transitions for the pops.
+        // start --(+initial)--> s1 --(default)*len--> target_nt_state
+        let mut from = start;
+        let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
+        dwa.states[from].transitions.exceptions.insert(pos_initial, next_state);
+        dwa.states[from].trans_weights_exceptions.insert(pos_initial, w_all.clone());
+        from = next_state;
+
+        for i in 0..len {
+            let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
+            dwa.states[from].transitions.default = Some(to);
+            dwa.states[from].trans_weight_default = Some(w_all.clone());
+            from = to;
+        }
+    }
+
+    // --- Actions from Non-Terminal States ---
+
+    for (nt, rc) in &bb.reduce_characterizations {
+        let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
+
+        for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
+            let pos_revealed = encode_symbol_i16(revealed_state)?;
+            let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
+
+            // src --(+revealed)--> s1 --(default)*len--> dst
+            let mut from = src_nt_state;
+            let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
+            dwa.states[from].transitions.exceptions.insert(pos_revealed, next_state);
+            dwa.states[from].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
+            from = next_state;
+
+            for i in 0..len {
+                let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
+                dwa.states[from].transitions.default = Some(to);
+                dwa.states[from].trans_weight_default = Some(w_all.clone());
+                from = to;
+            }
+        }
+
+        for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+            let pos_revealed = encode_symbol_i16(revealed_state)?;
+            let neg_revealed = encode_negative_i16(revealed_state)?;
+            let neg_goto = encode_negative_i16(goto_state)?;
+            let neg_shift = encode_negative_i16(shift_state)?;
+
+            let s1 = dwa.add_state();
+            let s2 = dwa.add_state();
+            let s3 = dwa.add_state();
+            let s4 = dwa.add_state();
+
+            // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
+            dwa.states[src_nt_state].transitions.exceptions.insert(pos_revealed, s1);
+            dwa.states[src_nt_state].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
+            dwa.states[s1].transitions.exceptions.insert(neg_revealed, s2);
+            dwa.states[s1].trans_weights_exceptions.insert(neg_revealed, w_all.clone());
+            dwa.states[s2].transitions.exceptions.insert(neg_goto, s3);
+            dwa.states[s2].trans_weights_exceptions.insert(neg_goto, w_all.clone());
+            dwa.states[s3].transitions.exceptions.insert(neg_shift, s4);
+            dwa.states[s3].trans_weights_exceptions.insert(neg_shift, w_all.clone());
+            dwa.states[s4].final_weight = Some(w_all.clone());
+        }
     }
 
     Ok(dwa)
