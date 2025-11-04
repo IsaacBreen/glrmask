@@ -25,17 +25,12 @@ fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
 }
 
 fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-    // Negative codes for stack-hitching. We store as - (id as i16).
-    if id.0 == 0 {
-        // Represent 0 as 0? We'll still use -0 = 0 which is not negative; disallow.
-        // Bump to -1 for 0? Simpler: disallow and require id > 0.
-        // But parser states can be 0. We'll map 0 to -32768 + 1 offset? Too much.
-        // KISS: if 0 => -1 and document TODO resolution later.
-        Ok(-1)
-    } else if id.0 > i16::MAX as usize {
+    // Negative codes for stack-hitching. We store as i16::MIN + id.
+    // This requires that parser state IDs are not too large.
+    if id.0 > (i16::MAX as usize) {
         Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
     } else {
-        Ok(-(id.0 as i16))
+        Ok(i16::MIN + (id.0 as i16))
     }
 }
 

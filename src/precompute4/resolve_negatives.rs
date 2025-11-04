@@ -36,17 +36,17 @@ mod tests {
         d.add_transition(0, 2, s3, Weight::from_item(0)).unwrap();
         d.add_transition(0, 3, s4, Weight::from_iter(0..=1)).unwrap();
         // State 1
-        d.add_transition(s1, -1, s5, Weight::all()).unwrap();
+        d.add_transition(s1, i16::MIN + 1, s5, Weight::all()).unwrap();
         // State 2
         d.set_default_transition(s2, s6, Weight::all()).unwrap();
         // State 3
-        d.add_transition(s3, -2, s7, Weight::all()).unwrap();
+        d.add_transition(s3, i16::MIN + 2, s7, Weight::all()).unwrap();
         // State 4 is a sink
         // State 5
-        d.add_transition(s5, -1, s8, Weight::all()).unwrap();
+        d.add_transition(s5, i16::MIN + 1, s8, Weight::all()).unwrap();
         // State 6 is a sink
         // State 7
-        d.add_transition(s7, -1, s9, Weight::all()).unwrap();
+        d.add_transition(s7, i16::MIN + 1, s9, Weight::all()).unwrap();
         // State 8
         d.set_final_weight(s8, Weight::all()).unwrap();
         // State 9
@@ -76,7 +76,7 @@ mod tests {
         let s2 = d.add_state();
 
         d.add_transition(d.body.start_state, 7, s1, Weight::from_item(2)).unwrap();
-        d.add_transition(s1, -7, s2, Weight::all()).unwrap();
+        d.add_transition(s1, i16::MIN + 7, s2, Weight::all()).unwrap();
         d.set_final_weight(s2, Weight::all()).unwrap();
 
         resolve_negative_codes_in_dwa(&mut d);
