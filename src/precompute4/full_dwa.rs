@@ -1,37 +1,20 @@
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
-use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, Weight, StateID};
+use crate::precompute4::weighted_automata::{DWAState, DWAStates, StateID, Weight, DWA};
 use std::collections::{BTreeMap, BTreeSet};
 use crate::datastructures::trie::Trie;
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
 use range_set_blaze::RangeSetBlaze;
+use crate::precompute4::utils;
 
 pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FullDWABuildError {
     ParserStateIdOutOfRange { state_id: ParserStateID },
-}
-
-fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-    if id.0 > i16::MAX as usize {
-        Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-    } else {
-        Ok(id.0 as i16)
-    }
-}
-
-fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-    // Negative codes for stack-hitching. We store as i16::MIN + id.
-    // This requires that parser state IDs are not too large.
-    if id.0 > (i16::MAX as usize) {
-        Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-    } else {
-        Ok(i16::MIN + (id.0 as i16))
-    }
 }
 
 fn build_template_dwa_from_characterization(
@@ -52,9 +35,9 @@ fn build_template_dwa_from_characterization(
     // --- Initial Actions from Start State ---
 
     for &(initial_state, shift_state) in &bb.initial_shifts {
-        let pos_initial = encode_symbol_i16(initial_state)?;
-        let neg_initial = encode_negative_i16(initial_state)?;
-        let neg_shift = encode_negative_i16(shift_state)?;
+        let pos_initial = utils::encode_symbol_i16(initial_state)?;
+        let neg_initial = utils::encode_negative_i16(initial_state)?;
+        let neg_shift = utils::encode_negative_i16(shift_state)?;
 
         let s1 = dwa.add_state();
         let s2 = dwa.add_state();
@@ -71,7 +54,7 @@ fn build_template_dwa_from_characterization(
     }
 
     for &(initial_state, len, nt) in &bb.initial_reduces {
-        let pos_initial = encode_symbol_i16(initial_state)?;
+        let pos_initial = utils::encode_symbol_i16(initial_state)?;
         let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
 
         // Create a chain of default transitions for the pops.
@@ -96,7 +79,7 @@ fn build_template_dwa_from_characterization(
         let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
 
         for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
-            let pos_revealed = encode_symbol_i16(revealed_state)?;
+            let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
             let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
 
             // src --(+revealed)--> s1 --(default)*len--> dst
@@ -115,10 +98,10 @@ fn build_template_dwa_from_characterization(
         }
 
         for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
-            let pos_revealed = encode_symbol_i16(revealed_state)?;
-            let neg_revealed = encode_negative_i16(revealed_state)?;
-            let neg_goto = encode_negative_i16(goto_state)?;
-            let neg_shift = encode_negative_i16(shift_state)?;
+            let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+            let neg_revealed = utils::encode_negative_i16(revealed_state)?;
+            let neg_goto = utils::encode_negative_i16(goto_state)?;
+            let neg_shift = utils::encode_negative_i16(shift_state)?;
 
             let s1 = dwa.add_state();
             let s2 = dwa.add_state();
