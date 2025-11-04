@@ -565,4 +565,32 @@ mod tests {
 
         assert_dwa_equivalent(d, expected);
     }
+
+    #[test]
+    fn test_resolve_negatives_isolated_path_from_tokenizer_1() {
+        let mut d = DWA::new();
+        // Path: 0 -> 1(s5) -> 2(s10) -> 3(s13) -> 4(s15) -> 5(s22) -> 6(s27) -> 7(s29) -> 8(s30)
+        // Transitions: 7, -7, -3, 3, 7, -7, -1, -2
+        let s5 = d.add_state(); // 1
+        let s10 = d.add_state(); // 2
+        let s13 = d.add_state(); // 3
+        let s15 = d.add_state(); // 4
+        let s22 = d.add_state(); // 5
+        let s27 = d.add_state(); // 6
+        let s29 = d.add_state(); // 7
+        let s30 = d.add_state(); // 8
+
+        d.add_transition(d.body.start_state, 7, s5, Weight::from_item(2)).unwrap();
+        d.add_transition(s5, -7, s30, Weight::all()).unwrap();
+        d.set_final_weight(s30, Weight::all()).unwrap();
+
+        resolve_negative_codes_in_dwa(&mut d);
+
+        let mut expected = DWA::new();
+        let s_final = expected.add_state();
+        expected.add_transition(expected.body.start_state, 7, s_final, Weight::from_item(2)).unwrap();
+        expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
+
+        assert_dwa_equivalent(d, expected);
+    }
 }
