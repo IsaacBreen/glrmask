@@ -269,6 +269,27 @@ impl DWAState {
                 .and_modify(|self_w| *self_w |= other_w)
                 .or_insert_with(|| other_w.clone());
         }
+
+        // Merge transition targets, asserting that we do not introduce non-determinism.
+        if let Some(other_def_tgt) = other.transitions.default {
+            if let Some(self_def_tgt) = self.transitions.default {
+                if self_def_tgt != other_def_tgt {
+                    panic!("Cannot merge DWAStates with conflicting default transitions");
+                }
+            } else {
+                self.transitions.default = Some(other_def_tgt);
+            }
+        }
+
+        for (&ch, &other_tgt) in &other.transitions.exceptions {
+            if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
+                if self_tgt != other_tgt {
+                    panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
+                }
+            } else {
+                self.transitions.exceptions.insert(ch, other_tgt);
+            }
+        }
     }
 }
 
