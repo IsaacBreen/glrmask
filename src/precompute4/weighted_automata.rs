@@ -243,6 +243,54 @@ impl DWAState {
         }
     }
 
+    /// Merges another DWAState into this one by taking the union of all weights.
+    /// This does not affect transition targets.
+    pub fn merge_union(&mut self, other: &DWAState) {
+        self.weight |= &other.weight;
+
+        if let Some(other_fw) = &other.final_weight {
+            if let Some(self_fw) = &mut self.final_weight {
+                *self_fw |= other_fw;
+            } else {
+                self.final_weight = Some(other_fw.clone());
+            }
+        }
+
+        if let Some(other_twd) = &other.trans_weight_default {
+            if let Some(self_twd) = &mut self.trans_weight_default {
+                *self_twd |= other_twd;
+            } else {
+                self.trans_weight_default = Some(other_twd.clone());
+            }
+        }
+
+        for (ch, other_w) in &other.trans_weights_exceptions {
+            self.trans_weights_exceptions.entry(*ch)
+                .and_modify(|self_w| *self_w |= other_w)
+                .or_insert_with(|| other_w.clone());
+        }
+
+        // Merge transition targets, asserting that we do not introduce non-determinism.
+        if let Some(other_def_tgt) = other.transitions.default {
+            if let Some(self_def_tgt) = self.transitions.default {
+                if self_def_tgt != other_def_tgt {
+                    panic!("Cannot merge DWAStates with conflicting default transitions");
+                }
+            } else {
+                self.transitions.default = Some(other_def_tgt);
+            }
+        }
+
+        for (&ch, &other_tgt) in &other.transitions.exceptions {
+            if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
+                if self_tgt != other_tgt {
+                    panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
+                }
+            } else {
+                self.transitions.exceptions.insert(ch, other_tgt);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -803,140 +851,6 @@ impl DWA {
         }
 
         new_dwa
-    }
-
-    /// Merge two states `a` and `b` by creating a new state whose behavior is the
-    /// union of `a` and `b`. Conflicting transitions are resolved by recursively
-    /// merging their destinations, creating additional states as needed.
-    ///
-    /// Returns the ID of the newly created merged state. Never panics.
-    pub fn merge_states_union(&mut self, a: StateID, b: StateID) -> Result<StateID, DWABuildError> {
-        let n0 = self.states.len();
-        if a >= n0 {
-            return Err(DWABuildError::StateOutOfBounds { state: a });
-        }
-        if b >= n0 {
-            return Err(DWABuildError::StateOutOfBounds { state: b });
-        }
-
-        // Map canonicalized pairs (min, max) -> new merged state ID
-        let mut pair_to_new: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
-        let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
-
-        // Helper to create-or-lookup the merged state for a pair.
-        let mut get_or_create = |pair: (StateID, StateID),
-                                 this: &mut DWA,
-                                 map: &mut BTreeMap<(StateID, StateID), StateID>,
-                                 wl: &mut VecDeque<(StateID, StateID)>|
-         -> StateID {
-            let key = if pair.0 <= pair.1 { pair } else { (pair.1, pair.0) };
-            if let Some(&id) = map.get(&key) {
-                return id;
-            }
-            let id = this.states.add_state();
-            map.insert(key, id);
-            wl.push_back(key);
-            id
-        };
-
-        // Weight lookup for a specific char on a state: exception weight if present;
-        // otherwise the default weight; otherwise zeros.
-        let edge_weight = |st: &DWAState, ch: i16| -> Weight {
-            st.trans_weights_exceptions
-                .get(&ch)
-                .cloned()
-                .unwrap_or_else(|| st.trans_weight_default.clone().unwrap_or_else(Weight::zeros))
-        };
-
-        let start_pair = if a <= b { (a, b) } else { (b, a) };
-        let start_id = get_or_create(start_pair, self, &mut pair_to_new, &mut worklist);
-
-        while let Some((x, y)) = worklist.pop_front() {
-            let new_id = *pair_to_new.get(&(x, y)).expect("pair must exist");
-
-            // Clone sources to avoid borrow conflicts while we construct the merged state.
-            let sx = self.states[x].clone();
-            let sy = self.states[y].clone();
-
-            // Build the merged state off to the side, then store it into arena.
-            let mut merged = DWAState::default();
-
-            // State weight = union
-            merged.weight = &sx.weight | &sy.weight;
-
-            // Final weight = union (None treated as zeros; omit if empty)
-            let fwx = sx.final_weight.clone().unwrap_or_else(Weight::zeros);
-            let fwy = sy.final_weight.clone().unwrap_or_else(Weight::zeros);
-            let fwu = &fwx | &fwy;
-            if !fwu.is_empty() {
-                merged.final_weight = Some(fwu);
-            }
-
-            // Determine merged default target (if any) and its weight.
-            let merged_default_target: Option<StateID> = match (sx.transitions.default, sy.transitions.default) {
-                (None, None) => None,
-                (Some(dx), None) => Some(dx),
-                (None, Some(dy)) => Some(dy),
-                (Some(dx), Some(dy)) => {
-                    if dx == dy {
-                        Some(dx)
-                    } else {
-                        Some(get_or_create(
-                            if dx <= dy { (dx, dy) } else { (dy, dx) },
-                            self,
-                            &mut pair_to_new,
-                            &mut worklist,
-                        ))
-                    }
-                }
-            };
-            if let Some(_) = merged_default_target {
-                let dwx = sx.trans_weight_default.clone().unwrap_or_else(Weight::zeros);
-                let dwy = sy.trans_weight_default.clone().unwrap_or_else(Weight::zeros);
-                merged.trans_weight_default = Some(&dwx | &dwy);
-            }
-            merged.transitions.default = merged_default_target;
-
-            // Build exceptions where they differ from default behavior.
-            let mut critical_points: BTreeSet<i16> = BTreeSet::new();
-            critical_points.extend(sx.transitions.exceptions.keys().copied());
-            critical_points.extend(sy.transitions.exceptions.keys().copied());
-
-            for ch in critical_points {
-                let tx = sx.transitions.get(ch).copied();
-                let ty = sy.transitions.get(ch).copied();
-                let tgt = match (tx, ty) {
-                    (None, None) => None,
-                    (Some(a), None) => Some(a),
-                    (None, Some(b)) => Some(b),
-                    (Some(a), Some(b)) => {
-                        if a == b {
-                            Some(a)
-                        } else {
-                            Some(get_or_create(
-                                if a <= b { (a, b) } else { (b, a) },
-                                self,
-                                &mut pair_to_new,
-                                &mut worklist,
-                            ))
-                        }
-                    }
-                };
-                if tgt != merged.transitions.default {
-                    if let Some(tid) = tgt {
-                        let wx = edge_weight(&sx, ch);
-                        let wy = edge_weight(&sy, ch);
-                        let wu = &wx | &wy;
-                        merged.transitions.exceptions.insert(ch, tid);
-                        merged.trans_weights_exceptions.insert(ch, wu);
-                    }
-                }
-            }
-
-            self.states[new_id] = merged;
-        }
-
-        Ok(start_id)
     }
 
     /// Concatenation-like operation on two DWAs.
