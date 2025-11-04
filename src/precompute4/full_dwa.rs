@@ -248,10 +248,6 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
     );
 
-    // 4. Resolve negative transition codes (placeholder, unimplemented)
-    //    This should inspect transitions with negative codes and transform/fold them into
-    //    a representation suitable for conversion. For now, it's a TODO and will panic
-    //    if invoked. Comment out to proceed without resolution.
     resolve_negative_codes_for_all(&mut final_dwas);
 
     final_dwas
