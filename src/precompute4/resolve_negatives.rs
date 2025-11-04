@@ -9,6 +9,7 @@ pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
 }
 
 fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
+    crate::debug!(5, "Initial DWA:\n{}", dwa);
     loop {
         let mut changed_in_pass = false;
         let mut all_new_states = Vec::with_capacity(dwa.states.len());
@@ -29,6 +30,7 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         dwa.states = DWAStates(all_new_states);
     }
     dwa.simplify();
+    crate::debug!(5, "Resolved DWA:\n{}", dwa);
 }
 
 fn resolve_negative_codes_in_dwa_internal(
