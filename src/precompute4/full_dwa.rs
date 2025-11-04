@@ -86,6 +86,8 @@ fn build_template_dwas(
     let mut out = BTreeMap::new();
     for (term, bb) in all {
         let dwa = build_template_dwa_from_characterization(&bb)?;
+        println!("Built template DWA for terminal {:?}:", term);
+        println!("{}", dwa);
         out.insert(term, dwa);
     }
     Ok(out)
