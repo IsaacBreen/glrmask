@@ -357,3 +357,60 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     DWA::normalize_edges_inplace(&mut dwa.states);
     dwa.simplify();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::precompute4::weighted_automata::{assert_dwa_equivalent, DWA, Weight};
+
+    #[test]
+    fn test_resolve_negatives_complex_cancellation() {
+        let mut d = DWA::new();
+        // State 0 is start
+        let s1 = d.add_state();
+        let s2 = d.add_state();
+        let s3 = d.add_state();
+        let s4 = d.add_state();
+        let s5 = d.add_state();
+        let s6 = d.add_state();
+        let s7 = d.add_state();
+        let s8 = d.add_state();
+        let s9 = d.add_state();
+
+        // State 0
+        d.add_transition(0, 0, s1, Weight::from_item(1)).unwrap();
+        d.add_transition(0, 1, s2, Weight::from_iter(0..=1)).unwrap();
+        d.add_transition(0, 2, s3, Weight::from_item(0)).unwrap();
+        d.add_transition(0, 3, s4, Weight::from_iter(0..=1)).unwrap();
+        // State 1
+        d.add_transition(s1, -1, s5, Weight::all()).unwrap();
+        // State 2
+        d.set_default_transition(s2, s6, Weight::all()).unwrap();
+        // State 3
+        d.add_transition(s3, -2, s7, Weight::all()).unwrap();
+        // State 4 is a sink
+        // State 5
+        d.add_transition(s5, -1, s8, Weight::all()).unwrap();
+        // State 6 is a sink
+        // State 7
+        d.add_transition(s7, -1, s9, Weight::all()).unwrap();
+        // State 8
+        d.set_final_weight(s8, Weight::all()).unwrap();
+        // State 9
+        d.set_final_weight(s9, Weight::all()).unwrap();
+
+        resolve_negative_codes_in_dwa(&mut d);
+
+        let mut expected = DWA::new(); // state 0
+        let s1_exp = expected.add_state(); // state 1
+        let s_sink_exp = expected.add_state(); // state 2
+
+        expected.add_transition(0, 0, s_sink_exp, Weight::from_item(1)).unwrap();
+        expected.add_transition(0, 1, s1_exp, Weight::from_iter(0..=1)).unwrap();
+        expected.add_transition(0, 2, s_sink_exp, Weight::from_item(0)).unwrap();
+        expected.add_transition(0, 3, s_sink_exp, Weight::from_iter(0..=1)).unwrap();
+        expected.set_default_transition(s1_exp, s_sink_exp, Weight::all()).unwrap();
+
+        assert_dwa_equivalent(d, expected);
+    }
+}
