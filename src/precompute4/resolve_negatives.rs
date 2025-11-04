@@ -381,12 +381,10 @@ mod tests {
         resolve_negative_codes_in_dwa(&mut d);
 
         // After resolution and simplification, the chain of cancellations should result
-        // in an automaton that accepts the sequence "77".
+        // in an automaton that accepts the "7".
         let mut expected = DWA::new();
-        let s_intermediate = expected.add_state();
         let s_final = expected.add_state();
-        expected.add_transition(expected.body.start_state, code7, s_intermediate, Weight::all()).unwrap();
-        expected.add_transition(s_intermediate, code7, s_final, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, code7, s_final, Weight::all()).unwrap();
         expected.set_final_weight(s_final, Weight::all()).unwrap();
 
         assert_dwa_equivalent(d, expected);
