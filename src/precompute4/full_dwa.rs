@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::datastructures::trie::Trie;
 use crate::glr::table::{TerminalID, StateID as ParserStateID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
+use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
 use range_set_blaze::RangeSetBlaze;
 
 pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
@@ -208,16 +209,4 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     resolve_negative_codes_for_all(&mut final_dwas);
 
     final_dwas
-}
-
-// Placeholder: resolve negative-coded transitions. Unimplemented for now.
-pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
-    for (sid, dwa) in precomputed4.iter_mut() {
-        println!("resolve_negative_codes_for_all: TokenizerStateID {:?} -> TODO", sid);
-        resolve_negative_codes_in_dwa(dwa);
-    }
-}
-
-fn resolve_negative_codes_in_dwa(_dwa: &mut DWA) {
-    eprintln!("Negative-coded transition resolution is not implemented yet. This pass should transform any i16<0 transition labels into an equivalent form free of negative labels.");
 }
