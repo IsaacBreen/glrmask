@@ -300,6 +300,11 @@ impl AugmentedNwaBody {
         }
 
         // 2) Compose inside the shared arena (states) using the product-like construction.
+        println!("concatenate_right_into_on_shared:\nLEFT: {}\nRIGHT: {}\nSTATES: {}",
+            &left.nwa,
+            &right.nwa,
+            &states,
+        );
         let mapping = WaNWA::concatenate_components(states, &mut left.nwa, &right.nwa, &join_map);
 
         // 3) Rebuild end_map and nt_nodes from the composition mapping.

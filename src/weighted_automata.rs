@@ -2136,6 +2136,11 @@ impl DWA {
 }
 
 // --- Display Implementations for Debugging ---
+impl Display for NWABody {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NWA Body (starts: {:?})", self.start_states)
+    }
+}
 
 impl Display for NWAStates {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
