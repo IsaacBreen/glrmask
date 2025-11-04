@@ -40,6 +40,7 @@ pub struct BelowBottomCharacterization {
     // (initial_state, len, nonterminal)
     pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
     pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+    pub all_nts: BTreeSet<NonTerminalID>,
 }
 
 impl Display for BelowBottomCharacterization {
@@ -76,11 +77,13 @@ pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID,
 }
 
 pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
+    let all_nts = parser.non_terminal_map.right_values().cloned().collect();
     let mut char = BelowBottomCharacterization {
         terminal: terminal_id,
         initial_shifts: BTreeSet::new(),
         initial_reduces: BTreeSet::new(),
         reduce_characterizations: BTreeMap::new(),
+        all_nts,
     };
 
     // --- 1. Compute initial actions ---

@@ -1,7 +1,7 @@
 // src/precompute4/conversion.rs
 use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
 use crate::datastructures::trie::Trie;
-use crate::weighted_automata::{DWA, StateID as WaStateID, Weight as WaWeight};
+use crate::weighted_automata::{DWA, StateID, Weight};
 use std::collections::BTreeMap;
 
 pub fn dwa_to_precompute3(
@@ -10,7 +10,7 @@ pub fn dwa_to_precompute3(
     _internal_max_llm_token: usize,
     max_parser_state_id: usize,
 ) -> PrecomputeNode3Index {
-    let mut dwa_state_to_trie_node: BTreeMap<WaStateID, PrecomputeNode3Index> = BTreeMap::new();
+    let mut dwa_state_to_trie_node: BTreeMap<StateID, PrecomputeNode3Index> = BTreeMap::new();
     let all_parser_states = StateIDBV::ones(max_parser_state_id + 1);
 
     // Create all nodes first
@@ -48,7 +48,7 @@ pub fn dwa_to_precompute3(
             let parser_state_id = char_code as usize;
             handled_exceptions.insert(parser_state_id);
 
-            let trans_weight = dwa_state.trans_weights_exceptions.get(&char_code).cloned().unwrap_or_else(WaWeight::zeros);
+            let trans_weight = dwa_state.trans_weights_exceptions.get(&char_code).cloned().unwrap_or_else(Weight::zeros);
             let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
 
             if !trans_weight_bv.is_empty() {
@@ -62,7 +62,7 @@ pub fn dwa_to_precompute3(
         // Default transition
         if let Some(target_dwa_id) = dwa_state.transitions.default {
             let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
-            let trans_weight = dwa_state.trans_weight_default.as_ref().cloned().unwrap_or_else(WaWeight::zeros);
+            let trans_weight = dwa_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
             let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
 
             if !trans_weight_bv.is_empty() {

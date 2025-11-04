@@ -1,7 +1,7 @@
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
-use crate::weighted_automata::{DWA, NWA as WaNWA, NWAStates as WaNWAStates, NWABody as WaNWABody, Weight as WaWeight};
+use crate::weighted_automata::{DWA, NWA, NWAStates, NWABody, Weight};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::datastructures::trie::Trie;
@@ -52,13 +52,13 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
 
     // Shared NWA states arena for the entire traversal. This lets us share subgraphs between paths.
-    let shared_states = RefCell::new(WaNWAStates::default());
+    let shared_states = RefCell::new(NWAStates::default());
     let initial_state = shared_states.borrow_mut().add_state();
-    shared_states.borrow_mut().set_final_weight(initial_state, WaWeight::all());
+    shared_states.borrow_mut().set_final_weight(initial_state, Weight::all());
 
     // The initial body: single start that is final, with end_map containing empty stack.
     let initial_aug_body = AugmentedNwaBody {
-        nwa: WaNWABody { start_states: BTreeSet::from([initial_state]) },
+        nwa: NWABody { start_states: BTreeSet::from([initial_state]) },
         nt_nodes: BTreeMap::new(),
         end_map: BTreeMap::from([]),
     };
@@ -95,7 +95,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 let mut left_body = template_aug.body.clone();
                 left_body.remap_states(&mapping);
 
-                let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                let weight: Weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
                 // Concatenate into a new body (mutating the shared graph with epsilon links).
                 let combine_now = Instant::now();
                 let mut new_body = left_body.clone();
@@ -161,7 +161,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let mut precomputed4: Precomputed4 = BTreeMap::new();
     for (sid, aug_body) in final_nwas {
         let det_now = Instant::now();
-        let mut dwa = WaNWA::determinize_components(&shared_states.borrow(), &aug_body.nwa);
+        let mut dwa = NWA::determinize_components(&shared_states.borrow(), &aug_body.nwa);
         let det_elapsed = det_now.elapsed();
 
         let simplify_now = Instant::now();
