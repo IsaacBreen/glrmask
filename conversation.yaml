@@ -1112,40 +1112,40 @@ local_system:
                   let s_a = &a.states[id_a];
                   let s_b = &b.states[id_b];
 
-                  assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {})", id_a, id_b);
-                  assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {})", id_a, id_b);
+                  assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
+                  assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
                   let def_a = s_a.transitions.default;
                   let def_b = s_b.transitions.default;
-                  assert_eq!(def_a.is_some(), def_b.is_some());
+                  assert_eq!(def_a.is_some(), def_b.is_some(), "Default transition existence differs for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
                   if let (Some(next_a), Some(next_b)) = (def_a, def_b) {
                       if let Some(&mapped_b) = mapping.get(&next_a) {
-                          assert_eq!(mapped_b, next_b, "Default transition mismatch");
+                          assert_eq!(mapped_b, next_b, "Default transition mismatch for state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, a, b);
                       } else {
                           mapping.insert(next_a, next_b);
                           worklist.push_back((next_a, next_b));
                       }
                   }
-                  assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default);
+                  assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default, "Default transition weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
-                  assert_eq!(s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>(),
-                             s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>(),
-                             "Exception transition keys differ");
+                  let keys_a = s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>();
+                  let keys_b = s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>();
+                  assert_eq!(keys_a, keys_b, "Exception transition keys differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
                   for (ch, &next_a) in &s_a.transitions.exceptions {
                       let next_b = *b.states[id_b].transitions.exceptions.get(ch).unwrap();
                       if let Some(&mapped_b) = mapping.get(&next_a) {
-                          assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {}", ch);
+                          assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
                       } else {
                           mapping.insert(next_a, next_b);
                           worklist.push_back((next_a, next_b));
                       }
-                      assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch));
+                      assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch), "Exception transition weights differ for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
                   }
               }
 
-              assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification");
-              assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic");
+              assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
+              assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
           }
 
           #[test]
@@ -2078,17 +2078,21 @@ local_system:
                       s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
                   };
 
+                  let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
+                  let s1_has_default = s1.map_or(false, |s| s.transitions.default.is_some());
+
                   // Default transition
                   let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
                   let def_tgt1 = s1.and_then(|s| s.transitions.default).unwrap_or(sink1);
                   let def_pair = (def_tgt0, def_tgt1);
-                  let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
-                  new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+                  if s0_has_default || s1_has_default {
+                      let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
+                      new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
 
-                  let tw_def0 = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-                  let tw_def1 = s1.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-                  new_dwa.states[new_id].trans_weight_default = Some(tw_def0 | tw_def1);
-
+                      let tw_def0 = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                      let tw_def1 = s1.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                      new_dwa.states[new_id].trans_weight_default = Some(tw_def0 | tw_def1);
+                  }
                   // Exception transitions
                   for &ch in &critical_points {
                       let tgt0 = get_target(s0, sink0, ch);
@@ -2203,6 +2207,10 @@ local_system:
                       s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
                   };
 
+                  let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
+                  let any_s1_has_default =
+                      ids1.iter().any(|&id1| id1 != sink1 && other.states[id1].transitions.default.is_some());
+
                   // Default transition
                   let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
                   let mut def_tgts1: BTreeSet<StateID> =
@@ -2213,17 +2221,19 @@ local_system:
                   }
 
                   let def_comp = (def_tgt0, def_tgts1);
-                  let new_def_tgt =
-                      get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                  new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+                  if s0_has_default || any_s1_has_default {
+                      let new_def_tgt =
+                          get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
+                      new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
 
-                  let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-                  for &id1 in &ids1 {
-                      if id1 != sink1 {
-                          tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                      let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                      for &id1 in &ids1 {
+                          if id1 != sink1 {
+                              tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                          }
                       }
+                      new_dwa.states[new_id].trans_weight_default = Some(tw_def);
                   }
-                  new_dwa.states[new_id].trans_weight_default = Some(tw_def);
 
                   // Exception transitions
                   for &ch in &critical_points {
@@ -4012,40 +4022,40 @@ messages:
                   let s_a = &a.states[id_a];
                   let s_b = &b.states[id_b];
 
-                  assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {})", id_a, id_b);
-                  assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {})", id_a, id_b);
+                  assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
+                  assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
                   let def_a = s_a.transitions.default;
                   let def_b = s_b.transitions.default;
-                  assert_eq!(def_a.is_some(), def_b.is_some());
+                  assert_eq!(def_a.is_some(), def_b.is_some(), "Default transition existence differs for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
                   if let (Some(next_a), Some(next_b)) = (def_a, def_b) {
                       if let Some(&mapped_b) = mapping.get(&next_a) {
-                          assert_eq!(mapped_b, next_b, "Default transition mismatch");
+                          assert_eq!(mapped_b, next_b, "Default transition mismatch for state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, a, b);
                       } else {
                           mapping.insert(next_a, next_b);
                           worklist.push_back((next_a, next_b));
                       }
                   }
-                  assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default);
+                  assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default, "Default transition weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
-                  assert_eq!(s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>(),
-                             s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>(),
-                             "Exception transition keys differ");
+                  let keys_a = s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>();
+                  let keys_b = s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>();
+                  assert_eq!(keys_a, keys_b, "Exception transition keys differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
                   for (ch, &next_a) in &s_a.transitions.exceptions {
                       let next_b = *b.states[id_b].transitions.exceptions.get(ch).unwrap();
                       if let Some(&mapped_b) = mapping.get(&next_a) {
-                          assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {}", ch);
+                          assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
                       } else {
                           mapping.insert(next_a, next_b);
                           worklist.push_back((next_a, next_b));
                       }
-                      assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch));
+                      assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch), "Exception transition weights differ for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
                   }
               }
 
-              assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification");
-              assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic");
+              assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
+              assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
           }
 
           #[test]
@@ -4336,8 +4346,258 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata.rs
-  - user: Enhance the tests so that when there's a mismatch, the expected and the
-      actual are displayed in full.
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --package sep1 --lib precompute4::weighted_automata --profile test --no-fail-fast -- --format=json -Z unstable-options --show-output
+      Testing started at 2:05 pm ...
+          Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+           Running unittests src/lib.rs (target/debug/deps/sep1-ab994d3f4be66692)
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (4 states -> 4 states) took: 107.083µs
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (3 states -> 3 states) took: 20µs
+
+
+      thread 'precompute4::weighted_automata::tests::test_concatenate_simple' (992585) panicked at src/precompute4/weighted_automata.rs:1113:13:
+      assertion `left == right` failed: Default transition existence differs for (0, 0).
+
+      ACTUAL:
+      DWA (start: 0)
+        State 0:
+          weight: []
+          * -> 1 (trans_weight: [])
+          'a' -> 2 (trans_weight: ALL)
+        State 1:
+          weight: []
+          * -> 1 (trans_weight: [])
+        State 2:
+          weight: []
+          final_weight: [1]
+          * -> 1 (trans_weight: [])
+          'b' -> 3 (trans_weight: ALL)
+        State 3:
+          weight: []
+          final_weight: [2]
+          * -> 1 (trans_weight: [])
+
+
+      EXPECTED:
+      DWA (start: 0)
+        State 0:
+          weight: []
+          'a' -> 1 (trans_weight: ALL)
+        State 1:
+          weight: []
+          'b' -> 2 (trans_weight: ALL)
+        State 2:
+          weight: []
+          final_weight: [2]
+
+        left: true
+       right: false
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::weighted_automata::tests::assert_dwa_equivalent
+                   at ./src/precompute4/weighted_automata.rs:1113:13
+         5: sep1::precompute4::weighted_automata::tests::test_concatenate_simple
+                   at ./src/precompute4/weighted_automata.rs:1212:9
+         6: sep1::precompute4::weighted_automata::tests::test_concatenate_simple::{{closure}}
+                   at ./src/precompute4/weighted_automata.rs:1207:33
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (2 states -> 2 states) took: 288.291µs
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (4 states -> 3 states) took: 184.75µs
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (4 states -> 2 states) took: 220.5µs
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (6 states -> 4 states) took: 122.583µs
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (4 states -> 4 states) took: 36.709µs
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (3 states -> 3 states) took: 16.583µs
+
+
+      thread 'precompute4::weighted_automata::tests::test_union_overlapping' (992597) panicked at src/precompute4/weighted_automata.rs:1113:13:
+      assertion `left == right` failed: Default transition existence differs for (0, 0).
+
+      ACTUAL:
+      DWA (start: 0)
+        State 0:
+          weight: []
+          * -> 1 (trans_weight: [])
+          'a' -> 2 (trans_weight: ALL)
+          'b' -> 3 (trans_weight: ALL)
+        State 1:
+          weight: []
+          * -> 1 (trans_weight: [])
+        State 2:
+          weight: []
+          final_weight: [1..=2]
+          * -> 1 (trans_weight: [])
+        State 3:
+          weight: []
+          final_weight: [3]
+          * -> 1 (trans_weight: [])
+
+
+      EXPECTED:
+      DWA (start: 0)
+        State 0:
+          weight: []
+          'a' -> 1 (trans_weight: ALL)
+          'b' -> 2 (trans_weight: ALL)
+        State 1:
+          weight: []
+          final_weight: [1..=2]
+        State 2:
+          weight: []
+          final_weight: [3]
+
+        left: true
+       right: false
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::weighted_automata::tests::assert_dwa_equivalent
+                   at ./src/precompute4/weighted_automata.rs:1113:13
+         5: sep1::precompute4::weighted_automata::tests::test_union_overlapping
+                   at ./src/precompute4/weighted_automata.rs:1203:9
+         6: sep1::precompute4::weighted_automata::tests::test_union_overlapping::{{closure}}
+                   at ./src/precompute4/weighted_automata.rs:1187:32
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (4 states -> 4 states) took: 39.792µs
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (3 states -> 3 states) took: 16.5µs
+
+
+      thread 'precompute4::weighted_automata::tests::test_union_simple' (992598) panicked at src/precompute4/weighted_automata.rs:1113:13:
+      assertion `left == right` failed: Default transition existence differs for (0, 0).
+
+      ACTUAL:
+      DWA (start: 0)
+        State 0:
+          weight: []
+          * -> 1 (trans_weight: [])
+          'a' -> 2 (trans_weight: ALL)
+          'b' -> 3 (trans_weight: ALL)
+        State 1:
+          weight: []
+          * -> 1 (trans_weight: [])
+        State 2:
+          weight: []
+          final_weight: [1]
+          * -> 1 (trans_weight: [])
+        State 3:
+          weight: []
+          final_weight: [2]
+          * -> 1 (trans_weight: [])
+
+
+      EXPECTED:
+      DWA (start: 0)
+        State 0:
+          weight: []
+          'a' -> 1 (trans_weight: ALL)
+          'b' -> 2 (trans_weight: ALL)
+        State 1:
+          weight: []
+          final_weight: [1]
+        State 2:
+          weight: []
+          final_weight: [2]
+
+        left: true
+       right: false
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::weighted_automata::tests::assert_dwa_equivalent
+                   at ./src/precompute4/weighted_automata.rs:1113:13
+         5: sep1::precompute4::weighted_automata::tests::test_union_simple
+                   at ./src/precompute4/weighted_automata.rs:1183:9
+         6: sep1::precompute4::weighted_automata::tests::test_union_simple::{{closure}}
+                   at ./src/precompute4/weighted_automata.rs:1170:27
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (3 states -> 3 states) took: 56.708µs
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:363: DWA::simplify_components (2 states -> 2 states) took: 10.334µs
+
+
+      thread 'precompute4::weighted_automata::tests::test_union_transition_weight_union' (992599) panicked at src/precompute4/weighted_automata.rs:1113:13:
+      assertion `left == right` failed: Default transition existence differs for (0, 0).
+
+      ACTUAL:
+      DWA (start: 0)
+        State 0:
+          weight: []
+          * -> 1 (trans_weight: [])
+          'x' -> 2 (trans_weight: [10, 20])
+        State 1:
+          weight: []
+          * -> 1 (trans_weight: [])
+        State 2:
+          weight: []
+          final_weight: [1..=2]
+          * -> 1 (trans_weight: [])
+
+
+      EXPECTED:
+      DWA (start: 0)
+        State 0:
+          weight: []
+          'x' -> 1 (trans_weight: [10, 20])
+        State 1:
+          weight: []
+          final_weight: [1..=2]
+
+        left: true
+       right: false
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::weighted_automata::tests::assert_dwa_equivalent
+                   at ./src/precompute4/weighted_automata.rs:1113:13
+         5: sep1::precompute4::weighted_automata::tests::test_union_transition_weight_union
+                   at ./src/precompute4/weighted_automata.rs:1353:9
+         6: sep1::precompute4::weighted_automata::tests::test_union_transition_weight_union::{{closure}}
+                   at ./src/precompute4/weighted_automata.rs:1335:44
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      error: test failed, to rerun pass `-p sep1 --lib`
+      error: 1 target failed:
+          `-p sep1 --lib`
+
+      Process finished with exit code 101
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4357,129 +4617,107 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Displaying the full context on test failures is a great way to make debugging easier. Here are the step-by-step instructions and the corresponding git diff to enhance your test assertions.
+      Hello! I see you're running into some test failures. It looks like the `union` and `concatenate` operations on your Deterministic Weighted Automata (DWA) are unconditionally creating default transitions, even when the input automata don't have them. This causes an issue in your tests where the actual output DWA has a different structure from the expected one.
+
+      Here are the step-by-step instructions to fix this, followed by the git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file** `src/precompute4/weighted_automata.rs`.
-      2.  **Navigate to the test module** at the bottom of the file, identified by `#[cfg(test)] mod tests { ... }`.
-      3.  **Find the helper function** `fn assert_dwa_equivalent(mut a: DWA, mut b: DWA)`.
-      4.  **Replace the body of this function** with the new version below. This update modifies all the `assert_eq!` calls to include a detailed failure message that will print both the actual and expected `DWA` structures in their entirety.
+      #### File: `src/precompute4/weighted_automata.rs`
 
-      ```rust
-          fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
-              a.simplify();
-              b.simplify();
+      1.  **Modify `DWA::union` to conditionally create default transitions:**
+          -   Inside the `while` loop in the `union` function, right before the `// Default transition` comment (around line 639), add a check to see if either of the source states (`s0` or `s1`) has a default transition.
+          -   The code that creates the default transition and sets its weight should only execute if at least one of the source states has a default transition.
 
-              let mut mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
-              let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
+      2.  **Modify `DWA::concatenate` similarly:**
+          -   Inside the `while` loop in the `concatenate` function, before the `// Default transition` comment (around line 777), add a check to determine if the left-hand state (`s0`) or any of the right-hand states (`ids1`) have a default transition.
+          -   Wrap the code that creates the default transition and its associated weight in a conditional block based on this check.
 
-              worklist.push_back((a.body.start_state, b.body.start_state));
-              mapping.insert(a.body.start_state, b.body.start_state);
+      These changes will ensure that default transitions are only created in the product automaton when they are logically implied by the presence of default transitions in the source automata.
 
-              while let Some((id_a, id_b)) = worklist.pop_front() {
-                  let s_a = &a.states[id_a];
-                  let s_b = &b.states[id_b];
+      ### Git Diffs
 
-                  assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-                  assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-
-                  let def_a = s_a.transitions.default;
-                  let def_b = s_b.transitions.default;
-                  assert_eq!(def_a.is_some(), def_b.is_some(), "Default transition existence differs for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-                  if let (Some(next_a), Some(next_b)) = (def_a, def_b) {
-                      if let Some(&mapped_b) = mapping.get(&next_a) {
-                          assert_eq!(mapped_b, next_b, "Default transition mismatch for state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, a, b);
-                      } else {
-                          mapping.insert(next_a, next_b);
-                          worklist.push_back((next_a, next_b));
-                      }
-                  }
-                  assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default, "Default transition weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-
-                  let keys_a = s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-                  let keys_b = s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-                  assert_eq!(keys_a, keys_b, "Exception transition keys differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-
-                  for (ch, &next_a) in &s_a.transitions.exceptions {
-                      let next_b = *b.states[id_b].transitions.exceptions.get(ch).unwrap();
-                      if let Some(&mapped_b) = mapping.get(&next_a) {
-                          assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
-                      } else {
-                          mapping.insert(next_a, next_b);
-                          worklist.push_back((next_a, next_b));
-                      }
-                      assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch), "Exception transition weights differ for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
-                  }
-              }
-
-              assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-              assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-          }
-      ```
-
-      ### Git Diff
-
-      Here is the git diff for the changes. You can apply this patch directly.
+      Here are the git diffs to apply these changes.
 
       ```diff
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -1421,36 +1421,49 @@
-                   let s_a = &a.states[id_a];
-                   let s_b = &b.states[id_b];
+      @@ -635,17 +635,21 @@
+                       s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
+                   };
        
-      -            assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {})", id_a, id_b);
-      -            assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {})", id_a, id_b);
-      +            assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-      +            assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
+      +            let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
+      +            let s1_has_default = s1.map_or(false, |s| s.transitions.default.is_some());
+      +
+                   // Default transition
+                   let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
+                   let def_tgt1 = s1.and_then(|s| s.transitions.default).unwrap_or(sink1);
+                   let def_pair = (def_tgt0, def_tgt1);
+      -            let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
+      -            new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+      -
+      -            let tw_def0 = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      -            let tw_def1 = s1.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      -            new_dwa.states[new_id].trans_weight_default = Some(tw_def0 | tw_def1);
+      +            if s0_has_default || s1_has_default {
+      +                let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
+      +                new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
        
-                   let def_a = s_a.transitions.default;
-                   let def_b = s_b.transitions.default;
-      -            assert_eq!(def_a.is_some(), def_b.is_some());
-      +            assert_eq!(def_a.is_some(), def_b.is_some(), "Default transition existence differs for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-                   if let (Some(next_a), Some(next_b)) = (def_a, def_b) {
-                       if let Some(&mapped_b) = mapping.get(&next_a) {
-      -                    assert_eq!(mapped_b, next_b, "Default transition mismatch");
-      +                    assert_eq!(mapped_b, next_b, "Default transition mismatch for state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, a, b);
-                       } else {
-                           mapping.insert(next_a, next_b);
-                           worklist.push_back((next_a, next_b));
-                       }
+      +                let tw_def0 = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      +                let tw_def1 = s1.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      +                new_dwa.states[new_id].trans_weight_default = Some(tw_def0 | tw_def1);
+      +            }
+                   // Exception transitions
+                   for &ch in &critical_points {
+                       let tgt0 = get_target(s0, sink0, ch);
+      @@ -773,28 +777,34 @@
+                       s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
+                   };
+       
+      +            let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
+      +            let any_s1_has_default =
+      +                ids1.iter().any(|&id1| id1 != sink1 && other.states[id1].transitions.default.is_some());
+      +
+                   // Default transition
+                   let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
+                   let mut def_tgts1: BTreeSet<StateID> =
+                       ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| other.states[id1].transitions.default.unwrap_or(sink1)).collect();
+                   def_tgts1.remove(&sink1);
+                   if is_final_left(def_tgt0) {
+                       def_tgts1.insert(right_start);
                    }
-      -            assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default);
-      +            assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default, "Default transition weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
        
-      -            assert_eq!(s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>(),
-      -                       s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>(),
-      -                       "Exception transition keys differ");
-      +            let keys_a = s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-      +            let keys_b = s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-      +            assert_eq!(keys_a, keys_b, "Exception transition keys differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-       
-                   for (ch, &next_a) in &s_a.transitions.exceptions {
-                       let next_b = *b.states[id_b].transitions.exceptions.get(ch).unwrap();
-                       if let Some(&mapped_b) = mapping.get(&next_a) {
-      -                    assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {}", ch);
-      +                    assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
-                       } else {
-                           mapping.insert(next_a, next_b);
-                           worklist.push_back((next_a, next_b));
+                   let def_comp = (def_tgt0, def_tgts1);
+      -            let new_def_tgt =
+      -                get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
+      -            new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+      -
+      -            let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      -            for &id1 in &ids1 {
+      -                if id1 != sink1 {
+      -                    tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      +            if s0_has_default || any_s1_has_default {
+      +                let new_def_tgt =
+      +                    get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
+      +                new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+      +
+      +                let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      +                for &id1 in &ids1 {
+      +                    if id1 != sink1 {
+      +                        tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      +                    }
                        }
-      -                assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch));
-      +                assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch), "Exception transition weights differ for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
-                   }
-               }
+      -            }
+      -            new_dwa.states[new_id].trans_weight_default = Some(tw_def);
+      +                new_dwa.states[new_id].trans_weight_default = Some(tw_def);
+      +            }
        
-      -        assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification");
-      -        assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic");
-      +        assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-      +        assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-           }
-       
-           #[test]
+                   // Exception transitions
+                   for &ch in &critical_points {
 
       ```
+
+      After applying these patches, your tests should pass. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -4490,7 +4728,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Enhance DWA equivalence assertions
-      to display full structures on mismatch"'
+  - user: 'Changes committed with message: "Fix DWA union/concatenate to only create
+      default transitions when necessary"'
     metadata:
 ...

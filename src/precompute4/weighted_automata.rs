@@ -642,17 +642,21 @@ impl DWA {
                 s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
             };
 
+            let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
+            let s1_has_default = s1.map_or(false, |s| s.transitions.default.is_some());
+
             // Default transition
             let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
             let def_tgt1 = s1.and_then(|s| s.transitions.default).unwrap_or(sink1);
             let def_pair = (def_tgt0, def_tgt1);
-            let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
-            new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+            if s0_has_default || s1_has_default {
+                let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
+                new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
 
-            let tw_def0 = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-            let tw_def1 = s1.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-            new_dwa.states[new_id].trans_weight_default = Some(tw_def0 | tw_def1);
-
+                let tw_def0 = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                let tw_def1 = s1.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                new_dwa.states[new_id].trans_weight_default = Some(tw_def0 | tw_def1);
+            }
             // Exception transitions
             for &ch in &critical_points {
                 let tgt0 = get_target(s0, sink0, ch);
@@ -767,6 +771,10 @@ impl DWA {
                 s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
             };
 
+            let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
+            let any_s1_has_default =
+                ids1.iter().any(|&id1| id1 != sink1 && other.states[id1].transitions.default.is_some());
+
             // Default transition
             let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
             let mut def_tgts1: BTreeSet<StateID> =
@@ -777,17 +785,19 @@ impl DWA {
             }
 
             let def_comp = (def_tgt0, def_tgts1);
-            let new_def_tgt =
-                get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-            new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
+            if s0_has_default || any_s1_has_default {
+                let new_def_tgt =
+                    get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
+                new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
 
-            let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-            for &id1 in &ids1 {
-                if id1 != sink1 {
-                    tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                for &id1 in &ids1 {
+                    if id1 != sink1 {
+                        tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                    }
                 }
+                new_dwa.states[new_id].trans_weight_default = Some(tw_def);
             }
-            new_dwa.states[new_id].trans_weight_default = Some(tw_def);
 
             // Exception transitions
             for &ch in &critical_points {
