@@ -2884,6 +2884,7 @@ local_system:
               let s1 = d.add_state();
               // Different state weight to avoid accidental merging
               d.set_state_weight(s1, Weight::from_item(99)).unwrap();
+              d.set_final_weight(s1, Weight::from_item(1)).unwrap();
               // Default goes to s1
               d.set_default_transition(d.body.start_state, s1, Weight::from_item(50)).unwrap();
               // Redundant exceptions also go to s1
@@ -2914,6 +2915,7 @@ local_system:
               let s3 = d.add_state();
               let sF = d.add_state();
               d.set_state_weight(sF, Weight::from_item(999)).unwrap(); // make sF distinct
+              d.set_final_weight(sF, Weight::from_item(1)).unwrap();
 
               // Reachability
               d.add_transition(d.body.start_state, 'a' as i16, s2, Weight::all()).unwrap();
@@ -3030,6 +3032,7 @@ local_system:
               let _s2 = d.add_state(); // Unused, unreachable
               d.set_default_transition(d.body.start_state, s1, Weight::all())
                   .unwrap();
+              d.set_final_weight(s1, Weight::from_item(1)).unwrap();
               d.add_transition(s1, 'x' as i16, s1, Weight::all()).unwrap();
 
               // Completely unreachable component
@@ -5116,5 +5119,110 @@ messages:
   - user: 'Changes committed with message: "Implement `assert_dwa_equivalent` and
       fix `prune_unreachable` to correctly handle dead/sink states for equivalence
       testing"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: test_prune_unreachable_with_default_chain
+    metadata:
+  - user: Some of these test are a bit weird. Fix them. e.g. test_prune_unreachable_with_default_chain
+      seems to think it doesn't need to set final weights. It does.
+    metadata:
+  - assistant: |-
+      You are right, my previous change to `prune_unreachable` introduced liveness analysis (backward reachability from final states), which revealed that several tests were not correctly set up. They were creating automata without any final states. In such cases, my new `simplify` function would correctly prune all states and transitions, causing the tests to fail because their assertions expected a different outcome.
+
+      To fix this, we need to update the affected tests to include at least one final state, ensuring that the parts of the automaton being tested are "live" and not pruned away.
+
+      Here are the step-by-step instructions to fix the tests:
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `src/precompute4/weighted_automata.rs`**.
+      2.  Navigate to the test `test_normalize_removes_redundant_exceptions` (around line 1442).
+      3.  Add a line to set a final weight on state `s1`. This makes it a "live" state, so the transitions leading to it won't be pruned, allowing the test to correctly check the normalization logic.
+          ```rust
+          // ...
+          d.set_state_weight(s1, Weight::from_item(99)).unwrap();
+          d.set_final_weight(s1, Weight::from_item(1)).unwrap(); // Add this line
+          // Default goes to s1
+          // ...
+          ```
+      4.  Navigate to the test `test_partition_refinement_aggregates_weights` (around line 1467).
+      5.  Add a line to set a final weight on state `sF`. This ensures that `sF` and the states that transition to it are considered live, allowing the test to properly check the weight aggregation logic during state merging.
+          ```rust
+          // ...
+          let sF = d.add_state();
+          d.set_state_weight(sF, Weight::from_item(999)).unwrap(); // make sF distinct
+          d.set_final_weight(sF, Weight::from_item(1)).unwrap(); // Add this line
+          // Reachability
+          // ...
+          ```
+      6.  Navigate to the test `test_prune_unreachable_with_default_chain` (around line 1562), which you specifically mentioned.
+      7.  Add a line to set a final weight on state `s1`. This makes the main component of the automaton live, ensuring that `simplify` only prunes the truly unreachable parts, as the test originally intended.
+          ```rust
+          // ...
+          let _s2 = d.add_state(); // Unused, unreachable
+          d.set_default_transition(d.body.start_state, s1, Weight::all())
+              .unwrap();
+          d.set_final_weight(s1, Weight::from_item(1)).unwrap(); // Add this line
+          d.add_transition(s1, 'x' as i16, s1, Weight::all()).unwrap();
+          // ...
+          ```
+
+      ### Git Diff
+
+      Here is the git patch that applies all the necessary fixes to the tests.
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata.rs b/src/precompute4/weighted_automata.rs
+      --- a/src/precompute4/weighted_automata.rs
+      +++ b/src/precompute4/weighted_automata.rs
+      @@ -1445,6 +1445,7 @@
+               let s1 = d.add_state();
+               // Different state weight to avoid accidental merging
+               d.set_state_weight(s1, Weight::from_item(99)).unwrap();
+      +        d.set_final_weight(s1, Weight::from_item(1)).unwrap();
+               // Default goes to s1
+               d.set_default_transition(d.body.start_state, s1, Weight::from_item(50)).unwrap();
+               // Redundant exceptions also go to s1
+      @@ -1470,6 +1471,7 @@
+               let s3 = d.add_state();
+               let sF = d.add_state();
+               d.set_state_weight(sF, Weight::from_item(999)).unwrap(); // make sF distinct
+      +        d.set_final_weight(sF, Weight::from_item(1)).unwrap();
+       
+               // Reachability
+               d.add_transition(d.body.start_state, 'a' as i16, s2, Weight::all()).unwrap();
+      @@ -1565,6 +1567,7 @@
+               let _s2 = d.add_state(); // Unused, unreachable
+               d.set_default_transition(d.body.start_state, s1, Weight::all())
+                   .unwrap();
+      +        d.set_final_weight(s1, Weight::from_item(1)).unwrap();
+               d.add_transition(s1, 'x' as i16, s1, Weight::all()).unwrap();
+       
+               // Completely unreachable component
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata.rs
+      Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix DWA equivalence tests by adding final
+      weights to ensure states are live after prune_unreachable update"'
     metadata:
 ...

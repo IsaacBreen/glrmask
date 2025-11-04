@@ -1439,6 +1439,7 @@ mod tests {
         let s1 = d.add_state();
         // Different state weight to avoid accidental merging
         d.set_state_weight(s1, Weight::from_item(99)).unwrap();
+        d.set_final_weight(s1, Weight::from_item(1)).unwrap();
         // Default goes to s1
         d.set_default_transition(d.body.start_state, s1, Weight::from_item(50)).unwrap();
         // Redundant exceptions also go to s1
@@ -1469,6 +1470,7 @@ mod tests {
         let s3 = d.add_state();
         let sF = d.add_state();
         d.set_state_weight(sF, Weight::from_item(999)).unwrap(); // make sF distinct
+        d.set_final_weight(sF, Weight::from_item(1)).unwrap();
 
         // Reachability
         d.add_transition(d.body.start_state, 'a' as i16, s2, Weight::all()).unwrap();
@@ -1585,6 +1587,7 @@ mod tests {
         let _s2 = d.add_state(); // Unused, unreachable
         d.set_default_transition(d.body.start_state, s1, Weight::all())
             .unwrap();
+        d.set_final_weight(s1, Weight::from_item(1)).unwrap();
         d.add_transition(s1, 'x' as i16, s1, Weight::all()).unwrap();
 
         // Completely unreachable component
