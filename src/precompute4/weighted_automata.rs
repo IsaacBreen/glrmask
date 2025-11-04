@@ -1179,11 +1179,11 @@ pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
         ow.clone().unwrap_or_else(Weight::zeros)
     }
 
-    use std::collections::HashSet;
+    use std::collections::{BTreeSet, HashSet};
 
     // Map a-state -> b-state and its inverse to ensure a bijection.
     let mut map_ab: HashMap<StateID, StateID> = HashMap::new();
-    let mut map_ba: HashMap<StateID, StateID> = HashMap::new();
+    let mut map_ba: HashMap<StateID, BTreeSet<StateID>> = HashMap::new();
     let mut q: VecDeque<(StateID, StateID)> = VecDeque::new();
 
     assert!(
@@ -1195,7 +1195,7 @@ pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
     let start_a = a.body.start_state;
     let start_b = b.body.start_state;
     map_ab.insert(start_a, start_b);
-    map_ba.insert(start_b, start_a);
+    map_ba.entry(start_b).or_default().insert(start_a);
     q.push_back((start_a, start_b));
 
     // Lookup per-edge weight for a specific character in a given state:
@@ -1218,15 +1218,6 @@ pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
             sa.weight, sb.weight,
             "State weight mismatch at (a:{}, b:{}): a.weight={} vs b.weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
             ia, ib, sa.weight, sb.weight, a, b
-        );
-
-        // Compare final weights (None considered zeros).
-        let fa = opt_w_to_w(&sa.final_weight);
-        let fb = opt_w_to_w(&sb.final_weight);
-        assert_eq!(
-            fa, fb,
-            "Final weight mismatch at (a:{}, b:{}): a.final_weight={} vs b.final_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-            ia, ib, fa, fb, a, b
         );
 
         // Compare default transition weights (None considered zeros).
@@ -1270,13 +1261,7 @@ pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
                         );
                     } else {
                         map_ab.insert(ta_id, tb_id);
-                        if let Some(prev_a) = map_ba.insert(tb_id, ta_id) {
-                            assert_eq!(
-                                prev_a, ta_id,
-                                "Non-bijective mapping: b-state {} already mapped to a-state {}, conflicting with a-state {} via char {} from (a:{}, b:{})\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                                tb_id, prev_a, ta_id, ch, ia, ib, a, b
-                            );
-                        }
+                        map_ba.entry(tb_id).or_default().insert(ta_id);
                         q.push_back((ta_id, tb_id));
                     }
                 }
@@ -1301,13 +1286,7 @@ pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
                     );
                 } else {
                     map_ab.insert(ta_id, tb_id);
-                    if let Some(prev_a) = map_ba.insert(tb_id, ta_id) {
-                        assert_eq!(
-                            prev_a, ta_id,
-                            "Non-bijective mapping on default: b-state {} already mapped to a-state {}, conflicting with a-state {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                            tb_id, prev_a, ta_id, a, b
-                        );
-                    }
+                    map_ba.entry(tb_id).or_default().insert(ta_id);
                     q.push_back((ta_id, tb_id));
                 }
             }
@@ -1319,6 +1298,22 @@ pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
                 );
             }
         }
+    }
+
+    // After establishing the state mapping, verify that the union of final weights
+    // for all `a` states mapping to a given `b` state is equal to the final weight
+    // of that `b` state. This handles cases where `a` is an unminimized version of `b`.
+    for (ib, ias) in &map_ba {
+        let mut union_fa = Weight::zeros();
+        for &ia in ias {
+            union_fa |= &opt_w_to_w(&a.states[ia].final_weight);
+        }
+        let fb = opt_w_to_w(&b.states[*ib].final_weight);
+        assert_eq!(
+            union_fa, fb,
+            "Aggregated final weight mismatch for b-state {} (a-states: {:?}): union(a)={}, b={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+            ib, ias, union_fa, fb, a, b
+        );
     }
 
     // Ensure we've covered all states reachable from b.start.
