@@ -688,7 +688,7 @@ fn test_ignore_token() {
     assert_eq!(state1.get_mask(), HybridBitset::from_iter(vec![llm_b.0, llm_ws.0]), "After 'a ', mask should allow 'b'");
     state1.commit(llm_b);
     // assert_eq!(state1.get_mask(), HybridBitset::from_iter(vec![llm_ws.0]), "After 'a b', mask should be empty (complete parse).");
-
+f
     // --- Equivalence check ---
     let mut state2 = constraint.init();
     state2.commit(llm_a_b);
