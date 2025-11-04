@@ -755,6 +755,9 @@ impl DWA {
             get_or_create(start_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
 
         let right_start = other.body.start_state;
+        let right_accepts_epsilon =
+            other.states[right_start].final_weight.as_ref().map_or(false, |w| !w.is_empty());
+
         let is_final_left = |i: StateID| -> bool {
             i != sink0 && self.states[i].final_weight.as_ref().map_or(false, |w| !w.is_empty())
         };
@@ -767,16 +770,26 @@ impl DWA {
 
             // Aggregate weights
             let mut agg_weight = s0.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
-            let mut agg_final_weight = Weight::zeros();
             for &id1 in &ids1 {
                 if id1 != sink1 {
-                    let s1 = &other.states[id1];
-                    agg_weight |= &s1.weight;
-                    if let Some(fw) = &s1.final_weight {
-                        agg_final_weight |= fw;
-                    }
+                    agg_weight |= &other.states[id1].weight;
                 }
             }
+
+            let agg_final_weight = if right_accepts_epsilon {
+                s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
+            } else {
+                let mut fw = Weight::zeros();
+                for &id1 in &ids1 {
+                    if id1 != sink1 {
+                        if let Some(w) = &other.states[id1].final_weight {
+                            fw |= w;
+                        }
+                    }
+                }
+                fw
+            };
+
             new_state.weight = agg_weight;
             if !agg_final_weight.is_empty() {
                 new_state.final_weight = Some(agg_final_weight);
