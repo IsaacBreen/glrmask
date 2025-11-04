@@ -418,9 +418,7 @@ mod tests {
         expected.set_final_weight(s_sink_exp, Weight::from_iter(0..=1)).unwrap();
 
         expected.add_transition(0, 0, s_sink_exp, Weight::from_item(1)).unwrap();
-        expected.add_transition(0, 1, s1_exp, Weight::from_iter(0..=1)).unwrap();
         expected.add_transition(0, 2, s_sink_exp, Weight::from_item(0)).unwrap();
-        expected.add_transition(0, 3, s1_exp, Weight::from_iter(0..=1)).unwrap();
 
         assert_dwa_equivalent(d, expected);
     }
