@@ -3,7 +3,7 @@ local_system:
     - src/precompute4/mod.rs
     - src/precompute4/weighted_automata.rs
     - src/precompute4/resolve_negatives.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/precompute4/mod.rs: |
@@ -1028,8 +1028,53 @@ local_system:
           let mut mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
           let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
 
+          if a.states.is_empty() && b.states.is_empty() {
+              return;
+          }
+
+          // It's possible for one DWA to simplify to nothing (e.g. start state is unreachable and pruned)
+          // while the other simplifies to a single non-final sink state. They are equivalent.
+          if a.states.is_empty() || b.states.is_empty() {
+              let (non_empty_dwa, empty_name, non_empty_name) = if a.states.is_empty() {
+                  (b, "ACTUAL", "EXPECTED")
+              } else {
+                  (a, "EXPECTED", "ACTUAL")
+              };
+              assert_eq!(non_empty_dwa.states.len(), 1, "One DWA is empty, the other ({}) has more than one state.", non_empty_name);
+              let start = &non_empty_dwa.states[non_empty_dwa.body.start_state];
+              let is_sink = start.final_weight.as_ref().map_or(true, |w| w.is_empty())
+                  && start.weight.is_empty()
+                  && start.transitions.default.is_none()
+                  && start.transitions.exceptions.is_empty();
+              assert!(is_sink, "One DWA is empty, but the other ({}) is not a simple sink state.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", non_empty_name, non_empty_dwa, DWA::default());
+              return;
+          }
+
           worklist.push_back((a.body.start_state, b.body.start_state));
           mapping.insert(a.body.start_state, b.body.start_state);
+
+          fn get_target_and_weight<'d>(
+              dwa: &'d DWA,
+              state_id: StateID,
+              on: i16,
+          ) -> (Option<StateID>, Weight) {
+              let state = &dwa.states[state_id];
+              if let Some(&tgt) = state.transitions.exceptions.get(&on) {
+                  (Some(tgt), state.trans_weights_exceptions.get(&on).cloned().unwrap_or_default())
+              } else if let Some(tgt) = state.transitions.default {
+                  (Some(tgt), state.trans_weight_default.clone().unwrap_or_default())
+              } else {
+                  (None, Weight::zeros())
+              }
+          }
+
+          fn is_sink(dwa: &DWA, state_id: StateID) -> bool {
+              let s = &dwa.states[state_id];
+              s.weight.is_empty()
+                  && s.final_weight.as_ref().map_or(true, |w| w.is_empty())
+                  && s.transitions.default.is_none()
+                  && s.transitions.exceptions.is_empty()
+          }
 
           while let Some((id_a, id_b)) = worklist.pop_front() {
               let s_a = &a.states[id_a];
@@ -1038,37 +1083,48 @@ local_system:
               assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
               assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
-              let def_a = s_a.transitions.default;
-              let def_b = s_b.transitions.default;
-              assert_eq!(def_a.is_some(), def_b.is_some(), "Default transition existence differs for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-              if let (Some(next_a), Some(next_b)) = (def_a, def_b) {
-                  if let Some(&mapped_b) = mapping.get(&next_a) {
-                      assert_eq!(mapped_b, next_b, "Default transition mismatch for state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, a, b);
-                  } else {
-                      mapping.insert(next_a, next_b);
-                      worklist.push_back((next_a, next_b));
+              let keys_a = s_a.transitions.exceptions.keys().copied().collect::<BTreeSet<_>>();
+              let keys_b = s_b.transitions.exceptions.keys().copied().collect::<BTreeSet<_>>();
+              let mut critical_keys = keys_a.union(&keys_b).copied().collect::<BTreeSet<_>>();
+
+              if s_a.transitions.default.is_some() || s_b.transitions.default.is_some() {
+                  let mut test_char: i16 = 42; // arbitrary starting point
+                  while critical_keys.contains(&test_char) {
+                      test_char = test_char.wrapping_add(1);
+                      if test_char == 42 { panic!("Could not find test char for default"); }
                   }
+                  critical_keys.insert(test_char);
               }
-              assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default, "Default transition weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
-              let keys_a = s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-              let keys_b = s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-              assert_eq!(keys_a, keys_b, "Exception transition keys differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
+              for &ch in &critical_keys {
+                  let (next_a, w_a) = get_target_and_weight(&a, id_a, ch);
+                  let (next_b, w_b) = get_target_and_weight(&b, id_b, ch);
 
-              for (ch, &next_a) in &s_a.transitions.exceptions {
-                  let next_b = *b.states[id_b].transitions.exceptions.get(ch).unwrap();
-                  if let Some(&mapped_b) = mapping.get(&next_a) {
-                      assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
-                  } else {
-                      mapping.insert(next_a, next_b);
-                      worklist.push_back((next_a, next_b));
+                  assert_eq!(w_a, w_b, "Transition weights for char {} differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, id_b, a, b);
+
+                  match (next_a, next_b) {
+                      (Some(na), Some(nb)) => {
+                          if let Some(&mapped_b) = mapping.get(&na) {
+                              assert_eq!(mapped_b, nb, "Transition mismatch for char {} from state ({}, {}). a -> {} (mapped to {}), b -> {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, id_b, na, mapped_b, nb, a, b);
+                          } else {
+                              mapping.insert(na, nb);
+                              worklist.push_back((na, nb));
+                          }
+                      },
+                      (None, None) => { /* both go to implicit sink, ok */ },
+                      (Some(na), None) => {
+                          assert!(is_sink(&a, na), "Transition mismatch on char {}: a -> state {} which is not a sink, b -> implicit sink.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, na, a, b);
+                      },
+                      (None, Some(nb)) => {
+                          assert!(is_sink(&b, nb), "Transition mismatch on char {}: a -> implicit sink, b -> state {} which is not a sink.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, nb, a, b);
+                      }
                   }
-                  assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch), "Exception transition weights differ for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
               }
           }
 
-          assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-          assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
+          assert_eq!(mapping.len(), a.states.len(), "Did not visit all states of A, graphs are not equivalent.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
+          let mapped_b_states = mapping.values().copied().collect::<BTreeSet<_>>();
+          assert_eq!(mapped_b_states.len(), b.states.len(), "Did not visit all states of B, graphs are not equivalent.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
       }
 
       // --- Tests ---
@@ -3382,6 +3438,31 @@ local_system:
               assert!(after < before, "Unreachable states should be pruned");
               assert_eq!(after, 2, "Only start and s1 should remain reachable");
           }
+
+          #[test]
+          fn test_equivalence_via_simplification() {
+              // DWA 'a' has explicit transitions for inputs '1' and '3' which lead
+              // to non-final, sink-like states. State 1 is a true sink, and state 2
+              // only transitions to state 1.
+              let mut a = DWA::new();
+              let s1a = a.add_state();
+              let s2a = a.add_state();
+              a.add_transition(0, 0, s1a, Weight::from_item(1)).unwrap();
+              a.add_transition(0, 1, s2a, Weight::from_iter(0..=1)).unwrap();
+              a.add_transition(0, 2, s1a, Weight::from_item(0)).unwrap();
+              a.add_transition(0, 3, s1a, Weight::from_iter(0..=1)).unwrap();
+              a.set_default_transition(s2a, s1a, Weight::all()).unwrap();
+
+              // DWA 'b' lacks these transitions. For inputs '1' and '3', it transitions
+              // to an implicit sink. The simplification process should make 'a' equivalent
+              // to 'b'.
+              let mut b = DWA::new();
+              let s1b = b.add_state();
+              b.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
+              b.add_transition(0, 2, s1b, Weight::from_item(0)).unwrap();
+
+              assert_dwa_equivalent(a, b);
+          }
       }
     src/precompute4/resolve_negatives.rs: |
       use crate::precompute4::full_dwa::Precomputed4;
@@ -3678,71 +3759,61 @@ local_system:
               }
           }
 
-          // Stage D: Remove negative edges to final states ("epsilon replacement").
-          // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
-          // This needs to be a fixpoint iteration to propagate finality backwards.
-          {
-              let mut changed_any = true;
-              let mut guard_rounds = 0usize;
-              while changed_any && guard_rounds < 64 {
-                  changed_any = false;
-                  guard_rounds += 1;
-
-                  let n = dwa.states.len();
-                  for a_id in 0..n {
-                      // Capture all negatives-to-final to process.
-                      let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
-                          .transitions
-                          .exceptions
-                          .iter()
-                          .filter_map(|(&ch, &tgt)| {
-                              if is_negative_code(ch) && is_final_nonempty(&dwa.states[*tgt]) {
-                                  Some((ch, *tgt))
-                              } else {
-                                  None
-                              }
-                          })
-                          .collect();
-
-                      if neg_to_final.is_empty() {
-                          continue;
-                      }
-
-                      for (ch, tgt) in neg_to_final {
-                          let edge_w = dwa.states[a_id]
-                              .trans_weights_exceptions
-                              .get(&ch)
-                              .cloned()
-                              .unwrap_or_else(Weight::all);
-                          if let Some(fw) = &dwa.states[tgt].final_weight {
-                              let inc = &edge_w & fw;
-                              if !inc.is_empty() {
-                                  if union_into_option(&mut dwa.states[a_id].final_weight, &inc) {
-                                      changed_any = true;
-                                  }
-                              }
-                          }
-                          // Remove the negative edge itself.
-                          dwa.states[a_id].transitions.exceptions.remove(&ch);
-                          dwa.states[a_id].trans_weights_exceptions.remove(&ch);
-                      }
-                  }
-              }
-          }
-
-          // Stage C: Remove any remaining negative edges. After the fixpoint above, any
-          // negative edge that could lead to a final state has been processed and removed.
-          // Any that remain are part of cycles or lead to non-final sinks, and can be pruned.
+          // Stage C: Remove remaining internal negative edges (those not going to final states).
           {
               let n = dwa.states.len();
               for a_id in 0..n {
+                  // Collect keys to remove to avoid mutating while iterating.
                   let to_remove: Vec<i16> = dwa.states[a_id]
                       .transitions
                       .exceptions
                       .iter()
-                      .filter_map(|(&ch, _)| if is_negative_code(ch) { Some(ch) } else { None })
+                      .filter_map(|(&ch, &tgt)| {
+                          if is_negative_code(ch) && !is_final_nonempty(&dwa.states[tgt]) {
+                              Some(ch)
+                          } else {
+                              None
+                          }
+                      })
                       .collect();
                   for ch in to_remove {
+                      dwa.states[a_id].transitions.exceptions.remove(&ch);
+                      dwa.states[a_id].trans_weights_exceptions.remove(&ch);
+                  }
+              }
+          }
+
+          // Stage D: Remove negative edges to final states ("epsilon replacement").
+          // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
+          {
+              let n = dwa.states.len();
+              for a_id in 0..n {
+                  // Capture all negatives-to-final to process.
+                  let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
+                      .transitions
+                      .exceptions
+                      .iter()
+                      .filter_map(|(&ch, &tgt)| {
+                          if is_negative_code(ch) && is_final_nonempty(&dwa.states[tgt]) {
+                              Some((ch, tgt))
+                          } else {
+                              None
+                          }
+                      })
+                      .collect();
+                  for (ch, tgt) in neg_to_final {
+                      let edge_w = dwa.states[a_id]
+                          .trans_weights_exceptions
+                          .get(&ch)
+                          .cloned()
+                          .unwrap_or_else(Weight::all);
+                      if let Some(fw) = &dwa.states[tgt].final_weight {
+                          let inc = &edge_w & fw;
+                          if !inc.is_empty() {
+                              union_into_option(&mut dwa.states[a_id].final_weight, &inc);
+                          }
+                      }
+                      // Remove the negative edge itself.
                       dwa.states[a_id].transitions.exceptions.remove(&ch);
                       dwa.states[a_id].trans_weights_exceptions.remove(&ch);
                   }
@@ -4881,8 +4952,53 @@ messages:
           let mut mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
           let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
 
+          if a.states.is_empty() && b.states.is_empty() {
+              return;
+          }
+
+          // It's possible for one DWA to simplify to nothing (e.g. start state is unreachable and pruned)
+          // while the other simplifies to a single non-final sink state. They are equivalent.
+          if a.states.is_empty() || b.states.is_empty() {
+              let (non_empty_dwa, empty_name, non_empty_name) = if a.states.is_empty() {
+                  (b, "ACTUAL", "EXPECTED")
+              } else {
+                  (a, "EXPECTED", "ACTUAL")
+              };
+              assert_eq!(non_empty_dwa.states.len(), 1, "One DWA is empty, the other ({}) has more than one state.", non_empty_name);
+              let start = &non_empty_dwa.states[non_empty_dwa.body.start_state];
+              let is_sink = start.final_weight.as_ref().map_or(true, |w| w.is_empty())
+                  && start.weight.is_empty()
+                  && start.transitions.default.is_none()
+                  && start.transitions.exceptions.is_empty();
+              assert!(is_sink, "One DWA is empty, but the other ({}) is not a simple sink state.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", non_empty_name, non_empty_dwa, DWA::default());
+              return;
+          }
+
           worklist.push_back((a.body.start_state, b.body.start_state));
           mapping.insert(a.body.start_state, b.body.start_state);
+
+          fn get_target_and_weight<'d>(
+              dwa: &'d DWA,
+              state_id: StateID,
+              on: i16,
+          ) -> (Option<StateID>, Weight) {
+              let state = &dwa.states[state_id];
+              if let Some(&tgt) = state.transitions.exceptions.get(&on) {
+                  (Some(tgt), state.trans_weights_exceptions.get(&on).cloned().unwrap_or_default())
+              } else if let Some(tgt) = state.transitions.default {
+                  (Some(tgt), state.trans_weight_default.clone().unwrap_or_default())
+              } else {
+                  (None, Weight::zeros())
+              }
+          }
+
+          fn is_sink(dwa: &DWA, state_id: StateID) -> bool {
+              let s = &dwa.states[state_id];
+              s.weight.is_empty()
+                  && s.final_weight.as_ref().map_or(true, |w| w.is_empty())
+                  && s.transitions.default.is_none()
+                  && s.transitions.exceptions.is_empty()
+          }
 
           while let Some((id_a, id_b)) = worklist.pop_front() {
               let s_a = &a.states[id_a];
@@ -4891,37 +5007,48 @@ messages:
               assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
               assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
-              let def_a = s_a.transitions.default;
-              let def_b = s_b.transitions.default;
-              assert_eq!(def_a.is_some(), def_b.is_some(), "Default transition existence differs for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-              if let (Some(next_a), Some(next_b)) = (def_a, def_b) {
-                  if let Some(&mapped_b) = mapping.get(&next_a) {
-                      assert_eq!(mapped_b, next_b, "Default transition mismatch for state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, a, b);
-                  } else {
-                      mapping.insert(next_a, next_b);
-                      worklist.push_back((next_a, next_b));
+              let keys_a = s_a.transitions.exceptions.keys().copied().collect::<BTreeSet<_>>();
+              let keys_b = s_b.transitions.exceptions.keys().copied().collect::<BTreeSet<_>>();
+              let mut critical_keys = keys_a.union(&keys_b).copied().collect::<BTreeSet<_>>();
+
+              if s_a.transitions.default.is_some() || s_b.transitions.default.is_some() {
+                  let mut test_char: i16 = 42; // arbitrary starting point
+                  while critical_keys.contains(&test_char) {
+                      test_char = test_char.wrapping_add(1);
+                      if test_char == 42 { panic!("Could not find test char for default"); }
                   }
+                  critical_keys.insert(test_char);
               }
-              assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default, "Default transition weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
-              let keys_a = s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-              let keys_b = s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-              assert_eq!(keys_a, keys_b, "Exception transition keys differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
+              for &ch in &critical_keys {
+                  let (next_a, w_a) = get_target_and_weight(&a, id_a, ch);
+                  let (next_b, w_b) = get_target_and_weight(&b, id_b, ch);
 
-              for (ch, &next_a) in &s_a.transitions.exceptions {
-                  let next_b = *b.states[id_b].transitions.exceptions.get(ch).unwrap();
-                  if let Some(&mapped_b) = mapping.get(&next_a) {
-                      assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
-                  } else {
-                      mapping.insert(next_a, next_b);
-                      worklist.push_back((next_a, next_b));
+                  assert_eq!(w_a, w_b, "Transition weights for char {} differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, id_b, a, b);
+
+                  match (next_a, next_b) {
+                      (Some(na), Some(nb)) => {
+                          if let Some(&mapped_b) = mapping.get(&na) {
+                              assert_eq!(mapped_b, nb, "Transition mismatch for char {} from state ({}, {}). a -> {} (mapped to {}), b -> {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, id_b, na, mapped_b, nb, a, b);
+                          } else {
+                              mapping.insert(na, nb);
+                              worklist.push_back((na, nb));
+                          }
+                      },
+                      (None, None) => { /* both go to implicit sink, ok */ },
+                      (Some(na), None) => {
+                          assert!(is_sink(&a, na), "Transition mismatch on char {}: a -> state {} which is not a sink, b -> implicit sink.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, na, a, b);
+                      },
+                      (None, Some(nb)) => {
+                          assert!(is_sink(&b, nb), "Transition mismatch on char {}: a -> implicit sink, b -> state {} which is not a sink.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, nb, a, b);
+                      }
                   }
-                  assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch), "Exception transition weights differ for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
               }
           }
 
-          assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-          assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
+          assert_eq!(mapping.len(), a.states.len(), "Did not visit all states of A, graphs are not equivalent.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
+          let mapped_b_states = mapping.values().copied().collect::<BTreeSet<_>>();
+          assert_eq!(mapped_b_states.len(), b.states.len(), "Did not visit all states of B, graphs are not equivalent.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
       }
 
       // --- Tests ---
@@ -5738,13 +5865,8 @@ messages:
     metadata:
       filename: src/precompute4/resolve_negatives.rs
   - user: |-
-      Make assert_dwa_equivalent more robust. It should work even when they look quite different, and are different after simplification. They can still be equivalent.
-      e.g. it's possible to get this
       ```
-      thread 'precompute4::resolve_negatives::tests::test_resolve_negatives_complex_cancellation' (1140800) panicked at src/precompute4/weighted_automata.rs:1041:9:
-      assertion `left == right` failed: Exception transition keys differ for (0, 0).
-
-      ACTUAL:
+      A:
       DWA (start: 0)
         State 0:
           weight: []
@@ -5759,7 +5881,7 @@ messages:
           * -> 1 (trans_weight: ALL)
 
 
-      EXPECTED:
+      B:
       DWA (start: 0)
         State 0:
           weight: []
@@ -5767,11 +5889,8 @@ messages:
           2 -> 1 (trans_weight: [0])
         State 1:
           weight: []
-
-        left: {0, 1, 2, 3}
-       right: {0, 2}
       ```
-      But actually these *are* equivalent.
+      Add a test case that ensures `assert_dwa_equivalent` passes for these two. (They *are* equivalent.)
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5791,273 +5910,80 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with equivalence of automata can be tricky, as structurally different state machines can represent the same language. The existing `assert_dwa_equivalent` function is too strict, as it essentially checks for graph isomorphism after a simplification step, which may not produce a unique canonical form.
+      Of course. Here are the step-by-step instructions to add the requested test case, followed by the corresponding git diff.
 
-      I'll guide you through making this assertion more robust by implementing a bisimulation check. This will compare the behavior of the two automata for all possible inputs, rather than their structure.
+      ### Step-by-step Instructions
 
-      Here are the step-by-step instructions to update `src/precompute4/weighted_automata.rs`:
+      I will add a new test case to `src/precompute4/weighted_automata.rs` that verifies the equivalence of the two Deterministic Weighted Automata (DWA) you provided.
 
-      ### File: `src/precompute4/weighted_automata.rs`
+      1.  **Open the file `src/precompute4/weighted_automata.rs`**.
+      2.  Navigate to the end of the file, inside the `tests` module.
+      3.  Add the following new test function after the `test_prune_unreachable_with_default_chain` test:
 
-      I will replace the entire `assert_dwa_equivalent` function with a more robust version that correctly handles behavioral equivalence.
+          ```rust
+          #[test]
+          fn test_equivalence_via_simplification() {
+              // DWA 'a' has explicit transitions for inputs '1' and '3' which lead
+              // to non-final, sink-like states. State 1 is a true sink, and state 2
+              // only transitions to state 1.
+              let mut a = DWA::new();
+              let s1a = a.add_state();
+              let s2a = a.add_state();
+              a.add_transition(0, 0, s1a, Weight::from_item(1)).unwrap();
+              a.add_transition(0, 1, s2a, Weight::from_iter(0..=1)).unwrap();
+              a.add_transition(0, 2, s1a, Weight::from_item(0)).unwrap();
+              a.add_transition(0, 3, s1a, Weight::from_iter(0..=1)).unwrap();
+              a.set_default_transition(s2a, s1a, Weight::all()).unwrap();
 
-      1.  **Locate the function**: Find the `assert_dwa_equivalent` function within the `#[cfg(test)]` section at the end of the file.
-      2.  **Replace the function**: Delete the existing `assert_dwa_equivalent` function and replace it with the following implementation. This new version checks for bisimulation equivalence by exploring both automata simultaneously and comparing their behavior on a set of "critical" input characters.
+              // DWA 'b' lacks these transitions. For inputs '1' and '3', it transitions
+              // to an implicit sink. The simplification process should make 'a' equivalent
+              // to 'b'.
+              let mut b = DWA::new();
+              let s1b = b.add_state();
+              b.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
+              b.add_transition(0, 2, s1b, Weight::from_item(0)).unwrap();
 
-      ```rust
-      #[cfg(test)]
-      pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
-          a.simplify();
-          b.simplify();
-
-          let mut mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
-          let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
-
-          if a.states.is_empty() && b.states.is_empty() {
-              return;
+              assert_dwa_equivalent(a, b);
           }
+          ```
 
-          // It's possible for one DWA to simplify to nothing (e.g. start state is unreachable and pruned)
-          // while the other simplifies to a single non-final sink state. They are equivalent.
-          if a.states.is_empty() || b.states.is_empty() {
-              let (non_empty_dwa, empty_name, non_empty_name) = if a.states.is_empty() {
-                  (b, "ACTUAL", "EXPECTED")
-              } else {
-                  (a, "EXPECTED", "ACTUAL")
-              };
-              assert_eq!(non_empty_dwa.states.len(), 1, "One DWA is empty, the other ({}) has more than one state.", non_empty_name);
-              let start = &non_empty_dwa.states[non_empty_dwa.body.start_state];
-              let is_sink = start.final_weight.as_ref().map_or(true, |w| w.is_empty())
-                  && start.weight.is_empty()
-                  && start.transitions.default.is_none()
-                  && start.transitions.exceptions.is_empty();
-              assert!(is_sink, "One DWA is empty, but the other ({}) is not a simple sink state.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", non_empty_name, non_empty_dwa, DWA::default());
-              return;
-          }
+      ### Git Diff
 
-          worklist.push_back((a.body.start_state, b.body.start_state));
-          mapping.insert(a.body.start_state, b.body.start_state);
-
-          fn get_target_and_weight<'d>(
-              dwa: &'d DWA,
-              state_id: StateID,
-              on: i16,
-          ) -> (Option<StateID>, Weight) {
-              let state = &dwa.states[state_id];
-              if let Some(&tgt) = state.transitions.exceptions.get(&on) {
-                  (Some(tgt), state.trans_weights_exceptions.get(&on).cloned().unwrap_or_default())
-              } else if let Some(tgt) = state.transitions.default {
-                  (Some(tgt), state.trans_weight_default.clone().unwrap_or_default())
-              } else {
-                  (None, Weight::zeros())
-              }
-          }
-
-          fn is_sink(dwa: &DWA, state_id: StateID) -> bool {
-              let s = &dwa.states[state_id];
-              s.weight.is_empty()
-                  && s.final_weight.as_ref().map_or(true, |w| w.is_empty())
-                  && s.transitions.default.is_none()
-                  && s.transitions.exceptions.is_empty()
-          }
-
-          while let Some((id_a, id_b)) = worklist.pop_front() {
-              let s_a = &a.states[id_a];
-              let s_b = &b.states[id_b];
-
-              assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-              assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-
-              let keys_a = s_a.transitions.exceptions.keys().copied().collect::<BTreeSet<_>>();
-              let keys_b = s_b.transitions.exceptions.keys().copied().collect::<BTreeSet<_>>();
-              let mut critical_keys = keys_a.union(&keys_b).copied().collect::<BTreeSet<_>>();
-
-              if s_a.transitions.default.is_some() || s_b.transitions.default.is_some() {
-                  let mut test_char: i16 = 42; // arbitrary starting point
-                  while critical_keys.contains(&test_char) {
-                      test_char = test_char.wrapping_add(1);
-                      if test_char == 42 { panic!("Could not find test char for default"); }
-                  }
-                  critical_keys.insert(test_char);
-              }
-
-              for &ch in &critical_keys {
-                  let (next_a, w_a) = get_target_and_weight(&a, id_a, ch);
-                  let (next_b, w_b) = get_target_and_weight(&b, id_b, ch);
-
-                  assert_eq!(w_a, w_b, "Transition weights for char {} differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, id_b, a, b);
-
-                  match (next_a, next_b) {
-                      (Some(na), Some(nb)) => {
-                          if let Some(&mapped_b) = mapping.get(&na) {
-                              assert_eq!(mapped_b, nb, "Transition mismatch for char {} from state ({}, {}). a -> {} (mapped to {}), b -> {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, id_b, na, mapped_b, nb, a, b);
-                          } else {
-                              mapping.insert(na, nb);
-                              worklist.push_back((na, nb));
-                          }
-                      },
-                      (None, None) => { /* both go to implicit sink, ok */ },
-                      (Some(na), None) => {
-                          assert!(is_sink(&a, na), "Transition mismatch on char {}: a -> state {} which is not a sink, b -> implicit sink.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, na, a, b);
-                      },
-                      (None, Some(nb)) => {
-                          assert!(is_sink(&b, nb), "Transition mismatch on char {}: a -> implicit sink, b -> state {} which is not a sink.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, nb, a, b);
-                      }
-                  }
-              }
-          }
-
-          assert_eq!(mapping.len(), a.states.len(), "Did not visit all states of A, graphs are not equivalent.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-          let mapped_b_states = mapping.values().copied().collect::<BTreeSet<_>>();
-          assert_eq!(mapped_b_states.len(), b.states.len(), "Did not visit all states of B, graphs are not equivalent.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-      }
-      ```
-
-      ---
-
-      Here is the git diff for the change:
+      Here is the patch in the standard git diff format.
 
       ```diff
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -1014,57 +1014,103 @@
-       // --- Test Helpers ---
-       #[cfg(test)]
-       pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
-           a.simplify();
-           b.simplify();
-       
-           let mut mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
-           let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
-       
-      +    if a.states.is_empty() && b.states.is_empty() {
-      +        return;
-      +    }
-      +
-      +    // It's possible for one DWA to simplify to nothing (e.g. start state is unreachable and pruned)
-      +    // while the other simplifies to a single non-final sink state. They are equivalent.
-      +    if a.states.is_empty() || b.states.is_empty() {
-      +        let (non_empty_dwa, empty_name, non_empty_name) = if a.states.is_empty() {
-      +            (b, "ACTUAL", "EXPECTED")
-      +        } else {
-      +            (a, "EXPECTED", "ACTUAL")
-      +        };
-      +        assert_eq!(non_empty_dwa.states.len(), 1, "One DWA is empty, the other ({}) has more than one state.", non_empty_name);
-      +        let start = &non_empty_dwa.states[non_empty_dwa.body.start_state];
-      +        let is_sink = start.final_weight.as_ref().map_or(true, |w| w.is_empty())
-      +            && start.weight.is_empty()
-      +            && start.transitions.default.is_none()
-      +            && start.transitions.exceptions.is_empty();
-      +        assert!(is_sink, "One DWA is empty, but the other ({}) is not a simple sink state.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", non_empty_name, non_empty_dwa, DWA::default());
-      +        return;
-      +    }
-      +
-           worklist.push_back((a.body.start_state, b.body.start_state));
-           mapping.insert(a.body.start_state, b.body.start_state);
-       
-      +    fn get_target_and_weight<'d>(
-      +        dwa: &'d DWA,
-      +        state_id: StateID,
-      +        on: i16,
-      +    ) -> (Option<StateID>, Weight) {
-      +        let state = &dwa.states[state_id];
-      +        if let Some(&tgt) = state.transitions.exceptions.get(&on) {
-      +            (Some(tgt), state.trans_weights_exceptions.get(&on).cloned().unwrap_or_default())
-      +        } else if let Some(tgt) = state.transitions.default {
-      +            (Some(tgt), state.trans_weight_default.clone().unwrap_or_default())
-      +        } else {
-      +            (None, Weight::zeros())
-      +        }
-      +    }
-      +
-      +    fn is_sink(dwa: &DWA, state_id: StateID) -> bool {
-      +        let s = &dwa.states[state_id];
-      +        s.weight.is_empty()
-      +            && s.final_weight.as_ref().map_or(true, |w| w.is_empty())
-      +            && s.transitions.default.is_none()
-      +            && s.transitions.exceptions.is_empty()
-      +    }
-      +
-           while let Some((id_a, id_b)) = worklist.pop_front() {
-               let s_a = &a.states[id_a];
-               let s_b = &b.states[id_b];
-       
-               assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-               assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-       
-      -        let def_a = s_a.transitions.default;
-      -        let def_b = s_b.transitions.default;
-      -        assert_eq!(def_a.is_some(), def_b.is_some(), "Default transition existence differs for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-      -        if let (Some(next_a), Some(next_b)) = (def_a, def_b) {
-      -            if let Some(&mapped_b) = mapping.get(&next_a) {
-      -                assert_eq!(mapped_b, next_b, "Default transition mismatch for state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, a, b);
-      -            } else {
-      -                mapping.insert(next_a, next_b);
-      -                worklist.push_back((next_a, next_b));
-      -            }
-      -        }
-      -        assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default, "Default transition weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-      -
-      -        let keys_a = s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-      -        let keys_b = s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-      -        assert_eq!(keys_a, keys_b, "Exception transition keys differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-      -
-      -        for (ch, &next_a) in &s_a.transitions.exceptions {
-      -            let next_b = *b.states[id_b].transitions.exceptions.get(ch).unwrap();
-      -            if let Some(&mapped_b) = mapping.get(&next_a) {
-      -                assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
-      -            } else {
-      -                mapping.insert(next_a, next_b);
-      -                worklist.push_back((next_a, next_b));
-      -            }
-      -            assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch), "Exception transition weights differ for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
-      +        let keys_a = s_a.transitions.exceptions.keys().copied().collect::<BTreeSet<_>>();
-      +        let keys_b = s_b.transitions.exceptions.keys().copied().collect::<BTreeSet<_>>();
-      +        let mut critical_keys = keys_a.union(&keys_b).copied().collect::<BTreeSet<_>>();
-      +
-      +        if s_a.transitions.default.is_some() || s_b.transitions.default.is_some() {
-      +            let mut test_char: i16 = 42; // arbitrary starting point
-      +            while critical_keys.contains(&test_char) {
-      +                test_char = test_char.wrapping_add(1);
-      +                if test_char == 42 { panic!("Could not find test char for default"); }
-      +            }
-      +            critical_keys.insert(test_char);
-      +        }
-      +
-      +        for &ch in &critical_keys {
-      +            let (next_a, w_a) = get_target_and_weight(&a, id_a, ch);
-      +            let (next_b, w_b) = get_target_and_weight(&b, id_b, ch);
-      +
-      +            assert_eq!(w_a, w_b, "Transition weights for char {} differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, id_b, a, b);
-      +
-      +            match (next_a, next_b) {
-      +                (Some(na), Some(nb)) => {
-      +                    if let Some(&mapped_b) = mapping.get(&na) {
-      +                        assert_eq!(mapped_b, nb, "Transition mismatch for char {} from state ({}, {}). a -> {} (mapped to {}), b -> {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, id_b, na, mapped_b, nb, a, b);
-      +                    } else {
-      +                        mapping.insert(na, nb);
-      +                        worklist.push_back((na, nb));
-      +                    }
-      +                },
-      +                (None, None) => { /* both go to implicit sink, ok */ },
-      +                (Some(na), None) => {
-      +                    assert!(is_sink(&a, na), "Transition mismatch on char {}: a -> state {} which is not a sink, b -> implicit sink.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, na, a, b);
-      +                },
-      +                (None, Some(nb)) => {
-      +                    assert!(is_sink(&b, nb), "Transition mismatch on char {}: a -> implicit sink, b -> state {} which is not a sink.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, nb, a, b);
-      +                }
-      +            }
-               }
+      @@ -1402,4 +1402,28 @@
+               assert!(after < before, "Unreachable states should be pruned");
+               assert_eq!(after, 2, "Only start and s1 should remain reachable");
            }
-       
-      -    assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-      -    assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-      +    assert_eq!(mapping.len(), a.states.len(), "Did not visit all states of A, graphs are not equivalent.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-      +    let mapped_b_states = mapping.values().copied().collect::<BTreeSet<_>>();
-      +    assert_eq!(mapped_b_states.len(), b.states.len(), "Did not visit all states of B, graphs are not equivalent.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
+      +
+      +    #[test]
+      +    fn test_equivalence_via_simplification() {
+      +        // DWA 'a' has explicit transitions for inputs '1' and '3' which lead
+      +        // to non-final, sink-like states. State 1 is a true sink, and state 2
+      +        // only transitions to state 1.
+      +        let mut a = DWA::new();
+      +        let s1a = a.add_state();
+      +        let s2a = a.add_state();
+      +        a.add_transition(0, 0, s1a, Weight::from_item(1)).unwrap();
+      +        a.add_transition(0, 1, s2a, Weight::from_iter(0..=1)).unwrap();
+      +        a.add_transition(0, 2, s1a, Weight::from_item(0)).unwrap();
+      +        a.add_transition(0, 3, s1a, Weight::from_iter(0..=1)).unwrap();
+      +        a.set_default_transition(s2a, s1a, Weight::all()).unwrap();
+      +
+      +        // DWA 'b' lacks these transitions. For inputs '1' and '3', it transitions
+      +        // to an implicit sink. The simplification process should make 'a' equivalent
+      +        // to 'b'.
+      +        let mut b = DWA::new();
+      +        let s1b = b.add_state();
+      +        b.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
+      +        b.add_transition(0, 2, s1b, Weight::from_item(0)).unwrap();
+      +
+      +        assert_dwa_equivalent(a, b);
+      +    }
        }
-       
-       // --- Tests ---
 
       ```
     metadata:
@@ -6070,348 +5996,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Make assert_dwa_equivalent robust
-      using behavioral comparison"'
-    metadata:
-  - user: |-
-      Diff of src/precompute4/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/resolve_negatives.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      assertion `left == right` failed: Transition weights for char 1 differ for (0, 0).
-
-      ACTUAL:
-      DWA (start: 0)
-        State 0:
-          weight: []
-          0 -> 1 (trans_weight: [1])
-          1 -> 2 (trans_weight: [0..=1])
-          2 -> 1 (trans_weight: [0])
-          3 -> 1 (trans_weight: [0..=1])
-        State 1:
-          weight: []
-        State 2:
-          weight: []
-          * -> 1 (trans_weight: ALL)
-
-
-      EXPECTED:
-      DWA (start: 0)
-        State 0:
-          weight: []
-          0 -> 1 (trans_weight: [1])
-          2 -> 1 (trans_weight: [0])
-        State 1:
-          weight: []
-
-        left: 0..=1
-       right:
-    metadata:
-  - assistant: |-
-      It looks like the previous changes to `assert_dwa_equivalent` have revealed a logic bug in `resolve_negative_codes_in_dwa`. The test is failing because negative transitions are being pruned prematurely, before their "finality" can be propagated backward through the automaton.
-
-      The fix involves two main changes to `resolve_negative_codes_in_dwa`:
-      1.  Re-ordering the processing stages to handle "epsilon replacement" (Stage D) before pruning internal negative edges (Stage C).
-      2.  Converting the epsilon replacement stage into a fixpoint loop, ensuring that finality is propagated across multiple sequential negative edges.
-
-      Here are the step-by-step instructions to apply the fix.
-
-      ### File: `src/precompute4/resolve_negatives.rs`
-
-      1.  **Locate the processing stages**: Find the comments for "Stage C" and "Stage D" inside the `resolve_negative_codes_in_dwa` function.
-      2.  **Reorder and modify the stages**: I will replace the existing "Stage C" and "Stage D" blocks with the corrected logic. The new "Stage D" will be a fixpoint loop that consumes negative edges leading to final states, and the new "Stage C" will clean up any negative edges that remain.
-
-      Replace this code block:
-      ```rust
-          // Stage C: Remove remaining internal negative edges (those not going to final states).
-          {
-              let n = dwa.states.len();
-              for a_id in 0..n {
-                  // Collect keys to remove to avoid mutating while iterating.
-                  let to_remove: Vec<i16> = dwa.states[a_id]
-                      .transitions
-                      .exceptions
-                      .iter()
-                      .filter_map(|(&ch, &tgt)| {
-                          if is_negative_code(ch) && !is_final_nonempty(&dwa.states[tgt]) {
-                              Some(ch)
-                          } else {
-                              None
-                          }
-                      })
-                      .collect();
-                  for ch in to_remove {
-                      dwa.states[a_id].transitions.exceptions.remove(&ch);
-                      dwa.states[a_id].trans_weights_exceptions.remove(&ch);
-                  }
-              }
-          }
-
-          // Stage D: Remove negative edges to final states ("epsilon replacement").
-          // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
-          {
-              let n = dwa.states.len();
-              for a_id in 0..n {
-                  // Capture all negatives-to-final to process.
-                  let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
-                      .transitions
-                      .exceptions
-                      .iter()
-                      .filter_map(|(&ch, &tgt)| {
-                          if is_negative_code(ch) && is_final_nonempty(&dwa.states[tgt]) {
-                              Some((ch, tgt))
-                          } else {
-                              None
-                          }
-                      })
-                      .collect();
-                  for (ch, tgt) in neg_to_final {
-                      let edge_w = dwa.states[a_id]
-                          .trans_weights_exceptions
-                          .get(&ch)
-                          .cloned()
-                          .unwrap_or_else(Weight::all);
-                      if let Some(fw) = &dwa.states[tgt].final_weight {
-                          let inc = &edge_w & fw;
-                          if !inc.is_empty() {
-                              union_into_option(&mut dwa.states[a_id].final_weight, &inc);
-                          }
-                      }
-                      // Remove the negative edge itself.
-                      dwa.states[a_id].transitions.exceptions.remove(&ch);
-                      dwa.states[a_id].trans_weights_exceptions.remove(&ch);
-                  }
-              }
-          }
-      ```
-
-      With this corrected block:
-      ```rust
-          // Stage D: Remove negative edges to final states ("epsilon replacement").
-          // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
-          // This needs to be a fixpoint iteration to propagate finality backwards.
-          {
-              let mut changed_any = true;
-              let mut guard_rounds = 0usize;
-              while changed_any && guard_rounds < 64 {
-                  changed_any = false;
-                  guard_rounds += 1;
-
-                  let n = dwa.states.len();
-                  for a_id in 0..n {
-                      // Capture all negatives-to-final to process.
-                      let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
-                          .transitions
-                          .exceptions
-                          .iter()
-                          .filter_map(|(&ch, &tgt)| {
-                              if is_negative_code(ch) && is_final_nonempty(&dwa.states[*tgt]) {
-                                  Some((ch, *tgt))
-                              } else {
-                                  None
-                              }
-                          })
-                          .collect();
-
-                      if neg_to_final.is_empty() {
-                          continue;
-                      }
-
-                      for (ch, tgt) in neg_to_final {
-                          let edge_w = dwa.states[a_id]
-                              .trans_weights_exceptions
-                              .get(&ch)
-                              .cloned()
-                              .unwrap_or_else(Weight::all);
-                          if let Some(fw) = &dwa.states[tgt].final_weight {
-                              let inc = &edge_w & fw;
-                              if !inc.is_empty() {
-                                  if union_into_option(&mut dwa.states[a_id].final_weight, &inc) {
-                                      changed_any = true;
-                                  }
-                              }
-                          }
-                          // Remove the negative edge itself.
-                          dwa.states[a_id].transitions.exceptions.remove(&ch);
-                          dwa.states[a_id].trans_weights_exceptions.remove(&ch);
-                      }
-                  }
-              }
-          }
-
-          // Stage C: Remove any remaining negative edges. After the fixpoint above, any
-          // negative edge that could lead to a final state has been processed and removed.
-          // Any that remain are part of cycles or lead to non-final sinks, and can be pruned.
-          {
-              let n = dwa.states.len();
-              for a_id in 0..n {
-                  let to_remove: Vec<i16> = dwa.states[a_id]
-                      .transitions
-                      .exceptions
-                      .iter()
-                      .filter_map(|(&ch, _)| if is_negative_code(ch) { Some(ch) } else { None })
-                      .collect();
-                  for ch in to_remove {
-                      dwa.states[a_id].transitions.exceptions.remove(&ch);
-                      dwa.states[a_id].trans_weights_exceptions.remove(&ch);
-                  }
-              }
-          }
-      ```
-
-      ---
-
-      Here is the git diff for the changes:
-
-      ```diff
-      --- a/src/precompute4/resolve_negatives.rs
-      +++ b/src/precompute4/resolve_negatives.rs
-      @@ -235,59 +235,68 @@
-               }
-           }
-       
-      -    // Stage C: Remove remaining internal negative edges (those not going to final states).
-      +    // Stage D: Remove negative edges to final states ("epsilon replacement").
-      +    // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
-      +    // This needs to be a fixpoint iteration to propagate finality backwards.
-           {
-      -        let n = dwa.states.len();
-      -        for a_id in 0..n {
-      -            // Collect keys to remove to avoid mutating while iterating.
-      -            let to_remove: Vec<i16> = dwa.states[a_id]
-      -                .transitions
-      -                .exceptions
-      -                .iter()
-      -                .filter_map(|(&ch, &tgt)| {
-      -                    if is_negative_code(ch) && !is_final_nonempty(&dwa.states[tgt]) {
-      -                        Some(ch)
-      -                    } else {
-      -                        None
-      +        let mut changed_any = true;
-      +        let mut guard_rounds = 0usize;
-      +        while changed_any && guard_rounds < 64 {
-      +            changed_any = false;
-      +            guard_rounds += 1;
-      +
-      +            let n = dwa.states.len();
-      +            for a_id in 0..n {
-      +                // Capture all negatives-to-final to process.
-      +                let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
-      +                    .transitions
-      +                    .exceptions
-      +                    .iter()
-      +                    .filter_map(|(&ch, &tgt)| {
-      +                        if is_negative_code(ch) && is_final_nonempty(&dwa.states[*tgt]) {
-      +                            Some((ch, *tgt))
-      +                        } else {
-      +                            None
-      +                        }
-      +                    })
-      +                    .collect();
-      +
-      +                if neg_to_final.is_empty() {
-      +                    continue;
-      +                }
-      +
-      +                for (ch, tgt) in neg_to_final {
-      +                    let edge_w = dwa.states[a_id]
-      +                        .trans_weights_exceptions
-      +                        .get(&ch)
-      +                        .cloned()
-      +                        .unwrap_or_else(Weight::all);
-      +                    if let Some(fw) = &dwa.states[tgt].final_weight {
-      +                        let inc = &edge_w & fw;
-      +                        if !inc.is_empty() {
-      +                            if union_into_option(&mut dwa.states[a_id].final_weight, &inc) {
-      +                                changed_any = true;
-      +                            }
-      +                        }
-                           }
-      -                })
-      -                .collect();
-      -            for ch in to_remove {
-      -                dwa.states[a_id].transitions.exceptions.remove(&ch);
-      -                dwa.states[a_id].trans_weights_exceptions.remove(&ch);
-      -            }
-      -        }
-      -    }
-      -
-      -    // Stage D: Remove negative edges to final states ("epsilon replacement").
-      -    // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
-      +                    // Remove the negative edge itself.
-      +                    dwa.states[a_id].transitions.exceptions.remove(&ch);
-      +                    dwa.states[a_id].trans_weights_exceptions.remove(&ch);
-      +                }
-      +            }
-      +        }
-      +    }
-      +
-      +    // Stage C: Remove any remaining negative edges. After the fixpoint above, any
-      +    // negative edge that could lead to a final state has been processed and removed.
-      +    // Any that remain are part of cycles or lead to non-final sinks, and can be pruned.
-           {
-               let n = dwa.states.len();
-               for a_id in 0..n {
-      -            // Capture all negatives-to-final to process.
-      -            let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
-      +            let to_remove: Vec<i16> = dwa.states[a_id]
-                       .transitions
-                       .exceptions
-                       .iter()
-      -                .filter_map(|(&ch, &tgt)| {
-      -                    if is_negative_code(ch) && is_final_nonempty(&dwa.states[tgt]) {
-      -                        Some((ch, tgt))
-      -                    } else {
-      -                        None
-      -                    }
-      -                })
-      -                .collect();
-      -            for (ch, tgt) in neg_to_final {
-      -                let edge_w = dwa.states[a_id]
-      -                    .trans_weights_exceptions
-      -                    .get(&ch)
-      -                    .cloned()
-      -                    .unwrap_or_else(Weight::all);
-      -                if let Some(fw) = &dwa.states[tgt].final_weight {
-      -                    let inc = &edge_w & fw;
-      -                    if !inc.is_empty() {
-      -                        union_into_option(&mut dwa.states[a_id].final_weight, &inc);
-      -                    }
-      -                }
-      -                // Remove the negative edge itself.
-      +                .filter_map(|(&ch, _)| if is_negative_code(ch) { Some(ch) } else { None })
-      +                .collect();
-      +            for ch in to_remove {
-                       dwa.states[a_id].transitions.exceptions.remove(&ch);
-                       dwa.states[a_id].trans_weights_exceptions.remove(&ch);
-                   }
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/resolve_negatives.rs
-      Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
-    metadata:
-  - user: 'Changes committed with message: "fix: Make negative code resolution robust
-      by iterating epsilon replacement fixpoint"'
+  - user: 'Changes committed with message: "Test: Add test case for equivalence via
+      simplification in weighted automata"'
     metadata:
 ...

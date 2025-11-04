@@ -1497,4 +1497,29 @@ mod tests {
         assert!(after < before, "Unreachable states should be pruned");
         assert_eq!(after, 2, "Only start and s1 should remain reachable");
     }
+
+    #[test]
+    fn test_equivalence_via_simplification() {
+        // DWA 'a' has explicit transitions for inputs '1' and '3' which lead
+        // to non-final, sink-like states. State 1 is a true sink, and state 2
+        // only transitions to state 1.
+        let mut a = DWA::new();
+        let s1a = a.add_state();
+        let s2a = a.add_state();
+        a.add_transition(0, 0, s1a, Weight::from_item(1)).unwrap();
+        a.add_transition(0, 1, s2a, Weight::from_iter(0..=1)).unwrap();
+        a.add_transition(0, 2, s1a, Weight::from_item(0)).unwrap();
+        a.add_transition(0, 3, s1a, Weight::from_iter(0..=1)).unwrap();
+        a.set_default_transition(s2a, s1a, Weight::all()).unwrap();
+
+        // DWA 'b' lacks these transitions. For inputs '1' and '3', it transitions
+        // to an implicit sink. The simplification process should make 'a' equivalent
+        // to 'b'.
+        let mut b = DWA::new();
+        let s1b = b.add_state();
+        b.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
+        b.add_transition(0, 2, s1b, Weight::from_item(0)).unwrap();
+
+        assert_dwa_equivalent(a, b);
+    }
 }
