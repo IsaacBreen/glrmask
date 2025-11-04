@@ -1014,21 +1014,21 @@ impl DWA {
             if let Some(&id) = memo.get(&key) {
                 return id;
             }
-            // Allocate a fresh state to hold the union result and record it immediately
-            // so recursive self-references pick it up.
+            // Reserve an ID up front and memoize it to break recursive cycles.
             let id = states.add_state();
             memo.insert(key, id);
 
-            // Clone sources to avoid borrow conflicts while constructing the union.
+            // Clone sources (no borrows into `states` held during merging).
             let sa = states[a].clone();
             let sb = states[b].clone();
 
-            // Fill the newly created state by unioning both sources into it.
-            {
-                let new_state = &mut states[id];
-                union_into_state_with_memo(states, new_state, &sa, memo);
-                union_into_state_with_memo(states, new_state, &sb, memo);
-            }
+            // Build into a local accumulator to avoid borrow conflicts.
+            let mut acc = DWAState::default();
+            union_into_state_with_memo(states, &mut acc, &sa, memo);
+            union_into_state_with_memo(states, &mut acc, &sb, memo);
+
+            // Write the accumulated result back into the arena.
+            states[id] = acc;
             id
         }
 
@@ -1069,6 +1069,10 @@ impl DWA {
                 } else {
                     left.trans_weight_default = Some(rdw.clone());
                 }
+            }
+            // Ensure a default weight exists whenever a default transition exists.
+            if left.transitions.default.is_some() && left.trans_weight_default.is_none() {
+                left.trans_weight_default = Some(Weight::zeros());
             }
 
             // 3) Merge exception transitions (insert missing, merge conflicts)
