@@ -1256,4 +1256,227 @@ mod tests {
         assert_eq!(new_start_state.transitions.exceptions.get(&('a' as i16)), Some(&s1));
         assert_eq!(new_start_state.transitions.default, Some(0));
     }
+
+    /// Helper that creates a DWA with a single transition on `ch` with a given
+    /// per-edge weight, landing in a final state with the provided final weight.
+    fn dwa_with_char_and_weights(ch: char, edge_weight: Weight, final_weight: Weight) -> DWA {
+        let mut d = DWA::new();
+        let s = d.add_state();
+        d.add_transition(d.body.start_state, ch as i16, s, edge_weight).unwrap();
+        d.set_final_weight(s, final_weight).unwrap();
+        d
+    }
+
+    #[test]
+    fn test_simple_bitset_iter_up_to_all() {
+        let all = Weight::all();
+        let vals: Vec<_> = all.iter_up_to(5).collect();
+        assert_eq!(vals, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_i16map_get_prefers_exception() {
+        let mut m = I16Map::with_default(7);
+        m.exceptions.insert(3, 42);
+        assert_eq!(m.get(3), Some(&42));
+        assert_eq!(m.get(4), Some(&7));
+    }
+
+    #[test]
+    fn test_normalize_removes_redundant_exceptions() {
+        let mut d = DWA::new();
+        let s1 = d.add_state();
+        // Different state weight to avoid accidental merging
+        d.set_state_weight(s1, Weight::from_item(99)).unwrap();
+        // Default goes to s1
+        d.set_default_transition(d.body.start_state, s1, Weight::from_item(50)).unwrap();
+        // Redundant exceptions also go to s1
+        d.add_transition(d.body.start_state, 'x' as i16, s1, Weight::from_item(60)).unwrap();
+        d.add_transition(d.body.start_state, 'y' as i16, s1, Weight::from_item(61)).unwrap();
+
+        // Sanity: exceptions exist pre-simplify
+        assert_eq!(d.states[d.body.start_state].transitions.exceptions.len(), 2);
+        assert_eq!(d.states[d.body.start_state].trans_weights_exceptions.len(), 2);
+
+        d.simplify();
+        let start = d.body.start_state;
+
+        // normalize_edges_inplace should remove exceptions equal to the default target,
+        // and their weights as well.
+        assert!(d.states[start].transitions.exceptions.is_empty(), "Exceptions equal to default should be removed");
+        assert!(d.states[start].trans_weights_exceptions.is_empty(), "Weights for removed exceptions should also be removed");
+        assert!(d.states[start].transitions.default.is_some(), "Default should remain");
+    }
+
+    #[test]
+    fn test_partition_refinement_aggregates_weights() {
+        // Build two states that are behaviorally equivalent (same outputs/transitions),
+        // differing only in their per-edge/default weights. They should be merged,
+        // and the merged state's per-edge/default weights should be the union.
+        let mut d = DWA::new();
+        let s2 = d.add_state();
+        let s3 = d.add_state();
+        let sF = d.add_state();
+        d.set_state_weight(sF, Weight::from_item(999)).unwrap(); // make sF distinct
+
+        // Reachability
+        d.add_transition(d.body.start_state, 'a' as i16, s2, Weight::all()).unwrap();
+        d.add_transition(d.body.start_state, 'b' as i16, s3, Weight::all()).unwrap();
+
+        // Self default loops with different weights
+        d.set_default_transition(s2, s2, Weight::from_item(200)).unwrap();
+        d.set_default_transition(s3, s3, Weight::from_item(201)).unwrap();
+        // Same structural exception 'z' to sF, but different per-edge weights
+        d.add_transition(s2, 'z' as i16, sF, Weight::from_item(100)).unwrap();
+        d.add_transition(s3, 'z' as i16, sF, Weight::from_item(101)).unwrap();
+
+        assert_eq!(d.states.len(), 4);
+        d.simplify();
+        // s2 and s3 should merge into one state.
+        assert_eq!(d.states.len(), 3);
+
+        // Find the merged middle state (it will be the only one with a 'z' exception).
+        let mut z_owner: Option<StateID> = None;
+        for (id, st) in d.states.0.iter().enumerate() {
+            if st.transitions.exceptions.contains_key(&('z' as i16)) {
+                z_owner = Some(id);
+                break;
+            }
+        }
+        let mid = z_owner.expect("Merged state with 'z' transition not found");
+        assert_eq!(
+            d.states[mid].trans_weights_exceptions.get(&('z' as i16)),
+            Some(&Weight::from_iter(vec![100, 101]))
+        );
+        assert_eq!(
+            d.states[mid].trans_weight_default,
+            Some(Weight::from_iter(vec![200, 201]))
+        );
+    }
+
+    #[test]
+    fn test_union_transition_weight_union_and_mapping() {
+        fn build(ch: char, ew: usize, fw: usize) -> DWA {
+            dwa_with_char_and_weights(ch, Weight::from_item(ew), Weight::from_item(fw))
+        }
+        let d1 = build('x', 10, 1);
+        let d2 = build('x', 20, 2);
+        let (u, mapping) = d1.union(&d2);
+
+        // Mapping for the start state should contain both component starts.
+        let start_u = u.body.start_state;
+        let start_map = mapping.get(&start_u).unwrap();
+        assert!(start_map.contains(&(0, d1.body.start_state)));
+        assert!(start_map.contains(&(1, d2.body.start_state)));
+
+        // The 'x' target should map to (some) d1 state and (some) d2 state.
+        let tgt_u = *u.states[start_u]
+            .transitions
+            .get('x' as i16)
+            .expect("union should have 'x' edge");
+        let tgt_map = mapping.get(&tgt_u).unwrap();
+        assert!(
+            tgt_map.iter().any(|&(i, s)| i == 0 && s != d1.body.start_state),
+            "target should include a non-start d1 state"
+        );
+        assert!(
+            tgt_map.iter().any(|&(i, s)| i == 1 && s != d2.body.start_state),
+            "target should include a non-start d2 state"
+        );
+
+        // Expected automaton with unioned transition and final weights on 'x'.
+        let mut expected = DWA::new();
+        let s = expected.add_state();
+        expected
+            .add_transition(0, 'x' as i16, s, Weight::from_iter(vec![10, 20]))
+            .unwrap();
+        expected
+            .set_final_weight(s, Weight::from_iter(vec![1, 2]))
+            .unwrap();
+
+        assert_dwa_equivalent(u, expected);
+    }
+
+    #[test]
+    fn test_concatenate_weight_aggregation_and_mapping() {
+        // Left automaton with weight {10} on start
+        let mut left = DWA::new();
+        left.set_state_weight(left.body.start_state, Weight::from_item(10)).unwrap();
+
+        // Right automaton with two states having weights {20} and {30}
+        let mut right = DWA::new();
+        right
+            .set_state_weight(right.body.start_state, Weight::from_item(20))
+            .unwrap();
+        let r2 = right.add_state();
+        right.set_state_weight(r2, Weight::from_item(30)).unwrap();
+
+        let mut join_map = BTreeMap::new();
+        join_map.insert(
+            left.body.start_state,
+            BTreeSet::from([right.body.start_state, r2]),
+        );
+
+        let (c, mapping) = left.concatenate(&right, &join_map);
+
+        // The composed start state's weight should be the union of all constituent weights.
+        let w_start = &c.states[c.body.start_state].weight;
+        assert_eq!(*w_start, Weight::from_iter(vec![10, 20, 30]));
+
+        // Mapping of the composed start should include all constituents.
+        let comp_start_map = mapping.get(&c.body.start_state).unwrap();
+        assert!(comp_start_map.contains(&(0, left.body.start_state)));
+        assert!(comp_start_map.contains(&(1, right.body.start_state)));
+        assert!(comp_start_map.contains(&(1, r2)));
+    }
+
+    #[test]
+    fn test_json_roundtrip_complex() {
+        use crate::json_serialization::JSONConvertible;
+
+        let mut d = DWA::new();
+        d.set_state_weight(d.body.start_state, Weight::all()).unwrap();
+        let s1 = d.add_state();
+        let s2 = d.add_state();
+        d.set_default_transition(d.body.start_state, s1, Weight::from_iter(vec![1, 2, 3]))
+            .unwrap();
+        d.add_transition(d.body.start_state, 'x' as i16, s2, Weight::from_item(99))
+            .unwrap();
+        d.set_final_weight(s2, Weight::from_iter(vec![5, 7])).unwrap();
+
+        let node = d.to_json();
+        let d2 = DWA::from_json(node.clone()).expect("from_json should succeed");
+        assert_eq!(node, d2.to_json(), "Roundtrip JSON should be stable");
+    }
+
+    #[test]
+    fn test_add_transition_out_of_bounds() {
+        let mut d = DWA::new();
+        let res = d.add_transition(5, 'a' as i16, 0, Weight::zeros());
+        assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 5 })));
+
+        let res2 = d.add_transition(0, 'a' as i16, 99, Weight::zeros());
+        assert!(matches!(res2, Err(DWABuildError::StateOutOfBounds { state: 99 })));
+    }
+
+    #[test]
+    fn test_prune_unreachable_with_default_chain() {
+        let mut d = DWA::new();
+        let s1 = d.add_state();
+        let _s2 = d.add_state(); // Unused, unreachable
+        d.set_default_transition(d.body.start_state, s1, Weight::all())
+            .unwrap();
+        d.add_transition(s1, 'x' as i16, s1, Weight::all()).unwrap();
+
+        // Completely unreachable component
+        let s_unreach = d.add_state();
+        d.add_transition(s_unreach, 'z' as i16, s_unreach, Weight::all())
+            .unwrap();
+
+        let before = d.states.len();
+        d.simplify();
+        let after = d.states.len();
+        assert!(after < before, "Unreachable states should be pruned");
+        assert_eq!(after, 2, "Only start and s1 should remain reachable");
+    }
 }
