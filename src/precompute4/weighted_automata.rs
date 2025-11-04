@@ -243,54 +243,6 @@ impl DWAState {
         }
     }
 
-    /// Merges another DWAState into this one by taking the union of all weights.
-    /// This does not affect transition targets.
-    pub fn merge_union(&mut self, other: &DWAState) {
-        self.weight |= &other.weight;
-
-        if let Some(other_fw) = &other.final_weight {
-            if let Some(self_fw) = &mut self.final_weight {
-                *self_fw |= other_fw;
-            } else {
-                self.final_weight = Some(other_fw.clone());
-            }
-        }
-
-        if let Some(other_twd) = &other.trans_weight_default {
-            if let Some(self_twd) = &mut self.trans_weight_default {
-                *self_twd |= other_twd;
-            } else {
-                self.trans_weight_default = Some(other_twd.clone());
-            }
-        }
-
-        for (ch, other_w) in &other.trans_weights_exceptions {
-            self.trans_weights_exceptions.entry(*ch)
-                .and_modify(|self_w| *self_w |= other_w)
-                .or_insert_with(|| other_w.clone());
-        }
-
-        // Merge transition targets, asserting that we do not introduce non-determinism.
-        if let Some(other_def_tgt) = other.transitions.default {
-            if let Some(self_def_tgt) = self.transitions.default {
-                if self_def_tgt != other_def_tgt {
-                    panic!("Cannot merge DWAStates with conflicting default transitions");
-                }
-            } else {
-                self.transitions.default = Some(other_def_tgt);
-            }
-        }
-
-        for (&ch, &other_tgt) in &other.transitions.exceptions {
-            if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
-                if self_tgt != other_tgt {
-                    panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
-                }
-            } else {
-                self.transitions.exceptions.insert(ch, other_tgt);
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1045,6 +997,119 @@ impl DWA {
         states[new_id] = new_state;
         body.start_state = new_id;
         new_id
+    }
+
+    pub fn union_into_state(states: &mut DWAStates, left: &mut DWAState, right: &DWAState) {
+        // Merge a pair of state IDs into a new state ID, memoizing to avoid infinite recursion.
+        fn merged_pair(
+            states: &mut DWAStates,
+            a: StateID,
+            b: StateID,
+            memo: &mut BTreeMap<(StateID, StateID), StateID>,
+        ) -> StateID {
+            if a == b {
+                return a;
+            }
+            let key = if a <= b { (a, b) } else { (b, a) };
+            if let Some(&id) = memo.get(&key) {
+                return id;
+            }
+            // Allocate a fresh state to hold the union result and record it immediately
+            // so recursive self-references pick it up.
+            let id = states.add_state();
+            memo.insert(key, id);
+
+            // Clone sources to avoid borrow conflicts while constructing the union.
+            let sa = states[a].clone();
+            let sb = states[b].clone();
+
+            // Fill the newly created state by unioning both sources into it.
+            {
+                let new_state = &mut states[id];
+                union_into_state_with_memo(states, new_state, &sa, memo);
+                union_into_state_with_memo(states, new_state, &sb, memo);
+            }
+            id
+        }
+
+        // Perform the core merge with a memo map for destination merges.
+        fn union_into_state_with_memo(
+            states: &mut DWAStates,
+            left: &mut DWAState,
+            right: &DWAState,
+            memo: &mut BTreeMap<(StateID, StateID), StateID>,
+        ) {
+            // 1) Union state and final weights
+            left.weight |= &right.weight;
+            if let Some(rfw) = &right.final_weight {
+                if let Some(lfw) = &mut left.final_weight {
+                    *lfw |= rfw;
+                } else {
+                    left.final_weight = Some(rfw.clone());
+                }
+            }
+
+            // 2) Merge default transitions and their weights
+            match (left.transitions.default, right.transitions.default) {
+                (None, None) => {}
+                (Some(_), None) => {}
+                (None, Some(rd)) => {
+                    left.transitions.default = Some(rd);
+                }
+                (Some(ld), Some(rd)) => {
+                    if ld != rd {
+                        let merged = merged_pair(states, ld, rd, memo);
+                        left.transitions.default = Some(merged);
+                    }
+                }
+            }
+            if let Some(rdw) = &right.trans_weight_default {
+                if let Some(ldw) = &mut left.trans_weight_default {
+                    *ldw |= rdw;
+                } else {
+                    left.trans_weight_default = Some(rdw.clone());
+                }
+            }
+
+            // 3) Merge exception transitions (insert missing, merge conflicts)
+            let right_exceptions: Vec<(i16, StateID)> = right
+                .transitions
+                .exceptions
+                .iter()
+                .map(|(&ch, &t)| (ch, t))
+                .collect();
+            for (ch, r_tgt) in right_exceptions {
+                match left.transitions.exceptions.get(&ch).copied() {
+                    Some(l_tgt) => {
+                        if l_tgt != r_tgt {
+                            let merged = merged_pair(states, l_tgt, r_tgt, memo);
+                            left.transitions.exceptions.insert(ch, merged);
+                        }
+                    }
+                    None => {
+                        left.transitions.exceptions.insert(ch, r_tgt);
+                    }
+                }
+            }
+
+            // 4) Merge per-exception weights for all current exceptions in `left`
+            // Ensure every exception has a weight (propagation relies on this).
+            let left_exc_keys: Vec<i16> = left.transitions.exceptions.keys().cloned().collect();
+            for ch in left_exc_keys {
+                let mut w = left
+                    .trans_weights_exceptions
+                    .get(&ch)
+                    .cloned()
+                    .unwrap_or_else(Weight::zeros);
+                if let Some(rw) = right.trans_weights_exceptions.get(&ch) {
+                    w |= rw;
+                }
+                left.trans_weights_exceptions.insert(ch, w);
+            }
+        }
+
+        let mut memo: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
+        union_into_state_with_memo(states, left, right, &mut memo);
     }
 }
 
