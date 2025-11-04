@@ -213,7 +213,7 @@ impl Display for DWABuildError {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWAState {
     pub transitions: I16Map<StateID>,
     pub weight: Weight,
