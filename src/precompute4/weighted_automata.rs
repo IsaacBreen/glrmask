@@ -1013,8 +1013,53 @@ pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
     let mut mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
     let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
 
+    if a.states.is_empty() && b.states.is_empty() {
+        return;
+    }
+
+    // It's possible for one DWA to simplify to nothing (e.g. start state is unreachable and pruned)
+    // while the other simplifies to a single non-final sink state. They are equivalent.
+    if a.states.is_empty() || b.states.is_empty() {
+        let (non_empty_dwa, empty_name, non_empty_name) = if a.states.is_empty() {
+            (b, "ACTUAL", "EXPECTED")
+        } else {
+            (a, "EXPECTED", "ACTUAL")
+        };
+        assert_eq!(non_empty_dwa.states.len(), 1, "One DWA is empty, the other ({}) has more than one state.", non_empty_name);
+        let start = &non_empty_dwa.states[non_empty_dwa.body.start_state];
+        let is_sink = start.final_weight.as_ref().map_or(true, |w| w.is_empty())
+            && start.weight.is_empty()
+            && start.transitions.default.is_none()
+            && start.transitions.exceptions.is_empty();
+        assert!(is_sink, "One DWA is empty, but the other ({}) is not a simple sink state.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", non_empty_name, non_empty_dwa, DWA::default());
+        return;
+    }
+
     worklist.push_back((a.body.start_state, b.body.start_state));
     mapping.insert(a.body.start_state, b.body.start_state);
+
+    fn get_target_and_weight<'d>(
+        dwa: &'d DWA,
+        state_id: StateID,
+        on: i16,
+    ) -> (Option<StateID>, Weight) {
+        let state = &dwa.states[state_id];
+        if let Some(&tgt) = state.transitions.exceptions.get(&on) {
+            (Some(tgt), state.trans_weights_exceptions.get(&on).cloned().unwrap_or_default())
+        } else if let Some(tgt) = state.transitions.default {
+            (Some(tgt), state.trans_weight_default.clone().unwrap_or_default())
+        } else {
+            (None, Weight::zeros())
+        }
+    }
+
+    fn is_sink(dwa: &DWA, state_id: StateID) -> bool {
+        let s = &dwa.states[state_id];
+        s.weight.is_empty()
+            && s.final_weight.as_ref().map_or(true, |w| w.is_empty())
+            && s.transitions.default.is_none()
+            && s.transitions.exceptions.is_empty()
+    }
 
     while let Some((id_a, id_b)) = worklist.pop_front() {
         let s_a = &a.states[id_a];
@@ -1023,37 +1068,48 @@ pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
         assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
         assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
-        let def_a = s_a.transitions.default;
-        let def_b = s_b.transitions.default;
-        assert_eq!(def_a.is_some(), def_b.is_some(), "Default transition existence differs for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
-        if let (Some(next_a), Some(next_b)) = (def_a, def_b) {
-            if let Some(&mapped_b) = mapping.get(&next_a) {
-                assert_eq!(mapped_b, next_b, "Default transition mismatch for state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, a, b);
-            } else {
-                mapping.insert(next_a, next_b);
-                worklist.push_back((next_a, next_b));
+        let keys_a = s_a.transitions.exceptions.keys().copied().collect::<BTreeSet<_>>();
+        let keys_b = s_b.transitions.exceptions.keys().copied().collect::<BTreeSet<_>>();
+        let mut critical_keys = keys_a.union(&keys_b).copied().collect::<BTreeSet<_>>();
+
+        if s_a.transitions.default.is_some() || s_b.transitions.default.is_some() {
+            let mut test_char: i16 = 42; // arbitrary starting point
+            while critical_keys.contains(&test_char) {
+                test_char = test_char.wrapping_add(1);
+                if test_char == 42 { panic!("Could not find test char for default"); }
             }
+            critical_keys.insert(test_char);
         }
-        assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default, "Default transition weights differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
 
-        let keys_a = s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-        let keys_b = s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>();
-        assert_eq!(keys_a, keys_b, "Exception transition keys differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", id_a, id_b, a, b);
+        for &ch in &critical_keys {
+            let (next_a, w_a) = get_target_and_weight(&a, id_a, ch);
+            let (next_b, w_b) = get_target_and_weight(&b, id_b, ch);
 
-        for (ch, &next_a) in &s_a.transitions.exceptions {
-            let next_b = *b.states[id_b].transitions.exceptions.get(ch).unwrap();
-            if let Some(&mapped_b) = mapping.get(&next_a) {
-                assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
-            } else {
-                mapping.insert(next_a, next_b);
-                worklist.push_back((next_a, next_b));
+            assert_eq!(w_a, w_b, "Transition weights for char {} differ for ({}, {}).\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, id_b, a, b);
+
+            match (next_a, next_b) {
+                (Some(na), Some(nb)) => {
+                    if let Some(&mapped_b) = mapping.get(&na) {
+                        assert_eq!(mapped_b, nb, "Transition mismatch for char {} from state ({}, {}). a -> {} (mapped to {}), b -> {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, id_b, na, mapped_b, nb, a, b);
+                    } else {
+                        mapping.insert(na, nb);
+                        worklist.push_back((na, nb));
+                    }
+                },
+                (None, None) => { /* both go to implicit sink, ok */ },
+                (Some(na), None) => {
+                    assert!(is_sink(&a, na), "Transition mismatch on char {}: a -> state {} which is not a sink, b -> implicit sink.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, na, a, b);
+                },
+                (None, Some(nb)) => {
+                    assert!(is_sink(&b, nb), "Transition mismatch on char {}: a -> implicit sink, b -> state {} which is not a sink.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, nb, a, b);
+                }
             }
-            assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch), "Exception transition weights differ for char {} from state {}.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", ch, id_a, a, b);
         }
     }
 
-    assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
-    assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
+    assert_eq!(mapping.len(), a.states.len(), "Did not visit all states of A, graphs are not equivalent.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
+    let mapped_b_states = mapping.values().copied().collect::<BTreeSet<_>>();
+    assert_eq!(mapped_b_states.len(), b.states.len(), "Did not visit all states of B, graphs are not equivalent.\n\nACTUAL:\n{}\n\nEXPECTED:\n{}", a, b);
 }
 
 // --- Tests ---
