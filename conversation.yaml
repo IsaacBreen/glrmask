@@ -1651,26 +1651,41 @@ local_system:
           // Stage A: Preprocess negative edges that go to final nodes with positive outgoing transitions.
           // Clone a new destination with only negative outgoing edges (and final weight) and redirect.
           {
+              use std::collections::BTreeMap;
               let n0 = dwa.states.len();
-              let mut redirects: Vec<(StateID, i16, StateID)> = Vec::new();
+
+              // 1. Find all edges that need redirection without mutating the DWA.
+              let mut edges_to_redirect: Vec<(StateID, i16, StateID)> = Vec::new();
               for sid in 0..n0 {
                   let st = &dwa.states[sid];
                   for (&ch, &tgt) in st.transitions.exceptions.iter() {
                       if is_negative_code(ch) {
-                          let dst = &dwa.states[tgt];
-                          if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
-                              let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
-                              redirects.push((sid, ch, new_tgt));
+                          // Check bounds; invalid tgt could exist before prune_unreachable.
+                          if tgt < n0 {
+                              let dst = &dwa.states[tgt];
+                              if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
+                                  edges_to_redirect.push((sid, ch, tgt));
+                              }
                           }
                       }
                   }
               }
-              // Apply redirects
-              for (sid, ch, new_tgt) in redirects {
-                  if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
-                      *entry = new_tgt;
+
+              // 2. For each unique target, clone it once. This mutates the DWA.
+              let mut cloned_tgts: BTreeMap<StateID, StateID> = BTreeMap::new();
+              for &(_, _, tgt) in &edges_to_redirect {
+                  cloned_tgts.entry(tgt).or_insert_with(|| {
+                      clone_state_with_only_negative_outgoing(dwa, tgt)
+                  });
+              }
+
+              // 3. Apply redirects using the map of cloned targets. This also mutates.
+              for (sid, ch, tgt) in edges_to_redirect {
+                  if let Some(new_tgt) = cloned_tgts.get(&tgt) {
+                      if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
+                          *entry = *new_tgt;
+                      }
                   }
-                  // Weight map stays associated with `ch` as-is.
               }
           }
 
@@ -3587,6 +3602,57 @@ local_system:
           DWA::normalize_edges_inplace(&mut dwa.states);
           dwa.simplify();
       }
+
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+          use crate::precompute4::weighted_automata::{DWA, Weight};
+
+          #[test]
+          fn test_resolve_negatives_chain() {
+              let mut dwa = DWA::new();
+              // DWA has 10 states 0..=9
+              for _ in 0..9 {
+                  dwa.add_state();
+              }
+
+              // State 0
+              dwa.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+              dwa.add_transition(0, 1, 2, Weight::from_iter([0..=1])).unwrap();
+              dwa.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
+              dwa.add_transition(0, 3, 4, Weight::from_iter([0..=1])).unwrap();
+
+              // State 1
+              dwa.add_transition(1, -1, 5, Weight::all()).unwrap();
+              // State 2
+              dwa.set_default_transition(2, 6, Weight::all()).unwrap();
+              // State 3
+              dwa.add_transition(3, -2, 7, Weight::all()).unwrap();
+              // State 4: no transitions
+              // State 5
+              dwa.add_transition(5, -1, 8, Weight::all()).unwrap();
+              // State 6: no transitions
+              // State 7
+              dwa.add_transition(7, -1, 9, Weight::all()).unwrap();
+              // State 8
+              dwa.set_final_weight(8, Weight::all()).unwrap();
+              // State 9
+              dwa.set_final_weight(9, Weight::all()).unwrap();
+
+              resolve_negative_codes_in_dwa(&mut dwa);
+
+              // After resolution, the negative chains should be broken because intermediate
+              // states are not final. The final states (8, 9) and the states that
+              // led to them (5, 7) should become unreachable and pruned by simplify().
+              // The final DWA should have no final states and no negative transitions.
+              for state in &dwa.states.0 {
+                  assert!(state.final_weight.is_none() || state.final_weight.as_ref().unwrap().is_empty(), "No state should have a final weight after resolution");
+                  for &ch in state.transitions.exceptions.keys() {
+                      assert!(ch >= 0, "No negative transitions should remain");
+                  }
+              }
+          }
+      }
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -5281,26 +5347,41 @@ messages:
           // Stage A: Preprocess negative edges that go to final nodes with positive outgoing transitions.
           // Clone a new destination with only negative outgoing edges (and final weight) and redirect.
           {
+              use std::collections::BTreeMap;
               let n0 = dwa.states.len();
-              let mut redirects: Vec<(StateID, i16, StateID)> = Vec::new();
+
+              // 1. Find all edges that need redirection without mutating the DWA.
+              let mut edges_to_redirect: Vec<(StateID, i16, StateID)> = Vec::new();
               for sid in 0..n0 {
                   let st = &dwa.states[sid];
                   for (&ch, &tgt) in st.transitions.exceptions.iter() {
                       if is_negative_code(ch) {
-                          let dst = &dwa.states[tgt];
-                          if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
-                              let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
-                              redirects.push((sid, ch, new_tgt));
+                          // Check bounds; invalid tgt could exist before prune_unreachable.
+                          if tgt < n0 {
+                              let dst = &dwa.states[tgt];
+                              if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
+                                  edges_to_redirect.push((sid, ch, tgt));
+                              }
                           }
                       }
                   }
               }
-              // Apply redirects
-              for (sid, ch, new_tgt) in redirects {
-                  if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
-                      *entry = new_tgt;
+
+              // 2. For each unique target, clone it once. This mutates the DWA.
+              let mut cloned_tgts: BTreeMap<StateID, StateID> = BTreeMap::new();
+              for &(_, _, tgt) in &edges_to_redirect {
+                  cloned_tgts.entry(tgt).or_insert_with(|| {
+                      clone_state_with_only_negative_outgoing(dwa, tgt)
+                  });
+              }
+
+              // 3. Apply redirects using the map of cloned targets. This also mutates.
+              for (sid, ch, tgt) in edges_to_redirect {
+                  if let Some(new_tgt) = cloned_tgts.get(&tgt) {
+                      if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
+                          *entry = *new_tgt;
+                      }
                   }
-                  // Weight map stays associated with `ch` as-is.
               }
           }
 
@@ -5422,18 +5503,42 @@ messages:
       ```
     metadata:
       filename: src/precompute4/resolve_negatives.rs
-  - user: |+
-      error[E0502]: cannot borrow `*dwa` as mutable because it is also borrowed as immutable
-         --> src/precompute4/resolve_negatives.rs:216:39
-          |
-      211 |             let st = &dwa.states[sid];
-          |                       ---------- immutable borrow occurs here
-      212 |             for (&ch, &tgt) in st.transitions.exceptions.iter() {
-          |                                -------------------------------- immutable borrow later used here
-      ...
-      216 |                         let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
-          |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
-
+  - user: |-
+      Add a resolve negatives test for this:
+      ```
+      DWA (start: 0)
+        State 0:
+          weight: []
+          0 -> 1 (trans_weight: [1])
+          1 -> 2 (trans_weight: [0..=1])
+          2 -> 3 (trans_weight: [0])
+          3 -> 4 (trans_weight: [0..=1])
+        State 1:
+          weight: []
+          -1 -> 5 (trans_weight: ALL)
+        State 2:
+          weight: []
+          * -> 6 (trans_weight: ALL)
+        State 3:
+          weight: []
+          -2 -> 7 (trans_weight: ALL)
+        State 4:
+          weight: []
+        State 5:
+          weight: []
+          -1 -> 8 (trans_weight: ALL)
+        State 6:
+          weight: []
+        State 7:
+          weight: []
+          -1 -> 9 (trans_weight: ALL)
+        State 8:
+          weight: []
+          final_weight: ALL
+        State 9:
+          weight: []
+          final_weight: ALL
+      ```
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5453,126 +5558,129 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The compiler is pointing out a borrow-checking violation in `src/precompute4/resolve_negatives.rs`. You are trying to modify the `dwa` (a mutable borrow) inside a loop that is iterating over parts of `dwa` (an immutable borrow).
-
-      To fix this, we need to restructure the code to separate the reading phase from the writing phase. Here are the step-by-step instructions to resolve the issue:
+      Of course. Here are the step-by-step instructions to add the requested test case, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
       1.  **Open the file** `src/precompute4/resolve_negatives.rs`.
+      2.  **Append the following code** to the end of the file. This adds a new test module with a test case that constructs the specified DWA and verifies the behavior of `resolve_negative_codes_in_dwa`. The test asserts that after processing, no negative transitions remain and no states have final weights, which is the expected outcome given the current implementation.
 
-      2.  **Locate the `resolve_negative_codes_in_dwa` function.** Inside this function, find the block of code for `Stage A`, which starts with a comment: `// Stage A: Preprocess negative edges...`.
+      ```rust
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+          use crate::precompute4::weighted_automata::{DWA, Weight};
 
-      3.  **Replace the entire implementation of the `Stage A` block.** The current implementation attempts to find and fix transitions in a single loop, causing the borrow checker error. The corrected version will perform these actions in separate stages:
-          a. First, iterate through the automaton to identify all transitions that need to be redirected, collecting their information without modifying the automaton.
-          b. Second, create the necessary new "cloned" states for redirection. This is where the automaton is mutated.
-          c. Finally, iterate through the collected information and apply the redirections.
+          #[test]
+          fn test_resolve_negatives_chain() {
+              let mut dwa = DWA::new();
+              // DWA has 10 states 0..=9
+              for _ in 0..9 {
+                  dwa.add_state();
+              }
 
-          Replace the code inside the `{ ... }` for `Stage A` with the following:
+              // State 0
+              dwa.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+              dwa.add_transition(0, 1, 2, Weight::from_iter([0..=1])).unwrap();
+              dwa.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
+              dwa.add_transition(0, 3, 4, Weight::from_iter([0..=1])).unwrap();
 
-          ```rust
-          use std::collections::BTreeMap;
-          let n0 = dwa.states.len();
+              // State 1
+              dwa.add_transition(1, -1, 5, Weight::all()).unwrap();
+              // State 2
+              dwa.set_default_transition(2, 6, Weight::all()).unwrap();
+              // State 3
+              dwa.add_transition(3, -2, 7, Weight::all()).unwrap();
+              // State 4: no transitions
+              // State 5
+              dwa.add_transition(5, -1, 8, Weight::all()).unwrap();
+              // State 6: no transitions
+              // State 7
+              dwa.add_transition(7, -1, 9, Weight::all()).unwrap();
+              // State 8
+              dwa.set_final_weight(8, Weight::all()).unwrap();
+              // State 9
+              dwa.set_final_weight(9, Weight::all()).unwrap();
 
-          // 1. Find all edges that need redirection without mutating the DWA.
-          let mut edges_to_redirect: Vec<(StateID, i16, StateID)> = Vec::new();
-          for sid in 0..n0 {
-              let st = &dwa.states[sid];
-              for (&ch, &tgt) in st.transitions.exceptions.iter() {
-                  if is_negative_code(ch) {
-                      // Check bounds; invalid tgt could exist before prune_unreachable.
-                      if tgt < n0 {
-                          let dst = &dwa.states[tgt];
-                          if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
-                              edges_to_redirect.push((sid, ch, tgt));
-                          }
-                      }
+              resolve_negative_codes_in_dwa(&mut dwa);
+
+              // After resolution, the negative chains should be broken because intermediate
+              // states are not final. The final states (8, 9) and the states that
+              // led to them (5, 7) should become unreachable and pruned by simplify().
+              // The final DWA should have no final states and no negative transitions.
+              for state in &dwa.states.0 {
+                  assert!(state.final_weight.is_none() || state.final_weight.as_ref().unwrap().is_empty(), "No state should have a final weight after resolution");
+                  for &ch in state.transitions.exceptions.keys() {
+                      assert!(ch >= 0, "No negative transitions should remain");
                   }
               }
           }
-
-          // 2. For each unique target, clone it once. This mutates the DWA.
-          let mut cloned_tgts: BTreeMap<StateID, StateID> = BTreeMap::new();
-          for &(_, _, tgt) in &edges_to_redirect {
-              cloned_tgts.entry(tgt).or_insert_with(|| {
-                  clone_state_with_only_negative_outgoing(dwa, tgt)
-              });
-          }
-
-          // 3. Apply redirects using the map of cloned targets. This also mutates.
-          for (sid, ch, tgt) in edges_to_redirect {
-              if let Some(new_tgt) = cloned_tgts.get(&tgt) {
-                  if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
-                      *entry = *new_tgt;
-                  }
-              }
-          }
-          ```
-
-      This change resolves the compiler error by ensuring that you are not mutably borrowing `dwa` while an immutable borrow is still active. It also adds a bounds check to prevent a potential panic.
+      }
+      ```
 
       ### Git Diff
 
-      Here is the git diff for the required change:
+      Here is the git patch to apply the changes:
 
       ```diff
       diff --git a/src/precompute4/resolve_negatives.rs b/src/precompute4/resolve_negatives.rs
       --- a/src/precompute4/resolve_negatives.rs
       +++ b/src/precompute4/resolve_negatives.rs
-      @@ -207,29 +207,45 @@
-           // Stage A: Preprocess negative edges that go to final nodes with positive outgoing transitions.
-           // Clone a new destination with only negative outgoing edges (and final weight) and redirect.
-           {
-      +        use std::collections::BTreeMap;
-               let n0 = dwa.states.len();
-      -        let mut redirects: Vec<(StateID, i16, StateID)> = Vec::new();
+      @@ -342,3 +342,50 @@
+           DWA::normalize_edges_inplace(&mut dwa.states);
+           dwa.simplify();
+       }
       +
-      +        // 1. Find all edges that need redirection without mutating the DWA.
-      +        let mut edges_to_redirect: Vec<(StateID, i16, StateID)> = Vec::new();
-               for sid in 0..n0 {
-                   let st = &dwa.states[sid];
-                   for (&ch, &tgt) in st.transitions.exceptions.iter() {
-                       if is_negative_code(ch) {
-      -                    let dst = &dwa.states[tgt];
-      -                    if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
-      -                        let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
-      -                        redirects.push((sid, ch, new_tgt));
-      +                    // Check bounds; invalid tgt could exist before prune_unreachable.
-      +                    if tgt < n0 {
-      +                        let dst = &dwa.states[tgt];
-      +                        if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
-      +                            edges_to_redirect.push((sid, ch, tgt));
-      +                        }
-                           }
-                       }
-                   }
-               }
-      -        // Apply redirects
-      -        for (sid, ch, new_tgt) in redirects {
-      -            if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
-      -                *entry = new_tgt;
+      +#[cfg(test)]
+      +mod tests {
+      +    use super::*;
+      +    use crate::precompute4::weighted_automata::{DWA, Weight};
       +
-      +        // 2. For each unique target, clone it once. This mutates the DWA.
-      +        let mut cloned_tgts: BTreeMap<StateID, StateID> = BTreeMap::new();
-      +        for &(_, _, tgt) in &edges_to_redirect {
-      +            cloned_tgts.entry(tgt).or_insert_with(|| {
-      +                clone_state_with_only_negative_outgoing(dwa, tgt)
-      +            });
+      +    #[test]
+      +    fn test_resolve_negatives_chain() {
+      +        let mut dwa = DWA::new();
+      +        // DWA has 10 states 0..=9
+      +        for _ in 0..9 {
+      +            dwa.add_state();
       +        }
       +
-      +        // 3. Apply redirects using the map of cloned targets. This also mutates.
-      +        for (sid, ch, tgt) in edges_to_redirect {
-      +            if let Some(new_tgt) = cloned_tgts.get(&tgt) {
-      +                if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
-      +                    *entry = *new_tgt;
-      +                }
-                   }
-      -            // Weight map stays associated with `ch` as-is.
-               }
-           }
-       
-           // Stage B: Internal negative cancellation/merging fixpoint.
-           // For each A -(-x)-> B and B -(x)-> C, merge C into A with the weight along the two edges (meet).
+      +        // State 0
+      +        dwa.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+      +        dwa.add_transition(0, 1, 2, Weight::from_iter([0..=1])).unwrap();
+      +        dwa.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
+      +        dwa.add_transition(0, 3, 4, Weight::from_iter([0..=1])).unwrap();
+      +
+      +        // State 1
+      +        dwa.add_transition(1, -1, 5, Weight::all()).unwrap();
+      +        // State 2
+      +        dwa.set_default_transition(2, 6, Weight::all()).unwrap();
+      +        // State 3
+      +        dwa.add_transition(3, -2, 7, Weight::all()).unwrap();
+      +        // State 4: no transitions
+      +        // State 5
+      +        dwa.add_transition(5, -1, 8, Weight::all()).unwrap();
+      +        // State 6: no transitions
+      +        // State 7
+      +        dwa.add_transition(7, -1, 9, Weight::all()).unwrap();
+      +        // State 8
+      +        dwa.set_final_weight(8, Weight::all()).unwrap();
+      +        // State 9
+      +        dwa.set_final_weight(9, Weight::all()).unwrap();
+      +
+      +        resolve_negative_codes_in_dwa(&mut dwa);
+      +
+      +        // After resolution, the negative chains should be broken because intermediate
+      +        // states are not final. The final states (8, 9) and the states that
+      +        // led to them (5, 7) should become unreachable and pruned by simplify().
+      +        // The final DWA should have no final states and no negative transitions.
+      +        for state in &dwa.states.0 {
+      +            assert!(state.final_weight.is_none() || state.final_weight.as_ref().unwrap().is_empty(), "No state should have a final weight after resolution");
+      +            for &ch in state.transitions.exceptions.keys() {
+      +                assert!(ch >= 0, "No negative transitions should remain");
+      +            }
+      +        }
+      +    }
+      +}
 
       ```
     metadata:
@@ -5585,7 +5693,7 @@ messages:
       Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix E0502 in resolve_negative_codes_in_dwa
-      by restructuring Stage A to separate read/write loops"'
+  - user: 'Changes committed with message: "test: Add test case for negative code
+      resolution chain"'
     metadata:
 ...

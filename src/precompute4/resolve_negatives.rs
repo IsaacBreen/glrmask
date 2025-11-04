@@ -357,3 +357,54 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     DWA::normalize_edges_inplace(&mut dwa.states);
     dwa.simplify();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::precompute4::weighted_automata::{DWA, Weight};
+
+    #[test]
+    fn test_resolve_negatives_chain() {
+        let mut dwa = DWA::new();
+        // DWA has 10 states 0..=9
+        for _ in 0..9 {
+            dwa.add_state();
+        }
+
+        // State 0
+        dwa.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+        dwa.add_transition(0, 1, 2, Weight::from_iter([0..=1])).unwrap();
+        dwa.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
+        dwa.add_transition(0, 3, 4, Weight::from_iter([0..=1])).unwrap();
+
+        // State 1
+        dwa.add_transition(1, -1, 5, Weight::all()).unwrap();
+        // State 2
+        dwa.set_default_transition(2, 6, Weight::all()).unwrap();
+        // State 3
+        dwa.add_transition(3, -2, 7, Weight::all()).unwrap();
+        // State 4: no transitions
+        // State 5
+        dwa.add_transition(5, -1, 8, Weight::all()).unwrap();
+        // State 6: no transitions
+        // State 7
+        dwa.add_transition(7, -1, 9, Weight::all()).unwrap();
+        // State 8
+        dwa.set_final_weight(8, Weight::all()).unwrap();
+        // State 9
+        dwa.set_final_weight(9, Weight::all()).unwrap();
+
+        resolve_negative_codes_in_dwa(&mut dwa);
+
+        // After resolution, the negative chains should be broken because intermediate
+        // states are not final. The final states (8, 9) and the states that
+        // led to them (5, 7) should become unreachable and pruned by simplify().
+        // The final DWA should have no final states and no negative transitions.
+        for state in &dwa.states.0 {
+            assert!(state.final_weight.is_none() || state.final_weight.as_ref().unwrap().is_empty(), "No state should have a final weight after resolution");
+            for &ch in state.transitions.exceptions.keys() {
+                assert!(ch >= 0, "No negative transitions should remain");
+            }
+        }
+    }
+}
