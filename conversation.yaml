@@ -1445,18 +1445,348 @@ local_system:
       }
     src/precompute4/resolve_negatives.rs: |
       use crate::precompute4::full_dwa::Precomputed4;
-      use crate::precompute4::weighted_automata::DWA;
+      use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, StateID, Weight};
 
-      // Placeholder: resolve negative-coded transitions. Unimplemented for now.
       pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
-          for (sid, dwa) in precomputed4.iter_mut() {
-              println!("resolve_negative_codes_for_all: TokenizerStateID {:?} -> TODO", sid);
+          for (_sid, dwa) in precomputed4.iter_mut() {
               resolve_negative_codes_in_dwa(dwa);
           }
       }
 
-      fn resolve_negative_codes_in_dwa(_dwa: &mut DWA) {
-          eprintln!("Negative-coded transition resolution is not implemented yet. This pass should transform any i16<0 transition labels into an equivalent form free of negative labels.");
+      fn is_negative_code(code: i16) -> bool {
+          code < 0
+      }
+
+      fn is_positive_code(code: i16) -> bool {
+          code >= 0
+      }
+
+      fn is_final_nonempty(st: &DWAState) -> bool {
+          st.final_weight.as_ref().map_or(false, |w| !w.is_empty())
+      }
+
+      fn has_any_positive_outgoing(st: &DWAState) -> bool {
+          st.transitions.default.is_some() || st.transitions.exceptions.keys().any(|&k| is_positive_code(k))
+      }
+
+      // Clone a state keeping: weight, final_weight, and only negative-coded outgoing transitions (and their weights).
+      // Drops default and all non-negative exceptions.
+      fn clone_state_with_only_negative_outgoing(dwa: &mut DWA, original_id: StateID) -> StateID {
+          let orig = dwa.states[original_id].clone();
+          let new_id = dwa.add_state();
+          let mut st = DWAState::default();
+          st.weight = orig.weight.clone();
+          st.final_weight = orig.final_weight.clone();
+          // Keep only negative-coded exceptions (and their weights).
+          for (ch, tgt) in orig.transitions.exceptions {
+              if is_negative_code(ch) {
+                  st.transitions.exceptions.insert(ch, tgt);
+                  let w = orig
+                      .trans_weights_exceptions
+                      .get(&ch)
+                      .cloned()
+                      .unwrap_or_else(Weight::all);
+                  st.trans_weights_exceptions.insert(ch, w);
+              }
+          }
+          // No default from the clone.
+          st.transitions.default = None;
+          st.trans_weight_default = None;
+          dwa.states[new_id] = st;
+          new_id
+      }
+
+      // Union a weight into an Option<Weight>. Returns true if changed.
+      fn union_into_option(dst: &mut Option<Weight>, inc: &Weight) -> bool {
+          if inc.is_empty() {
+              return false;
+          }
+          match dst {
+              Some(w) => {
+                  let before = w.clone();
+                  *w |= inc;
+                  *w != before
+              }
+              None => {
+                  *dst = Some(inc.clone());
+                  true
+              }
+          }
+      }
+
+      // Insert an exception edge (code -> tgt) into state s_id with given weight (add_w).
+      // - If the exception exists and points to the same tgt: union weights.
+      // - If it exists but points elsewhere: conservatively union the weight into the existing edge's weight,
+      //   leaving the target unchanged (keeps determinism).
+      // - If it does not exist: insert it with the provided weight.
+      // Returns true if a change was made.
+      fn add_or_union_exception(dwa: &mut DWA, s_id: StateID, ch: i16, tgt: StateID, add_w: Weight) -> bool {
+          if add_w.is_empty() {
+              return false;
+          }
+          let st = &mut dwa.states[s_id];
+          if let Some(&existing_tgt) = st.transitions.exceptions.get(&ch) {
+              // Already exists.
+              if existing_tgt == tgt {
+                  let entry = st
+                      .trans_weights_exceptions
+                      .entry(ch)
+                      .or_insert_with(Weight::zeros);
+                  let before = entry.clone();
+                  *entry |= &add_w;
+                  return *entry != before;
+              } else {
+                  // Determinism requirement: we cannot have two different targets for the same code.
+                  // Conservatively union the additional weight into the existing edge's weight.
+                  let entry = st
+                      .trans_weights_exceptions
+                      .entry(ch)
+                      .or_insert_with(Weight::zeros);
+                  let before = entry.clone();
+                  *entry |= &add_w;
+                  return *entry != before;
+              }
+          } else {
+              // Insert new exception.
+              st.transitions.exceptions.insert(ch, tgt);
+              st.trans_weights_exceptions.insert(ch, add_w);
+              return true;
+          }
+      }
+
+      // Merge src state (src_id) into dst state (dst_id), gating everything by `gate`.
+      // - dst.weight |= (gate & src.weight)
+      // - dst.final_weight |= (gate & src.final_weight)
+      // - For each outgoing edge e of src:
+      //     - If default: fold into dst.default (union weights if same target; otherwise, keep target and union weights)
+      //     - If exception: add_or_union_exception with weight (gate & edge_weight)
+      // Returns true if any change was made to dst.
+      fn merge_state_into(dwa: &mut DWA, dst_id: StateID, src_id: StateID, gate: &Weight) -> bool {
+          if gate.is_empty() {
+              return false;
+          }
+          let src = dwa.states[src_id].clone(); // prevent borrow conflicts
+          let dst = &mut dwa.states[dst_id];
+          let mut changed = false;
+
+          // State weights
+          let gated_state_w = &src.weight & gate;
+          let before_w = dst.weight.clone();
+          dst.weight |= &gated_state_w;
+          if dst.weight != before_w {
+              changed = true;
+          }
+
+          // Final weights
+          if let Some(fw) = &src.final_weight {
+              let gated_fw = fw & gate;
+              if !gated_fw.is_empty() {
+                  if union_into_option(&mut dst.final_weight, &gated_fw) {
+                      changed = true;
+                  }
+              }
+          }
+
+          // Default transition
+          if let Some(def_tgt) = src.transitions.default {
+              // Default edge weight on src's default; treat missing weight as ALL.
+              let def_w = src.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all);
+              let gated_def_w = &def_w & gate;
+              if !gated_def_w.is_empty() {
+                  if let Some(dst_def_tgt) = dst.transitions.default {
+                      if dst_def_tgt == def_tgt {
+                          // Merge weight
+                          let entry = dst
+                              .trans_weight_default
+                              .get_or_insert_with(Weight::zeros);
+                          let before = entry.clone();
+                          *entry |= &gated_def_w;
+                          if *entry != before {
+                              changed = true;
+                          }
+                      } else {
+                          // Keep deterministic target; merge weights conservatively.
+                          let entry = dst
+                              .trans_weight_default
+                              .get_or_insert_with(Weight::zeros);
+                          let before = entry.clone();
+                          *entry |= &gated_def_w;
+                          if *entry != before {
+                              changed = true;
+                          }
+                      }
+                  } else {
+                      // No default yet: set it.
+                      dst.transitions.default = Some(def_tgt);
+                      dst.trans_weight_default = Some(gated_def_w);
+                      changed = true;
+                  }
+              }
+          }
+
+          // Exception transitions
+          for (ch, tgt) in src.transitions.exceptions {
+              // Treat missing per-edge weight as ALL
+              let edge_w = src
+                  .trans_weights_exceptions
+                  .get(&ch)
+                  .cloned()
+                  .unwrap_or_else(Weight::all);
+              let gated = &edge_w & gate;
+              if !gated.is_empty() {
+                  if add_or_union_exception(dwa, dst_id, ch, tgt, gated) {
+                      changed = true;
+                  }
+              }
+          }
+
+          changed
+      }
+
+      fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
+          if dwa.states.len() == 0 {
+              return;
+          }
+
+          // Stage A: Preprocess negative edges that go to final nodes with positive outgoing transitions.
+          // Clone a new destination with only negative outgoing edges (and final weight) and redirect.
+          {
+              let n0 = dwa.states.len();
+              let mut redirects: Vec<(StateID, i16, StateID)> = Vec::new();
+              for sid in 0..n0 {
+                  let st = &dwa.states[sid];
+                  for (&ch, &tgt) in st.transitions.exceptions.iter() {
+                      if is_negative_code(ch) {
+                          let dst = &dwa.states[tgt];
+                          if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
+                              let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
+                              redirects.push((sid, ch, new_tgt));
+                          }
+                      }
+                  }
+              }
+              // Apply redirects
+              for (sid, ch, new_tgt) in redirects {
+                  if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
+                      *entry = new_tgt;
+                  }
+                  // Weight map stays associated with `ch` as-is.
+              }
+          }
+
+          // Stage B: Internal negative cancellation/merging fixpoint.
+          // For each A -(-x)-> B and B -(x)-> C, merge C into A with the weight along the two edges (meet).
+          {
+              let mut changed_any = true;
+              let mut guard_rounds = 0usize;
+              while changed_any && guard_rounds < 64 {
+                  changed_any = false;
+                  guard_rounds += 1;
+                  let n = dwa.states.len();
+                  for a_id in 0..n {
+                      // Collect negative edges out of a_id to avoid borrow issues.
+                      let neg_edges: Vec<(i16, StateID)> = dwa.states[a_id]
+                          .transitions
+                          .exceptions
+                          .iter()
+                          .filter_map(|(&ch, &b_id)| if is_negative_code(ch) { Some((ch, b_id)) } else { None })
+                          .collect();
+                      for (neg_ch, b_id) in neg_edges {
+                          let x = -neg_ch; // matching positive code
+                          // Edge weights: treat missing as ALL
+                          let w_neg = dwa.states[a_id]
+                              .trans_weights_exceptions
+                              .get(&neg_ch)
+                              .cloned()
+                              .unwrap_or_else(Weight::all);
+                          if w_neg.is_empty() {
+                              continue;
+                          }
+                          if let Some(&c_id) = dwa.states[b_id].transitions.exceptions.get(&x) {
+                              let w_pos = dwa.states[b_id]
+                                  .trans_weights_exceptions
+                                  .get(&x)
+                                  .cloned()
+                                  .unwrap_or_else(Weight::all);
+                              if w_pos.is_empty() {
+                                  continue;
+                              }
+                              let w_path = &w_neg & &w_pos;
+                              if !w_path.is_empty() {
+                                  if merge_state_into(dwa, a_id, c_id, &w_path) {
+                                      changed_any = true;
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // Stage C: Remove remaining internal negative edges (those not going to final states).
+          {
+              let n = dwa.states.len();
+              for a_id in 0..n {
+                  // Collect keys to remove to avoid mutating while iterating.
+                  let to_remove: Vec<i16> = dwa.states[a_id]
+                      .transitions
+                      .exceptions
+                      .iter()
+                      .filter_map(|(&ch, &tgt)| {
+                          if is_negative_code(ch) && !is_final_nonempty(&dwa.states[tgt]) {
+                              Some(ch)
+                          } else {
+                              None
+                          }
+                      })
+                      .collect();
+                  for ch in to_remove {
+                      dwa.states[a_id].transitions.exceptions.remove(&ch);
+                      dwa.states[a_id].trans_weights_exceptions.remove(&ch);
+                  }
+              }
+          }
+
+          // Stage D: Remove negative edges to final states ("epsilon replacement").
+          // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
+          {
+              let n = dwa.states.len();
+              for a_id in 0..n {
+                  // Capture all negatives-to-final to process.
+                  let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
+                      .transitions
+                      .exceptions
+                      .iter()
+                      .filter_map(|(&ch, &tgt)| {
+                          if is_negative_code(ch) && is_final_nonempty(&dwa.states[tgt]) {
+                              Some((ch, tgt))
+                          } else {
+                              None
+                          }
+                      })
+                      .collect();
+                  for (ch, tgt) in neg_to_final {
+                      let edge_w = dwa.states[a_id]
+                          .trans_weights_exceptions
+                          .get(&ch)
+                          .cloned()
+                          .unwrap_or_else(Weight::all);
+                      if let Some(fw) = &dwa.states[tgt].final_weight {
+                          let inc = &edge_w & fw;
+                          if !inc.is_empty() {
+                              union_into_option(&mut dwa.states[a_id].final_weight, &inc);
+                          }
+                      }
+                      // Remove the negative edge itself.
+                      dwa.states[a_id].transitions.exceptions.remove(&ch);
+                      dwa.states[a_id].trans_weights_exceptions.remove(&ch);
+                  }
+              }
+          }
+
+          // Clean up and simplify.
+          DWA::normalize_edges_inplace(&mut dwa.states);
+          dwa.simplify();
       }
   prev_file_contents:
     src/precompute4/weighted_automata.rs: |
@@ -3105,26 +3435,41 @@ local_system:
           // Stage A: Preprocess negative edges that go to final nodes with positive outgoing transitions.
           // Clone a new destination with only negative outgoing edges (and final weight) and redirect.
           {
+              use std::collections::BTreeMap;
               let n0 = dwa.states.len();
-              let mut redirects: Vec<(StateID, i16, StateID)> = Vec::new();
+
+              // 1. Find all edges that need redirection without mutating the DWA.
+              let mut edges_to_redirect: Vec<(StateID, i16, StateID)> = Vec::new();
               for sid in 0..n0 {
                   let st = &dwa.states[sid];
                   for (&ch, &tgt) in st.transitions.exceptions.iter() {
                       if is_negative_code(ch) {
-                          let dst = &dwa.states[tgt];
-                          if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
-                              let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
-                              redirects.push((sid, ch, new_tgt));
+                          // Check bounds; invalid tgt could exist before prune_unreachable.
+                          if tgt < n0 {
+                              let dst = &dwa.states[tgt];
+                              if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
+                                  edges_to_redirect.push((sid, ch, tgt));
+                              }
                           }
                       }
                   }
               }
-              // Apply redirects
-              for (sid, ch, new_tgt) in redirects {
-                  if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
-                      *entry = new_tgt;
+
+              // 2. For each unique target, clone it once. This mutates the DWA.
+              let mut cloned_tgts: BTreeMap<StateID, StateID> = BTreeMap::new();
+              for &(_, _, tgt) in &edges_to_redirect {
+                  cloned_tgts.entry(tgt).or_insert_with(|| {
+                      clone_state_with_only_negative_outgoing(dwa, tgt)
+                  });
+              }
+
+              // 3. Apply redirects using the map of cloned targets. This also mutates.
+              for (sid, ch, tgt) in edges_to_redirect {
+                  if let Some(new_tgt) = cloned_tgts.get(&tgt) {
+                      if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
+                          *entry = *new_tgt;
+                      }
                   }
-                  // Weight map stays associated with `ch` as-is.
               }
           }
 
@@ -3253,7 +3598,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -4730,88 +5075,365 @@ messages:
   - user: |-
       ```rust "src/precompute4/resolve_negatives.rs"
       use crate::precompute4::full_dwa::Precomputed4;
-      use crate::precompute4::weighted_automata::DWA;
+      use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, StateID, Weight};
 
-      // Placeholder: resolve negative-coded transitions. Unimplemented for now.
       pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
-          for (sid, dwa) in precomputed4.iter_mut() {
-              println!("resolve_negative_codes_for_all: TokenizerStateID {:?} -> TODO", sid);
+          for (_sid, dwa) in precomputed4.iter_mut() {
               resolve_negative_codes_in_dwa(dwa);
           }
       }
 
-      fn resolve_negative_codes_in_dwa(_dwa: &mut DWA) {
-          eprintln!("Negative-coded transition resolution is not implemented yet. This pass should transform any i16<0 transition labels into an equivalent form free of negative labels.");
+      fn is_negative_code(code: i16) -> bool {
+          code < 0
+      }
+
+      fn is_positive_code(code: i16) -> bool {
+          code >= 0
+      }
+
+      fn is_final_nonempty(st: &DWAState) -> bool {
+          st.final_weight.as_ref().map_or(false, |w| !w.is_empty())
+      }
+
+      fn has_any_positive_outgoing(st: &DWAState) -> bool {
+          st.transitions.default.is_some() || st.transitions.exceptions.keys().any(|&k| is_positive_code(k))
+      }
+
+      // Clone a state keeping: weight, final_weight, and only negative-coded outgoing transitions (and their weights).
+      // Drops default and all non-negative exceptions.
+      fn clone_state_with_only_negative_outgoing(dwa: &mut DWA, original_id: StateID) -> StateID {
+          let orig = dwa.states[original_id].clone();
+          let new_id = dwa.add_state();
+          let mut st = DWAState::default();
+          st.weight = orig.weight.clone();
+          st.final_weight = orig.final_weight.clone();
+          // Keep only negative-coded exceptions (and their weights).
+          for (ch, tgt) in orig.transitions.exceptions {
+              if is_negative_code(ch) {
+                  st.transitions.exceptions.insert(ch, tgt);
+                  let w = orig
+                      .trans_weights_exceptions
+                      .get(&ch)
+                      .cloned()
+                      .unwrap_or_else(Weight::all);
+                  st.trans_weights_exceptions.insert(ch, w);
+              }
+          }
+          // No default from the clone.
+          st.transitions.default = None;
+          st.trans_weight_default = None;
+          dwa.states[new_id] = st;
+          new_id
+      }
+
+      // Union a weight into an Option<Weight>. Returns true if changed.
+      fn union_into_option(dst: &mut Option<Weight>, inc: &Weight) -> bool {
+          if inc.is_empty() {
+              return false;
+          }
+          match dst {
+              Some(w) => {
+                  let before = w.clone();
+                  *w |= inc;
+                  *w != before
+              }
+              None => {
+                  *dst = Some(inc.clone());
+                  true
+              }
+          }
+      }
+
+      // Insert an exception edge (code -> tgt) into state s_id with given weight (add_w).
+      // - If the exception exists and points to the same tgt: union weights.
+      // - If it exists but points elsewhere: conservatively union the weight into the existing edge's weight,
+      //   leaving the target unchanged (keeps determinism).
+      // - If it does not exist: insert it with the provided weight.
+      // Returns true if a change was made.
+      fn add_or_union_exception(dwa: &mut DWA, s_id: StateID, ch: i16, tgt: StateID, add_w: Weight) -> bool {
+          if add_w.is_empty() {
+              return false;
+          }
+          let st = &mut dwa.states[s_id];
+          if let Some(&existing_tgt) = st.transitions.exceptions.get(&ch) {
+              // Already exists.
+              if existing_tgt == tgt {
+                  let entry = st
+                      .trans_weights_exceptions
+                      .entry(ch)
+                      .or_insert_with(Weight::zeros);
+                  let before = entry.clone();
+                  *entry |= &add_w;
+                  return *entry != before;
+              } else {
+                  // Determinism requirement: we cannot have two different targets for the same code.
+                  // Conservatively union the additional weight into the existing edge's weight.
+                  let entry = st
+                      .trans_weights_exceptions
+                      .entry(ch)
+                      .or_insert_with(Weight::zeros);
+                  let before = entry.clone();
+                  *entry |= &add_w;
+                  return *entry != before;
+              }
+          } else {
+              // Insert new exception.
+              st.transitions.exceptions.insert(ch, tgt);
+              st.trans_weights_exceptions.insert(ch, add_w);
+              return true;
+          }
+      }
+
+      // Merge src state (src_id) into dst state (dst_id), gating everything by `gate`.
+      // - dst.weight |= (gate & src.weight)
+      // - dst.final_weight |= (gate & src.final_weight)
+      // - For each outgoing edge e of src:
+      //     - If default: fold into dst.default (union weights if same target; otherwise, keep target and union weights)
+      //     - If exception: add_or_union_exception with weight (gate & edge_weight)
+      // Returns true if any change was made to dst.
+      fn merge_state_into(dwa: &mut DWA, dst_id: StateID, src_id: StateID, gate: &Weight) -> bool {
+          if gate.is_empty() {
+              return false;
+          }
+          let src = dwa.states[src_id].clone(); // prevent borrow conflicts
+          let dst = &mut dwa.states[dst_id];
+          let mut changed = false;
+
+          // State weights
+          let gated_state_w = &src.weight & gate;
+          let before_w = dst.weight.clone();
+          dst.weight |= &gated_state_w;
+          if dst.weight != before_w {
+              changed = true;
+          }
+
+          // Final weights
+          if let Some(fw) = &src.final_weight {
+              let gated_fw = fw & gate;
+              if !gated_fw.is_empty() {
+                  if union_into_option(&mut dst.final_weight, &gated_fw) {
+                      changed = true;
+                  }
+              }
+          }
+
+          // Default transition
+          if let Some(def_tgt) = src.transitions.default {
+              // Default edge weight on src's default; treat missing weight as ALL.
+              let def_w = src.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all);
+              let gated_def_w = &def_w & gate;
+              if !gated_def_w.is_empty() {
+                  if let Some(dst_def_tgt) = dst.transitions.default {
+                      if dst_def_tgt == def_tgt {
+                          // Merge weight
+                          let entry = dst
+                              .trans_weight_default
+                              .get_or_insert_with(Weight::zeros);
+                          let before = entry.clone();
+                          *entry |= &gated_def_w;
+                          if *entry != before {
+                              changed = true;
+                          }
+                      } else {
+                          // Keep deterministic target; merge weights conservatively.
+                          let entry = dst
+                              .trans_weight_default
+                              .get_or_insert_with(Weight::zeros);
+                          let before = entry.clone();
+                          *entry |= &gated_def_w;
+                          if *entry != before {
+                              changed = true;
+                          }
+                      }
+                  } else {
+                      // No default yet: set it.
+                      dst.transitions.default = Some(def_tgt);
+                      dst.trans_weight_default = Some(gated_def_w);
+                      changed = true;
+                  }
+              }
+          }
+
+          // Exception transitions
+          for (ch, tgt) in src.transitions.exceptions {
+              // Treat missing per-edge weight as ALL
+              let edge_w = src
+                  .trans_weights_exceptions
+                  .get(&ch)
+                  .cloned()
+                  .unwrap_or_else(Weight::all);
+              let gated = &edge_w & gate;
+              if !gated.is_empty() {
+                  if add_or_union_exception(dwa, dst_id, ch, tgt, gated) {
+                      changed = true;
+                  }
+              }
+          }
+
+          changed
+      }
+
+      fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
+          if dwa.states.len() == 0 {
+              return;
+          }
+
+          // Stage A: Preprocess negative edges that go to final nodes with positive outgoing transitions.
+          // Clone a new destination with only negative outgoing edges (and final weight) and redirect.
+          {
+              let n0 = dwa.states.len();
+              let mut redirects: Vec<(StateID, i16, StateID)> = Vec::new();
+              for sid in 0..n0 {
+                  let st = &dwa.states[sid];
+                  for (&ch, &tgt) in st.transitions.exceptions.iter() {
+                      if is_negative_code(ch) {
+                          let dst = &dwa.states[tgt];
+                          if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
+                              let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
+                              redirects.push((sid, ch, new_tgt));
+                          }
+                      }
+                  }
+              }
+              // Apply redirects
+              for (sid, ch, new_tgt) in redirects {
+                  if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
+                      *entry = new_tgt;
+                  }
+                  // Weight map stays associated with `ch` as-is.
+              }
+          }
+
+          // Stage B: Internal negative cancellation/merging fixpoint.
+          // For each A -(-x)-> B and B -(x)-> C, merge C into A with the weight along the two edges (meet).
+          {
+              let mut changed_any = true;
+              let mut guard_rounds = 0usize;
+              while changed_any && guard_rounds < 64 {
+                  changed_any = false;
+                  guard_rounds += 1;
+                  let n = dwa.states.len();
+                  for a_id in 0..n {
+                      // Collect negative edges out of a_id to avoid borrow issues.
+                      let neg_edges: Vec<(i16, StateID)> = dwa.states[a_id]
+                          .transitions
+                          .exceptions
+                          .iter()
+                          .filter_map(|(&ch, &b_id)| if is_negative_code(ch) { Some((ch, b_id)) } else { None })
+                          .collect();
+                      for (neg_ch, b_id) in neg_edges {
+                          let x = -neg_ch; // matching positive code
+                          // Edge weights: treat missing as ALL
+                          let w_neg = dwa.states[a_id]
+                              .trans_weights_exceptions
+                              .get(&neg_ch)
+                              .cloned()
+                              .unwrap_or_else(Weight::all);
+                          if w_neg.is_empty() {
+                              continue;
+                          }
+                          if let Some(&c_id) = dwa.states[b_id].transitions.exceptions.get(&x) {
+                              let w_pos = dwa.states[b_id]
+                                  .trans_weights_exceptions
+                                  .get(&x)
+                                  .cloned()
+                                  .unwrap_or_else(Weight::all);
+                              if w_pos.is_empty() {
+                                  continue;
+                              }
+                              let w_path = &w_neg & &w_pos;
+                              if !w_path.is_empty() {
+                                  if merge_state_into(dwa, a_id, c_id, &w_path) {
+                                      changed_any = true;
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // Stage C: Remove remaining internal negative edges (those not going to final states).
+          {
+              let n = dwa.states.len();
+              for a_id in 0..n {
+                  // Collect keys to remove to avoid mutating while iterating.
+                  let to_remove: Vec<i16> = dwa.states[a_id]
+                      .transitions
+                      .exceptions
+                      .iter()
+                      .filter_map(|(&ch, &tgt)| {
+                          if is_negative_code(ch) && !is_final_nonempty(&dwa.states[tgt]) {
+                              Some(ch)
+                          } else {
+                              None
+                          }
+                      })
+                      .collect();
+                  for ch in to_remove {
+                      dwa.states[a_id].transitions.exceptions.remove(&ch);
+                      dwa.states[a_id].trans_weights_exceptions.remove(&ch);
+                  }
+              }
+          }
+
+          // Stage D: Remove negative edges to final states ("epsilon replacement").
+          // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
+          {
+              let n = dwa.states.len();
+              for a_id in 0..n {
+                  // Capture all negatives-to-final to process.
+                  let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
+                      .transitions
+                      .exceptions
+                      .iter()
+                      .filter_map(|(&ch, &tgt)| {
+                          if is_negative_code(ch) && is_final_nonempty(&dwa.states[tgt]) {
+                              Some((ch, tgt))
+                          } else {
+                              None
+                          }
+                      })
+                      .collect();
+                  for (ch, tgt) in neg_to_final {
+                      let edge_w = dwa.states[a_id]
+                          .trans_weights_exceptions
+                          .get(&ch)
+                          .cloned()
+                          .unwrap_or_else(Weight::all);
+                      if let Some(fw) = &dwa.states[tgt].final_weight {
+                          let inc = &edge_w & fw;
+                          if !inc.is_empty() {
+                              union_into_option(&mut dwa.states[a_id].final_weight, &inc);
+                          }
+                      }
+                      // Remove the negative edge itself.
+                      dwa.states[a_id].transitions.exceptions.remove(&ch);
+                      dwa.states[a_id].trans_weights_exceptions.remove(&ch);
+                  }
+              }
+          }
+
+          // Clean up and simplify.
+          DWA::normalize_edges_inplace(&mut dwa.states);
+          dwa.simplify();
       }
 
       ```
     metadata:
       filename: src/precompute4/resolve_negatives.rs
-  - user: |-
-      Implement `resolve_negative_codes_for_all` and `resolve_negative_codes_in_dwa`. It should work like this.
-
-      Two distinct stages: one to remove internal negatives, then one to remove negatives at end.
-
-      Removing negatives at end just takes off negatives that lead to an end node. Imagine replacing them with an epsilon edge (ie don't nullify them). That's it.
-
-      Removing internal negatives is a little more complex.
-
-      Consider a simple case
-      a -(1)-> b -(-2)-> c  -(2)-> d -(3)-> e
-      -2 appears before 2, so they cancel and we're left with
-      a -(1)-> b -(3)-> e
-
-      On the other hand if we had
-      a -(1)-> b -(2)-> c  -(-2)-> d -(3)-> e
-      -2 appears *after* 2, so that doesn't count. What counts is that it appears *before* 3. -2 and 3 don't match, so this edge is NULLIFIED.
-      i.e. the
-      a
-      as in this doesn't match any string - it's invalid.
-
-      Another case
-      a -(1)-> b -(-2)-> c
-      This can't be simplified. It remains as-is.
-
-
-      Now, how can we generalize this?
-      Consider any negative edge A -(-x)-> B and positive edge B -(x)-> C.
-      Merge C into A. But make sure to apply the weights along the path A -(-x)-> B -(x)-> C to C before doing so.
-      Keep A -(-x)-> B and B -(x)-> C in place - don't remove them.
-
-      Just keep doing this until we can't do it any more, or there are no changes. Then we're done.
-      There will still be those internal negative edges, of course. Just invalidate them.
-      Keep negative edges that go to end states.
-
-      What about negative edges that go to end states that *also* have outgoing transitions? This is a problem. They're neither internal negative edges nor end negative edges.
-      With careful treatment, this will be fine.
-      Create a new end state for the negative edge *without* those outgoing transitions. That's it! Point the transition to that state instead, and remove it from the original.
-
-
-      Implement this in full. Focus on correctness over performance.
-      Think mathematically. Rigorously prove yourself.
-
+  - user: |+
+      error[E0502]: cannot borrow `*dwa` as mutable because it is also borrowed as immutable
+         --> src/precompute4/resolve_negatives.rs:216:39
+          |
+      211 |             let st = &dwa.states[sid];
+          |                       ---------- immutable borrow occurs here
+      212 |             for (&ch, &tgt) in st.transitions.exceptions.iter() {
+          |                                -------------------------------- immutable borrow later used here
       ...
+      216 |                         let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
+          |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
 
-      Maybe a better way to do it.
-
-      Consider a negative edge.
-      We create a new destination state with only negative edges and final weight, ie same but without any outgoing positive transtions.
-      So do this. Create a new dst without positive outgoing edges. Send the negative transition to this instead.
-      BUT also look for any positive transitions out of the dst that match this negative transition...
-
-      ...
-
-      Better way.
-      - Look at a single state. We're going to modify it in-place.
-      - Create a new blank state to eventually replace this one.
-      - Look at each outgoing negative edge.
-          - Add a negative edge to the new state that goes to a state equivalent to the current destination except without any positive outgoing edges.
-          - Look for an outgoing positive edge that matches the negative edge. If there is one, take its destination. Merge it into this this state, applying the path's weight (the combined weight of the negative and positive edge) as we do so.
-      We can imagine continuing this until there are no negative internal edges.
-      This method is nice because we can march through the automata once and perform this on the node over and over until there are no more changes, then move on.
-
-      Yes, use this method.
-      Implement this.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4831,404 +5453,127 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are the exact steps to implement negative-code resolution, followed by the corresponding git diff.
+      Of course. The compiler is pointing out a borrow-checking violation in `src/precompute4/resolve_negatives.rs`. You are trying to modify the `dwa` (a mutable borrow) inside a loop that is iterating over parts of `dwa` (an immutable borrow).
 
-      Step-by-step instructions
+      To fix this, we need to restructure the code to separate the reading phase from the writing phase. Here are the step-by-step instructions to resolve the issue:
 
-      1) Edit src/precompute4/resolve_negatives.rs:
-      - Replace the placeholder implementations with a full pass that:
-        - Iterates over all DWAs in Precomputed4 and resolves negative-coded transitions in each.
-        - Performs two stages:
-          - Internal-negatives stage:
-            - For every negative edge A -(-x)-> B and matching positive edge B -(x)-> C, repeatedly “merge C into A” with the composed path weight (edge weights intersected).
-            - Keep the original edges in place during the merging iterations.
-            - After the merging fixpoint, remove all remaining negative edges that do not lead to a final (accepting) state (these are invalid).
-            - Special-case when a negative edge goes to a final state that also has outgoing positive transitions: create a new end-like target (a clone that keeps only negative outgoing edges and the final weight) and redirect that negative edge to the new end-like target.
-          - End-negatives stage:
-            - For negative edges that lead directly to final states (end nodes), remove the negative edges and “epsilon-replace” them by merging the path’s final acceptance into the source state’s final_weight (intersect the edge weight with the target’s final weight and union that into the source’s final weight).
-        - Normalize and simplify the resulting automata to keep things consistent.
+      ### Step-by-step Instructions
 
-      - Implement the following helpers in the same file:
-        - is_negative_code(code: i16) -> bool
-        - is_positive_code(code: i16) -> bool
-        - is_final_nonempty(st: &DWAState) -> bool
-        - has_any_positive_outgoing(st: &DWAState) -> bool (counts non-negative exceptions or the presence of a default)
-        - clone_state_with_only_negative_outgoing(dwa: &mut DWA, original_id: StateID) -> StateID
-        - union_into_option(opt: &mut Option<Weight>, inc: &Weight) -> bool
-        - add_or_union_exception(dwa: &mut DWA, s_id: StateID, ch: i16, tgt: StateID, add_w: Weight) -> bool
-        - merge_state_into(dwa: &mut DWA, dst_id: StateID, src_id: StateID, gate: &Weight) -> bool
+      1.  **Open the file** `src/precompute4/resolve_negatives.rs`.
 
-      - In resolve_negative_codes_for_all, remove the placeholder print and call resolve_negative_codes_in_dwa for each DWA.
-      - In resolve_negative_codes_in_dwa:
-        - Stage A (pre-split): For every negative edge to a final state with positive outgoing transitions, clone a new “end-like” state (same weights and negative-only outgoing transitions) and redirect the negative edge to that clone.
-        - Stage B (fixpoint merge): Repeatedly find A -(-x)-> B and B -(x)-> C pairs and merge C into A using the path weight (intersection of both edges’ weights).
-        - Stage C (remove internal negatives): Remove remaining negative edges whose targets are not final.
-        - Stage D (remove negatives at end): For each remaining negative edge to a final state, fold it into the source’s final_weight (epsilon replacement) and remove that edge.
-        - Normalize edges and run dwa.simplify().
+      2.  **Locate the `resolve_negative_codes_in_dwa` function.** Inside this function, find the block of code for `Stage A`, which starts with a comment: `// Stage A: Preprocess negative edges...`.
 
-      Notes:
-      - Where transition weights are missing, treat them as “ALL” (no restriction) so composition via ∧ behaves correctly.
-      - When merging transitions from C into A, if A already has the same exception pointing to the same target, union their edge weights. If A has a conflicting existing target for that code, conservatively union the weights into the current edge’s weight but keep the target unchanged (keeps determinism; see inline comments for rationale). This is the simplest deterministic compromise.
-      - After transformations, edges with empty weights are never created; empty intersections are skipped.
+      3.  **Replace the entire implementation of the `Stage A` block.** The current implementation attempts to find and fix transitions in a single loop, causing the borrow checker error. The corrected version will perform these actions in separate stages:
+          a. First, iterate through the automaton to identify all transitions that need to be redirected, collecting their information without modifying the automaton.
+          b. Second, create the necessary new "cloned" states for redirection. This is where the automaton is mutated.
+          c. Finally, iterate through the collected information and apply the redirections.
 
-      Git diff
+          Replace the code inside the `{ ... }` for `Stage A` with the following:
+
+          ```rust
+          use std::collections::BTreeMap;
+          let n0 = dwa.states.len();
+
+          // 1. Find all edges that need redirection without mutating the DWA.
+          let mut edges_to_redirect: Vec<(StateID, i16, StateID)> = Vec::new();
+          for sid in 0..n0 {
+              let st = &dwa.states[sid];
+              for (&ch, &tgt) in st.transitions.exceptions.iter() {
+                  if is_negative_code(ch) {
+                      // Check bounds; invalid tgt could exist before prune_unreachable.
+                      if tgt < n0 {
+                          let dst = &dwa.states[tgt];
+                          if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
+                              edges_to_redirect.push((sid, ch, tgt));
+                          }
+                      }
+                  }
+              }
+          }
+
+          // 2. For each unique target, clone it once. This mutates the DWA.
+          let mut cloned_tgts: BTreeMap<StateID, StateID> = BTreeMap::new();
+          for &(_, _, tgt) in &edges_to_redirect {
+              cloned_tgts.entry(tgt).or_insert_with(|| {
+                  clone_state_with_only_negative_outgoing(dwa, tgt)
+              });
+          }
+
+          // 3. Apply redirects using the map of cloned targets. This also mutates.
+          for (sid, ch, tgt) in edges_to_redirect {
+              if let Some(new_tgt) = cloned_tgts.get(&tgt) {
+                  if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
+                      *entry = *new_tgt;
+                  }
+              }
+          }
+          ```
+
+      This change resolves the compiler error by ensuring that you are not mutably borrowing `dwa` while an immutable borrow is still active. It also adds a bounds check to prevent a potential panic.
+
+      ### Git Diff
+
+      Here is the git diff for the required change:
 
       ```diff
       diff --git a/src/precompute4/resolve_negatives.rs b/src/precompute4/resolve_negatives.rs
       --- a/src/precompute4/resolve_negatives.rs
       +++ b/src/precompute4/resolve_negatives.rs
-      @@ -1,16 +1,288 @@
-       use crate::precompute4::full_dwa::Precomputed4;
-      -use crate::precompute4::weighted_automata::DWA;
-      +use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, StateID, Weight};
-       
-      -// Placeholder: resolve negative-coded transitions. Unimplemented for now.
-       pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
-      -    for (sid, dwa) in precomputed4.iter_mut() {
-      -        println!("resolve_negative_codes_for_all: TokenizerStateID {:?} -> TODO", sid);
-      -        resolve_negative_codes_in_dwa(dwa);
-      +    for (_sid, dwa) in precomputed4.iter_mut() {
-      +        resolve_negative_codes_in_dwa(dwa);
+      @@ -207,29 +207,45 @@
+           // Stage A: Preprocess negative edges that go to final nodes with positive outgoing transitions.
+           // Clone a new destination with only negative outgoing edges (and final weight) and redirect.
+           {
+      +        use std::collections::BTreeMap;
+               let n0 = dwa.states.len();
+      -        let mut redirects: Vec<(StateID, i16, StateID)> = Vec::new();
+      +
+      +        // 1. Find all edges that need redirection without mutating the DWA.
+      +        let mut edges_to_redirect: Vec<(StateID, i16, StateID)> = Vec::new();
+               for sid in 0..n0 {
+                   let st = &dwa.states[sid];
+                   for (&ch, &tgt) in st.transitions.exceptions.iter() {
+                       if is_negative_code(ch) {
+      -                    let dst = &dwa.states[tgt];
+      -                    if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
+      -                        let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
+      -                        redirects.push((sid, ch, new_tgt));
+      +                    // Check bounds; invalid tgt could exist before prune_unreachable.
+      +                    if tgt < n0 {
+      +                        let dst = &dwa.states[tgt];
+      +                        if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
+      +                            edges_to_redirect.push((sid, ch, tgt));
+      +                        }
+                           }
+                       }
+                   }
+               }
+      -        // Apply redirects
+      -        for (sid, ch, new_tgt) in redirects {
+      -            if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
+      -                *entry = new_tgt;
+      +
+      +        // 2. For each unique target, clone it once. This mutates the DWA.
+      +        let mut cloned_tgts: BTreeMap<StateID, StateID> = BTreeMap::new();
+      +        for &(_, _, tgt) in &edges_to_redirect {
+      +            cloned_tgts.entry(tgt).or_insert_with(|| {
+      +                clone_state_with_only_negative_outgoing(dwa, tgt)
+      +            });
+      +        }
+      +
+      +        // 3. Apply redirects using the map of cloned targets. This also mutates.
+      +        for (sid, ch, tgt) in edges_to_redirect {
+      +            if let Some(new_tgt) = cloned_tgts.get(&tgt) {
+      +                if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
+      +                    *entry = *new_tgt;
+      +                }
+                   }
+      -            // Weight map stays associated with `ch` as-is.
+               }
            }
-       }
        
-      -fn resolve_negative_codes_in_dwa(_dwa: &mut DWA) {
-      -    eprintln!("Negative-coded transition resolution is not implemented yet. This pass should transform any i16<0 transition labels into an equivalent form free of negative labels.");
-      +fn is_negative_code(code: i16) -> bool {
-      +    code < 0
-       }
-       
-      +fn is_positive_code(code: i16) -> bool {
-      +    code >= 0
-      +}
-      +
-      +fn is_final_nonempty(st: &DWAState) -> bool {
-      +    st.final_weight.as_ref().map_or(false, |w| !w.is_empty())
-      +}
-      +
-      +fn has_any_positive_outgoing(st: &DWAState) -> bool {
-      +    st.transitions.default.is_some() || st.transitions.exceptions.keys().any(|&k| is_positive_code(k))
-      +}
-      +
-      +// Clone a state keeping: weight, final_weight, and only negative-coded outgoing transitions (and their weights).
-      +// Drops default and all non-negative exceptions.
-      +fn clone_state_with_only_negative_outgoing(dwa: &mut DWA, original_id: StateID) -> StateID {
-      +    let orig = dwa.states[original_id].clone();
-      +    let new_id = dwa.add_state();
-      +    let mut st = DWAState::default();
-      +    st.weight = orig.weight.clone();
-      +    st.final_weight = orig.final_weight.clone();
-      +    // Keep only negative-coded exceptions (and their weights).
-      +    for (ch, tgt) in orig.transitions.exceptions {
-      +        if is_negative_code(ch) {
-      +            st.transitions.exceptions.insert(ch, tgt);
-      +            let w = orig
-      +                .trans_weights_exceptions
-      +                .get(&ch)
-      +                .cloned()
-      +                .unwrap_or_else(Weight::all);
-      +            st.trans_weights_exceptions.insert(ch, w);
-      +        }
-      +    }
-      +    // No default from the clone.
-      +    st.transitions.default = None;
-      +    st.trans_weight_default = None;
-      +    dwa.states[new_id] = st;
-      +    new_id
-      +}
-      +
-      +// Union a weight into an Option<Weight>. Returns true if changed.
-      +fn union_into_option(dst: &mut Option<Weight>, inc: &Weight) -> bool {
-      +    if inc.is_empty() {
-      +        return false;
-      +    }
-      +    match dst {
-      +        Some(w) => {
-      +            let before = w.clone();
-      +            *w |= inc;
-      +            *w != before
-      +        }
-      +        None => {
-      +            *dst = Some(inc.clone());
-      +            true
-      +        }
-      +    }
-      +}
-      +
-      +// Insert an exception edge (code -> tgt) into state s_id with given weight (add_w).
-      +// - If the exception exists and points to the same tgt: union weights.
-      +// - If it exists but points elsewhere: conservatively union the weight into the existing edge's weight,
-      +//   leaving the target unchanged (keeps determinism).
-      +// - If it does not exist: insert it with the provided weight.
-      +// Returns true if a change was made.
-      +fn add_or_union_exception(dwa: &mut DWA, s_id: StateID, ch: i16, tgt: StateID, add_w: Weight) -> bool {
-      +    if add_w.is_empty() {
-      +        return false;
-      +    }
-      +    let st = &mut dwa.states[s_id];
-      +    if let Some(&existing_tgt) = st.transitions.exceptions.get(&ch) {
-      +        // Already exists.
-      +        if existing_tgt == tgt {
-      +            let entry = st
-      +                .trans_weights_exceptions
-      +                .entry(ch)
-      +                .or_insert_with(Weight::zeros);
-      +            let before = entry.clone();
-      +            *entry |= &add_w;
-      +            return *entry != before;
-      +        } else {
-      +            // Determinism requirement: we cannot have two different targets for the same code.
-      +            // Conservatively union the additional weight into the existing edge's weight.
-      +            let entry = st
-      +                .trans_weights_exceptions
-      +                .entry(ch)
-      +                .or_insert_with(Weight::zeros);
-      +            let before = entry.clone();
-      +            *entry |= &add_w;
-      +            return *entry != before;
-      +        }
-      +    } else {
-      +        // Insert new exception.
-      +        st.transitions.exceptions.insert(ch, tgt);
-      +        st.trans_weights_exceptions.insert(ch, add_w);
-      +        return true;
-      +    }
-      +}
-      +
-      +// Merge src state (src_id) into dst state (dst_id), gating everything by `gate`.
-      +// - dst.weight |= (gate & src.weight)
-      +// - dst.final_weight |= (gate & src.final_weight)
-      +// - For each outgoing edge e of src:
-      +//     - If default: fold into dst.default (union weights if same target; otherwise, keep target and union weights)
-      +//     - If exception: add_or_union_exception with weight (gate & edge_weight)
-      +// Returns true if any change was made to dst.
-      +fn merge_state_into(dwa: &mut DWA, dst_id: StateID, src_id: StateID, gate: &Weight) -> bool {
-      +    if gate.is_empty() {
-      +        return false;
-      +    }
-      +    let src = dwa.states[src_id].clone(); // prevent borrow conflicts
-      +    let dst = &mut dwa.states[dst_id];
-      +    let mut changed = false;
-      +
-      +    // State weights
-      +    let gated_state_w = &src.weight & gate;
-      +    let before_w = dst.weight.clone();
-      +    dst.weight |= &gated_state_w;
-      +    if dst.weight != before_w {
-      +        changed = true;
-      +    }
-      +
-      +    // Final weights
-      +    if let Some(fw) = &src.final_weight {
-      +        let gated_fw = fw & gate;
-      +        if !gated_fw.is_empty() {
-      +            if union_into_option(&mut dst.final_weight, &gated_fw) {
-      +                changed = true;
-      +            }
-      +        }
-      +    }
-      +
-      +    // Default transition
-      +    if let Some(def_tgt) = src.transitions.default {
-      +        // Default edge weight on src's default; treat missing weight as ALL.
-      +        let def_w = src.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all);
-      +        let gated_def_w = &def_w & gate;
-      +        if !gated_def_w.is_empty() {
-      +            if let Some(dst_def_tgt) = dst.transitions.default {
-      +                if dst_def_tgt == def_tgt {
-      +                    // Merge weight
-      +                    let entry = dst
-      +                        .trans_weight_default
-      +                        .get_or_insert_with(Weight::zeros);
-      +                    let before = entry.clone();
-      +                    *entry |= &gated_def_w;
-      +                    if *entry != before {
-      +                        changed = true;
-      +                    }
-      +                } else {
-      +                    // Keep deterministic target; merge weights conservatively.
-      +                    let entry = dst
-      +                        .trans_weight_default
-      +                        .get_or_insert_with(Weight::zeros);
-      +                    let before = entry.clone();
-      +                    *entry |= &gated_def_w;
-      +                    if *entry != before {
-      +                        changed = true;
-      +                    }
-      +                }
-      +            } else {
-      +                // No default yet: set it.
-      +                dst.transitions.default = Some(def_tgt);
-      +                dst.trans_weight_default = Some(gated_def_w);
-      +                changed = true;
-      +            }
-      +        }
-      +    }
-      +
-      +    // Exception transitions
-      +    for (ch, tgt) in src.transitions.exceptions {
-      +        // Treat missing per-edge weight as ALL
-      +        let edge_w = src
-      +            .trans_weights_exceptions
-      +            .get(&ch)
-      +            .cloned()
-      +            .unwrap_or_else(Weight::all);
-      +        let gated = &edge_w & gate;
-      +        if !gated.is_empty() {
-      +            if add_or_union_exception(dwa, dst_id, ch, tgt, gated) {
-      +                changed = true;
-      +            }
-      +        }
-      +    }
-      +
-      +    changed
-      +}
-      +
-      +fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-      +    if dwa.states.len() == 0 {
-      +        return;
-      +    }
-      +
-      +    // Stage A: Preprocess negative edges that go to final nodes with positive outgoing transitions.
-      +    // Clone a new destination with only negative outgoing edges (and final weight) and redirect.
-      +    {
-      +        let n0 = dwa.states.len();
-      +        let mut redirects: Vec<(StateID, i16, StateID)> = Vec::new();
-      +        for sid in 0..n0 {
-      +            let st = &dwa.states[sid];
-      +            for (&ch, &tgt) in st.transitions.exceptions.iter() {
-      +                if is_negative_code(ch) {
-      +                    let dst = &dwa.states[tgt];
-      +                    if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
-      +                        let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
-      +                        redirects.push((sid, ch, new_tgt));
-      +                    }
-      +                }
-      +            }
-      +        }
-      +        // Apply redirects
-      +        for (sid, ch, new_tgt) in redirects {
-      +            if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
-      +                *entry = new_tgt;
-      +            }
-      +            // Weight map stays associated with `ch` as-is.
-      +        }
-      +    }
-      +
-      +    // Stage B: Internal negative cancellation/merging fixpoint.
-      +    // For each A -(-x)-> B and B -(x)-> C, merge C into A with the weight along the two edges (meet).
-      +    {
-      +        let mut changed_any = true;
-      +        let mut guard_rounds = 0usize;
-      +        while changed_any && guard_rounds < 64 {
-      +            changed_any = false;
-      +            guard_rounds += 1;
-      +            let n = dwa.states.len();
-      +            for a_id in 0..n {
-      +                // Collect negative edges out of a_id to avoid borrow issues.
-      +                let neg_edges: Vec<(i16, StateID)> = dwa.states[a_id]
-      +                    .transitions
-      +                    .exceptions
-      +                    .iter()
-      +                    .filter_map(|(&ch, &b_id)| if is_negative_code(ch) { Some((ch, b_id)) } else { None })
-      +                    .collect();
-      +                for (neg_ch, b_id) in neg_edges {
-      +                    let x = -neg_ch; // matching positive code
-      +                    // Edge weights: treat missing as ALL
-      +                    let w_neg = dwa.states[a_id]
-      +                        .trans_weights_exceptions
-      +                        .get(&neg_ch)
-      +                        .cloned()
-      +                        .unwrap_or_else(Weight::all);
-      +                    if w_neg.is_empty() {
-      +                        continue;
-      +                    }
-      +                    if let Some(&c_id) = dwa.states[b_id].transitions.exceptions.get(&x) {
-      +                        let w_pos = dwa.states[b_id]
-      +                            .trans_weights_exceptions
-      +                            .get(&x)
-      +                            .cloned()
-      +                            .unwrap_or_else(Weight::all);
-      +                        if w_pos.is_empty() {
-      +                            continue;
-      +                        }
-      +                        let w_path = &w_neg & &w_pos;
-      +                        if !w_path.is_empty() {
-      +                            if merge_state_into(dwa, a_id, c_id, &w_path) {
-      +                                changed_any = true;
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +        }
-      +    }
-      +
-      +    // Stage C: Remove remaining internal negative edges (those not going to final states).
-      +    {
-      +        let n = dwa.states.len();
-      +        for a_id in 0..n {
-      +            // Collect keys to remove to avoid mutating while iterating.
-      +            let to_remove: Vec<i16> = dwa.states[a_id]
-      +                .transitions
-      +                .exceptions
-      +                .iter()
-      +                .filter_map(|(&ch, &tgt)| {
-      +                    if is_negative_code(ch) && !is_final_nonempty(&dwa.states[tgt]) {
-      +                        Some(ch)
-      +                    } else {
-      +                        None
-      +                    }
-      +                })
-      +                .collect();
-      +            for ch in to_remove {
-      +                dwa.states[a_id].transitions.exceptions.remove(&ch);
-      +                dwa.states[a_id].trans_weights_exceptions.remove(&ch);
-      +            }
-      +        }
-      +    }
-      +
-      +    // Stage D: Remove negative edges to final states ("epsilon replacement").
-      +    // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
-      +    {
-      +        let n = dwa.states.len();
-      +        for a_id in 0..n {
-      +            // Capture all negatives-to-final to process.
-      +            let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
-      +                .transitions
-      +                .exceptions
-      +                .iter()
-      +                .filter_map(|(&ch, &tgt)| {
-      +                    if is_negative_code(ch) && is_final_nonempty(&dwa.states[tgt]) {
-      +                        Some((ch, tgt))
-      +                    } else {
-      +                        None
-      +                    }
-      +                })
-      +                .collect();
-      +            for (ch, tgt) in neg_to_final {
-      +                let edge_w = dwa.states[a_id]
-      +                    .trans_weights_exceptions
-      +                    .get(&ch)
-      +                    .cloned()
-      +                    .unwrap_or_else(Weight::all);
-      +                if let Some(fw) = &dwa.states[tgt].final_weight {
-      +                    let inc = &edge_w & fw;
-      +                    if !inc.is_empty() {
-      +                        union_into_option(&mut dwa.states[a_id].final_weight, &inc);
-      +                    }
-      +                }
-      +                // Remove the negative edge itself.
-      +                dwa.states[a_id].transitions.exceptions.remove(&ch);
-      +                dwa.states[a_id].trans_weights_exceptions.remove(&ch);
-      +            }
-      +        }
-      +    }
-      +
-      +    // Clean up and simplify.
-      +    DWA::normalize_edges_inplace(&mut dwa.states);
-      +    dwa.simplify();
-      +}
+           // Stage B: Internal negative cancellation/merging fixpoint.
+           // For each A -(-x)-> B and B -(x)-> C, merge C into A with the weight along the two edges (meet).
+
       ```
     metadata:
   - user: |
@@ -5240,7 +5585,7 @@ messages:
       Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
     metadata:
-  - user: 'Changes committed with message: "Implement negative-coded transition resolution
-      in DWA"'
+  - user: 'Changes committed with message: "Fix E0502 in resolve_negative_codes_in_dwa
+      by restructuring Stage A to separate read/write loops"'
     metadata:
 ...

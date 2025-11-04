@@ -205,26 +205,41 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     // Stage A: Preprocess negative edges that go to final nodes with positive outgoing transitions.
     // Clone a new destination with only negative outgoing edges (and final weight) and redirect.
     {
+        use std::collections::BTreeMap;
         let n0 = dwa.states.len();
-        let mut redirects: Vec<(StateID, i16, StateID)> = Vec::new();
+
+        // 1. Find all edges that need redirection without mutating the DWA.
+        let mut edges_to_redirect: Vec<(StateID, i16, StateID)> = Vec::new();
         for sid in 0..n0 {
             let st = &dwa.states[sid];
             for (&ch, &tgt) in st.transitions.exceptions.iter() {
                 if is_negative_code(ch) {
-                    let dst = &dwa.states[tgt];
-                    if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
-                        let new_tgt = clone_state_with_only_negative_outgoing(dwa, tgt);
-                        redirects.push((sid, ch, new_tgt));
+                    // Check bounds; invalid tgt could exist before prune_unreachable.
+                    if tgt < n0 {
+                        let dst = &dwa.states[tgt];
+                        if is_final_nonempty(dst) && has_any_positive_outgoing(dst) {
+                            edges_to_redirect.push((sid, ch, tgt));
+                        }
                     }
                 }
             }
         }
-        // Apply redirects
-        for (sid, ch, new_tgt) in redirects {
-            if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
-                *entry = new_tgt;
+
+        // 2. For each unique target, clone it once. This mutates the DWA.
+        let mut cloned_tgts: BTreeMap<StateID, StateID> = BTreeMap::new();
+        for &(_, _, tgt) in &edges_to_redirect {
+            cloned_tgts.entry(tgt).or_insert_with(|| {
+                clone_state_with_only_negative_outgoing(dwa, tgt)
+            });
+        }
+
+        // 3. Apply redirects using the map of cloned targets. This also mutates.
+        for (sid, ch, tgt) in edges_to_redirect {
+            if let Some(new_tgt) = cloned_tgts.get(&tgt) {
+                if let Some(entry) = dwa.states[sid].transitions.exceptions.get_mut(&ch) {
+                    *entry = *new_tgt;
+                }
             }
-            // Weight map stays associated with `ch` as-is.
         }
     }
 
