@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::datastructures::trie::Trie;
 use crate::trie3_opt::context::OptimizationContext;
-use crate::weighted_automata::DWAState;
+use crate::precompute4::weighted_automata::DWAState;
 use crate::trie3_opt::core::{EdgeKey, MiniTrie, Node, NodeId, SortedSet};
 use crate::trie3_opt::passes::OptimizationPass;
-use crate::weighted_automata::{NWA, SimpleBitset};
+use crate::precompute4::weighted_automata::{NWA, SimpleBitset};
 
 /// A roundtrip pass that:
 /// - Converts the MiniTrie subgraph for each root into a weighted NWA,
@@ -105,7 +105,7 @@ impl NwaDwaRoundtripPass {
     /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
     /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
     fn follow_simple_chain(
-        dwa: &crate::weighted_automata::DWA,
+        dwa: &crate::precompute4::weighted_automata::DWA,
         start: usize,
     ) -> (usize, usize) {
         todo!()
@@ -123,7 +123,7 @@ impl NwaDwaRoundtripPass {
     //     (u, steps)
     // }
     // fn convert_dwa_to_minitrie(
-    //     dwa: crate::weighted_automata::DWA,
+    //     dwa: crate::precompute4::weighted_automata::DWA,
     //     ctx: &OptimizationContext,
     // ) -> (MiniTrie, NodeId) {
     //     let mut mini = MiniTrie::new();

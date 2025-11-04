@@ -4,7 +4,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{
     compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
 };
-use crate::weighted_automata::{
+use crate::precompute4::weighted_automata::{
     DWA, DWABody, DWAState, DWAStates, NWA, NWABody, NWAStates, StateID, Weight,
 };
 use std::collections::{BTreeMap, BTreeSet};

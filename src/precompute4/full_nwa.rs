@@ -1,7 +1,7 @@
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
-use crate::weighted_automata::{DWA, NWA, NWAStates, NWABody, Weight};
+use crate::precompute4::weighted_automata::{DWA, NWA, NWAStates, NWABody, Weight};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::datastructures::trie::Trie;
