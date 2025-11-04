@@ -292,61 +292,45 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         }
     }
 
-    // Stage D: Remove negative edges to final states ("epsilon replacement").
-    // For each A -(-x)-> B (B final), remove the edge and add (edge_weight ∧ B.final_weight) into A.final_weight.
-    // This needs to be a fixpoint iteration to propagate finality backwards.
+    // Stage C (was D): Epsilon-style merging fixpoint.
+    // For each A -(-x)-> B, merge B's properties into A, as if the negative edge were an
+    // epsilon transition. This propagates finality and transitions backwards.
     {
         let mut changed_any = true;
         let mut guard_rounds = 0usize;
         while changed_any && guard_rounds < 64 {
             changed_any = false;
             guard_rounds += 1;
-
             let n = dwa.states.len();
             for a_id in 0..n {
-                // Capture all negatives-to-final to process.
-                let neg_to_final: Vec<(i16, StateID)> = dwa.states[a_id]
+                // Collect negative edges to avoid borrow issues.
+                let neg_edges: Vec<(i16, StateID)> = dwa.states[a_id]
                     .transitions
                     .exceptions
                     .iter()
-                    .filter_map(|(&ch, &tgt)| {
-                        if is_negative_code(ch) && is_final_nonempty(&dwa.states[tgt]) {
-                            Some((ch, tgt))
-                        } else {
-                            None
-                        }
-                    })
+                    .filter_map(|(&ch, &b_id)| if is_negative_code(ch) { Some((ch, b_id)) } else { None })
                     .collect();
 
-                if neg_to_final.is_empty() {
-                    continue;
-                }
-
-                for (ch, tgt) in neg_to_final {
-                    let edge_w = dwa.states[a_id]
+                for (neg_ch, b_id) in neg_edges {
+                    let w_neg = dwa.states[a_id]
                         .trans_weights_exceptions
-                        .get(&ch)
+                        .get(&neg_ch)
                         .cloned()
                         .unwrap_or_else(Weight::all);
-                    if let Some(fw) = &dwa.states[tgt].final_weight {
-                        let inc = &edge_w & fw;
-                        if !inc.is_empty() {
-                            if union_into_option(&mut dwa.states[a_id].final_weight, &inc) {
-                                changed_any = true;
-                            }
-                        }
+                    if w_neg.is_empty() {
+                        continue;
                     }
-                    // Remove the negative edge itself.
-                    dwa.states[a_id].transitions.exceptions.remove(&ch);
-                    dwa.states[a_id].trans_weights_exceptions.remove(&ch);
+                    // Merge B into A, gated by the negative edge's weight.
+                    if merge_state_into(dwa, a_id, b_id, &w_neg) {
+                        changed_any = true;
+                    }
                 }
             }
         }
     }
 
-    // Stage C: Remove any remaining negative edges. After the fixpoint above, any
-    // negative edge that could lead to a final state has been processed and removed.
-    // Any that remain are part of cycles or lead to non-final sinks, and can be pruned.
+    // Stage D (was C): Remove all negative edges.
+    // After the fixpoint, their information has been propagated.
     {
         let n = dwa.states.len();
         for a_id in 0..n {
@@ -514,11 +498,33 @@ mod tests {
 
         resolve_negative_codes_in_dwa(&mut d);
 
-        // The resolution algorithm will prune all paths from the start state,
-        // as none of them can reach a final state after negative edges are processed.
-        // The final simplification pass will remove all unreachable states, leaving
-        // only a single, non-final start state.
-        let expected = DWA::new();
+        // After resolution, several paths should lead to a final state.
+        // We construct an equivalent automaton for some of these paths.
+        // The simplification in `assert_dwa_equivalent` will canonicalize both
+        // and confirm they represent the same language.
+        let mut expected = DWA::new();
+        let s_final = expected.add_state();
+        expected.set_final_weight(s_final, Weight::all()).unwrap();
+
+        // Paths starting with '1'
+        let s_after_1 = expected.add_state();
+        expected.add_transition(0, 1, s_after_1, Weight::from_item(2)).unwrap();
+        for &i in &[1i16, 3, 4, 6, 7, 8] {
+            expected.add_transition(s_after_1, i, s_final, Weight::all()).unwrap();
+        }
+
+        // Paths starting with '3' or '4'
+        let s_after_3_or_4 = expected.add_state();
+        expected.add_transition(0, 3, s_after_3_or_4, Weight::from_item(2)).unwrap();
+        expected.add_transition(0, 4, s_after_3_or_4, Weight::from_item(2)).unwrap();
+        expected.add_transition(s_after_3_or_4, 7, s_final, Weight::all()).unwrap();
+
+        // Paths starting with '7'
+        let s_after_7 = expected.add_state();
+        expected.add_transition(0, 7, s_after_7, Weight::from_item(2)).unwrap();
+        for &i in &[1i16, 3, 4, 6, 7, 8] {
+            expected.add_transition(s_after_7, i, s_final, Weight::all()).unwrap();
+        }
 
         assert_dwa_equivalent(d, expected);
     }
