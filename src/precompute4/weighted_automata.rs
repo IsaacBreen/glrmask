@@ -406,6 +406,9 @@ impl DWA {
             if Self::normalize_edges_inplace(states) {
                 changed_any = true;
             }
+            if Self::propagate_and_constrain_weights(states, body) {
+                changed_any = true;
+            }
             if Self::minimize_partition_refinement(states, body) {
                 changed_any = true;
             }
@@ -417,6 +420,82 @@ impl DWA {
             }
         }
         crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+    }
+
+    pub fn propagate_and_constrain_weights(states: &mut DWAStates, body: &mut DWABody) -> bool {
+        let n = states.len();
+        if n == 0 {
+            return false;
+        }
+
+        let mut reachable_weights = vec![Weight::zeros(); n];
+        let mut worklist = VecDeque::new();
+
+        if body.start_state >= n {
+            return false; // No start state, nothing to do.
+        }
+        reachable_weights[body.start_state] = Weight::all();
+        worklist.push_back(body.start_state);
+
+        while let Some(u) = worklist.pop_front() {
+            let u_rw = reachable_weights[u].clone();
+            if u_rw.is_empty() {
+                continue;
+            }
+            let u_state = &states[u];
+
+            // Default transition
+            if let Some(v) = u_state.transitions.default {
+                if v < n {
+                    let edge_w = u_state.trans_weight_default.as_ref().unwrap();
+                    let new_v_rw = &u_rw & edge_w;
+
+                    let old_v_rw = &reachable_weights[v];
+                    if (&new_v_rw & old_v_rw) != new_v_rw {
+                        // if new_v_rw is not a subset of old_v_rw
+                        reachable_weights[v] |= &new_v_rw;
+                        worklist.push_back(v);
+                    }
+                }
+            }
+
+            // Exception transitions
+            for (&ch, &v) in &u_state.transitions.exceptions {
+                if v < n {
+                    let edge_w = u_state.trans_weights_exceptions.get(&ch).unwrap();
+                    let new_v_rw = &u_rw & edge_w;
+
+                    let old_v_rw = &reachable_weights[v];
+                    if (&new_v_rw & old_v_rw) != new_v_rw {
+                        // if new_v_rw is not a subset of old_v_rw
+                        reachable_weights[v] |= &new_v_rw;
+                        worklist.push_back(v);
+                    }
+                }
+            }
+        }
+
+        // Now apply constraints
+        let mut changed = false;
+        for i in 0..n {
+            let old_weight = states[i].weight.clone();
+            states[i].weight &= &reachable_weights[i];
+            if states[i].weight != old_weight {
+                changed = true;
+            }
+
+            let old_fw = states[i].final_weight.clone();
+            if let Some(fw) = states[i].final_weight.as_mut() {
+                *fw &= &reachable_weights[i];
+                if fw.is_empty() {
+                    states[i].final_weight = None;
+                }
+            }
+            if states[i].final_weight != old_fw {
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
