@@ -413,12 +413,15 @@ mod tests {
 
         let mut expected = DWA::new(); // state 0
         let s1_exp = expected.add_state(); // state 1
-        let s_sink_exp = expected.add_state(); // state 2
+        let s_final = expected.add_state(); // state 2
 
-        expected.set_final_weight(s_sink_exp, Weight::from_iter(0..=1)).unwrap();
+        // After resolution, the negative paths leading to final states effectively make
+        // their predecessor states final. The final weight propagates backwards as ALL
+        // because all intermediate edge weights and original final weights are ALL.
+        expected.set_final_weight(s_final, Weight::all()).unwrap();
 
-        expected.add_transition(0, 0, s_sink_exp, Weight::from_item(1)).unwrap();
-        expected.add_transition(0, 2, s_sink_exp, Weight::from_item(0)).unwrap();
+        expected.add_transition(0, 0, s_final, Weight::from_item(1)).unwrap();
+        expected.add_transition(0, 2, s_final, Weight::from_item(0)).unwrap();
 
         assert_dwa_equivalent(d, expected);
     }
