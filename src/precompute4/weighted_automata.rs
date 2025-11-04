@@ -1627,4 +1627,32 @@ mod tests {
 
         assert_dwa_equivalent(a, b);
     }
+
+    #[test]
+    fn test_concatenate_left_start_is_final() {
+        // LEFT: DWA (start: 0)
+        //   State 0:
+        //     weight: []
+        //     final_weight: [0]
+        let mut left = DWA::new();
+        left.set_final_weight(left.body.start_state, Weight::from_item(0)).unwrap();
+
+        // RIGHT: DWA (start: 0)
+        //   State 0:
+        //     weight: []
+        //     final_weight: ALL
+        let mut right = DWA::new();
+        right.set_final_weight(right.body.start_state, Weight::all()).unwrap();
+
+        // When concatenating, because left's start is final, the new start state
+        // should immediately incorporate the properties of right's start state.
+        // The final weight should be the final weight of the right start state.
+        let c = left.concatenate(&right);
+
+        // Expected: a DWA with a single start state that is final with weight ALL.
+        let mut expected = DWA::new();
+        expected.set_final_weight(expected.body.start_state, Weight::all()).unwrap();
+
+        assert_dwa_equivalent(c, expected);
+    }
 }

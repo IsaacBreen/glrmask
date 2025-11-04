@@ -257,7 +257,9 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
         // merge function: union them
         |dwa1, dwa2| {
+            crate::debug!(5, "Unioning DWAs:\nLEFT:\n{}\nRIGHT:\n{}", dwa1, dwa2);
             *dwa1 = dwa1.union(&dwa2);
+            crate::debug!(5, "Resulting unioned DWA:\n{}", dwa1);
         },
         // process function: capture at original roots
         |_node_data, node_idx, mut dwa| {
