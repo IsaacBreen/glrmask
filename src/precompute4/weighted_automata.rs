@@ -983,13 +983,8 @@ impl Display for DWA {
                 let char_repr = if *on >= 0 {
                     format_pos_code(*on)
                 } else {
-                    let k = on.wrapping_neg();
-                    if k < 0 {
-                        // i16::MIN case
-                        format!("{}", on)
-                    } else {
-                        format!("-{}", format_pos_code(k))
-                    }
+                    let decoded_id = on.wrapping_sub(i16::MIN);
+                    format!("neg({})", decoded_id)
                 };
                 if let Some(w) = state.trans_weights_exceptions.get(on) {
                     writeln!(f, "    {} -> {} (trans_weight: {})", char_repr, to, w)?;
