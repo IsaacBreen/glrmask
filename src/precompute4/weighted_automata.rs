@@ -222,6 +222,56 @@ pub struct DWAState {
     pub trans_weights_exceptions: BTreeMap<i16, Weight>,
 }
 
+impl DWAState {
+    /// Intersects all weights in this state with the given weight.
+    pub fn apply_weight(&mut self, weight: &Weight) {
+        self.weight &= weight;
+
+        if let Some(fw) = &mut self.final_weight {
+            *fw &= weight;
+            if fw.is_empty() {
+                self.final_weight = None;
+            }
+        }
+
+        if let Some(twd) = &mut self.trans_weight_default {
+            *twd &= weight;
+        }
+
+        for w in self.trans_weights_exceptions.values_mut() {
+            *w &= weight;
+        }
+    }
+
+    /// Merges another DWAState into this one by taking the union of all weights.
+    /// This does not affect transition targets.
+    pub fn merge_union(&mut self, other: &DWAState) {
+        self.weight |= &other.weight;
+
+        if let Some(other_fw) = &other.final_weight {
+            if let Some(self_fw) = &mut self.final_weight {
+                *self_fw |= other_fw;
+            } else {
+                self.final_weight = Some(other_fw.clone());
+            }
+        }
+
+        if let Some(other_twd) = &other.trans_weight_default {
+            if let Some(self_twd) = &mut self.trans_weight_default {
+                *self_twd |= other_twd;
+            } else {
+                self.trans_weight_default = Some(other_twd.clone());
+            }
+        }
+
+        for (ch, other_w) in &other.trans_weights_exceptions {
+            self.trans_weights_exceptions.entry(*ch)
+                .and_modify(|self_w| *self_w |= other_w)
+                .or_insert_with(|| other_w.clone());
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DWAStates(pub Vec<DWAState>);
 
@@ -888,24 +938,9 @@ impl DWA {
         let old_start = body.start_state;
         let new_id = states.add_state();
 
-        // Snapshot the old start state's data before mutating the arena.
-        let old = states[old_start].clone();
-
-        let mut new_state = DWAState::default();
-        // Gate state/output weights
-        new_state.weight = &old.weight & weight;
-        if let Some(fw) = &old.final_weight {
-            let gw = fw & weight;
-            if !gw.is_empty() {
-                new_state.final_weight = Some(gw);
-            }
-        }
-        // Copy structure of transitions (targets), gate their weights.
-        new_state.transitions.default = old.transitions.default;
-        new_state.transitions.exceptions = old.transitions.exceptions.clone();
-        new_state.trans_weight_default = old.trans_weight_default.as_ref().map(|dw| dw & weight);
-        new_state.trans_weights_exceptions =
-            old.trans_weights_exceptions.into_iter().map(|(ch, w)| (ch, &w & weight)).collect();
+        // Snapshot the old start state's data, then apply the weight gate.
+        let mut new_state = states[old_start].clone();
+        new_state.apply_weight(weight);
 
         states[new_id] = new_state;
         body.start_state = new_id;
