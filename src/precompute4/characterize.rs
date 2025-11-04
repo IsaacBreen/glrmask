@@ -187,5 +187,7 @@ pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: Te
         }
     }
 
+    crate::debug!(5, "Computed Below-Bottom Characterization for terminal {}:\n{}", terminal_id.0, char);
+
     char
 }
