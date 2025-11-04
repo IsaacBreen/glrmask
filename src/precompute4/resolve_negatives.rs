@@ -119,6 +119,16 @@ fn resolve_negative_codes_in_dwa_internal(
 
             let mut c_copy = state_c.clone();
             c_copy.apply_weight(&combined_weight);
+
+            // If the original state `state_a` did not have a default transition,
+            // do not let the merge with `c_copy` introduce one. This would alter
+            // the behavior of `state_a` for all inputs that are not exceptions,
+            // which is too broad an effect for a cancellation path that involves
+            // specific tokens. We clear the default from `c_copy` to prevent this.
+            if state_a.transitions.default.is_none() {
+                c_copy.transitions.default = None;
+                c_copy.trans_weight_default = None;
+            }
             resolved_state.merge_union(&c_copy);
         }
     }

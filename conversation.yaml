@@ -277,6 +277,27 @@ local_system:
                       .and_modify(|self_w| *self_w |= other_w)
                       .or_insert_with(|| other_w.clone());
               }
+
+              // Merge transition targets, asserting that we do not introduce non-determinism.
+              if let Some(other_def_tgt) = other.transitions.default {
+                  if let Some(self_def_tgt) = self.transitions.default {
+                      if self_def_tgt != other_def_tgt {
+                          panic!("Cannot merge DWAStates with conflicting default transitions");
+                      }
+                  } else {
+                      self.transitions.default = Some(other_def_tgt);
+                  }
+              }
+
+              for (&ch, &other_tgt) in &other.transitions.exceptions {
+                  if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
+                      if self_tgt != other_tgt {
+                          panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
+                      }
+                  } else {
+                      self.transitions.exceptions.insert(ch, other_tgt);
+                  }
+              }
           }
       }
 
@@ -2093,6 +2114,45 @@ local_system:
               assert_dwa_equivalent(d, expected);
           }
 
+          #[test]
+          fn test_resolve_negatives_cancellation_with_follow_on_state() {
+              // Tests the pattern A --neg(X)--> B --X--> C, where C has further transitions.
+              // The resolution of A should correctly incorporate the structure of C.
+              let mut d = DWA::new();
+              let s1 = d.add_state(); // State A
+              let s2 = d.add_state(); // State B
+              let s3 = d.add_state(); // State C
+              let s4 = d.add_state(); // Final state
+
+              let code_b = 'b' as i16;
+              let neg_code_b = i16::MIN + code_b;
+              let code_c = 'c' as i16;
+
+              // Path to get to state A: 0 --'a'--> 1
+              d.add_transition(d.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
+
+              // The cancellation pattern: 1 --neg(b)--> 2 --b--> 3
+              d.add_transition(s1, neg_code_b, s2, Weight::all()).unwrap();
+              d.add_transition(s2, code_b, s3, Weight::all()).unwrap();
+
+              // The follow-on transition from C: 3 --'c'--> 4(final)
+              d.add_transition(s3, code_c, s4, Weight::all()).unwrap();
+              d.set_final_weight(s4, Weight::from_item(1)).unwrap();
+
+              resolve_negative_codes_in_dwa(&mut d);
+
+              // Expected: after 'a', we should be in a state equivalent to C (s3),
+              // which means a 'c' transition should lead to a final state.
+              // The path should be 'a' -> 'c' -> final.
+              let mut expected = DWA::new();
+              let s1_exp = expected.add_state();
+              let s2_exp = expected.add_state();
+              expected.add_transition(expected.body.start_state, 'a' as i16, s1_exp, Weight::all()).unwrap();
+              expected.add_transition(s1_exp, code_c, s2_exp, Weight::all()).unwrap();
+              expected.set_final_weight(s2_exp, Weight::from_item(1)).unwrap();
+
+              assert_dwa_equivalent(d, expected);
+          }
 
           #[test]
           fn test_resolve_negatives_from_tokenizer_0() {
@@ -4129,6 +4189,16 @@ local_system:
 
                   let mut c_copy = state_c.clone();
                   c_copy.apply_weight(&combined_weight);
+
+                  // If the original state `state_a` did not have a default transition,
+                  // do not let the merge with `c_copy` introduce one. This would alter
+                  // the behavior of `state_a` for all inputs that are not exceptions,
+                  // which is too broad an effect for a cancellation path that involves
+                  // specific tokens. We clear the default from `c_copy` to prevent this.
+                  if state_a.transitions.default.is_none() {
+                      c_copy.transitions.default = None;
+                      c_copy.trans_weight_default = None;
+                  }
                   resolved_state.merge_union(&c_copy);
               }
           }
@@ -4776,6 +4846,27 @@ messages:
                   self.trans_weights_exceptions.entry(*ch)
                       .and_modify(|self_w| *self_w |= other_w)
                       .or_insert_with(|| other_w.clone());
+              }
+
+              // Merge transition targets, asserting that we do not introduce non-determinism.
+              if let Some(other_def_tgt) = other.transitions.default {
+                  if let Some(self_def_tgt) = self.transitions.default {
+                      if self_def_tgt != other_def_tgt {
+                          panic!("Cannot merge DWAStates with conflicting default transitions");
+                      }
+                  } else {
+                      self.transitions.default = Some(other_def_tgt);
+                  }
+              }
+
+              for (&ch, &other_tgt) in &other.transitions.exceptions {
+                  if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
+                      if self_tgt != other_tgt {
+                          panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
+                      }
+                  } else {
+                      self.transitions.exceptions.insert(ch, other_tgt);
+                  }
               }
           }
       }
@@ -6598,6 +6689,45 @@ messages:
               assert_dwa_equivalent(d, expected);
           }
 
+          #[test]
+          fn test_resolve_negatives_cancellation_with_follow_on_state() {
+              // Tests the pattern A --neg(X)--> B --X--> C, where C has further transitions.
+              // The resolution of A should correctly incorporate the structure of C.
+              let mut d = DWA::new();
+              let s1 = d.add_state(); // State A
+              let s2 = d.add_state(); // State B
+              let s3 = d.add_state(); // State C
+              let s4 = d.add_state(); // Final state
+
+              let code_b = 'b' as i16;
+              let neg_code_b = i16::MIN + code_b;
+              let code_c = 'c' as i16;
+
+              // Path to get to state A: 0 --'a'--> 1
+              d.add_transition(d.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
+
+              // The cancellation pattern: 1 --neg(b)--> 2 --b--> 3
+              d.add_transition(s1, neg_code_b, s2, Weight::all()).unwrap();
+              d.add_transition(s2, code_b, s3, Weight::all()).unwrap();
+
+              // The follow-on transition from C: 3 --'c'--> 4(final)
+              d.add_transition(s3, code_c, s4, Weight::all()).unwrap();
+              d.set_final_weight(s4, Weight::from_item(1)).unwrap();
+
+              resolve_negative_codes_in_dwa(&mut d);
+
+              // Expected: after 'a', we should be in a state equivalent to C (s3),
+              // which means a 'c' transition should lead to a final state.
+              // The path should be 'a' -> 'c' -> final.
+              let mut expected = DWA::new();
+              let s1_exp = expected.add_state();
+              let s2_exp = expected.add_state();
+              expected.add_transition(expected.body.start_state, 'a' as i16, s1_exp, Weight::all()).unwrap();
+              expected.add_transition(s1_exp, code_c, s2_exp, Weight::all()).unwrap();
+              expected.set_final_weight(s2_exp, Weight::from_item(1)).unwrap();
+
+              assert_dwa_equivalent(d, expected);
+          }
 
           #[test]
           fn test_resolve_negatives_from_tokenizer_0() {
@@ -6713,18 +6843,37 @@ messages:
     metadata:
       filename: src/precompute4/resolve_negatives.rs
   - user: |+
-      [DEBUG] 3] src/precompute4/weighted_automata.rs:422: DWA::simplify_components (31 states -> 1 states) took: 1.366541ms
-      [DEBUG] 3] src/precompute4/weighted_automata.rs:422: DWA::simplify_components (1 states -> 1 states) took: 7.667µs
-      [DEBUG] 3] src/precompute4/weighted_automata.rs:422: DWA::simplify_components (3 states -> 3 states) took: 587.583µs
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:443: DWA::simplify_components (31 states -> 6 states) took: 3.036375ms
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:443: DWA::simplify_components (6 states -> 6 states) took: 81.333µs
+      [DEBUG] 3] src/precompute4/weighted_automata.rs:443: DWA::simplify_components (3 states -> 3 states) took: 45.584µs
 
 
-      thread 'precompute4::resolve_negatives::tests::test_resolve_negatives_from_tokenizer_0' (1663047) panicked at src/precompute4/weighted_automata.rs:1248:13:
-      assertion `left == right` failed: Per-edge weight mismatch on char 1 at (a:0, b:0): a.edge_weight=[] vs b.edge_weight=[2]
+      thread 'precompute4::resolve_negatives::tests::test_resolve_negatives_from_tokenizer_0' (1674954) panicked at src/precompute4/weighted_automata.rs:1247:9:
+      assertion `left == right` failed: Default transition weight mismatch at (a:1, b:2): a.def_weight=[2] vs b.def_weight=[]
 
       DWA A:
       DWA (start: 0)
         State 0:
           weight: []
+          1 -> 1 (trans_weight: [2])
+          3 -> 2 (trans_weight: [2])
+          4 -> 3 (trans_weight: [2])
+          7 -> 4 (trans_weight: [2])
+        State 1:
+          weight: []
+          * -> 4 (trans_weight: [2])
+        State 2:
+          weight: []
+          7 -> 4 (trans_weight: ALL)
+        State 3:
+          weight: []
+          * -> 2 (trans_weight: ALL)
+        State 4:
+          weight: []
+          7 -> 5 (trans_weight: ALL)
+        State 5:
+          weight: []
+          final_weight: [2]
 
 
       DWA B:
@@ -6742,8 +6891,8 @@ messages:
           weight: []
           final_weight: [2]
 
-        left: 
-       right: 2..=2
+        left: 2..=2
+       right: 
       stack backtrace:
          0: __rustc::rust_begin_unwind
                    at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
@@ -6753,11 +6902,11 @@ messages:
          3: core::panicking::assert_failed
                    at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
          4: sep1::precompute4::weighted_automata::assert_dwa_equivalent
-                   at ./src/precompute4/weighted_automata.rs:1248:13
+                   at ./src/precompute4/weighted_automata.rs:1247:9
          5: sep1::precompute4::resolve_negatives::tests::test_resolve_negatives_from_tokenizer_0
-                   at ./src/precompute4/resolve_negatives.rs:413:9
+                   at ./src/precompute4/resolve_negatives.rs:452:9
          6: sep1::precompute4::resolve_negatives::tests::test_resolve_negatives_from_tokenizer_0::{{closure}}
-                   at ./src/precompute4/resolve_negatives.rs:308:49
+                   at ./src/precompute4/resolve_negatives.rs:347:49
          7: core::ops::function::FnOnce::call_once
                    at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
          8: core::ops::function::FnOnce::call_once
@@ -6785,233 +6934,77 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here is an analysis of the root cause of the test failure, a minimal test case that reproduces the issue, and the necessary code changes to fix it.
+      Based on the panic message and analysis of the code, the test failure in `test_resolve_negatives_from_tokenizer_0` is caused by an incorrect default transition being added to a state during the negative code resolution process.
 
-      ### Root Cause Analysis
+      The function `resolve_negative_codes_in_dwa_internal` handles `neg(X), X` token cancellation by merging the state `C` (reached after `X`) into the state `A` (before `neg(X)`). This is done via `DWAState::merge_union`. The issue arises when state `A` has no default transition, but state `C` does. The `merge_union` operation causes the new resolved state for `A` to inherit `C`'s default transition.
 
-      The test `test_resolve_negatives_from_tokenizer_0` fails because of a bug in how `neg(X), X` code sequences (cancellations) are handled during negative code resolution.
+      This is incorrect because the cancellation is a specific two-token path. It should not change the behavior of state `A` for all other characters that would have previously gone to an implicit sink (because `A` had no default transition).
 
-      1.  The function `resolve_negative_codes_in_dwa_internal` identifies patterns where a state `A` has a negative transition `A --neg(X)--> B`, and state `B` has a corresponding positive transition `B --X--> C`. This is treated as a cancellation, where state `A` should now behave like state `C`.
-      2.  To implement this, `A`'s resolved state representation calls `merge_union` to incorporate the properties of `C`.
-      3.  The bug lies in the `DWAState::merge_union` function in `weighted_automata.rs`. It correctly unions all weights (state weight, final weight, and transition weights), but it **fails to merge the transition structure itself**. It does not copy the transition targets from the `other` state.
-      4.  In the failing test, a cancellation occurs where the target state `C` has subsequent transitions that are essential for reaching a final state. Because `merge_union` doesn't copy these transitions, the path is broken.
-      5.  The `simplify()` function, which runs after resolution, sees these broken paths as unable to reach a final state and prunes them entirely. In the failing test, this removes all accepting paths, resulting in an empty automaton that doesn't match the expected behavior.
+      The fix is to prevent this inheritance. Before calling `merge_union`, we will check if the original state (`state_a`) had a default transition. If it did not, we will clear the default transition from the state being merged (`c_copy`) to prevent it from being added to the resolved state.
 
-      The minimal test case below isolates this exact scenario: a `neg(X), X` cancellation where the target state has a necessary follow-on transition that is not being correctly merged.
+      Here are the step-by-step instructions to apply the fix:
 
-      ### Step-by-Step Instructions
+      ### Step-by-step Instructions
 
-      #### 1. Add a Minimal Reproducible Test Case
+      1.  **Open the file `src/precompute4/resolve_negatives.rs`**.
 
-      To confirm the bug and verify the fix, add the following test case to `src/precompute4/resolve_negatives.rs` inside the `tests` module. It will fail with the current code but pass after the fix is applied.
+      2.  **Navigate to the `resolve_negative_codes_in_dwa_internal` function**.
 
-      **File:** `src/precompute4/resolve_negatives.rs`
+      3.  **Locate the `if let Some(&c_id) = state_b.transitions.get(pos_code)` block**. Inside this block, find the call to `resolved_state.merge_union(&c_copy)`.
 
-      ```rust
-          #[test]
-          fn test_resolve_negatives_cancellation_with_follow_on_state() {
-              // Tests the pattern A --neg(X)--> B --X--> C, where C has further transitions.
-              // The resolution of A should correctly incorporate the structure of C.
-              let mut d = DWA::new();
-              let s1 = d.add_state(); // State A
-              let s2 = d.add_state(); // State B
-              let s3 = d.add_state(); // State C
-              let s4 = d.add_state(); // Final state
+      4.  **Insert the following code snippet** immediately before the `resolved_state.merge_union(&c_copy);` line:
 
-              let code_b = 'b' as i16;
-              let neg_code_b = i16::MIN + code_b;
-              let code_c = 'c' as i16;
-
-              // Path to get to state A: 0 --'a'--> 1
-              d.add_transition(d.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
-
-              // The cancellation pattern: 1 --neg(b)--> 2 --b--> 3
-              d.add_transition(s1, neg_code_b, s2, Weight::all()).unwrap();
-              d.add_transition(s2, code_b, s3, Weight::all()).unwrap();
-
-              // The follow-on transition from C: 3 --'c'--> 4(final)
-              d.add_transition(s3, code_c, s4, Weight::all()).unwrap();
-              d.set_final_weight(s4, Weight::from_item(1)).unwrap();
-
-              resolve_negative_codes_in_dwa(&mut d);
-
-              // Expected: after 'a', we should be in a state equivalent to C (s3),
-              // which means a 'c' transition should lead to a final state.
-              // The path should be 'a' -> 'c' -> final.
-              let mut expected = DWA::new();
-              let s1_exp = expected.add_state();
-              let s2_exp = expected.add_state();
-              expected.add_transition(expected.body.start_state, 'a' as i16, s1_exp, Weight::all()).unwrap();
-              expected.add_transition(s1_exp, code_c, s2_exp, Weight::all()).unwrap();
-              expected.set_final_weight(s2_exp, Weight::from_item(1)).unwrap();
-
-              assert_dwa_equivalent(d, expected);
-          }
-      ```
-
-      #### 2. Fix the `merge_union` Function
-
-      Modify the `DWAState::merge_union` function in `src/precompute4/weighted_automata.rs` to correctly merge the transition targets, asserting that no non-determinism is introduced.
-
-      **File:** `src/precompute4/weighted_automata.rs`
-
-      ```rust
-      // In `impl DWAState`, inside the `merge_union` function:
-          pub fn merge_union(&mut self, other: &DWAState) {
-              self.weight |= &other.weight;
-
-              if let Some(other_fw) = &other.final_weight {
-                  if let Some(self_fw) = &mut self.final_weight {
-                      *self_fw |= other_fw;
-                  } else {
-                      self.final_weight = Some(other_fw.clone());
+          ```rust
+                  // If the original state `state_a` did not have a default transition,
+                  // do not let the merge with `c_copy` introduce one. This would alter
+                  // the behavior of `state_a` for all inputs that are not exceptions,
+                  // which is too broad an effect for a cancellation path that involves
+                  // specific tokens. We clear the default from `c_copy` to prevent this.
+                  if state_a.transitions.default.is_none() {
+                      c_copy.transitions.default = None;
+                      c_copy.trans_weight_default = None;
                   }
-              }
+          ```
 
-              if let Some(other_twd) = &other.trans_weight_default {
-                  if let Some(self_twd) = &mut self.trans_weight_default {
-                      *self_twd |= other_twd;
-                  } else {
-                      self.trans_weight_default = Some(other_twd.clone());
-                  }
-              }
+      This change ensures that a default transition is not incorrectly introduced into a state that didn't originally have one, fixing the bug that caused the test to fail.
 
-              for (ch, other_w) in &other.trans_weights_exceptions {
-                  self.trans_weights_exceptions.entry(*ch)
-                      .and_modify(|self_w| *self_w |= other_w)
-                      .or_insert_with(|| other_w.clone());
-              }
+      ### Git Diff
 
-              // --- START OF CHANGES ---
-              // Merge transition targets, asserting that we do not introduce non-determinism.
-              if let Some(other_def_tgt) = other.transitions.default {
-                  if let Some(self_def_tgt) = self.transitions.default {
-                      if self_def_tgt != other_def_tgt {
-                          panic!("Cannot merge DWAStates with conflicting default transitions");
-                      }
-                  } else {
-                      self.transitions.default = Some(other_def_tgt);
-                  }
-              }
-
-              for (&ch, &other_tgt) in &other.transitions.exceptions {
-                  if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
-                      if self_tgt != other_tgt {
-                          panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
-                      }
-                  } else {
-                      self.transitions.exceptions.insert(ch, other_tgt);
-                  }
-              }
-              // --- END OF CHANGES ---
-          }
-      ```
-
-      ### Git Diffs
-
-      Here are the changes in `git diff` format.
+      Here is the corresponding git diff for the change:
 
       ```diff
       --- a/src/precompute4/resolve_negatives.rs
       +++ b/src/precompute4/resolve_negatives.rs
-      @@ -241,6 +241,43 @@
-               assert_dwa_equivalent(d, expected);
-           }
+      @@ -120,6 +120,16 @@
        
-      +    #[test]
-      +    fn test_resolve_negatives_cancellation_with_follow_on_state() {
-      +        // Tests the pattern A --neg(X)--> B --X--> C, where C has further transitions.
-      +        // The resolution of A should correctly incorporate the structure of C.
-      +        let mut d = DWA::new();
-      +        let s1 = d.add_state(); // State A
-      +        let s2 = d.add_state(); // State B
-      +        let s3 = d.add_state(); // State C
-      +        let s4 = d.add_state(); // Final state
+                   let mut c_copy = state_c.clone();
+                   c_copy.apply_weight(&combined_weight);
       +
-      +        let code_b = 'b' as i16;
-      +        let neg_code_b = i16::MIN + code_b;
-      +        let code_c = 'c' as i16;
-      +
-      +        // Path to get to state A: 0 --'a'--> 1
-      +        d.add_transition(d.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
-      +
-      +        // The cancellation pattern: 1 --neg(b)--> 2 --b--> 3
-      +        d.add_transition(s1, neg_code_b, s2, Weight::all()).unwrap();
-      +        d.add_transition(s2, code_b, s3, Weight::all()).unwrap();
-      +
-      +        // The follow-on transition from C: 3 --'c'--> 4(final)
-      +        d.add_transition(s3, code_c, s4, Weight::all()).unwrap();
-      +        d.set_final_weight(s4, Weight::from_item(1)).unwrap();
-      +
-      +        resolve_negative_codes_in_dwa(&mut d);
-      +
-      +        // Expected: after 'a', we should be in a state equivalent to C (s3),
-      +        // which means a 'c' transition should lead to a final state.
-      +        // The path should be 'a' -> 'c' -> final.
-      +        let mut expected = DWA::new();
-      +        let s1_exp = expected.add_state();
-      +        let s2_exp = expected.add_state();
-      +        expected.add_transition(expected.body.start_state, 'a' as i16, s1_exp, Weight::all()).unwrap();
-      +        expected.add_transition(s1_exp, code_c, s2_exp, Weight::all()).unwrap();
-      +        expected.set_final_weight(s2_exp, Weight::from_item(1)).unwrap();
-      +
-      +        assert_dwa_equivalent(d, expected);
-      +    }
-       
-           #[test]
-           fn test_resolve_negatives_from_tokenizer_0() {
-
-      ```
-
-      ```diff
-      --- a/src/precompute4/weighted_automata.rs
-      +++ b/src/precompute4/weighted_automata.rs
-      @@ -288,6 +288,26 @@
-                       .and_modify(|self_w| *self_w |= other_w)
-                       .or_insert_with(|| other_w.clone());
+      +            // If the original state `state_a` did not have a default transition,
+      +            // do not let the merge with `c_copy` introduce one. This would alter
+      +            // the behavior of `state_a` for all inputs that are not exceptions,
+      +            // which is too broad an effect for a cancellation path that involves
+      +            // specific tokens. We clear the default from `c_copy` to prevent this.
+      +            if state_a.transitions.default.is_none() {
+      +                c_copy.transitions.default = None;
+      +                c_copy.trans_weight_default = None;
+      +            }
+                   resolved_state.merge_union(&c_copy);
                }
-      +
-      +        // Merge transition targets, asserting that we do not introduce non-determinism.
-      +        if let Some(other_def_tgt) = other.transitions.default {
-      +            if let Some(self_def_tgt) = self.transitions.default {
-      +                if self_def_tgt != other_def_tgt {
-      +                    panic!("Cannot merge DWAStates with conflicting default transitions");
-      +                }
-      +            } else {
-      +                self.transitions.default = Some(other_def_tgt);
-      +            }
-      +        }
-      +
-      +        for (&ch, &other_tgt) in &other.transitions.exceptions {
-      +            if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
-      +                if self_tgt != other_tgt {
-      +                    panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
-      +                }
-      +            } else {
-      +                self.transitions.exceptions.insert(ch, other_tgt);
-      +            }
-      +        }
            }
-       }
-       
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/precompute4/resolve_negatives.rs
       Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/precompute4/weighted_automata.rs
-      Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly merge transition structure
-      in DWAState::merge_union during negative code resolution"'
+  - user: 'Changes committed with message: "Fix: Prevent introducing default transitions
+      during negative code resolution merge"'
     metadata:
 ...
