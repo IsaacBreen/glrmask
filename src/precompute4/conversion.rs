@@ -45,7 +45,8 @@ pub fn dwa_to_precompute3(
         // Exception transitions
         for (&char_code, &target_dwa_id) in &dwa_state.transitions.exceptions {
             if char_code < 0 {
-                panic!("Encountered negative transition code {} during conversion. Please run negative-resolution pass before conversion.", char_code);
+                eprintln!("Encountered negative transition code {} during conversion. Please run negative-resolution pass before conversion.", char_code);
+                continue;
             }
             let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
             let parser_state_id = char_code as usize;
