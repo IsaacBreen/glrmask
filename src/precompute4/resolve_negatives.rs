@@ -190,130 +190,115 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_negatives_isolated_path_from_tokenizer_1() {
+    fn test_resolve_negatives_simple_cancellation() {
+        // Corresponds to a sequence like `a, neg(a)`.
+        // The DWA should resolve to an automaton that accepts `a` and is final.
         let mut d = DWA::new();
         let s1 = d.add_state();
         let s2 = d.add_state();
 
-        d.add_transition(d.body.start_state, 7, s1, Weight::from_item(2)).unwrap();
-        d.add_transition(s1, i16::MIN + 7, s2, Weight::all()).unwrap();
+        let code_a = 7;
+        let neg_code_a = i16::MIN + code_a;
+
+        // 0 --a--> 1
+        d.add_transition(d.body.start_state, code_a, s1, Weight::from_item(2)).unwrap();
+        // 1 --neg(a)--> 2
+        d.add_transition(s1, neg_code_a, s2, Weight::all()).unwrap();
+        // 2 is final
         d.set_final_weight(s2, Weight::all()).unwrap();
 
         resolve_negative_codes_in_dwa(&mut d);
 
+        // Expected: 0 --a--> final_state
         let mut expected = DWA::new();
         let s_final = expected.add_state();
-        expected.add_transition(expected.body.start_state, 7, s_final, Weight::from_item(2)).unwrap();
+        expected.add_transition(expected.body.start_state, code_a, s_final, Weight::from_item(2)).unwrap();
+        // The final weight is the intersection of the edge weight (2) and the final weight (all),
+        // constrained by reachability during simplification.
         expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
 
         assert_dwa_equivalent(d, expected);
     }
 
     #[test]
-    fn test_resolve_negatives_from_tokenizer_0() {
+    fn test_resolve_negatives_chained_cancellation() {
+        // Corresponds to a sequence like `a, b, neg(b), neg(a)`.
+        // Should resolve to an automaton that accepts `ab` and is final.
         let mut d = DWA::new();
-        let mut s = vec![d.body.start_state];
-        for _ in 0..30 {
-            s.push(d.add_state());
-        }
+        let s1 = d.add_state();
+        let s2 = d.add_state();
+        let s3 = d.add_state();
+        let s4 = d.add_state();
 
-        // State 0
-        d.add_transition(s[0], 1, s[1], Weight::from_item(2)).unwrap();
-        d.add_transition(s[0], 3, s[2], Weight::from_item(2)).unwrap();
-        d.add_transition(s[0], 4, s[3], Weight::from_item(2)).unwrap();
-        d.add_transition(s[0], 6, s[4], Weight::from_item(2)).unwrap();
-        d.add_transition(s[0], 7, s[5], Weight::from_item(2)).unwrap();
-        d.add_transition(s[0], 8, s[6], Weight::from_item(2)).unwrap();
-        // State 1
-        d.add_transition(s[1], i16::MIN + 1, s[7], Weight::all()).unwrap();
-        // State 2
-        d.add_transition(s[2], 7, s[8], Weight::all()).unwrap();
-        // State 3
-        d.set_default_transition(s[3], s[2], Weight::all()).unwrap();
-        // State 4
-        d.set_default_transition(s[4], s[9], Weight::all()).unwrap();
-        // State 5
-        d.add_transition(s[5], i16::MIN + 7, s[10], Weight::all()).unwrap();
-        // State 6 is a sink
-        // State 7
-        d.add_transition(s[7], i16::MIN + 4, s[11], Weight::all()).unwrap();
-        // State 8
-        d.add_transition(s[8], i16::MIN + 7, s[12], Weight::all()).unwrap();
-        // State 9 is a sink
-        // State 10
-        d.add_transition(s[10], i16::MIN + 3, s[13], Weight::all()).unwrap();
-        // State 11
-        d.add_transition(s[11], 1, s[14], Weight::from_item(2)).unwrap();
-        d.add_transition(s[11], 3, s[15], Weight::from_item(2)).unwrap();
-        d.add_transition(s[11], 4, s[16], Weight::from_item(2)).unwrap();
-        d.add_transition(s[11], 6, s[17], Weight::from_item(2)).unwrap();
-        d.add_transition(s[11], 7, s[18], Weight::from_item(2)).unwrap();
-        d.add_transition(s[11], 8, s[19], Weight::from_item(2)).unwrap();
-        // State 12
-        d.add_transition(s[12], i16::MIN + 1, s[20], Weight::all()).unwrap();
-        // State 13
-        d.add_transition(s[13], 1, s[14], Weight::from_item(2)).unwrap();
-        d.add_transition(s[13], 3, s[15], Weight::from_item(2)).unwrap();
-        d.add_transition(s[13], 4, s[16], Weight::from_item(2)).unwrap();
-        d.add_transition(s[13], 6, s[17], Weight::from_item(2)).unwrap();
-        d.add_transition(s[13], 7, s[18], Weight::from_item(2)).unwrap();
-        d.add_transition(s[13], 8, s[19], Weight::from_item(2)).unwrap();
-        // State 14
-        d.add_transition(s[14], i16::MIN + 1, s[21], Weight::all()).unwrap();
-        // State 15
-        d.add_transition(s[15], 7, s[22], Weight::all()).unwrap();
-        // State 16
-        d.set_default_transition(s[16], s[15], Weight::all()).unwrap();
-        // State 17
-        d.set_default_transition(s[17], s[23], Weight::all()).unwrap();
-        // State 18
-        d.add_transition(s[18], i16::MIN + 7, s[24], Weight::all()).unwrap();
-        // State 19 is a sink
-        // State 20
-        d.add_transition(s[20], i16::MIN + 4, s[25], Weight::all()).unwrap();
-        // State 21
-        d.add_transition(s[21], i16::MIN + 2, s[26], Weight::all()).unwrap();
-        // State 22
-        d.add_transition(s[22], i16::MIN + 7, s[27], Weight::all()).unwrap();
-        // State 23 is a sink
-        // State 24
-        d.add_transition(s[24], i16::MIN + 0, s[28], Weight::all()).unwrap();
-        // State 25
-        d.add_transition(s[25], 1, s[14], Weight::from_item(2)).unwrap();
-        d.add_transition(s[25], 3, s[15], Weight::from_item(2)).unwrap();
-        d.add_transition(s[25], 4, s[16], Weight::from_item(2)).unwrap();
-        d.add_transition(s[25], 6, s[17], Weight::from_item(2)).unwrap();
-        d.add_transition(s[25], 7, s[18], Weight::from_item(2)).unwrap();
-        d.add_transition(s[25], 8, s[19], Weight::from_item(2)).unwrap();
-        // State 26
-        d.set_final_weight(s[26], Weight::all()).unwrap();
-        // State 27
-        d.add_transition(s[27], i16::MIN + 1, s[29], Weight::all()).unwrap();
-        // State 28
-        d.set_final_weight(s[28], Weight::all()).unwrap();
-        // State 29
-        d.add_transition(s[29], i16::MIN + 2, s[30], Weight::all()).unwrap();
-        // State 30
-        d.set_final_weight(s[30], Weight::all()).unwrap();
+        let code_a = 7;
+        let neg_code_a = i16::MIN + code_a;
+        let code_b = 8;
+        let neg_code_b = i16::MIN + code_b;
+
+        // 0 --a--> 1 --b--> 2 --neg(b)--> 3 --neg(a)--> 4(final)
+        d.add_transition(d.body.start_state, code_a, s1, Weight::all()).unwrap();
+        d.add_transition(s1, code_b, s2, Weight::all()).unwrap();
+        d.add_transition(s2, neg_code_b, s3, Weight::all()).unwrap();
+        d.add_transition(s3, neg_code_a, s4, Weight::all()).unwrap();
+        d.set_final_weight(s4, Weight::from_item(100)).unwrap();
 
         resolve_negative_codes_in_dwa(&mut d);
 
-        // After resolution and simplification, several paths should resolve to simple
-        // accepting paths. For example, `1 -> neg(1)` paths should make the state before
-        // the `1` transition behave like the state after `neg(1)`.
+        // Expected: 0 --a--> s1_exp --b--> s_final
         let mut expected = DWA::new();
-        let s1 = expected.add_state();
+        let s1_exp = expected.add_state();
         let s_final = expected.add_state();
+        expected.add_transition(expected.body.start_state, code_a, s1_exp, Weight::all()).unwrap();
+        expected.add_transition(s1_exp, code_b, s_final, Weight::all()).unwrap();
+        expected.set_final_weight(s_final, Weight::from_item(100)).unwrap();
 
-        expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
+        assert_dwa_equivalent(d, expected);
+    }
 
-        // Paths starting with 1, 3, 4, and 7 from the original DWA can reach a final state.
-        // After simplification, they should all lead to the same final state.
-        expected.add_transition(0, 1, s_final, Weight::from_item(2)).unwrap();
-        expected.add_transition(0, 3, s1, Weight::from_item(2)).unwrap();
-        expected.add_transition(0, 4, s1, Weight::from_item(2)).unwrap();
-        expected.add_transition(0, 7, s_final, Weight::from_item(2)).unwrap();
-        expected.add_transition(s1, 7, s_final, Weight::all()).unwrap();
+    #[test]
+    fn test_resolve_negatives_branched_cancellation() {
+        // Two branches that cancel and lead to the same final state.
+        // Branch 1: a, neg(a)
+        // Branch 2: b, c, neg(c), neg(b)
+        // Should resolve to an automaton accepting `a` and `bc`.
+        let mut d = DWA::new();
+        let s1 = d.add_state(); // after a
+        let s2 = d.add_state(); // after b
+        let s3 = d.add_state(); // final state
+        let s4 = d.add_state(); // after b, c
+        let s5 = d.add_state(); // after b, c, neg(c)
+
+        let code_a = 7;
+        let neg_code_a = i16::MIN + code_a;
+        let code_b = 8;
+        let neg_code_b = i16::MIN + code_b;
+        let code_c = 9;
+        let neg_code_c = i16::MIN + code_c;
+
+        // Branch 1: 0 --a--> 1 --neg(a)--> 3
+        d.add_transition(d.body.start_state, code_a, s1, Weight::all()).unwrap();
+        d.add_transition(s1, neg_code_a, s3, Weight::all()).unwrap();
+
+        // Branch 2: 0 --b--> 2 --c--> 4 --neg(c)--> 5 --neg(b)--> 3
+        d.add_transition(d.body.start_state, code_b, s2, Weight::all()).unwrap();
+        d.add_transition(s2, code_c, s4, Weight::all()).unwrap();
+        d.add_transition(s4, neg_code_c, s5, Weight::all()).unwrap();
+        d.add_transition(s5, neg_code_b, s3, Weight::all()).unwrap();
+
+        // s3 is final
+        d.set_final_weight(s3, Weight::from_item(100)).unwrap();
+
+        resolve_negative_codes_in_dwa(&mut d);
+
+        // Expected: accepts 'a' and 'bc', simplified to a common final state
+        let mut expected = DWA::new();
+        let s_final = expected.add_state();
+        let s_b = expected.add_state();
+
+        expected.set_final_weight(s_final, Weight::from_item(100)).unwrap();
+        expected.add_transition(expected.body.start_state, code_a, s_final, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, code_b, s_b, Weight::all()).unwrap();
+        expected.add_transition(s_b, code_c, s_final, Weight::all()).unwrap();
 
         assert_dwa_equivalent(d, expected);
     }
