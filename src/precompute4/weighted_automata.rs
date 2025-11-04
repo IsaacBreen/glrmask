@@ -1007,7 +1007,190 @@ impl JSONConvertible for DWA {
 // --- Test Helpers ---
 #[cfg(test)]
 pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
-    todo!()
+    // Strategy:
+    // 1) Simplify both automata to obtain canonical, minimized, and normalized forms
+    //    (unreachable pruned, sink-like states collapsed, redundant exceptions removed),
+    //    while aggregating edge/default weights as unions across merged states.
+    // 2) Perform a BFS isomorphism test from the start states. For each matched pair:
+    //    - Compare state weights and final weights (None treated as zeros).
+    //    - Compare default transition weights (None treated as zeros).
+    //    - For each character in the union of exception keys, compare per-edge weights
+    //      (falling back to default if exception weight absent).
+    //    - Ensure default and per-exception targets correspond under the evolving bijection.
+    // 3) Verify that all states reachable in `b` are matched by some state of `a`.
+
+    a.simplify();
+    b.simplify();
+
+    // Helper: convert Option<Weight> to Weight (None => zeros).
+    fn opt_w_to_w(ow: &Option<Weight>) -> Weight {
+        ow.clone().unwrap_or_else(Weight::zeros)
+    }
+
+    use std::collections::HashSet;
+
+    // Map a-state -> b-state and its inverse to ensure a bijection.
+    let mut map_ab: HashMap<StateID, StateID> = HashMap::new();
+    let mut map_ba: HashMap<StateID, StateID> = HashMap::new();
+    let mut q: VecDeque<(StateID, StateID)> = VecDeque::new();
+
+    assert!(
+        !a.states.is_empty() && !b.states.is_empty(),
+        "Automata should have at least one state after simplification"
+    );
+
+    let start_a = a.body.start_state;
+    let start_b = b.body.start_state;
+    map_ab.insert(start_a, start_b);
+    map_ba.insert(start_b, start_a);
+    q.push_back((start_a, start_b));
+
+    // Lookup per-edge weight for a specific character in a given state:
+    // - If an exception weight is present, use it.
+    // - Else, use the default weight (or zeros if absent).
+    let edge_weight = |st: &DWAState, ch: i16| -> Weight {
+        if let Some(w) = st.trans_weights_exceptions.get(&ch) {
+            w.clone()
+        } else {
+            opt_w_to_w(&st.trans_weight_default)
+        }
+    };
+
+    while let Some((ia, ib)) = q.pop_front() {
+        let sa = &a.states[ia];
+        let sb = &b.states[ib];
+
+        // Compare state weights (outputs).
+        assert_eq!(
+            sa.weight, sb.weight,
+            "State weight mismatch at (a:{}, b:{}): a.weight={} vs b.weight={}",
+            ia, ib, sa.weight, sb.weight
+        );
+
+        // Compare final weights (None considered zeros).
+        let fa = opt_w_to_w(&sa.final_weight);
+        let fb = opt_w_to_w(&sb.final_weight);
+        assert_eq!(
+            fa, fb,
+            "Final weight mismatch at (a:{}, b:{}): a.final_weight={} vs b.final_weight={}",
+            ia, ib, fa, fb
+        );
+
+        // Compare default transition weights (None considered zeros).
+        let dwa = opt_w_to_w(&sa.trans_weight_default);
+        let dwb = opt_w_to_w(&sb.trans_weight_default);
+        assert_eq!(
+            dwa, dwb,
+            "Default transition weight mismatch at (a:{}, b:{}): a.def_weight={} vs b.def_weight={}",
+            ia, ib, dwa, dwb
+        );
+
+        // Union of exception keys; after simplify(), both representations should be normalized,
+        // but we compute the union to be robust.
+        let keys_a: BTreeSet<i16> = sa.transitions.exceptions.keys().cloned().collect();
+        let keys_b: BTreeSet<i16> = sb.transitions.exceptions.keys().cloned().collect();
+        let all_keys: BTreeSet<i16> = keys_a.union(&keys_b).cloned().collect();
+
+        // Compare and enqueue per-exception transitions.
+        let def_a = sa.transitions.default;
+        let def_b = sb.transitions.default;
+
+        for ch in all_keys {
+            let ta = sa.transitions.exceptions.get(&ch).copied().or(def_a);
+            let tb = sb.transitions.exceptions.get(&ch).copied().or(def_b);
+
+            let wa = edge_weight(sa, ch);
+            let wb = edge_weight(sb, ch);
+            assert_eq!(
+                wa, wb,
+                "Per-edge weight mismatch on char {} at (a:{}, b:{}): a.edge_weight={} vs b.edge_weight={}",
+                ch, ia, ib, wa, wb
+            );
+
+            match (ta, tb) {
+                (Some(ta_id), Some(tb_id)) => {
+                    if let Some(&mapped) = map_ab.get(&ta_id) {
+                        assert_eq!(
+                            mapped, tb_id,
+                            "Transition mismatch on char {} from (a:{}, b:{}): a-target {} is already mapped to b-target {}, but encountered b-target {}",
+                            ch, ia, ib, ta_id, mapped, tb_id
+                        );
+                    } else {
+                        map_ab.insert(ta_id, tb_id);
+                        if let Some(prev_a) = map_ba.insert(tb_id, ta_id) {
+                            assert_eq!(
+                                prev_a, ta_id,
+                                "Non-bijective mapping: b-state {} already mapped to a-state {}, conflicting with a-state {} via char {} from (a:{}, b:{})",
+                                tb_id, prev_a, ta_id, ch, ia, ib
+                            );
+                        }
+                        q.push_back((ta_id, tb_id));
+                    }
+                }
+                (None, None) => { /* Both lack transition for this char; fine. */ }
+                _ => {
+                    panic!(
+                        "Presence mismatch for transition on char {} at (a:{}, b:{}): a-target={:?}, b-target={:?}",
+                        ch, ia, ib, ta, tb
+                    );
+                }
+            }
+        }
+
+        // Compare and enqueue default transitions.
+        match (def_a, def_b) {
+            (Some(ta_id), Some(tb_id)) => {
+                if let Some(&mapped) = map_ab.get(&ta_id) {
+                    assert_eq!(
+                        mapped, tb_id,
+                        "Default transition mismatch from (a:{}, b:{}): a-target {} already mapped to b-target {}, but encountered b-target {}",
+                        ia, ib, ta_id, mapped, tb_id
+                    );
+                } else {
+                    map_ab.insert(ta_id, tb_id);
+                    if let Some(prev_a) = map_ba.insert(tb_id, ta_id) {
+                        assert_eq!(
+                            prev_a, ta_id,
+                            "Non-bijective mapping on default: b-state {} already mapped to a-state {}, conflicting with a-state {}",
+                            tb_id, prev_a, ta_id
+                        );
+                    }
+                    q.push_back((ta_id, tb_id));
+                }
+            }
+            (None, None) => { /* No default on either side; fine. */ }
+            _ => {
+                panic!(
+                    "Default transition presence mismatch at (a:{}, b:{}): a.default={:?}, b.default={:?}",
+                    ia, ib, def_a, def_b
+                );
+            }
+        }
+    }
+
+    // Ensure we've covered all states reachable from b.start.
+    let mut reachable_b: HashSet<StateID> = HashSet::new();
+    let mut qb: VecDeque<StateID> = VecDeque::new();
+    reachable_b.insert(b.body.start_state);
+    qb.push_back(b.body.start_state);
+    while let Some(u) = qb.pop_front() {
+        if let Some(d) = b.states[u].transitions.default {
+            if reachable_b.insert(d) {
+                qb.push_back(d);
+            }
+        }
+        for &v in b.states[u].transitions.exceptions.values() {
+            if reachable_b.insert(v) {
+                qb.push_back(v);
+            }
+        }
+    }
+    let mapped_b: HashSet<StateID> = map_ab.values().cloned().collect();
+    assert_eq!(
+        mapped_b, reachable_b,
+        "Reachable-state mismatch in `b`: matched set = {:?}, reachable set = {:?}",
+        mapped_b, reachable_b
+    );
 }
 
 // --- Tests ---
