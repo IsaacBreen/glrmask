@@ -526,63 +526,83 @@ impl DWA {
         }
         let n = states.0.len();
 
-        // 1. Forward reachability from start_state
+        // 1. Backward reachability from final states to find "live" states.
+        let mut live = vec![false; n];
+        let mut q_live: VecDeque<usize> = VecDeque::new();
+        let mut rev_adj: Vec<Vec<usize>> = vec![vec![]; n];
+        for i in 0..n {
+            if states[i].final_weight.as_ref().map_or(false, |w| !w.is_empty()) {
+                live[i] = true;
+                q_live.push_back(i);
+            }
+            if let Some(d) = states[i].transitions.default { if d < n { rev_adj[d].push(i); } }
+            for &v in states[i].transitions.exceptions.values() { if v < n { rev_adj[v].push(i); } }
+        }
+        while let Some(u) = q_live.pop_front() {
+            for &v in &rev_adj[u] {
+                if !live[v] { live[v] = true; q_live.push_back(v); }
+            }
+        }
+
+        // 2. Remove transitions to non-live states.
+        let mut changed = false;
+        for i in 0..n {
+            let st = &mut states[i];
+            if let Some(d) = st.transitions.default {
+                if !live[d] {
+                    st.transitions.default = None;
+                    st.trans_weight_default = None;
+                    changed = true;
+                }
+            }
+            let before = st.transitions.exceptions.len();
+            st.transitions.exceptions.retain(|_, tgt| live[*tgt]);
+            if st.transitions.exceptions.len() != before {
+                changed = true;
+                st.trans_weights_exceptions.retain(|ch, _| st.transitions.exceptions.contains_key(ch));
+            }
+        }
+
+        // 3. Forward reachability from start_state to find actually reachable states.
         let mut visited = vec![false; n];
         let mut q: VecDeque<usize> = VecDeque::new();
         if body.start_state < n {
             visited[body.start_state] = true;
             q.push_back(body.start_state);
         }
-
         while let Some(u) = q.pop_front() {
-            if let Some(d) = states[u].transitions.default {
-                if d < n && !visited[d] {
-                    visited[d] = true;
-                    q.push_back(d);
-                }
-            }
-            for &v in states[u].transitions.exceptions.values() {
-                if v < n && !visited[v] {
-                    visited[v] = true;
-                    q.push_back(v);
-                }
-            }
+            if let Some(d) = states[u].transitions.default { if d < n && !visited[d] { visited[d] = true; q.push_back(d); } }
+            for &v in states[u].transitions.exceptions.values() { if v < n && !visited[v] { visited[v] = true; q.push_back(v); } }
         }
 
-        if visited.iter().all(|&b| b) {
+        if visited.iter().all(|&b| b) && !changed {
             return false;
         }
 
-        // 4. Remap
+        // 4. Remap kept states.
         let mut map = vec![usize::MAX; n];
         let mut next_id = 0usize;
-        for i in 0..n {
-            if visited[i] {
-                map[i] = next_id;
-                next_id += 1;
-            }
-        }
+        for i in 0..n { if visited[i] { map[i] = next_id; next_id += 1; } }
 
-        if next_id == n { return false; }
+        if next_id == n && !changed { return false; }
 
         let mut new_states: Vec<DWAState> = Vec::with_capacity(next_id);
         for old in 0..n {
-            if !visited[old] {
-                continue;
-            }
+            if !visited[old] { continue; }
             let mut st = states[old].clone();
-            if let Some(d) = st.transitions.default {
-                st.transitions.default = Some(map[d]);
-            }
+            if let Some(d) = st.transitions.default { st.transitions.default = Some(map[d]); }
             let ex = st.transitions.exceptions.clone();
             st.transitions.exceptions.clear();
-            for (ch, tgt) in ex {
-                st.transitions.exceptions.insert(ch, map[tgt]);
-            }
+            for (ch, tgt) in ex { st.transitions.exceptions.insert(ch, map[tgt]); }
             new_states.push(st);
         }
         states.0 = new_states;
-        body.start_state = map[body.start_state];
+        if next_id > 0 {
+            body.start_state = map[body.start_state];
+        } else if n > 0 {
+            states.0.clear();
+            body.start_state = states.add_state();
+        }
         true
     }
 
