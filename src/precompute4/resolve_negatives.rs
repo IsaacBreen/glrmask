@@ -93,13 +93,13 @@ fn propagate_cancellations(dwa: &mut DWA) {
                     // Aggregate weight updates
                     let weight_to_add = &path_weight & &c_state.weight;
                     if !weight_to_add.is_empty() {
-                        weight_updates.entry(a_id).or_default() |= &weight_to_add;
+                        *weight_updates.entry(a_id).or_default() |= &weight_to_add;
                     }
 
                     if let Some(fw) = &c_state.final_weight {
                         let final_weight_to_add = &path_weight & fw;
                         if !final_weight_to_add.is_empty() {
-                            final_weight_updates.entry(a_id).or_default() |= &final_weight_to_add;
+                            *final_weight_updates.entry(a_id).or_default() |= &final_weight_to_add;
                         }
                     }
 
@@ -147,12 +147,14 @@ fn propagate_cancellations(dwa: &mut DWA) {
 /// After propagation, any remaining negative transitions that do not point to a final state
 /// are considered invalid paths and are removed.
 fn remove_internal_negatives(dwa: &mut DWA) {
+    let is_final: Vec<bool> = dwa.states.iter().map(|s| s.final_weight.is_some()).collect();
+
     for state in &mut dwa.states.0 {
         let to_remove: Vec<i16> = state
             .transitions
             .exceptions
             .iter()
-            .filter(|(&k, &v)| k < 0 && dwa.states[v].final_weight.is_none())
+            .filter(|(&k, &v)| k < 0 && !is_final[v])
             .map(|(k, _)| *k)
             .collect();
 
