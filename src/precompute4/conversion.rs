@@ -1,7 +1,5 @@
 // src/precompute4/conversion.rs
-use crate::constraint::{
-    LLMTokenBV, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper,
-};
+use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
 use crate::datastructures::trie::Trie;
 use crate::precompute4::weighted_automata::{DWA, StateID, Weight};
 use std::collections::BTreeMap;
@@ -45,25 +43,18 @@ pub fn dwa_to_precompute3(
         let mut handled_exceptions = StateIDBV::zeros();
 
         // Exception transitions
-        for (&symbol, &target_dwa_id) in &dwa_state.transitions.exceptions {
-            if symbol < 0 {
-                panic!("Negative DWA symbol encountered in conversion: {}", symbol);
-            }
-            let symbol_u = symbol as usize;
+        for (&char_code, &target_dwa_id) in &dwa_state.transitions.exceptions {
             let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
-            handled_exceptions.insert(symbol_u);
+            let parser_state_id = char_code as usize;
+            handled_exceptions.insert(parser_state_id);
 
-            let trans_weight = dwa_state
-                .trans_weights_exceptions
-                .get(&symbol)
-                .cloned()
-                .unwrap_or_else(Weight::zeros);
+            let trans_weight = dwa_state.trans_weights_exceptions.get(&char_code).cloned().unwrap_or_else(Weight::zeros);
             let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
 
             if !trans_weight_bv.is_empty() {
-                let edge_key = (pop_len as isize, trans_weight_bv); // pop 1 if not root, 0 if root
+                let edge_key = (pop_len as isize, trans_weight_bv); // pop 1
                 let mut edge_val = StateIDBV::zeros();
-                edge_val.insert(symbol_u);
+                edge_val.insert(parser_state_id);
                 trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
             }
         }
@@ -71,15 +62,11 @@ pub fn dwa_to_precompute3(
         // Default transition
         if let Some(target_dwa_id) = dwa_state.transitions.default {
             let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
-            let trans_weight = dwa_state
-                .trans_weight_default
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(Weight::zeros);
+            let trans_weight = dwa_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
             let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
 
             if !trans_weight_bv.is_empty() {
-                let edge_key = (pop_len as isize, trans_weight_bv); // pop 1 if not root, 0 if root
+                let edge_key = (pop_len as isize, trans_weight_bv); // pop 1
                 let edge_val = &all_parser_states - &handled_exceptions;
                 if !edge_val.is_empty() {
                     trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
