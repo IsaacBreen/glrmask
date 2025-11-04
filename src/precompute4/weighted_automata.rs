@@ -741,7 +741,7 @@ impl DWA {
 
             // Aggregate weights
             let mut agg_weight = s0.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
-            let mut agg_final_weight = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+            let mut agg_final_weight = Weight::zeros();
             for &id1 in &ids1 {
                 if id1 != sink1 {
                     let s1 = &other.states[id1];
