@@ -360,7 +360,7 @@ impl DWA {
                 changed_any = true;
             }
         }
-        println!("DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+        crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
     }
 
     pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
