@@ -1086,4 +1086,174 @@ mod tests {
         let (c, _) = d1.concatenate(&d2, &join_map);
         assert!(c.states.len() >= 2);
     }
+
+    // --- Advanced Tests ---
+
+    /// Helper to create a DWA that accepts a single character and produces a final weight.
+    fn dwa_accepts_char(ch: char, final_weight: Weight) -> DWA {
+        let mut dwa = DWA::new();
+        let final_state = dwa.add_state();
+        dwa.add_transition(dwa.body.start_state, ch as i16, final_state, Weight::all()).unwrap();
+        dwa.set_final_weight(final_state, final_weight).unwrap();
+        dwa
+    }
+
+    /// Helper to create a DWA that accepts a string and produces a final weight.
+    fn dwa_from_str(s: &str, final_weight: Weight) -> DWA {
+        let mut dwa = DWA::new();
+        let mut current_state = dwa.body.start_state;
+        for ch in s.chars() {
+            let next_state = dwa.add_state();
+            dwa.add_transition(current_state, ch as i16, next_state, Weight::all()).unwrap();
+            current_state = next_state;
+        }
+        dwa.set_final_weight(current_state, final_weight).unwrap();
+        dwa
+    }
+
+    /// Checks if two DWAs are equivalent by simplifying them and then checking for graph isomorphism.
+    fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
+        a.simplify();
+        b.simplify();
+
+        let mut mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
+        let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
+
+        worklist.push_back((a.body.start_state, b.body.start_state));
+        mapping.insert(a.body.start_state, b.body.start_state);
+
+        while let Some((id_a, id_b)) = worklist.pop_front() {
+            let s_a = &a.states[id_a];
+            let s_b = &b.states[id_b];
+
+            assert_eq!(s_a.weight, s_b.weight, "State weights differ for ({}, {})", id_a, id_b);
+            assert_eq!(s_a.final_weight, s_b.final_weight, "Final weights differ for ({}, {})", id_a, id_b);
+
+            let def_a = s_a.transitions.default;
+            let def_b = s_b.transitions.default;
+            assert_eq!(def_a.is_some(), def_b.is_some());
+            if let (Some(next_a), Some(next_b)) = (def_a, def_b) {
+                if let Some(&mapped_b) = mapping.get(&next_a) {
+                    assert_eq!(mapped_b, next_b, "Default transition mismatch");
+                } else {
+                    mapping.insert(next_a, next_b);
+                    worklist.push_back((next_a, next_b));
+                }
+            }
+            assert_eq!(s_a.trans_weight_default, s_b.trans_weight_default);
+
+            assert_eq!(s_a.transitions.exceptions.keys().collect::<BTreeSet<_>>(),
+                       s_b.transitions.exceptions.keys().collect::<BTreeSet<_>>(),
+                       "Exception transition keys differ");
+
+            for (ch, &next_a) in &s_a.transitions.exceptions {
+                let next_b = *b.states[id_b].transitions.exceptions.get(ch).unwrap();
+                if let Some(&mapped_b) = mapping.get(&next_a) {
+                    assert_eq!(mapped_b, next_b, "Exception transition mismatch for char {}", ch);
+                } else {
+                    mapping.insert(next_a, next_b);
+                    worklist.push_back((next_a, next_b));
+                }
+                assert_eq!(s_a.trans_weights_exceptions.get(ch), s_b.trans_weights_exceptions.get(ch));
+            }
+        }
+
+        assert_eq!(a.states.len(), b.states.len(), "State counts differ after simplification");
+        assert_eq!(mapping.len(), a.states.len(), "Did not visit all states, graphs are not isomorphic");
+    }
+
+    #[test]
+    fn test_simplify_redundant_states() {
+        let mut d = DWA::new();
+        let s1 = d.add_state();
+        let s2 = d.add_state();
+        let s3 = d.add_state(); // Should be merged with s2
+        let s4 = d.add_state(); // Final state
+        let s5 = d.add_state(); // Unreachable
+
+        d.add_transition(0, 'a' as i16, s1, Weight::all()).unwrap();
+        d.add_transition(0, 'b' as i16, s2, Weight::all()).unwrap();
+        d.add_transition(0, 'c' as i16, s3, Weight::all()).unwrap();
+        d.add_transition(s1, 'x' as i16, s4, Weight::all()).unwrap();
+        d.add_transition(s2, 'y' as i16, s4, Weight::all()).unwrap();
+        d.add_transition(s3, 'y' as i16, s4, Weight::all()).unwrap(); // Same behavior as s2
+        d.set_final_weight(s4, Weight::from_item(1)).unwrap();
+        d.set_state_weight(s5, Weight::from_item(99)).unwrap();
+
+        assert_eq!(d.states.len(), 6);
+        d.simplify();
+        // s5 pruned (unreachable). s2 and s3 merged.
+        // Expected states: start, 'a'-state, 'b'/'c'-state, final-state. Total 4.
+        assert_eq!(d.states.len(), 4);
+    }
+
+    #[test]
+    fn test_union_simple() {
+        let d1 = dwa_accepts_char('a', Weight::from_item(1));
+        let d2 = dwa_accepts_char('b', Weight::from_item(2));
+
+        let mut expected = DWA::new();
+        let s_a = expected.add_state();
+        let s_b = expected.add_state();
+        expected.add_transition(0, 'a' as i16, s_a, Weight::all()).unwrap();
+        expected.add_transition(0, 'b' as i16, s_b, Weight::all()).unwrap();
+        expected.set_final_weight(s_a, Weight::from_item(1)).unwrap();
+        expected.set_final_weight(s_b, Weight::from_item(2)).unwrap();
+
+        let (u, _) = d1.union(&d2);
+        assert_dwa_equivalent(u, expected);
+    }
+
+    #[test]
+    fn test_union_overlapping() {
+        let d1 = dwa_accepts_char('a', Weight::from_item(1));
+        let mut d2 = dwa_accepts_char('b', Weight::from_item(3));
+        let s_a2 = d2.add_state();
+        d2.add_transition(d2.body.start_state, 'a' as i16, s_a2, Weight::all()).unwrap();
+        d2.set_final_weight(s_a2, Weight::from_item(2)).unwrap();
+
+        let mut expected = DWA::new();
+        let s_a = expected.add_state();
+        let s_b = expected.add_state();
+        expected.add_transition(0, 'a' as i16, s_a, Weight::all()).unwrap();
+        expected.add_transition(0, 'b' as i16, s_b, Weight::all()).unwrap();
+        expected.set_final_weight(s_a, Weight::from_iter(vec![1, 2])).unwrap();
+        expected.set_final_weight(s_b, Weight::from_item(3)).unwrap();
+
+        let (u, _) = d1.union(&d2);
+        assert_dwa_equivalent(u, expected);
+    }
+
+    #[test]
+    fn test_concatenate_simple() {
+        let d1 = dwa_accepts_char('a', Weight::from_item(1)); // Final state is 1
+        let d2 = dwa_accepts_char('b', Weight::from_item(2));
+        let mut join_map = BTreeMap::new();
+        join_map.insert(1, BTreeSet::from([d2.body.start_state]));
+        let (c, _) = d1.concatenate(&d2, &join_map);
+        let expected = dwa_from_str("ab", Weight::from_item(2));
+        assert_dwa_equivalent(c, expected);
+    }
+
+    #[test]
+    fn test_apply_weight() {
+        let mut d = DWA::new();
+        let s1 = d.add_state();
+        d.set_state_weight(0, Weight::from_iter(vec![10, 11])).unwrap();
+        d.set_final_weight(0, Weight::from_iter(vec![5, 6])).unwrap();
+        d.add_transition(0, 'a' as i16, s1, Weight::from_iter(vec![100, 101])).unwrap();
+        d.set_default_transition(0, 0, Weight::from_iter(vec![200, 201])).unwrap();
+
+        let gate = Weight::from_iter(vec![6, 11, 101, 201]);
+        let new_start = d.apply_weight(&gate);
+
+        assert_eq!(d.body.start_state, new_start);
+        let new_start_state = &d.states[new_start];
+        assert_eq!(new_start_state.weight, Weight::from_item(11));
+        assert_eq!(new_start_state.final_weight, Some(Weight::from_item(6)));
+        assert_eq!(new_start_state.trans_weights_exceptions.get(&('a' as i16)), Some(&Weight::from_item(101)));
+        assert_eq!(new_start_state.trans_weight_default, Some(Weight::from_item(201)));
+        assert_eq!(new_start_state.transitions.exceptions.get(&('a' as i16)), Some(&s1));
+        assert_eq!(new_start_state.transitions.default, Some(0));
+    }
 }
