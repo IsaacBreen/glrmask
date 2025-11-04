@@ -89,6 +89,12 @@ impl FromIterator<usize> for SimpleBitset {
     }
 }
 
+impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
+    fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
+        SimpleBitset(RangeSetBlaze::from_iter(iter))
+    }
+}
+
 // Borrowed bit-ops
 impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;

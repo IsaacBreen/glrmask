@@ -1803,6 +1803,57 @@ local_system:
           DWA::normalize_edges_inplace(&mut dwa.states);
           dwa.simplify();
       }
+
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+          use crate::precompute4::weighted_automata::{DWA, Weight};
+
+          #[test]
+          fn test_resolve_negatives_chain() {
+              let mut dwa = DWA::new();
+              // DWA has 10 states 0..=9
+              for _ in 0..9 {
+                  dwa.add_state();
+              }
+
+              // State 0
+              dwa.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+              dwa.add_transition(0, 1, 2, Weight::from_iter([0..=1])).unwrap();
+              dwa.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
+              dwa.add_transition(0, 3, 4, Weight::from_iter([0..=1])).unwrap();
+
+              // State 1
+              dwa.add_transition(1, -1, 5, Weight::all()).unwrap();
+              // State 2
+              dwa.set_default_transition(2, 6, Weight::all()).unwrap();
+              // State 3
+              dwa.add_transition(3, -2, 7, Weight::all()).unwrap();
+              // State 4: no transitions
+              // State 5
+              dwa.add_transition(5, -1, 8, Weight::all()).unwrap();
+              // State 6: no transitions
+              // State 7
+              dwa.add_transition(7, -1, 9, Weight::all()).unwrap();
+              // State 8
+              dwa.set_final_weight(8, Weight::all()).unwrap();
+              // State 9
+              dwa.set_final_weight(9, Weight::all()).unwrap();
+
+              resolve_negative_codes_in_dwa(&mut dwa);
+
+              // After resolution, the negative chains should be broken because intermediate
+              // states are not final. The final states (8, 9) and the states that
+              // led to them (5, 7) should become unreachable and pruned by simplify().
+              // The final DWA should have no final states and no negative transitions.
+              for state in &dwa.states.0 {
+                  assert!(state.final_weight.is_none() || state.final_weight.as_ref().unwrap().is_empty(), "No state should have a final weight after resolution");
+                  for &ch in state.transitions.exceptions.keys() {
+                      assert!(ch >= 0, "No negative transitions should remain");
+                  }
+              }
+          }
+      }
   prev_file_contents:
     src/precompute4/weighted_automata.rs: |
       // src/precompute4/weighted_automata.rs
@@ -1892,6 +1943,12 @@ local_system:
 
       impl FromIterator<usize> for SimpleBitset {
           fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
+              SimpleBitset(RangeSetBlaze::from_iter(iter))
+          }
+      }
+
+      impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
+          fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
               SimpleBitset(RangeSetBlaze::from_iter(iter))
           }
       }
@@ -5500,72 +5557,6 @@ messages:
           dwa.simplify();
       }
 
-      ```
-    metadata:
-      filename: src/precompute4/resolve_negatives.rs
-  - user: |-
-      Add a resolve negatives test for this:
-      ```
-      DWA (start: 0)
-        State 0:
-          weight: []
-          0 -> 1 (trans_weight: [1])
-          1 -> 2 (trans_weight: [0..=1])
-          2 -> 3 (trans_weight: [0])
-          3 -> 4 (trans_weight: [0..=1])
-        State 1:
-          weight: []
-          -1 -> 5 (trans_weight: ALL)
-        State 2:
-          weight: []
-          * -> 6 (trans_weight: ALL)
-        State 3:
-          weight: []
-          -2 -> 7 (trans_weight: ALL)
-        State 4:
-          weight: []
-        State 5:
-          weight: []
-          -1 -> 8 (trans_weight: ALL)
-        State 6:
-          weight: []
-        State 7:
-          weight: []
-          -1 -> 9 (trans_weight: ALL)
-        State 8:
-          weight: []
-          final_weight: ALL
-        State 9:
-          weight: []
-          final_weight: ALL
-      ```
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
-                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      Of course. Here are the step-by-step instructions to add the requested test case, followed by the corresponding git diff.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file** `src/precompute4/resolve_negatives.rs`.
-      2.  **Append the following code** to the end of the file. This adds a new test module with a test case that constructs the specified DWA and verifies the behavior of `resolve_negative_codes_in_dwa`. The test asserts that after processing, no negative transitions remain and no states have final weights, which is the expected outcome given the current implementation.
-
-      ```rust
       #[cfg(test)]
       mod tests {
           use super::*;
@@ -5616,71 +5607,70 @@ messages:
               }
           }
       }
+
       ```
+    metadata:
+      filename: src/precompute4/resolve_negatives.rs
+  - user: Implement `FromIterator<std::ops::RangeInclusive>` for `SimpleBitset`.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to implement `FromIterator<std::ops::RangeInclusive<usize>>` for `SimpleBitset`, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      In the file `src/precompute4/weighted_automata.rs`, I will add an implementation of the `FromIterator` trait for `std::ops::RangeInclusive<usize>`. This allows creating a `SimpleBitset` directly from an iterator of ranges.
+
+      1.  **Open the file `src/precompute4/weighted_automata.rs`**.
+      2.  **Locate the `impl FromIterator<usize> for SimpleBitset` block.** This ends around line 104.
+      3.  **Insert the new code block** immediately after the `impl FromIterator<usize> for SimpleBitset` block:
+
+          ```rust
+          impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
+              fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
+                  SimpleBitset(RangeSetBlaze::from_iter(iter))
+              }
+          }
+          ```
+
+      This new implementation will delegate the construction to the underlying `RangeSetBlaze` type, which already supports being created from an iterator of ranges.
 
       ### Git Diff
 
-      Here is the git patch to apply the changes:
+      Here is the git diff for the change:
 
       ```diff
-      diff --git a/src/precompute4/resolve_negatives.rs b/src/precompute4/resolve_negatives.rs
-      --- a/src/precompute4/resolve_negatives.rs
-      +++ b/src/precompute4/resolve_negatives.rs
-      @@ -342,3 +342,50 @@
-           DWA::normalize_edges_inplace(&mut dwa.states);
-           dwa.simplify();
+      --- a/src/precompute4/weighted_automata.rs
+      +++ b/src/precompute4/weighted_automata.rs
+      @@ -102,6 +102,12 @@
+           }
        }
-      +
-      +#[cfg(test)]
-      +mod tests {
-      +    use super::*;
-      +    use crate::precompute4::weighted_automata::{DWA, Weight};
-      +
-      +    #[test]
-      +    fn test_resolve_negatives_chain() {
-      +        let mut dwa = DWA::new();
-      +        // DWA has 10 states 0..=9
-      +        for _ in 0..9 {
-      +            dwa.add_state();
-      +        }
-      +
-      +        // State 0
-      +        dwa.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-      +        dwa.add_transition(0, 1, 2, Weight::from_iter([0..=1])).unwrap();
-      +        dwa.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
-      +        dwa.add_transition(0, 3, 4, Weight::from_iter([0..=1])).unwrap();
-      +
-      +        // State 1
-      +        dwa.add_transition(1, -1, 5, Weight::all()).unwrap();
-      +        // State 2
-      +        dwa.set_default_transition(2, 6, Weight::all()).unwrap();
-      +        // State 3
-      +        dwa.add_transition(3, -2, 7, Weight::all()).unwrap();
-      +        // State 4: no transitions
-      +        // State 5
-      +        dwa.add_transition(5, -1, 8, Weight::all()).unwrap();
-      +        // State 6: no transitions
-      +        // State 7
-      +        dwa.add_transition(7, -1, 9, Weight::all()).unwrap();
-      +        // State 8
-      +        dwa.set_final_weight(8, Weight::all()).unwrap();
-      +        // State 9
-      +        dwa.set_final_weight(9, Weight::all()).unwrap();
-      +
-      +        resolve_negative_codes_in_dwa(&mut dwa);
-      +
-      +        // After resolution, the negative chains should be broken because intermediate
-      +        // states are not final. The final states (8, 9) and the states that
-      +        // led to them (5, 7) should become unreachable and pruned by simplify().
-      +        // The final DWA should have no final states and no negative transitions.
-      +        for state in &dwa.states.0 {
-      +            assert!(state.final_weight.is_none() || state.final_weight.as_ref().unwrap().is_empty(), "No state should have a final weight after resolution");
-      +            for &ch in state.transitions.exceptions.keys() {
-      +                assert!(ch >= 0, "No negative transitions should remain");
-      +            }
-      +        }
+       
+      +impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
+      +    fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
+      +        SimpleBitset(RangeSetBlaze::from_iter(iter))
       +    }
       +}
+      +
+       // Borrowed bit-ops
+       impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
+           type Output = SimpleBitset;
 
       ```
     metadata:
@@ -5689,11 +5679,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/resolve_negatives.rs
-      Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
+      Identified target file: src/precompute4/weighted_automata.rs
+      Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Add test case for negative code
-      resolution chain"'
+  - user: 'Changes committed with message: "weighted_automata: Implement FromIterator<RangeInclusive<usize>>
+      for SimpleBitset"'
     metadata:
 ...
