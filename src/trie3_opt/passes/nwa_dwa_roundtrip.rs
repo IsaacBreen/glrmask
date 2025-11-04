@@ -4,7 +4,7 @@ use crate::trie3_opt::context::OptimizationContext;
 use crate::precompute4::weighted_automata::DWAState;
 use crate::trie3_opt::core::{EdgeKey, MiniTrie, Node, NodeId, SortedSet};
 use crate::trie3_opt::passes::OptimizationPass;
-use crate::precompute4::weighted_automata::{NWA, SimpleBitset};
+use crate::precompute4::weighted_automata::{DWA, SimpleBitset};
 
 /// A roundtrip pass that:
 /// - Converts the MiniTrie subgraph for each root into a weighted NWA,
@@ -44,7 +44,7 @@ impl NwaDwaRoundtripPass {
         mini: &MiniTrie,
         root: NodeId,
         _ctx: &OptimizationContext,
-    ) -> (NWA, BTreeMap<NodeId, usize>) {
+    ) -> (DWA, BTreeMap<NodeId, usize>) {
         todo!()
         // let mut nwa = NWA::new();
         // // Collect subgraph nodes reachable from this root.
