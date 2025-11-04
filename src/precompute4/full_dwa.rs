@@ -181,7 +181,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 left.apply_weight(&weight);
 
                 // Concatenate: left then current (right)
-                crate::debug!(5, "Concatenating DWAs with join_map:\nLEFT:\n{}\nRIGHT:\n{}", left, current_dwa);
+                crate::debug!(5, "Concatenating DWAs:\nLEFT:\n{}\nRIGHT:\n{}", left, current_dwa);
                 let mut composed = left.concatenate(&current_dwa);
                 crate::debug!(5, "Resulting composed DWA:\n{}", composed);
                 results.push((*dest_idx, composed));
