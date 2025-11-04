@@ -2501,7 +2501,8 @@ local_system:
 
           assert!(
               !a.states.is_empty() && !b.states.is_empty(),
-              "Automata should have at least one state after simplification"
+              "Automata should have at least one state after simplification.\n\nDWA A:\n{}\n\nDWA B:\n{}",
+              a, b
           );
 
           let start_a = a.body.start_state;
@@ -2528,8 +2529,8 @@ local_system:
               // Compare state weights (outputs).
               assert_eq!(
                   sa.weight, sb.weight,
-                  "State weight mismatch at (a:{}, b:{}): a.weight={} vs b.weight={}",
-                  ia, ib, sa.weight, sb.weight
+                  "State weight mismatch at (a:{}, b:{}): a.weight={} vs b.weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                  ia, ib, sa.weight, sb.weight, a, b
               );
 
               // Compare final weights (None considered zeros).
@@ -2537,8 +2538,8 @@ local_system:
               let fb = opt_w_to_w(&sb.final_weight);
               assert_eq!(
                   fa, fb,
-                  "Final weight mismatch at (a:{}, b:{}): a.final_weight={} vs b.final_weight={}",
-                  ia, ib, fa, fb
+                  "Final weight mismatch at (a:{}, b:{}): a.final_weight={} vs b.final_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                  ia, ib, fa, fb, a, b
               );
 
               // Compare default transition weights (None considered zeros).
@@ -2546,8 +2547,8 @@ local_system:
               let dwb = opt_w_to_w(&sb.trans_weight_default);
               assert_eq!(
                   dwa, dwb,
-                  "Default transition weight mismatch at (a:{}, b:{}): a.def_weight={} vs b.def_weight={}",
-                  ia, ib, dwa, dwb
+                  "Default transition weight mismatch at (a:{}, b:{}): a.def_weight={} vs b.def_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                  ia, ib, dwa, dwb, a, b
               );
 
               // Union of exception keys; after simplify(), both representations should be normalized,
@@ -2568,8 +2569,8 @@ local_system:
                   let wb = edge_weight(sb, ch);
                   assert_eq!(
                       wa, wb,
-                      "Per-edge weight mismatch on char {} at (a:{}, b:{}): a.edge_weight={} vs b.edge_weight={}",
-                      ch, ia, ib, wa, wb
+                      "Per-edge weight mismatch on char {} at (a:{}, b:{}): a.edge_weight={} vs b.edge_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                      ch, ia, ib, wa, wb, a, b
                   );
 
                   match (ta, tb) {
@@ -2577,16 +2578,16 @@ local_system:
                           if let Some(&mapped) = map_ab.get(&ta_id) {
                               assert_eq!(
                                   mapped, tb_id,
-                                  "Transition mismatch on char {} from (a:{}, b:{}): a-target {} is already mapped to b-target {}, but encountered b-target {}",
-                                  ch, ia, ib, ta_id, mapped, tb_id
+                                  "Transition mismatch on char {} from (a:{}, b:{}): a-target {} is already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                                  ch, ia, ib, ta_id, mapped, tb_id, a, b
                               );
                           } else {
                               map_ab.insert(ta_id, tb_id);
                               if let Some(prev_a) = map_ba.insert(tb_id, ta_id) {
                                   assert_eq!(
                                       prev_a, ta_id,
-                                      "Non-bijective mapping: b-state {} already mapped to a-state {}, conflicting with a-state {} via char {} from (a:{}, b:{})",
-                                      tb_id, prev_a, ta_id, ch, ia, ib
+                                      "Non-bijective mapping: b-state {} already mapped to a-state {}, conflicting with a-state {} via char {} from (a:{}, b:{})\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                                      tb_id, prev_a, ta_id, ch, ia, ib, a, b
                                   );
                               }
                               q.push_back((ta_id, tb_id));
@@ -2595,8 +2596,8 @@ local_system:
                       (None, None) => { /* Both lack transition for this char; fine. */ }
                       _ => {
                           panic!(
-                              "Presence mismatch for transition on char {} at (a:{}, b:{}): a-target={:?}, b-target={:?}",
-                              ch, ia, ib, ta, tb
+                              "Presence mismatch for transition on char {} at (a:{}, b:{}): a-target={:?}, b-target={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                              ch, ia, ib, ta, tb, a, b
                           );
                       }
                   }
@@ -2608,16 +2609,16 @@ local_system:
                       if let Some(&mapped) = map_ab.get(&ta_id) {
                           assert_eq!(
                               mapped, tb_id,
-                              "Default transition mismatch from (a:{}, b:{}): a-target {} already mapped to b-target {}, but encountered b-target {}",
-                              ia, ib, ta_id, mapped, tb_id
+                              "Default transition mismatch from (a:{}, b:{}): a-target {} already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                              ia, ib, ta_id, mapped, tb_id, a, b
                           );
                       } else {
                           map_ab.insert(ta_id, tb_id);
                           if let Some(prev_a) = map_ba.insert(tb_id, ta_id) {
                               assert_eq!(
                                   prev_a, ta_id,
-                                  "Non-bijective mapping on default: b-state {} already mapped to a-state {}, conflicting with a-state {}",
-                                  tb_id, prev_a, ta_id
+                                  "Non-bijective mapping on default: b-state {} already mapped to a-state {}, conflicting with a-state {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                                  tb_id, prev_a, ta_id, a, b
                               );
                           }
                           q.push_back((ta_id, tb_id));
@@ -2626,8 +2627,8 @@ local_system:
                   (None, None) => { /* No default on either side; fine. */ }
                   _ => {
                       panic!(
-                          "Default transition presence mismatch at (a:{}, b:{}): a.default={:?}, b.default={:?}",
-                          ia, ib, def_a, def_b
+                          "Default transition presence mismatch at (a:{}, b:{}): a.default={:?}, b.default={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                          ia, ib, def_a, def_b, a, b
                       );
                   }
               }
@@ -2653,8 +2654,8 @@ local_system:
           let mapped_b: HashSet<StateID> = map_ab.values().cloned().collect();
           assert_eq!(
               mapped_b, reachable_b,
-              "Reachable-state mismatch in `b`: matched set = {:?}, reachable set = {:?}",
-              mapped_b, reachable_b
+              "Reachable-state mismatch in `b`: matched set = {:?}, reachable set = {:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+              mapped_b, reachable_b, a, b
           );
       }
 
@@ -3083,7 +3084,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - gf
   commit_message_model:
@@ -5224,5 +5225,186 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix DWA equivalence tests by adding final
       weights to ensure states are live after prune_unreachable update"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: If there's a mismatch in assert_dwa_equivalent, display both DWA.
+    metadata:
+  - assistant: |-
+      Of course. When debugging equivalence failures, seeing the state of both automata is invaluable. Here are the instructions to add this detailed output to your test helper.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `src/precompute4/weighted_automata.rs`**.
+      2.  **Locate the `assert_dwa_equivalent` function**. This is your custom assertion helper for comparing two `DWA` instances.
+      3.  **Modify every assertion and panic macro call** within this function (`assert!`, `assert_eq!`, and `panic!`).
+          *   For each macro call, append `\n\nDWA A:\n{}\n\nDWA B:\n{}` to the end of the format string (the first argument).
+          *   Then, add `a, b` as the final arguments to the macro call.
+      4.  This change will ensure that whenever an equivalence check fails, the formatted string representations of both automata (after they have been simplified) will be printed as part of the panic message, giving you a clear view of what was being compared.
+
+      ### Git Diff
+
+      Here is the patch that applies these changes to your `assert_dwa_equivalent` function.
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata.rs b/src/precompute4/weighted_automata.rs
+      --- a/src/precompute4/weighted_automata.rs
+      +++ b/src/precompute4/weighted_automata.rs
+      @@ -1031,8 +1031,9 @@
+       
+           assert!(
+               !a.states.is_empty() && !b.states.is_empty(),
+      -        "Automata should have at least one state after simplification"
+      +        "Automata should have at least one state after simplification.\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +        a, b
+           );
+       
+           let start_a = a.body.start_state;
+      @@ -1058,24 +1059,24 @@
+               // Compare state weights (outputs).
+               assert_eq!(
+                   sa.weight, sb.weight,
+      -            "State weight mismatch at (a:{}, b:{}): a.weight={} vs b.weight={}",
+      -            ia, ib, sa.weight, sb.weight
+      +            "State weight mismatch at (a:{}, b:{}): a.weight={} vs b.weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +            ia, ib, sa.weight, sb.weight, a, b
+               );
+       
+               // Compare final weights (None considered zeros).
+               let fa = opt_w_to_w(&sa.final_weight);
+               let fb = opt_w_to_w(&sb.final_weight);
+               assert_eq!(
+                   fa, fb,
+      -            "Final weight mismatch at (a:{}, b:{}): a.final_weight={} vs b.final_weight={}",
+      -            ia, ib, fa, fb
+      +            "Final weight mismatch at (a:{}, b:{}): a.final_weight={} vs b.final_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +            ia, ib, fa, fb, a, b
+               );
+       
+               // Compare default transition weights (None considered zeros).
+               let dwa = opt_w_to_w(&sa.trans_weight_default);
+               let dwb = opt_w_to_w(&sb.trans_weight_default);
+               assert_eq!(
+                   dwa, dwb,
+      -            "Default transition weight mismatch at (a:{}, b:{}): a.def_weight={} vs b.def_weight={}",
+      -            ia, ib, dwa, dwb
+      +            "Default transition weight mismatch at (a:{}, b:{}): a.def_weight={} vs b.def_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +            ia, ib, dwa, dwb, a, b
+               );
+       
+               // Union of exception keys; after simplify(), both representations should be normalized,
+      @@ -1094,32 +1095,32 @@
+                   let wb = edge_weight(sb, ch);
+                   assert_eq!(
+                       wa, wb,
+      -                "Per-edge weight mismatch on char {} at (a:{}, b:{}): a.edge_weight={} vs b.edge_weight={}",
+      -                ch, ia, ib, wa, wb
+      +                "Per-edge weight mismatch on char {} at (a:{}, b:{}): a.edge_weight={} vs b.edge_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +                ch, ia, ib, wa, wb, a, b
+                   );
+       
+                   match (ta, tb) {
+                       (Some(ta_id), Some(tb_id)) => {
+                           if let Some(&mapped) = map_ab.get(&ta_id) {
+                               assert_eq!(
+                                   mapped, tb_id,
+      -                            "Transition mismatch on char {} from (a:{}, b:{}): a-target {} is already mapped to b-target {}, but encountered b-target {}",
+      -                            ch, ia, ib, ta_id, mapped, tb_id
+      +                            "Transition mismatch on char {} from (a:{}, b:{}): a-target {} is already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +                            ch, ia, ib, ta_id, mapped, tb_id, a, b
+                               );
+                           } else {
+                               map_ab.insert(ta_id, tb_id);
+                               if let Some(prev_a) = map_ba.insert(tb_id, ta_id) {
+                                   assert_eq!(
+                                       prev_a, ta_id,
+      -                                "Non-bijective mapping: b-state {} already mapped to a-state {}, conflicting with a-state {} via char {} from (a:{}, b:{})",
+      -                                tb_id, prev_a, ta_id, ch, ia, ib
+      +                                "Non-bijective mapping: b-state {} already mapped to a-state {}, conflicting with a-state {} via char {} from (a:{}, b:{})\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +                                tb_id, prev_a, ta_id, ch, ia, ib, a, b
+                                   );
+                               }
+                               q.push_back((ta_id, tb_id));
+                           }
+                       }
+                       (None, None) => { /* Both lack transition for this char; fine. */ }
+                       _ => {
+                           panic!(
+      -                        "Presence mismatch for transition on char {} at (a:{}, b:{}): a-target={:?}, b-target={:?}",
+      -                        ch, ia, ib, ta, tb
+      +                        "Presence mismatch for transition on char {} at (a:{}, b:{}): a-target={:?}, b-target={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +                        ch, ia, ib, ta, tb, a, b
+                           );
+                       }
+                   }
+      @@ -1131,28 +1132,28 @@
+                       if let Some(&mapped) = map_ab.get(&ta_id) {
+                           assert_eq!(
+                               mapped, tb_id,
+      -                        "Default transition mismatch from (a:{}, b:{}): a-target {} already mapped to b-target {}, but encountered b-target {}",
+      -                        ia, ib, ta_id, mapped, tb_id
+      +                        "Default transition mismatch from (a:{}, b:{}): a-target {} already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +                        ia, ib, ta_id, mapped, tb_id, a, b
+                           );
+                       } else {
+                           map_ab.insert(ta_id, tb_id);
+                           if let Some(prev_a) = map_ba.insert(tb_id, ta_id) {
+                               assert_eq!(
+                                   prev_a, ta_id,
+      -                            "Non-bijective mapping on default: b-state {} already mapped to a-state {}, conflicting with a-state {}",
+      -                            tb_id, prev_a, ta_id
+      +                            "Non-bijective mapping on default: b-state {} already mapped to a-state {}, conflicting with a-state {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +                            tb_id, prev_a, ta_id, a, b
+                               );
+                           }
+                           q.push_back((ta_id, tb_id));
+                       }
+                   }
+                   (None, None) => { /* No default on either side; fine. */ }
+                   _ => {
+                       panic!(
+      -                    "Default transition presence mismatch at (a:{}, b:{}): a.default={:?}, b.default={:?}",
+      -                    ia, ib, def_a, def_b
+      +                    "Default transition presence mismatch at (a:{}, b:{}): a.default={:?}, b.default={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +                    ia, ib, def_a, def_b, a, b
+                       );
+                   }
+               }
+           }
+      @@ -1176,8 +1177,8 @@
+           let mapped_b: HashSet<StateID> = map_ab.values().cloned().collect();
+           assert_eq!(
+               mapped_b, reachable_b,
+      -        "Reachable-state mismatch in `b`: matched set = {:?}, reachable set = {:?}",
+      -        mapped_b, reachable_b
+      +        "Reachable-state mismatch in `b`: matched set = {:?}, reachable set = {:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +        mapped_b, reachable_b, a, b
+           );
+       }
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata.rs
+      Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
+    metadata:
+  - user: 'Changes committed with message: "Add detailed DWA output to `assert_dwa_equivalent`
+      on failure for easier debugging"'
     metadata:
 ...
