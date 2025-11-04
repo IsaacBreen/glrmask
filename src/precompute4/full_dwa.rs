@@ -144,7 +144,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     // 3. Traverse the reversed trie with KISS composition:
     // - step: concatenate left (template gated by weight) with current (right)
     // - merge: union
-    // - process: simplify
+    // - process: capture
     let initial_dwa = {
         let mut d = DWA::new();
         // Make start final so concatenation with first template works via join_map
@@ -181,7 +181,6 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 // Concatenate: left then current (right)
                 let join_map = join_map_final_to_start(&left, &current_dwa);
                 let (mut composed, _) = left.concatenate(&current_dwa, &join_map);
-                composed.simplify();
                 results.push((*dest_idx, composed));
             }
             results
@@ -189,12 +188,10 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         // merge function: union them
         |dwa1, dwa2| {
             let (mut u, _) = dwa1.union(&dwa2);
-            u.simplify();
             *dwa1 = u;
         },
-        // process function: simplify and capture at original roots
+        // process function: capture at original roots
         |_node_data, node_idx, mut dwa| {
-            dwa.simplify();
             if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
                 final_dwas.insert(*tokenizer_state_id, dwa.clone());
             }
