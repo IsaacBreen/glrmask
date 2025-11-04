@@ -965,21 +965,31 @@ impl Display for DWA {
                     writeln!(f, "    * -> {}", to)?;
                 }
             }
-            for (on, to) in &state.transitions.exceptions {
-                // Represent positive codes as char if ASCII; negatives as numeric
-                let char_repr = if *on >= 0 {
-                    let u = *on as u16;
-                    if let Some(c) = char::from_u32(u as u32) {
-                        if c.is_ascii_graphic() || c == ' ' {
-                            format!("'{}'", c)
-                        } else {
-                            format!("{}", u)
-                        }
+            let format_pos_code = |code: i16| -> String {
+                let u = code as u16;
+                if let Some(c) = char::from_u32(u as u32) {
+                    if c.is_ascii_graphic() || c == ' ' {
+                        format!("'{}'", c)
                     } else {
                         format!("{}", u)
                     }
                 } else {
-                    format!("{}", on)
+                    format!("{}", u)
+                }
+            };
+
+            for (on, to) in &state.transitions.exceptions {
+                // Represent positive codes as char if ASCII; negatives as '-char' or '-num'
+                let char_repr = if *on >= 0 {
+                    format_pos_code(*on)
+                } else {
+                    let k = on.wrapping_neg();
+                    if k < 0 {
+                        // i16::MIN case
+                        format!("{}", on)
+                    } else {
+                        format!("-{}", format_pos_code(k))
+                    }
                 };
                 if let Some(w) = state.trans_weights_exceptions.get(on) {
                     writeln!(f, "    {} -> {} (trans_weight: {})", char_repr, to, w)?;
