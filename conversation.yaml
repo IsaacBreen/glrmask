@@ -277,6 +277,27 @@ local_system:
                       .and_modify(|self_w| *self_w |= other_w)
                       .or_insert_with(|| other_w.clone());
               }
+
+              // Merge transition targets, asserting that we do not introduce non-determinism.
+              if let Some(other_def_tgt) = other.transitions.default {
+                  if let Some(self_def_tgt) = self.transitions.default {
+                      if self_def_tgt != other_def_tgt {
+                          panic!("Cannot merge DWAStates with conflicting default transitions");
+                      }
+                  } else {
+                      self.transitions.default = Some(other_def_tgt);
+                  }
+              }
+
+              for (&ch, &other_tgt) in &other.transitions.exceptions {
+                  if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
+                      if self_tgt != other_tgt {
+                          panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
+                      }
+                  } else {
+                      self.transitions.exceptions.insert(ch, other_tgt);
+                  }
+              }
           }
       }
 
@@ -2093,112 +2114,42 @@ local_system:
               assert_dwa_equivalent(d, expected);
           }
 
-
           #[test]
-          fn test_resolve_negatives_from_tokenizer_0() {
+          fn test_resolve_negatives_cancellation_with_follow_on_state() {
+              // Tests the pattern A --neg(X)--> B --X--> C, where C has further transitions.
+              // The resolution of A should correctly incorporate the structure of C.
               let mut d = DWA::new();
-              let mut s = vec![d.body.start_state];
-              for _ in 0..30 {
-                  s.push(d.add_state());
-              }
+              let s1 = d.add_state(); // State A
+              let s2 = d.add_state(); // State B
+              let s3 = d.add_state(); // State C
+              let s4 = d.add_state(); // Final state
 
-              // State 0
-              d.add_transition(s[0], 1, s[1], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 3, s[2], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 4, s[3], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 6, s[4], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 7, s[5], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 8, s[6], Weight::from_item(2)).unwrap();
-              // State 1
-              d.add_transition(s[1], i16::MIN + 1, s[7], Weight::all()).unwrap();
-              // State 2
-              d.add_transition(s[2], 7, s[8], Weight::all()).unwrap();
-              // State 3
-              d.set_default_transition(s[3], s[2], Weight::all()).unwrap();
-              // State 4
-              d.set_default_transition(s[4], s[9], Weight::all()).unwrap();
-              // State 5
-              d.add_transition(s[5], i16::MIN + 7, s[10], Weight::all()).unwrap();
-              // State 6 is a sink
-              // State 7
-              d.add_transition(s[7], i16::MIN + 4, s[11], Weight::all()).unwrap();
-              // State 8
-              d.add_transition(s[8], i16::MIN + 7, s[12], Weight::all()).unwrap();
-              // State 9 is a sink
-              // State 10
-              d.add_transition(s[10], i16::MIN + 3, s[13], Weight::all()).unwrap();
-              // State 11
-              d.add_transition(s[11], 1, s[14], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 3, s[15], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 4, s[16], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 6, s[17], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 7, s[18], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 8, s[19], Weight::from_item(2)).unwrap();
-              // State 12
-              d.add_transition(s[12], i16::MIN + 1, s[20], Weight::all()).unwrap();
-              // State 13
-              d.add_transition(s[13], 1, s[14], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 3, s[15], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 4, s[16], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 6, s[17], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 7, s[18], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 8, s[19], Weight::from_item(2)).unwrap();
-              // State 14
-              d.add_transition(s[14], i16::MIN + 1, s[21], Weight::all()).unwrap();
-              // State 15
-              d.add_transition(s[15], 7, s[22], Weight::all()).unwrap();
-              // State 16
-              d.set_default_transition(s[16], s[15], Weight::all()).unwrap();
-              // State 17
-              d.set_default_transition(s[17], s[23], Weight::all()).unwrap();
-              // State 18
-              d.add_transition(s[18], i16::MIN + 7, s[24], Weight::all()).unwrap();
-              // State 19 is a sink
-              // State 20
-              d.add_transition(s[20], i16::MIN + 4, s[25], Weight::all()).unwrap();
-              // State 21
-              d.add_transition(s[21], i16::MIN + 2, s[26], Weight::all()).unwrap();
-              // State 22
-              d.add_transition(s[22], i16::MIN + 7, s[27], Weight::all()).unwrap();
-              // State 23 is a sink
-              // State 24
-              d.add_transition(s[24], i16::MIN + 0, s[28], Weight::all()).unwrap();
-              // State 25
-              d.add_transition(s[25], 1, s[14], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 3, s[15], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 4, s[16], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 6, s[17], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 7, s[18], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 8, s[19], Weight::from_item(2)).unwrap();
-              // State 26
-              d.set_final_weight(s[26], Weight::all()).unwrap();
-              // State 27
-              d.add_transition(s[27], i16::MIN + 1, s[29], Weight::all()).unwrap();
-              // State 28
-              d.set_final_weight(s[28], Weight::all()).unwrap();
-              // State 29
-              d.add_transition(s[29], i16::MIN + 2, s[30], Weight::all()).unwrap();
-              // State 30
-              d.set_final_weight(s[30], Weight::all()).unwrap();
+              let code_b = 'b' as i16;
+              let neg_code_b = i16::MIN + code_b;
+              let code_c = 'c' as i16;
+
+              // Path to get to state A: 0 --'a'--> 1
+              d.add_transition(d.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
+
+              // The cancellation pattern: 1 --neg(b)--> 2 --b--> 3
+              d.add_transition(s1, neg_code_b, s2, Weight::all()).unwrap();
+              d.add_transition(s2, code_b, s3, Weight::all()).unwrap();
+
+              // The follow-on transition from C: 3 --'c'--> 4(final)
+              d.add_transition(s3, code_c, s4, Weight::all()).unwrap();
+              d.set_final_weight(s4, Weight::from_item(1)).unwrap();
 
               resolve_negative_codes_in_dwa(&mut d);
 
-              // After resolution and simplification, several paths should resolve to simple
-              // accepting paths. For example, `1 -> neg(1)` paths should make the state before
-              // the `1` transition behave like the state after `neg(1)`.
+              // Expected: after 'a', we should be in a state equivalent to C (s3),
+              // which means a 'c' transition should lead to a final state.
+              // The path should be 'a' -> 'c' -> final.
               let mut expected = DWA::new();
-              let s1 = expected.add_state();
-              let s_final = expected.add_state();
-
-              expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
-
-              // Paths starting with 1, 3, 4, and 7 from the original DWA can reach a final state.
-              // After simplification, they should all lead to the same final state.
-              expected.add_transition(0, 1, s_final, Weight::from_item(2)).unwrap();
-              expected.add_transition(0, 3, s1, Weight::from_item(2)).unwrap();
-              expected.add_transition(0, 4, s1, Weight::from_item(2)).unwrap();
-              expected.add_transition(0, 7, s_final, Weight::from_item(2)).unwrap();
-              expected.add_transition(s1, 7, s_final, Weight::all()).unwrap();
+              let s1_exp = expected.add_state();
+              let s2_exp = expected.add_state();
+              expected.add_transition(expected.body.start_state, 'a' as i16, s1_exp, Weight::all()).unwrap();
+              expected.add_transition(s1_exp, code_c, s2_exp, Weight::all()).unwrap();
+              expected.set_final_weight(s2_exp, Weight::from_item(1)).unwrap();
 
               assert_dwa_equivalent(d, expected);
           }
@@ -4354,110 +4305,103 @@ local_system:
           }
 
           #[test]
-          fn test_resolve_negatives_from_tokenizer_0() {
+          fn test_resolve_negatives_from_tokenizer_state_0() {
               let mut d = DWA::new();
-              let mut s = vec![d.body.start_state];
-              for _ in 0..30 {
-                  s.push(d.add_state());
+              while d.states.len() < 31 {
+                  d.add_state();
               }
 
               // State 0
-              d.add_transition(s[0], 1, s[1], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 3, s[2], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 4, s[3], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 6, s[4], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 7, s[5], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 8, s[6], Weight::from_item(2)).unwrap();
+              d.add_transition(0, 1, 1, Weight::from_item(2)).unwrap();
+              d.add_transition(0, 3, 2, Weight::from_item(2)).unwrap();
+              d.add_transition(0, 4, 3, Weight::from_item(2)).unwrap();
+              d.add_transition(0, 6, 4, Weight::from_item(2)).unwrap();
+              d.add_transition(0, 7, 5, Weight::from_item(2)).unwrap();
+              d.add_transition(0, 8, 6, Weight::from_item(2)).unwrap();
               // State 1
-              d.add_transition(s[1], i16::MIN + 1, s[7], Weight::all()).unwrap();
+              d.add_transition(1, i16::MIN + 1, 7, Weight::all()).unwrap();
               // State 2
-              d.add_transition(s[2], 7, s[8], Weight::all()).unwrap();
+              d.add_transition(2, 7, 8, Weight::all()).unwrap();
               // State 3
-              d.set_default_transition(s[3], s[2], Weight::all()).unwrap();
+              d.set_default_transition(3, 2, Weight::all()).unwrap();
               // State 4
-              d.set_default_transition(s[4], s[9], Weight::all()).unwrap();
+              d.set_default_transition(4, 9, Weight::all()).unwrap();
               // State 5
-              d.add_transition(s[5], i16::MIN + 7, s[10], Weight::all()).unwrap();
+              d.add_transition(5, i16::MIN + 7, 10, Weight::all()).unwrap();
               // State 6 is a sink
               // State 7
-              d.add_transition(s[7], i16::MIN + 4, s[11], Weight::all()).unwrap();
+              d.add_transition(7, i16::MIN + 4, 11, Weight::all()).unwrap();
               // State 8
-              d.add_transition(s[8], i16::MIN + 7, s[12], Weight::all()).unwrap();
+              d.add_transition(8, i16::MIN + 7, 12, Weight::all()).unwrap();
               // State 9 is a sink
               // State 10
-              d.add_transition(s[10], i16::MIN + 3, s[13], Weight::all()).unwrap();
+              d.add_transition(10, i16::MIN + 3, 13, Weight::all()).unwrap();
               // State 11
-              d.add_transition(s[11], 1, s[14], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 3, s[15], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 4, s[16], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 6, s[17], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 7, s[18], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 8, s[19], Weight::from_item(2)).unwrap();
+              d.add_transition(11, 1, 14, Weight::from_item(2)).unwrap();
+              d.add_transition(11, 3, 15, Weight::from_item(2)).unwrap();
+              d.add_transition(11, 4, 16, Weight::from_item(2)).unwrap();
+              d.add_transition(11, 6, 17, Weight::from_item(2)).unwrap();
+              d.add_transition(11, 7, 18, Weight::from_item(2)).unwrap();
+              d.add_transition(11, 8, 19, Weight::from_item(2)).unwrap();
               // State 12
-              d.add_transition(s[12], i16::MIN + 1, s[20], Weight::all()).unwrap();
+              d.add_transition(12, i16::MIN + 1, 20, Weight::all()).unwrap();
               // State 13
-              d.add_transition(s[13], 1, s[14], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 3, s[15], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 4, s[16], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 6, s[17], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 7, s[18], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 8, s[19], Weight::from_item(2)).unwrap();
+              d.add_transition(13, 1, 14, Weight::from_item(2)).unwrap();
+              d.add_transition(13, 3, 15, Weight::from_item(2)).unwrap();
+              d.add_transition(13, 4, 16, Weight::from_item(2)).unwrap();
+              d.add_transition(13, 6, 17, Weight::from_item(2)).unwrap();
+              d.add_transition(13, 7, 18, Weight::from_item(2)).unwrap();
+              d.add_transition(13, 8, 19, Weight::from_item(2)).unwrap();
               // State 14
-              d.add_transition(s[14], i16::MIN + 1, s[21], Weight::all()).unwrap();
+              d.add_transition(14, i16::MIN + 1, 21, Weight::all()).unwrap();
               // State 15
-              d.add_transition(s[15], 7, s[22], Weight::all()).unwrap();
+              d.add_transition(15, 7, 22, Weight::all()).unwrap();
               // State 16
-              d.set_default_transition(s[16], s[15], Weight::all()).unwrap();
+              d.set_default_transition(16, 15, Weight::all()).unwrap();
               // State 17
-              d.set_default_transition(s[17], s[23], Weight::all()).unwrap();
+              d.set_default_transition(17, 23, Weight::all()).unwrap();
               // State 18
-              d.add_transition(s[18], i16::MIN + 7, s[24], Weight::all()).unwrap();
+              d.add_transition(18, i16::MIN + 7, 24, Weight::all()).unwrap();
               // State 19 is a sink
               // State 20
-              d.add_transition(s[20], i16::MIN + 4, s[25], Weight::all()).unwrap();
+              d.add_transition(20, i16::MIN + 4, 25, Weight::all()).unwrap();
               // State 21
-              d.add_transition(s[21], i16::MIN + 2, s[26], Weight::all()).unwrap();
+              d.add_transition(21, i16::MIN + 2, 26, Weight::all()).unwrap();
               // State 22
-              d.add_transition(s[22], i16::MIN + 7, s[27], Weight::all()).unwrap();
+              d.add_transition(22, i16::MIN + 7, 27, Weight::all()).unwrap();
               // State 23 is a sink
               // State 24
-              d.add_transition(s[24], i16::MIN + 0, s[28], Weight::all()).unwrap();
+              d.add_transition(24, i16::MIN + 0, 28, Weight::all()).unwrap();
               // State 25
-              d.add_transition(s[25], 1, s[14], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 3, s[15], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 4, s[16], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 6, s[17], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 7, s[18], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 8, s[19], Weight::from_item(2)).unwrap();
+              d.add_transition(25, 1, 14, Weight::from_item(2)).unwrap();
+              d.add_transition(25, 3, 15, Weight::from_item(2)).unwrap();
+              d.add_transition(25, 4, 16, Weight::from_item(2)).unwrap();
+              d.add_transition(25, 6, 17, Weight::from_item(2)).unwrap();
+              d.add_transition(25, 7, 18, Weight::from_item(2)).unwrap();
+              d.add_transition(25, 8, 19, Weight::from_item(2)).unwrap();
               // State 26
-              d.set_final_weight(s[26], Weight::all()).unwrap();
+              d.set_final_weight(26, Weight::all()).unwrap();
               // State 27
-              d.add_transition(s[27], i16::MIN + 1, s[29], Weight::all()).unwrap();
+              d.add_transition(27, i16::MIN + 1, 29, Weight::all()).unwrap();
               // State 28
-              d.set_final_weight(s[28], Weight::all()).unwrap();
+              d.set_final_weight(28, Weight::all()).unwrap();
               // State 29
-              d.add_transition(s[29], i16::MIN + 2, s[30], Weight::all()).unwrap();
+              d.add_transition(29, i16::MIN + 2, 30, Weight::all()).unwrap();
               // State 30
-              d.set_final_weight(s[30], Weight::all()).unwrap();
+              d.set_final_weight(30, Weight::all()).unwrap();
 
               resolve_negative_codes_in_dwa(&mut d);
 
-              // After resolution and simplification, several paths should resolve to simple
-              // accepting paths. For example, `1 -> neg(1)` paths should make the state before
-              // the `1` transition behave like the state after `neg(1)`.
+              // After resolution, paths from start that could eventually reach a final state
+              // are simplified. The initial edge weights are preserved and intersected with
+              // the final weights along the path.
               let mut expected = DWA::new();
-              let s1 = expected.add_state();
               let s_final = expected.add_state();
-
               expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
-
-              // Paths starting with 1, 3, 4, and 7 from the original DWA can reach a final state.
-              // After simplification, they should all lead to the same final state.
               expected.add_transition(0, 1, s_final, Weight::from_item(2)).unwrap();
-              expected.add_transition(0, 3, s1, Weight::from_item(2)).unwrap();
-              expected.add_transition(0, 4, s1, Weight::from_item(2)).unwrap();
+              expected.add_transition(0, 3, s_final, Weight::from_item(2)).unwrap();
+              expected.add_transition(0, 4, s_final, Weight::from_item(2)).unwrap();
               expected.add_transition(0, 7, s_final, Weight::from_item(2)).unwrap();
-              expected.add_transition(s1, 7, s_final, Weight::all()).unwrap();
 
               assert_dwa_equivalent(d, expected);
           }
@@ -4776,6 +4720,27 @@ messages:
                   self.trans_weights_exceptions.entry(*ch)
                       .and_modify(|self_w| *self_w |= other_w)
                       .or_insert_with(|| other_w.clone());
+              }
+
+              // Merge transition targets, asserting that we do not introduce non-determinism.
+              if let Some(other_def_tgt) = other.transitions.default {
+                  if let Some(self_def_tgt) = self.transitions.default {
+                      if self_def_tgt != other_def_tgt {
+                          panic!("Cannot merge DWAStates with conflicting default transitions");
+                      }
+                  } else {
+                      self.transitions.default = Some(other_def_tgt);
+                  }
+              }
+
+              for (&ch, &other_tgt) in &other.transitions.exceptions {
+                  if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
+                      if self_tgt != other_tgt {
+                          panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
+                      }
+                  } else {
+                      self.transitions.exceptions.insert(ch, other_tgt);
+                  }
               }
           }
       }
@@ -6598,216 +6563,6 @@ messages:
               assert_dwa_equivalent(d, expected);
           }
 
-
-          #[test]
-          fn test_resolve_negatives_from_tokenizer_0() {
-              let mut d = DWA::new();
-              let mut s = vec![d.body.start_state];
-              for _ in 0..30 {
-                  s.push(d.add_state());
-              }
-
-              // State 0
-              d.add_transition(s[0], 1, s[1], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 3, s[2], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 4, s[3], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 6, s[4], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 7, s[5], Weight::from_item(2)).unwrap();
-              d.add_transition(s[0], 8, s[6], Weight::from_item(2)).unwrap();
-              // State 1
-              d.add_transition(s[1], i16::MIN + 1, s[7], Weight::all()).unwrap();
-              // State 2
-              d.add_transition(s[2], 7, s[8], Weight::all()).unwrap();
-              // State 3
-              d.set_default_transition(s[3], s[2], Weight::all()).unwrap();
-              // State 4
-              d.set_default_transition(s[4], s[9], Weight::all()).unwrap();
-              // State 5
-              d.add_transition(s[5], i16::MIN + 7, s[10], Weight::all()).unwrap();
-              // State 6 is a sink
-              // State 7
-              d.add_transition(s[7], i16::MIN + 4, s[11], Weight::all()).unwrap();
-              // State 8
-              d.add_transition(s[8], i16::MIN + 7, s[12], Weight::all()).unwrap();
-              // State 9 is a sink
-              // State 10
-              d.add_transition(s[10], i16::MIN + 3, s[13], Weight::all()).unwrap();
-              // State 11
-              d.add_transition(s[11], 1, s[14], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 3, s[15], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 4, s[16], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 6, s[17], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 7, s[18], Weight::from_item(2)).unwrap();
-              d.add_transition(s[11], 8, s[19], Weight::from_item(2)).unwrap();
-              // State 12
-              d.add_transition(s[12], i16::MIN + 1, s[20], Weight::all()).unwrap();
-              // State 13
-              d.add_transition(s[13], 1, s[14], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 3, s[15], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 4, s[16], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 6, s[17], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 7, s[18], Weight::from_item(2)).unwrap();
-              d.add_transition(s[13], 8, s[19], Weight::from_item(2)).unwrap();
-              // State 14
-              d.add_transition(s[14], i16::MIN + 1, s[21], Weight::all()).unwrap();
-              // State 15
-              d.add_transition(s[15], 7, s[22], Weight::all()).unwrap();
-              // State 16
-              d.set_default_transition(s[16], s[15], Weight::all()).unwrap();
-              // State 17
-              d.set_default_transition(s[17], s[23], Weight::all()).unwrap();
-              // State 18
-              d.add_transition(s[18], i16::MIN + 7, s[24], Weight::all()).unwrap();
-              // State 19 is a sink
-              // State 20
-              d.add_transition(s[20], i16::MIN + 4, s[25], Weight::all()).unwrap();
-              // State 21
-              d.add_transition(s[21], i16::MIN + 2, s[26], Weight::all()).unwrap();
-              // State 22
-              d.add_transition(s[22], i16::MIN + 7, s[27], Weight::all()).unwrap();
-              // State 23 is a sink
-              // State 24
-              d.add_transition(s[24], i16::MIN + 0, s[28], Weight::all()).unwrap();
-              // State 25
-              d.add_transition(s[25], 1, s[14], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 3, s[15], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 4, s[16], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 6, s[17], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 7, s[18], Weight::from_item(2)).unwrap();
-              d.add_transition(s[25], 8, s[19], Weight::from_item(2)).unwrap();
-              // State 26
-              d.set_final_weight(s[26], Weight::all()).unwrap();
-              // State 27
-              d.add_transition(s[27], i16::MIN + 1, s[29], Weight::all()).unwrap();
-              // State 28
-              d.set_final_weight(s[28], Weight::all()).unwrap();
-              // State 29
-              d.add_transition(s[29], i16::MIN + 2, s[30], Weight::all()).unwrap();
-              // State 30
-              d.set_final_weight(s[30], Weight::all()).unwrap();
-
-              resolve_negative_codes_in_dwa(&mut d);
-
-              // After resolution and simplification, several paths should resolve to simple
-              // accepting paths. For example, `1 -> neg(1)` paths should make the state before
-              // the `1` transition behave like the state after `neg(1)`.
-              let mut expected = DWA::new();
-              let s1 = expected.add_state();
-              let s_final = expected.add_state();
-
-              expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
-
-              // Paths starting with 1, 3, 4, and 7 from the original DWA can reach a final state.
-              // After simplification, they should all lead to the same final state.
-              expected.add_transition(0, 1, s_final, Weight::from_item(2)).unwrap();
-              expected.add_transition(0, 3, s1, Weight::from_item(2)).unwrap();
-              expected.add_transition(0, 4, s1, Weight::from_item(2)).unwrap();
-              expected.add_transition(0, 7, s_final, Weight::from_item(2)).unwrap();
-              expected.add_transition(s1, 7, s_final, Weight::all()).unwrap();
-
-              assert_dwa_equivalent(d, expected);
-          }
-      }
-
-      ```
-    metadata:
-      filename: src/precompute4/resolve_negatives.rs
-  - user: |+
-      [DEBUG] 3] src/precompute4/weighted_automata.rs:422: DWA::simplify_components (31 states -> 1 states) took: 1.366541ms
-      [DEBUG] 3] src/precompute4/weighted_automata.rs:422: DWA::simplify_components (1 states -> 1 states) took: 7.667µs
-      [DEBUG] 3] src/precompute4/weighted_automata.rs:422: DWA::simplify_components (3 states -> 3 states) took: 587.583µs
-
-
-      thread 'precompute4::resolve_negatives::tests::test_resolve_negatives_from_tokenizer_0' (1663047) panicked at src/precompute4/weighted_automata.rs:1248:13:
-      assertion `left == right` failed: Per-edge weight mismatch on char 1 at (a:0, b:0): a.edge_weight=[] vs b.edge_weight=[2]
-
-      DWA A:
-      DWA (start: 0)
-        State 0:
-          weight: []
-
-
-      DWA B:
-      DWA (start: 0)
-        State 0:
-          weight: []
-          1 -> 2 (trans_weight: [2])
-          3 -> 1 (trans_weight: [2])
-          4 -> 1 (trans_weight: [2])
-          7 -> 2 (trans_weight: [2])
-        State 1:
-          weight: []
-          7 -> 2 (trans_weight: ALL)
-        State 2:
-          weight: []
-          final_weight: [2]
-
-        left: 
-       right: 2..=2
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::weighted_automata::assert_dwa_equivalent
-                   at ./src/precompute4/weighted_automata.rs:1248:13
-         5: sep1::precompute4::resolve_negatives::tests::test_resolve_negatives_from_tokenizer_0
-                   at ./src/precompute4/resolve_negatives.rs:413:9
-         6: sep1::precompute4::resolve_negatives::tests::test_resolve_negatives_from_tokenizer_0::{{closure}}
-                   at ./src/precompute4/resolve_negatives.rs:308:49
-         7: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         8: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-    metadata:
-  - user: Why does this fail? It's the only one that does.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
-                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      Of course. Here is an analysis of the root cause of the test failure, a minimal test case that reproduces the issue, and the necessary code changes to fix it.
-
-      ### Root Cause Analysis
-
-      The test `test_resolve_negatives_from_tokenizer_0` fails because of a bug in how `neg(X), X` code sequences (cancellations) are handled during negative code resolution.
-
-      1.  The function `resolve_negative_codes_in_dwa_internal` identifies patterns where a state `A` has a negative transition `A --neg(X)--> B`, and state `B` has a corresponding positive transition `B --X--> C`. This is treated as a cancellation, where state `A` should now behave like state `C`.
-      2.  To implement this, `A`'s resolved state representation calls `merge_union` to incorporate the properties of `C`.
-      3.  The bug lies in the `DWAState::merge_union` function in `weighted_automata.rs`. It correctly unions all weights (state weight, final weight, and transition weights), but it **fails to merge the transition structure itself**. It does not copy the transition targets from the `other` state.
-      4.  In the failing test, a cancellation occurs where the target state `C` has subsequent transitions that are essential for reaching a final state. Because `merge_union` doesn't copy these transitions, the path is broken.
-      5.  The `simplify()` function, which runs after resolution, sees these broken paths as unable to reach a final state and prunes them entirely. In the failing test, this removes all accepting paths, resulting in an empty automaton that doesn't match the expected behavior.
-
-      The minimal test case below isolates this exact scenario: a `neg(X), X` cancellation where the target state has a necessary follow-on transition that is not being correctly merged.
-
-      ### Step-by-Step Instructions
-
-      #### 1. Add a Minimal Reproducible Test Case
-
-      To confirm the bug and verify the fix, add the following test case to `src/precompute4/resolve_negatives.rs` inside the `tests` module. It will fail with the current code but pass after the fix is applied.
-
-      **File:** `src/precompute4/resolve_negatives.rs`
-
-      ```rust
           #[test]
           fn test_resolve_negatives_cancellation_with_follow_on_state() {
               // Tests the pattern A --neg(X)--> B --X--> C, where C has further transitions.
@@ -6847,171 +6602,387 @@ messages:
 
               assert_dwa_equivalent(d, expected);
           }
+      }
+
       ```
+    metadata:
+      filename: src/precompute4/resolve_negatives.rs
+  - user: |-
+      Tokenizer State ID: 0
+      DWA (start: 0)
+        State 0:
+          weight: []
+          1 -> 1 (trans_weight: [2])
+          3 -> 2 (trans_weight: [2])
+          4 -> 3 (trans_weight: [2])
+          6 -> 4 (trans_weight: [2])
+          7 -> 5 (trans_weight: [2])
+          8 -> 6 (trans_weight: [2])
+        State 1:
+          weight: []
+          neg(1) -> 7 (trans_weight: ALL)
+        State 2:
+          weight: []
+          7 -> 8 (trans_weight: ALL)
+        State 3:
+          weight: []
+          * -> 2 (trans_weight: ALL)
+        State 4:
+          weight: []
+          * -> 9 (trans_weight: ALL)
+        State 5:
+          weight: []
+          neg(7) -> 10 (trans_weight: ALL)
+        State 6:
+          weight: []
+        State 7:
+          weight: []
+          neg(4) -> 11 (trans_weight: ALL)
+        State 8:
+          weight: []
+          neg(7) -> 12 (trans_weight: ALL)
+        State 9:
+          weight: []
+        State 10:
+          weight: []
+          neg(3) -> 13 (trans_weight: ALL)
+        State 11:
+          weight: []
+          1 -> 14 (trans_weight: [2])
+          3 -> 15 (trans_weight: [2])
+          4 -> 16 (trans_weight: [2])
+          6 -> 17 (trans_weight: [2])
+          7 -> 18 (trans_weight: [2])
+          8 -> 19 (trans_weight: [2])
+        State 12:
+          weight: []
+          neg(1) -> 20 (trans_weight: ALL)
+        State 13:
+          weight: []
+          1 -> 14 (trans_weight: [2])
+          3 -> 15 (trans_weight: [2])
+          4 -> 16 (trans_weight: [2])
+          6 -> 17 (trans_weight: [2])
+          7 -> 18 (trans_weight: [2])
+          8 -> 19 (trans_weight: [2])
+        State 14:
+          weight: []
+          neg(1) -> 21 (trans_weight: ALL)
+        State 15:
+          weight: []
+          7 -> 22 (trans_weight: ALL)
+        State 16:
+          weight: []
+          * -> 15 (trans_weight: ALL)
+        State 17:
+          weight: []
+          * -> 23 (trans_weight: ALL)
+        State 18:
+          weight: []
+          neg(7) -> 24 (trans_weight: ALL)
+        State 19:
+          weight: []
+        State 20:
+          weight: []
+          neg(4) -> 25 (trans_weight: ALL)
+        State 21:
+          weight: []
+          neg(2) -> 26 (trans_weight: ALL)
+        State 22:
+          weight: []
+          neg(7) -> 27 (trans_weight: ALL)
+        State 23:
+          weight: []
+        State 24:
+          weight: []
+          neg(0) -> 28 (trans_weight: ALL)
+        State 25:
+          weight: []
+          1 -> 14 (trans_weight: [2])
+          3 -> 15 (trans_weight: [2])
+          4 -> 16 (trans_weight: [2])
+          6 -> 17 (trans_weight: [2])
+          7 -> 18 (trans_weight: [2])
+          8 -> 19 (trans_weight: [2])
+        State 26:
+          weight: []
+          final_weight: ALL
+        State 27:
+          weight: []
+          neg(1) -> 29 (trans_weight: ALL)
+        State 28:
+          weight: []
+          final_weight: ALL
+        State 29:
+          weight: []
+          neg(2) -> 30 (trans_weight: ALL)
+        State 30:
+          weight: []
+          final_weight: ALL
+    metadata:
+  - user: Add a test to resolve_negatives with this exact DWA.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to add the requested test case, followed by the corresponding git diff.
 
-      #### 2. Fix the `merge_union` Function
+      ### Step-by-step Instructions
 
-      Modify the `DWAState::merge_union` function in `src/precompute4/weighted_automata.rs` to correctly merge the transition targets, asserting that no non-determinism is introduced.
+      1.  **Open the file `src/precompute4/resolve_negatives.rs`**.
 
-      **File:** `src/precompute4/weighted_automata.rs`
+      2.  **Navigate to the end of the `tests` module**, which is at the end of the file.
 
-      ```rust
-      // In `impl DWAState`, inside the `merge_union` function:
-          pub fn merge_union(&mut self, other: &DWAState) {
-              self.weight |= &other.weight;
+      3.  **Add a new test function** named `test_resolve_negatives_from_tokenizer_state_0` after the last test (`test_resolve_negatives_cancellation_with_follow_on_state`). This test will construct the complex DWA you provided, run the negative code resolution, and assert that it simplifies to an expected automaton.
 
-              if let Some(other_fw) = &other.final_weight {
-                  if let Some(self_fw) = &mut self.final_weight {
-                      *self_fw |= other_fw;
-                  } else {
-                      self.final_weight = Some(other_fw.clone());
-                  }
+      4.  **Insert the following code** for the new test:
+
+          ```rust
+          #[test]
+          fn test_resolve_negatives_from_tokenizer_state_0() {
+              let mut d = DWA::new();
+              while d.states.len() < 31 {
+                  d.add_state();
               }
 
-              if let Some(other_twd) = &other.trans_weight_default {
-                  if let Some(self_twd) = &mut self.trans_weight_default {
-                      *self_twd |= other_twd;
-                  } else {
-                      self.trans_weight_default = Some(other_twd.clone());
-                  }
-              }
+              // State 0
+              d.add_transition(0, 1, 1, Weight::from_item(2)).unwrap();
+              d.add_transition(0, 3, 2, Weight::from_item(2)).unwrap();
+              d.add_transition(0, 4, 3, Weight::from_item(2)).unwrap();
+              d.add_transition(0, 6, 4, Weight::from_item(2)).unwrap();
+              d.add_transition(0, 7, 5, Weight::from_item(2)).unwrap();
+              d.add_transition(0, 8, 6, Weight::from_item(2)).unwrap();
+              // State 1
+              d.add_transition(1, i16::MIN + 1, 7, Weight::all()).unwrap();
+              // State 2
+              d.add_transition(2, 7, 8, Weight::all()).unwrap();
+              // State 3
+              d.set_default_transition(3, 2, Weight::all()).unwrap();
+              // State 4
+              d.set_default_transition(4, 9, Weight::all()).unwrap();
+              // State 5
+              d.add_transition(5, i16::MIN + 7, 10, Weight::all()).unwrap();
+              // State 6 is a sink
+              // State 7
+              d.add_transition(7, i16::MIN + 4, 11, Weight::all()).unwrap();
+              // State 8
+              d.add_transition(8, i16::MIN + 7, 12, Weight::all()).unwrap();
+              // State 9 is a sink
+              // State 10
+              d.add_transition(10, i16::MIN + 3, 13, Weight::all()).unwrap();
+              // State 11
+              d.add_transition(11, 1, 14, Weight::from_item(2)).unwrap();
+              d.add_transition(11, 3, 15, Weight::from_item(2)).unwrap();
+              d.add_transition(11, 4, 16, Weight::from_item(2)).unwrap();
+              d.add_transition(11, 6, 17, Weight::from_item(2)).unwrap();
+              d.add_transition(11, 7, 18, Weight::from_item(2)).unwrap();
+              d.add_transition(11, 8, 19, Weight::from_item(2)).unwrap();
+              // State 12
+              d.add_transition(12, i16::MIN + 1, 20, Weight::all()).unwrap();
+              // State 13
+              d.add_transition(13, 1, 14, Weight::from_item(2)).unwrap();
+              d.add_transition(13, 3, 15, Weight::from_item(2)).unwrap();
+              d.add_transition(13, 4, 16, Weight::from_item(2)).unwrap();
+              d.add_transition(13, 6, 17, Weight::from_item(2)).unwrap();
+              d.add_transition(13, 7, 18, Weight::from_item(2)).unwrap();
+              d.add_transition(13, 8, 19, Weight::from_item(2)).unwrap();
+              // State 14
+              d.add_transition(14, i16::MIN + 1, 21, Weight::all()).unwrap();
+              // State 15
+              d.add_transition(15, 7, 22, Weight::all()).unwrap();
+              // State 16
+              d.set_default_transition(16, 15, Weight::all()).unwrap();
+              // State 17
+              d.set_default_transition(17, 23, Weight::all()).unwrap();
+              // State 18
+              d.add_transition(18, i16::MIN + 7, 24, Weight::all()).unwrap();
+              // State 19 is a sink
+              // State 20
+              d.add_transition(20, i16::MIN + 4, 25, Weight::all()).unwrap();
+              // State 21
+              d.add_transition(21, i16::MIN + 2, 26, Weight::all()).unwrap();
+              // State 22
+              d.add_transition(22, i16::MIN + 7, 27, Weight::all()).unwrap();
+              // State 23 is a sink
+              // State 24
+              d.add_transition(24, i16::MIN + 0, 28, Weight::all()).unwrap();
+              // State 25
+              d.add_transition(25, 1, 14, Weight::from_item(2)).unwrap();
+              d.add_transition(25, 3, 15, Weight::from_item(2)).unwrap();
+              d.add_transition(25, 4, 16, Weight::from_item(2)).unwrap();
+              d.add_transition(25, 6, 17, Weight::from_item(2)).unwrap();
+              d.add_transition(25, 7, 18, Weight::from_item(2)).unwrap();
+              d.add_transition(25, 8, 19, Weight::from_item(2)).unwrap();
+              // State 26
+              d.set_final_weight(26, Weight::all()).unwrap();
+              // State 27
+              d.add_transition(27, i16::MIN + 1, 29, Weight::all()).unwrap();
+              // State 28
+              d.set_final_weight(28, Weight::all()).unwrap();
+              // State 29
+              d.add_transition(29, i16::MIN + 2, 30, Weight::all()).unwrap();
+              // State 30
+              d.set_final_weight(30, Weight::all()).unwrap();
 
-              for (ch, other_w) in &other.trans_weights_exceptions {
-                  self.trans_weights_exceptions.entry(*ch)
-                      .and_modify(|self_w| *self_w |= other_w)
-                      .or_insert_with(|| other_w.clone());
-              }
+              resolve_negative_codes_in_dwa(&mut d);
 
-              // --- START OF CHANGES ---
-              // Merge transition targets, asserting that we do not introduce non-determinism.
-              if let Some(other_def_tgt) = other.transitions.default {
-                  if let Some(self_def_tgt) = self.transitions.default {
-                      if self_def_tgt != other_def_tgt {
-                          panic!("Cannot merge DWAStates with conflicting default transitions");
-                      }
-                  } else {
-                      self.transitions.default = Some(other_def_tgt);
-                  }
-              }
+              // After resolution, paths from start that could eventually reach a final state
+              // are simplified. The initial edge weights are preserved and intersected with
+              // the final weights along the path.
+              let mut expected = DWA::new();
+              let s_final = expected.add_state();
+              expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
+              expected.add_transition(0, 1, s_final, Weight::from_item(2)).unwrap();
+              expected.add_transition(0, 3, s_final, Weight::from_item(2)).unwrap();
+              expected.add_transition(0, 4, s_final, Weight::from_item(2)).unwrap();
+              expected.add_transition(0, 7, s_final, Weight::from_item(2)).unwrap();
 
-              for (&ch, &other_tgt) in &other.transitions.exceptions {
-                  if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
-                      if self_tgt != other_tgt {
-                          panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
-                      }
-                  } else {
-                      self.transitions.exceptions.insert(ch, other_tgt);
-                  }
-              }
-              // --- END OF CHANGES ---
+              assert_dwa_equivalent(d, expected);
           }
-      ```
+          ```
 
-      ### Git Diffs
+      ### Git Diff
 
-      Here are the changes in `git diff` format.
+      Here is the git diff for the changes.
 
       ```diff
       --- a/src/precompute4/resolve_negatives.rs
       +++ b/src/precompute4/resolve_negatives.rs
-      @@ -241,6 +241,43 @@
+      @@ -248,4 +248,111 @@
+       
                assert_dwa_equivalent(d, expected);
            }
-       
+      +
       +    #[test]
-      +    fn test_resolve_negatives_cancellation_with_follow_on_state() {
-      +        // Tests the pattern A --neg(X)--> B --X--> C, where C has further transitions.
-      +        // The resolution of A should correctly incorporate the structure of C.
+      +    fn test_resolve_negatives_from_tokenizer_state_0() {
       +        let mut d = DWA::new();
-      +        let s1 = d.add_state(); // State A
-      +        let s2 = d.add_state(); // State B
-      +        let s3 = d.add_state(); // State C
-      +        let s4 = d.add_state(); // Final state
+      +        while d.states.len() < 31 {
+      +            d.add_state();
+      +        }
       +
-      +        let code_b = 'b' as i16;
-      +        let neg_code_b = i16::MIN + code_b;
-      +        let code_c = 'c' as i16;
-      +
-      +        // Path to get to state A: 0 --'a'--> 1
-      +        d.add_transition(d.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
-      +
-      +        // The cancellation pattern: 1 --neg(b)--> 2 --b--> 3
-      +        d.add_transition(s1, neg_code_b, s2, Weight::all()).unwrap();
-      +        d.add_transition(s2, code_b, s3, Weight::all()).unwrap();
-      +
-      +        // The follow-on transition from C: 3 --'c'--> 4(final)
-      +        d.add_transition(s3, code_c, s4, Weight::all()).unwrap();
-      +        d.set_final_weight(s4, Weight::from_item(1)).unwrap();
+      +        // State 0
+      +        d.add_transition(0, 1, 1, Weight::from_item(2)).unwrap();
+      +        d.add_transition(0, 3, 2, Weight::from_item(2)).unwrap();
+      +        d.add_transition(0, 4, 3, Weight::from_item(2)).unwrap();
+      +        d.add_transition(0, 6, 4, Weight::from_item(2)).unwrap();
+      +        d.add_transition(0, 7, 5, Weight::from_item(2)).unwrap();
+      +        d.add_transition(0, 8, 6, Weight::from_item(2)).unwrap();
+      +        // State 1
+      +        d.add_transition(1, i16::MIN + 1, 7, Weight::all()).unwrap();
+      +        // State 2
+      +        d.add_transition(2, 7, 8, Weight::all()).unwrap();
+      +        // State 3
+      +        d.set_default_transition(3, 2, Weight::all()).unwrap();
+      +        // State 4
+      +        d.set_default_transition(4, 9, Weight::all()).unwrap();
+      +        // State 5
+      +        d.add_transition(5, i16::MIN + 7, 10, Weight::all()).unwrap();
+      +        // State 6 is a sink
+      +        // State 7
+      +        d.add_transition(7, i16::MIN + 4, 11, Weight::all()).unwrap();
+      +        // State 8
+      +        d.add_transition(8, i16::MIN + 7, 12, Weight::all()).unwrap();
+      +        // State 9 is a sink
+      +        // State 10
+      +        d.add_transition(10, i16::MIN + 3, 13, Weight::all()).unwrap();
+      +        // State 11
+      +        d.add_transition(11, 1, 14, Weight::from_item(2)).unwrap();
+      +        d.add_transition(11, 3, 15, Weight::from_item(2)).unwrap();
+      +        d.add_transition(11, 4, 16, Weight::from_item(2)).unwrap();
+      +        d.add_transition(11, 6, 17, Weight::from_item(2)).unwrap();
+      +        d.add_transition(11, 7, 18, Weight::from_item(2)).unwrap();
+      +        d.add_transition(11, 8, 19, Weight::from_item(2)).unwrap();
+      +        // State 12
+      +        d.add_transition(12, i16::MIN + 1, 20, Weight::all()).unwrap();
+      +        // State 13
+      +        d.add_transition(13, 1, 14, Weight::from_item(2)).unwrap();
+      +        d.add_transition(13, 3, 15, Weight::from_item(2)).unwrap();
+      +        d.add_transition(13, 4, 16, Weight::from_item(2)).unwrap();
+      +        d.add_transition(13, 6, 17, Weight::from_item(2)).unwrap();
+      +        d.add_transition(13, 7, 18, Weight::from_item(2)).unwrap();
+      +        d.add_transition(13, 8, 19, Weight::from_item(2)).unwrap();
+      +        // State 14
+      +        d.add_transition(14, i16::MIN + 1, 21, Weight::all()).unwrap();
+      +        // State 15
+      +        d.add_transition(15, 7, 22, Weight::all()).unwrap();
+      +        // State 16
+      +        d.set_default_transition(16, 15, Weight::all()).unwrap();
+      +        // State 17
+      +        d.set_default_transition(17, 23, Weight::all()).unwrap();
+      +        // State 18
+      +        d.add_transition(18, i16::MIN + 7, 24, Weight::all()).unwrap();
+      +        // State 19 is a sink
+      +        // State 20
+      +        d.add_transition(20, i16::MIN + 4, 25, Weight::all()).unwrap();
+      +        // State 21
+      +        d.add_transition(21, i16::MIN + 2, 26, Weight::all()).unwrap();
+      +        // State 22
+      +        d.add_transition(22, i16::MIN + 7, 27, Weight::all()).unwrap();
+      +        // State 23 is a sink
+      +        // State 24
+      +        d.add_transition(24, i16::MIN + 0, 28, Weight::all()).unwrap();
+      +        // State 25
+      +        d.add_transition(25, 1, 14, Weight::from_item(2)).unwrap();
+      +        d.add_transition(25, 3, 15, Weight::from_item(2)).unwrap();
+      +        d.add_transition(25, 4, 16, Weight::from_item(2)).unwrap();
+      +        d.add_transition(25, 6, 17, Weight::from_item(2)).unwrap();
+      +        d.add_transition(25, 7, 18, Weight::from_item(2)).unwrap();
+      +        d.add_transition(25, 8, 19, Weight::from_item(2)).unwrap();
+      +        // State 26
+      +        d.set_final_weight(26, Weight::all()).unwrap();
+      +        // State 27
+      +        d.add_transition(27, i16::MIN + 1, 29, Weight::all()).unwrap();
+      +        // State 28
+      +        d.set_final_weight(28, Weight::all()).unwrap();
+      +        // State 29
+      +        d.add_transition(29, i16::MIN + 2, 30, Weight::all()).unwrap();
+      +        // State 30
+      +        d.set_final_weight(30, Weight::all()).unwrap();
       +
       +        resolve_negative_codes_in_dwa(&mut d);
       +
-      +        // Expected: after 'a', we should be in a state equivalent to C (s3),
-      +        // which means a 'c' transition should lead to a final state.
-      +        // The path should be 'a' -> 'c' -> final.
+      +        // After resolution, paths from start that could eventually reach a final state
+      +        // are simplified. The initial edge weights are preserved and intersected with
+      +        // the final weights along the path.
       +        let mut expected = DWA::new();
-      +        let s1_exp = expected.add_state();
-      +        let s2_exp = expected.add_state();
-      +        expected.add_transition(expected.body.start_state, 'a' as i16, s1_exp, Weight::all()).unwrap();
-      +        expected.add_transition(s1_exp, code_c, s2_exp, Weight::all()).unwrap();
-      +        expected.set_final_weight(s2_exp, Weight::from_item(1)).unwrap();
+      +        let s_final = expected.add_state();
+      +        expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
+      +        expected.add_transition(0, 1, s_final, Weight::from_item(2)).unwrap();
+      +        expected.add_transition(0, 3, s_final, Weight::from_item(2)).unwrap();
+      +        expected.add_transition(0, 4, s_final, Weight::from_item(2)).unwrap();
+      +        expected.add_transition(0, 7, s_final, Weight::from_item(2)).unwrap();
       +
       +        assert_dwa_equivalent(d, expected);
       +    }
-       
-           #[test]
-           fn test_resolve_negatives_from_tokenizer_0() {
-
-      ```
-
-      ```diff
-      --- a/src/precompute4/weighted_automata.rs
-      +++ b/src/precompute4/weighted_automata.rs
-      @@ -288,6 +288,26 @@
-                       .and_modify(|self_w| *self_w |= other_w)
-                       .or_insert_with(|| other_w.clone());
-               }
-      +
-      +        // Merge transition targets, asserting that we do not introduce non-determinism.
-      +        if let Some(other_def_tgt) = other.transitions.default {
-      +            if let Some(self_def_tgt) = self.transitions.default {
-      +                if self_def_tgt != other_def_tgt {
-      +                    panic!("Cannot merge DWAStates with conflicting default transitions");
-      +                }
-      +            } else {
-      +                self.transitions.default = Some(other_def_tgt);
-      +            }
-      +        }
-      +
-      +        for (&ch, &other_tgt) in &other.transitions.exceptions {
-      +            if let Some(&self_tgt) = self.transitions.exceptions.get(&ch) {
-      +                if self_tgt != other_tgt {
-      +                    panic!("Cannot merge DWAStates with conflicting exception transitions on char {}", ch);
-      +                }
-      +            } else {
-      +                self.transitions.exceptions.insert(ch, other_tgt);
-      +            }
-      +        }
-           }
        }
-       
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/precompute4/resolve_negatives.rs
       Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/precompute4/weighted_automata.rs
-      Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly merge transition structure
-      in DWAState::merge_union during negative code resolution"'
+  - user: 'Changes committed with message: "Add test case for negative code resolution
+      based on tokenizer state 0 DWA structure"'
     metadata:
 ...
