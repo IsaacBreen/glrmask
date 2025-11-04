@@ -1,0 +1,20 @@
+use crate::glr::table::StateID as ParserStateID;
+use crate::precompute4::full_dwa::FullDWABuildError;
+
+pub fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
+    if id.0 > i16::MAX as usize {
+        Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
+    } else {
+        Ok(id.0 as i16)
+    }
+}
+
+pub fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
+    // Negative codes for stack-hitching. We store as i16::MIN + id.
+    // This requires that parser state IDs are not too large.
+    if id.0 > (i16::MAX as usize) {
+        Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
+    } else {
+        Ok(i16::MIN + (id.0 as i16))
+    }
+}
