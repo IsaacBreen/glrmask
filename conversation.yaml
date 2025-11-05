@@ -576,7 +576,9 @@ local_system:
       pub mod conversion;
       pub mod resolve_negatives;
       mod utils;
-      mod test_weighted_automata;
+      pub mod test_weighted_automata;
+
+
 
     src/precompute4/resolve_negatives.rs: |
       use crate::precompute4::full_dwa::Precomputed4;
@@ -1026,7 +1028,7 @@ local_system:
               acc
           }
 
-          fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
+          pub fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
               let mut rng = SimpleRng::from_time();
               for _ in 0..VALIDATION_SAMPLES {
                   // Sample a path from A -> must be in U, and U == A ∪ B for that word.
@@ -1055,7 +1057,7 @@ local_system:
               }
           }
 
-          fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
+          pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
               let mut rng = SimpleRng::from_time();
               for _ in 0..VALIDATION_SAMPLES {
                   // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
@@ -2352,12 +2354,16 @@ local_system:
       use std::fmt::{Debug, Display, Formatter};
       use std::iter::FromIterator;
       use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
+      use crate::precompute4::test_weighted_automata;
       use std::time::Instant;
 
       // --- Part 1: SimpleBitset ---
 
+      const STOCHASTIC_DEBUG: bool = true; // Set to true to enable expensive stochastic validation
+
       #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
       pub struct SimpleBitset(pub RangeSetBlaze<usize>);
+
 
       impl SimpleBitset {
           pub fn zeros() -> Self {
@@ -2864,7 +2870,16 @@ local_system:
           }
 
           pub fn simplify(&mut self) {
-              Self::simplify_components(&mut self.states, &mut self.body)
+              let before_simplify = if STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
+
+              Self::simplify_components(&mut self.states, &mut self.body);
+
+              if STOCHASTIC_DEBUG {
+                  if let Some(before) = before_simplify {
+                      // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
+                      test_weighted_automata::assert_dwa_equivalent(before, self.clone());
+                  }
+              }
           }
 
           pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody) {
@@ -3407,6 +3422,11 @@ local_system:
               let union_nwa = NWA { states: combined_states, body: union_body };
               let mut result_dwa = union_nwa.determinize_to_dwa();
               result_dwa.simplify();
+
+              if STOCHASTIC_DEBUG {
+                  DWA::stochastic_validate_union(&self, other, &result_dwa);
+              }
+
               result_dwa
           }
 
@@ -3427,6 +3447,11 @@ local_system:
               let concat_nwa = NWA { states: combined_states, body: concat_body };
               let mut result_dwa = concat_nwa.determinize_to_dwa();
               result_dwa.simplify();
+
+              if STOCHASTIC_DEBUG {
+                  DWA::stochastic_validate_concatenate(&self, other, &result_dwa);
+              }
+
               result_dwa
           }
 
@@ -6372,6 +6397,7 @@ local_system:
       use crate::json_serialization::{JSONConvertible, JSONNode};
       use range_set_blaze::RangeSetBlaze;
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+      use std::cell::Cell;
       use std::fmt::{Debug, Display, Formatter};
       use std::iter::FromIterator;
       use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
@@ -6380,7 +6406,11 @@ local_system:
 
       // --- Part 1: SimpleBitset ---
 
-      const STOCHASTIC_DEBUG: bool = false; // Set to true to enable expensive stochastic validation
+      const STOCHASTIC_DEBUG: bool = true; // Set to true to enable expensive stochastic validation
+
+      thread_local! {
+          static IN_SIMPLIFY_CHECK: Cell<bool> = Cell::new(false);
+      }
 
       #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
       pub struct SimpleBitset(pub RangeSetBlaze<usize>);
@@ -6891,15 +6921,16 @@ local_system:
           }
 
           pub fn simplify(&mut self) {
-              let before_simplify = if STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
+              let is_checking = IN_SIMPLIFY_CHECK.with(|c| c.get());
+              let before_simplify = if !is_checking && STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
 
               Self::simplify_components(&mut self.states, &mut self.body);
 
-              if STOCHASTIC_DEBUG {
-                  if let Some(before) = before_simplify {
-                      // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
-                      test_weighted_automata::assert_dwa_equivalent(before, self.clone());
-                  }
+              if let Some(before) = before_simplify {
+                  IN_SIMPLIFY_CHECK.with(|c| c.set(true));
+                  // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
+                  test_weighted_automata::assert_dwa_equivalent(before, self.clone());
+                  IN_SIMPLIFY_CHECK.with(|c| c.set(false));
               }
           }
 
@@ -7445,7 +7476,7 @@ local_system:
               result_dwa.simplify();
 
               if STOCHASTIC_DEBUG {
-                  test_weighted_automata::stochastic_validate_union(self, other, &result_dwa);
+                  DWA::stochastic_validate_union(&self, other, &result_dwa);
               }
 
               result_dwa
@@ -7470,7 +7501,7 @@ local_system:
               result_dwa.simplify();
 
               if STOCHASTIC_DEBUG {
-                  test_weighted_automata::stochastic_validate_concatenate(self, other, &result_dwa);
+                  DWA::stochastic_validate_concatenate(&self, other, &result_dwa);
               }
 
               result_dwa
@@ -8700,7 +8731,9 @@ messages:
       pub mod conversion;
       pub mod resolve_negatives;
       mod utils;
-      mod test_weighted_automata;
+      pub mod test_weighted_automata;
+
+
 
 
       ```
@@ -9160,7 +9193,7 @@ messages:
               acc
           }
 
-          fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
+          pub fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
               let mut rng = SimpleRng::from_time();
               for _ in 0..VALIDATION_SAMPLES {
                   // Sample a path from A -> must be in U, and U == A ∪ B for that word.
@@ -9189,7 +9222,7 @@ messages:
               }
           }
 
-          fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
+          pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
               let mut rng = SimpleRng::from_time();
               for _ in 0..VALIDATION_SAMPLES {
                   // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
@@ -10495,12 +10528,16 @@ messages:
       use std::fmt::{Debug, Display, Formatter};
       use std::iter::FromIterator;
       use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
+      use crate::precompute4::test_weighted_automata;
       use std::time::Instant;
 
       // --- Part 1: SimpleBitset ---
 
+      const STOCHASTIC_DEBUG: bool = true; // Set to true to enable expensive stochastic validation
+
       #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
       pub struct SimpleBitset(pub RangeSetBlaze<usize>);
+
 
       impl SimpleBitset {
           pub fn zeros() -> Self {
@@ -11007,7 +11044,16 @@ messages:
           }
 
           pub fn simplify(&mut self) {
-              Self::simplify_components(&mut self.states, &mut self.body)
+              let before_simplify = if STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
+
+              Self::simplify_components(&mut self.states, &mut self.body);
+
+              if STOCHASTIC_DEBUG {
+                  if let Some(before) = before_simplify {
+                      // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
+                      test_weighted_automata::assert_dwa_equivalent(before, self.clone());
+                  }
+              }
           }
 
           pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody) {
@@ -11550,6 +11596,11 @@ messages:
               let union_nwa = NWA { states: combined_states, body: union_body };
               let mut result_dwa = union_nwa.determinize_to_dwa();
               result_dwa.simplify();
+
+              if STOCHASTIC_DEBUG {
+                  DWA::stochastic_validate_union(&self, other, &result_dwa);
+              }
+
               result_dwa
           }
 
@@ -11570,6 +11621,11 @@ messages:
               let concat_nwa = NWA { states: combined_states, body: concat_body };
               let mut result_dwa = concat_nwa.determinize_to_dwa();
               result_dwa.simplify();
+
+              if STOCHASTIC_DEBUG {
+                  DWA::stochastic_validate_concatenate(&self, other, &result_dwa);
+              }
+
               result_dwa
           }
 
@@ -12178,8 +12234,25 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata.rs
-  - user: Add a debug flag in src/precompute4/weighted_automata.rs that, when set,
-      runs stochastic testing on union, concatenation, and simplification.
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --package sep1 --lib test_constraint_basic::test_trivial --profile test --no-fail-fast -- --format=json --exact -Z unstable-options --show-output
+      Testing started at 8:26 pm ...
+          Blocking waiting for file lock on build directory
+          Finished `test` profile [unoptimized + debuginfo] target(s) in 1.94s
+           Running unittests src/lib.rs (target/debug/deps/sep1-ab994d3f4be66692)
+
+      thread 'test_constraint_basic::test_trivial' (3386025) has overflowed its stack
+      fatal runtime error: stack overflow, aborting
+      error: test failed, to rerun pass `-p sep1 --lib`
+
+      Caused by:
+        process didn't exit successfully: `/Users/isaacbreen/Projects2/grammars2024/target/debug/deps/sep1-ab994d3f4be66692 'test_constraint_basic::test_trivial' --format=json --exact -Z unstable-options --show-output` (signal: 6, SIGABRT: process abort signal)
+      error: 1 target failed:
+          `-p sep1 --lib`
+
+      Process finished with exit code 101
+    metadata:
+  - user: When I enable STOCHASTIC_DEBUG I get this
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -12199,204 +12272,92 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course! Here are the step-by-step instructions to add a debug flag for stochastic testing, followed by the corresponding git diffs.
+      Hello! Dealing with stack overflows can be tricky, but it looks like we have a classic case of infinite recursion here, triggered by a debug-only validation check. Here’s a step-by-step guide to fix it, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      1.  **File: `src/precompute4/mod.rs`**
-          *   To allow the `weighted_automata` module to access the testing utilities, you need to make the `test_weighted_automata` module public.
-          *   Open `src/precompute4/mod.rs`.
-          *   Find the line:
-              ```rust
-              mod test_weighted_automata;
-              ```
-          *   Change it to:
-              ```rust
-              pub mod test_weighted_automata;
-              ```
+      The stack overflow occurs because the `DWA::simplify` function calls `assert_dwa_equivalent` for validation when `STOCHASTIC_DEBUG` is enabled. However, `assert_dwa_equivalent` also calls `simplify` on its inputs to normalize them before comparison, leading to an infinite loop: `simplify` -> `assert_dwa_equivalent` -> `simplify` -> ...
 
-      2.  **File: `src/precompute4/test_weighted_automata.rs`**
-          *   Next, you need to expose the stochastic validation functions from the test module.
-          *   Open `src/precompute4/test_weighted_automata.rs`.
-          *   Locate the function `stochastic_validate_union` and add the `pub` keyword to its definition:
-              ```rust
-              // from:
-              fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
-              // to:
-              pub fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
-              ```
-          *   Similarly, locate `stochastic_validate_concatenate` and make it public:
-              ```rust
-              // from:
-              fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
-              // to:
-              pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
-              ```
+      To break this cycle, we'll introduce a thread-local flag that will serve as a recursion guard. This ensures the validation check inside `simplify` is only performed for the top-level call and not for any nested, recursive calls.
 
-      3.  **File: `src/precompute4/weighted_automata.rs`**
-          *   Finally, add the debug flag and the conditional calls to the validation functions in the main `weighted_automata.rs` file.
-          *   Open `src/precompute4/weighted_automata.rs`.
-          *   At the top of the file, after the `use` statements, add the debug flag constant:
-              ```rust
-              const STOCHASTIC_DEBUG: bool = false; // Set to true to enable expensive stochastic validation
-              ```
-          *   Add a `use` statement to import the test utilities:
-              ```rust
-              use crate::precompute4::test_weighted_automata;
-              ```
-          *   In the `DWA::simplify` method:
-              *   At the very beginning, add this line to clone the DWA's state before simplification:
-                  ```rust
-                  let before_simplify = if STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
-                  ```
-              *   At the very end of the method, add the following block to run the equivalence check:
-                  ```rust
-                  if STOCHASTIC_DEBUG {
-                      if let Some(before) = before_simplify {
-                          // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
-                          test_weighted_automata::assert_dwa_equivalent(before, self.clone());
-                      }
-                  }
-                  ```    *   In the `DWA::union` method, just before the final `result_dwa` is returned, insert this block:
-              ```rust
-              if STOCHASTIC_DEBUG {
-                  test_weighted_automata::stochastic_validate_union(self, other, &result_dwa);
-              }
-              ```
-          *   In the `DWA::concatenate` method, just before the final `result_dwa` is returned, insert this block:
-              ```rust
-              if STOCHASTIC_DEBUG {
-                  test_weighted_automata::stochastic_validate_concatenate(self, other, &result_dwa);
-              }
-              ```
+      Here are the precise changes for `src/precompute4/weighted_automata.rs`:
 
-      ### Git Diffs
+      1.  **Import `Cell`**: Add `use std::cell::Cell;` to the list of imports at the top of the file. This is needed for the thread-local guard.
 
-      Here are the git diffs corresponding to the changes described above.
+      2.  **Define Thread-Local Guard**: After the imports, we'll define a `thread_local!` static variable `IN_SIMPLIFY_CHECK` which will track whether we are already inside the validation part of the `simplify` function.
+
+      3.  **Modify `DWA::simplify`**: We will update the `simplify` method to use this guard. Before running the validation, it will check the flag. If not set, it will proceed, but it will set the flag before calling `assert_dwa_equivalent` and unset it afterward. This prevents any recursive calls to `simplify` from re-triggering the validation.
+
+      Let's apply these changes.
+
+      ### Git Diff
+
+      Here is the git patch to resolve the issue.
 
       ```diff
-      diff --git a/src/precompute4/mod.rs b/src/precompute4/mod.rs
-      --- a/src/precompute4/mod.rs
-      +++ b/src/precompute4/mod.rs
-      @@ -4,7 +4,7 @@
-       pub mod conversion;
-       pub mod resolve_negatives;
-       mod utils;
-      -mod test_weighted_automata;
-      +pub mod test_weighted_automata;
-       
-       
-
-      ```
-
-      ```diff
-      diff --git a/src/precompute4/test_weighted_automata.rs b/src/precompute4/test_weighted_automata.rs
-      --- a/src/precompute4/test_weighted_automata.rs
-      +++ b/src/precompute4/test_weighted_automata.rs
-      @@ -200,7 +200,7 @@
-               acc
-           }
-       
-      -    fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
-      +    pub fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
-               let mut rng = SimpleRng::from_time();
-               for _ in 0..VALIDATION_SAMPLES {
-                   // Sample a path from A -> must be in U, and U == A ∪ B for that word.
-      @@ -226,7 +226,7 @@
-               }
-           }
-       
-      -    fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
-      +    pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
-               let mut rng = SimpleRng::from_time();
-               for _ in 0..VALIDATION_SAMPLES {
-                   // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
-
-      ```
-
-      ```diff
-      diff --git a/src/precompute4/weighted_automata.rs b/src/precompute4/weighted_automata.rs
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -5,8 +5,12 @@
+      @@ -4,15 +4,20 @@
+       use crate::json_serialization::{JSONConvertible, JSONNode};
+       use range_set_blaze::RangeSetBlaze;
+       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+      +use std::cell::Cell;
        use std::fmt::{Debug, Display, Formatter};
        use std::iter::FromIterator;
        use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
-      +use crate::precompute4::test_weighted_automata;
+       use crate::precompute4::test_weighted_automata;
        use std::time::Instant;
        
-      +// --- Part 1: SimpleBitset ---
+       // --- Part 1: SimpleBitset ---
+       
+       const STOCHASTIC_DEBUG: bool = true; // Set to true to enable expensive stochastic validation
       +
-      +const STOCHASTIC_DEBUG: bool = false; // Set to true to enable expensive stochastic validation
-      +
+      +thread_local! {
+      +    static IN_SIMPLIFY_CHECK: Cell<bool> = Cell::new(false);
+      +}
+       
        #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
        pub struct SimpleBitset(pub RangeSetBlaze<usize>);
-       
-      @@ -441,7 +445,17 @@
+      @@ -448,16 +453,18 @@
            }
        
            pub fn simplify(&mut self) {
-      -        Self::simplify_components(&mut self.states, &mut self.body)
-      +        let before_simplify = if STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
-      +
-      +        Self::simplify_components(&mut self.states, &mut self.body);
-      +
-      +        if STOCHASTIC_DEBUG {
-      +            if let Some(before) = before_simplify {
-      +                // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
-      +                test_weighted_automata::assert_dwa_equivalent(before, self.clone());
-      +            }
+      -        let before_simplify = if STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
+      +        let is_checking = IN_SIMPLIFY_CHECK.with(|c| c.get());
+      +        let before_simplify = if !is_checking && STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
+       
+               Self::simplify_components(&mut self.states, &mut self.body);
+       
+      -        if STOCHASTIC_DEBUG {
+      -            if let Some(before) = before_simplify {
+      -                // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
+      -                test_weighted_automata::assert_dwa_equivalent(before, self.clone());
+      -            }
+      -        }
+      +        if let Some(before) = before_simplify {
+      +            IN_SIMPLIFY_CHECK.with(|c| c.set(true));
+      +            // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
+      +            test_weighted_automata::assert_dwa_equivalent(before, self.clone());
+      +            IN_SIMPLIFY_CHECK.with(|c| c.set(false));
       +        }
            }
        
            pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody) {
-      @@ -1008,6 +1022,11 @@
-               let union_nwa = NWA { states: combined_states, body: union_body };
-               let mut result_dwa = union_nwa.determinize_to_dwa();
-               result_dwa.simplify();
-      +
-      +        if STOCHASTIC_DEBUG {
-      +            test_weighted_automata::stochastic_validate_union(self, other, &result_dwa);
-      +        }
-      +
-               result_dwa
-           }
-       
-      @@ -1027,6 +1046,11 @@
-               let concat_nwa = NWA { states: combined_states, body: concat_body };
-               let mut result_dwa = concat_nwa.determinize_to_dwa();
-               result_dwa.simplify();
-      +
-      +        if STOCHASTIC_DEBUG {
-      +            test_weighted_automata::stochastic_validate_concatenate(self, other, &result_dwa);
-      +        }
-      +
-               result_dwa
-           }
-       
 
       ```
+
+      These changes should resolve the stack overflow by correctly handling the recursion in your debug validation logic. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/mod.rs
-      Applying patch to 'src/precompute4/mod.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/mod.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/precompute4/test_weighted_automata.rs
-      Applying patch to 'src/precompute4/test_weighted_automata.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/test_weighted_automata.rs.
-
-      --- Processing Diff Block 3 ---
       Identified target file: src/precompute4/weighted_automata.rs
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Add optional stochastic testing
-      for DWA union, concatenation, and simplification"'
+  - user: 'Changes committed with message: "Fix stack overflow in DWA::simplify by
+      guarding recursive stochastic validation"'
     metadata:
 ...

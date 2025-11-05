@@ -5,6 +5,7 @@
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::cell::Cell;
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
@@ -14,6 +15,10 @@ use std::time::Instant;
 // --- Part 1: SimpleBitset ---
 
 const STOCHASTIC_DEBUG: bool = true; // Set to true to enable expensive stochastic validation
+
+thread_local! {
+    static IN_SIMPLIFY_CHECK: Cell<bool> = Cell::new(false);
+}
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct SimpleBitset(pub RangeSetBlaze<usize>);
@@ -524,15 +529,16 @@ impl DWA {
     }
 
     pub fn simplify(&mut self) {
-        let before_simplify = if STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
+        let is_checking = IN_SIMPLIFY_CHECK.with(|c| c.get());
+        let before_simplify = if !is_checking && STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
 
         Self::simplify_components(&mut self.states, &mut self.body);
 
-        if STOCHASTIC_DEBUG {
-            if let Some(before) = before_simplify {
-                // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
-                test_weighted_automata::assert_dwa_equivalent(before, self.clone());
-            }
+        if let Some(before) = before_simplify {
+            IN_SIMPLIFY_CHECK.with(|c| c.set(true));
+            // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
+            test_weighted_automata::assert_dwa_equivalent(before, self.clone());
+            IN_SIMPLIFY_CHECK.with(|c| c.set(false));
         }
     }
 
