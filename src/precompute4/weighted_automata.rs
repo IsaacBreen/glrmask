@@ -11,6 +11,8 @@ use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
 use crate::precompute4::test_weighted_automata;
 use std::time::Instant;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use crate::profiler::PROGRESS_BAR_ENABLED;
 
 // --- Part 1: SimpleBitset ---
 
@@ -1522,8 +1524,24 @@ impl NWA {
         subset_to_d_id.insert(init_key.clone(), start_d_id);
         worklist.push_back(init_key);
 
+        let pb = ProgressBar::new(subset_to_d_id.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [Determinizing DWA: {elapsed_precise}] \
+                           [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
+                .expect("progress-bar"),
+        );
+        if !PROGRESS_BAR_ENABLED {
+            pb.set_draw_target(ProgressDrawTarget::hidden());
+        }
+
+        let mut processed_states = 0;
+
         // Ensure enough DWA states vector capacity as we go; transitions/weights filled dynamically
         while let Some(subset_key) = worklist.pop_front() {
+            processed_states += 1;
+            pb.set_position(processed_states);
+
             let d_id = *subset_to_d_id.get(&subset_key).unwrap();
             let subset_map: BTreeMap<NWAStateID, Weight> = subset_key.0.iter().map(|(k,w)| (*k, w.clone())).collect();
 
@@ -1568,6 +1586,7 @@ impl NWA {
                     let nid = dwa.states.add_state();
                     subset_to_d_id.insert(def_key.clone(), nid);
                     worklist.push_back(def_key);
+                    pb.set_length(subset_to_d_id.len() as u64);
                     nid
                 };
                 let mut def_w_opt: Option<Weight> = None;
@@ -1617,6 +1636,7 @@ impl NWA {
                     let nid = dwa.states.add_state();
                     subset_to_d_id.insert(target_key.clone(), nid);
                     worklist.push_back(target_key.clone());
+                    pb.set_length(subset_to_d_id.len() as u64);
                     nid
                 };
 
@@ -1641,6 +1661,8 @@ impl NWA {
                 }
             }
         }
+
+        pb.finish_with_message(format!("Determinized to {} states", subset_to_d_id.len()));
 
         dwa
     }
