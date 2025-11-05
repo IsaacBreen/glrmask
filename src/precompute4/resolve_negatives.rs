@@ -12,22 +12,18 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(5, "Initial DWA:\n{}", dwa);
     loop {
         let mut changed_in_pass = false;
-        let mut all_new_states = Vec::with_capacity(dwa.states.len());
 
         for state_id in 0..dwa.states.len() {
-            let (new_state, changed) =
+            let changed =
                 resolve_negative_codes_in_dwa_internal(state_id, &mut dwa.states);
             if changed {
                 changed_in_pass = true;
             }
-            all_new_states.push(new_state);
         }
 
         if !changed_in_pass {
             break;
         }
-
-        dwa.states = DWAStates(all_new_states);
     }
     dwa.simplify();
     crate::debug!(5, "Resolved DWA:\n{}", dwa);
@@ -36,103 +32,8 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
 fn resolve_negative_codes_in_dwa_internal(
     state_id: StateID,
     states: &mut DWAStates,
-) -> (DWAState, bool) {
-    let orig = states[state_id].clone();
-
-    // Create a fresh state:
-    // - preserve state weight and existing final_weight
-    // - copy default transition (and weight)
-    // - copy only positive-code exception transitions (and their weights)
-    let mut new_state = DWAState::default();
-    new_state.weight = orig.weight.clone();
-    new_state.final_weight = orig.final_weight.clone();
-    new_state.transitions.default = orig.transitions.default;
-    new_state.trans_weight_default = orig.trans_weight_default.clone();
-
-    for (&ch, &tgt) in orig.transitions.exceptions.iter() {
-        if ch >= 0 {
-            new_state.transitions.exceptions.insert(ch, tgt);
-            if let Some(w) = orig.trans_weights_exceptions.get(&ch) {
-                new_state.trans_weights_exceptions.insert(ch, w.clone());
-            }
-        }
-    }
-
-    // Gather negative exception edges to process.
-    let mut neg_edges: Vec<(i16, StateID)> = Vec::new();
-    for (&ch, &tgt) in orig.transitions.exceptions.iter() {
-        if ch < 0 {
-            neg_edges.push((ch, tgt));
-        }
-    }
-
-    for (neg_ch, b_id) in neg_edges {
-        let edge_w = orig
-            .trans_weights_exceptions
-            .get(&neg_ch)
-            .cloned()
-            .unwrap_or_else(Weight::zeros);
-
-        let b_state = &states[b_id];
-
-        // 1) Pull back finality across the negative edge.
-        if let Some(b_fw) = b_state.final_weight.clone() {
-            let mut pulled = b_fw;
-            pulled &= &edge_w;
-            if !pulled.is_empty() {
-                if let Some(ref mut s_fw) = new_state.final_weight {
-                    *s_fw |= &pulled;
-                } else {
-                    new_state.final_weight = Some(pulled);
-                }
-            }
-        }
-
-        // 2) Try to cancel with a matching positive edge from B on the decoded positive code.
-        //    Negative codes are encoded as i16::MIN + code; decode with wrapping_sub.
-        let pos_ch: i16 = neg_ch.wrapping_sub(i16::MIN);
-        let (c_opt, w_pos_opt) = if let Some(&cid) = b_state.transitions.exceptions.get(&pos_ch) {
-            let w_pos = b_state
-                .trans_weights_exceptions
-                .get(&pos_ch)
-                .cloned()
-                .unwrap_or_else(Weight::zeros);
-            (Some(cid), Some(w_pos))
-        } else if let Some(cid) = b_state.transitions.default {
-            let w_pos = b_state
-                .trans_weight_default
-                .clone()
-                .unwrap_or_else(Weight::zeros);
-            (Some(cid), Some(w_pos))
-        } else {
-            (None, None)
-        };
-
-        if let (Some(c_id), Some(w_pos)) = (c_opt, w_pos_opt) {
-            // Compose the two edge weights (neg followed by matching pos).
-            let gate = &edge_w & &w_pos;
-            let mut c_copy = states[c_id].clone();
-            c_copy.apply_weight(&gate);
-
-            // Merge C's behavior into the current state's new version.
-            // This union preserves determinism as long as targets align; otherwise it will panic.
-            todo!();
-            // Negative edge resolved -> do not re-add it.
-        } else {
-            // No positive match. Keep the negative edge only if B is not final.
-            let b_is_final = b_state
-                .final_weight
-                .as_ref()
-                .map_or(false, |w| !w.is_empty());
-            if !b_is_final {
-                new_state.transitions.exceptions.insert(neg_ch, b_id);
-                new_state.trans_weights_exceptions.insert(neg_ch, edge_w);
-            }
-        }
-    }
-
-    let changed = new_state != orig;
-    (new_state, changed)
+) -> bool {
+    todo!()
 }
 
 #[cfg(test)]
