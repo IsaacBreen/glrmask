@@ -82,7 +82,8 @@ fn resolve_negative_codes_in_dwa_internal(
             changed = true;
             states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
         } else {
-            states.remove_state(b_copy_id);
+            assert_eq!(states.len(), b_copy_id + 1);
+            states.0.pop();
         }
 
         // Step 5: Handle matching positive edge (cancellation)
