@@ -24,8 +24,8 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         if !changed_in_pass {
             break;
         }
+        dwa.simplify();
     }
-    dwa.simplify();
     crate::debug!(5, "Resolved DWA:\n{}", dwa);
 }
 
