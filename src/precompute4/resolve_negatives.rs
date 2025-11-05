@@ -22,7 +22,6 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(3, "Initial DWA: {}", dwa);
     let mut nwa = NWA::from_dwa(dwa);
     loop {
-        let mut previous_dwa: Option<DWA> = None;
         let mut changed_in_pass = false;
 
         let n = nwa.states.len();
@@ -40,12 +39,6 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         // Determinize to DWA then back to NWA to normalize the graph, which helps subsequent passes.
         let mut tmp_dwa = nwa.determinize_to_dwa();
         tmp_dwa.simplify();
-
-        if previous_dwa.as_ref() == Some(&tmp_dwa) {
-            break; // Fixed point reached, break loop.
-        }
-        previous_dwa = Some(tmp_dwa.clone());
-
         crate::debug!(3, "Intermediate DWA: {}", tmp_dwa);
         nwa = NWA::from_dwa(&tmp_dwa);
     }
