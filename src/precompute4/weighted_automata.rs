@@ -288,6 +288,11 @@ impl DWAStates {
         self.add_existing_state(state)
     }
 
+    pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
+        assert!(state_id < self.len(), "state_id out of bounds");
+        self[state_id].apply_weight(weight);
+    }
+
     /// Merges two states that are transition-equivalent into a new state.
     /// The new state's weights are the union of the original states' weights.
     ///
