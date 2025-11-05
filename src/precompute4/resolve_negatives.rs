@@ -69,8 +69,22 @@ fn resolve_negative_codes_in_dwa_internal(
             }
         }
 
-        // Step 3: Handle matching positive edge (cancellation)
+        // Step 3: Discard all positive edges from B_copy
         let b_orig_state_clone = states[b_orig_id].clone();
+        let b_copy_state = &mut states[b_copy_id];
+        b_copy_state.transitions.exceptions.retain(|k, _| *k < 0);
+        b_copy_state.trans_weights_exceptions.retain(|k, _| *k < 0);
+        b_copy_state.transitions.default = None;
+
+        // Step 4: Replace A -> B with A -> B_copy
+        if b_copy_state != &b_orig_state_clone {
+            changed = true;
+            states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
+        } else {
+            states.remove_state(b_copy_id);
+        }
+
+        // Step 5: Handle matching positive edge (cancellation)
         if let Some(&c_orig_id) = b_orig_state_clone.transitions.get(p) {
             changed = true;
             let c_copy_id = states.copy_state(c_orig_id);
@@ -79,20 +93,6 @@ fn resolve_negative_codes_in_dwa_internal(
             states.apply_weight(c_copy_id, &w);
             // Merge into A
             states.union_assign_state(c_copy_id, state_id);
-        }
-
-        // Step 4: Discard all positive edges from B_copy
-        let b_copy_state = &mut states[b_copy_id];
-        b_copy_state.transitions.exceptions.retain(|k, _| *k < 0);
-        b_copy_state.trans_weights_exceptions.retain(|k, _| *k < 0);
-        b_copy_state.transitions.default = None;
-
-        // Step 5: Replace A -> B with A -> B_copy
-        if b_copy_state != &b_orig_state_clone {
-            changed = true;
-            states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
-        } else {
-            states.remove_state(b_copy_id);
         }
     }
 
