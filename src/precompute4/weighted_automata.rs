@@ -2084,36 +2084,31 @@ impl NWA {
             }
             dwa.states[d_id].final_weight = d_final;
 
-            // Precompute default grouping: group states by their default step-vector (by target+weight).
-            let mut def_groups_all: HashMap<StepVec, Weight> = HashMap::new();
+            // Precompute default grouping: group states by their default step-vectors (by target+weight).
+            let mut def_groups_all: HashMap<StepGroupKey, Weight> = HashMap::new();
             for (sid, w_in) in subset_vec.iter() {
                 if let Some((to, wdef)) = &self.states[*sid].default {
-                    let step = get_step_for_target_weight(
-                        *to, wdef, &self.states, &fut, &comp_of, &pure_comp, &comps,
-                        &mut eps_cache_state, &mut eps_cache_comp, &mut step_cache_by_target_weight, &mut step_intern
-                    );
-                    if let Some(acc_w) = def_groups_all.get_mut(&step) {
+                    // Group by (mask, wdef)
+                    let mask = get_eps_mask(*to, &self.states, &fut, &comp_of, &pure_comp, &comps, &mut eps_cache_state, &mut eps_cache_comp, &mut step_intern);
+                    let key = StepGroupKey { mask, w: wdef.clone(), fp: wdef.fp };
+                    if let Some(acc_w) = def_groups_all.get_mut(&key) {
                         *acc_w |= w_in;
                     } else {
-                        def_groups_all.insert(step, w_in.clone());
+                        def_groups_all.insert(key, w_in.clone());
                     }
                 }
             }
             // Distribute default groups to targets.
             let mut def_acc: HashMap<NWAStateID, Weight> = HashMap::new();
-            for (step_vec, group_w) in def_groups_all.iter() {
-                for (t, wstep) in step_vec.iter() {
-                    let w = group_w & wstep;
-                    if w.is_empty() { continue; }
-                    if let Some(old) = def_acc.get_mut(t) { *old |= &w; } else { def_acc.insert(*t, w); }
-                }
+            for (key, group_w) in def_groups_all.iter() {
+                accumulate_step_group(&key.mask, &key.w, group_w, &mut def_acc);
             }
             // Establish default edge (if any)
             let mut def_edge_target: Option<StateID> = None;
             let mut def_edge_weight: Option<Weight> = None;
             let mut def_target_subset_sv: Option<StepVec> = None;
             if !def_acc.is_empty() {
-                let mut def_vec: Vec<(NWAStateID, Weight)> = def_acc.into_iter().collect();
+                let mut def_vec: Vec<(NWAStateID, Weight)> = def_acc.iter().map(|(k,v)| (*k, v.clone())).collect();
                 def_vec.sort_by_key(|(k, _)| *k);
                 let def_sv = intern_step_vec(def_vec, &mut step_intern);
                 let def_key = StepKeyArc::new(def_sv.clone());
@@ -2159,52 +2154,40 @@ impl NWA {
                 let idxs = label_to_indices.get(&lbl).unwrap();
                 if idxs.is_empty() { continue; }
 
-                let mut ex_groups: HashMap<StepVec, Weight> = HashMap::new();
-                let mut def_groups_for_explicit: HashMap<StepVec, Weight> = HashMap::new();
+                let mut ex_groups: HashMap<StepGroupKey, Weight> = HashMap::new();
+                let mut def_groups_for_explicit: HashMap<StepGroupKey, Weight> = HashMap::new();
                 for &idx in idxs {
                     let (sid, w_in) = &subset_vec[idx];
                     if let Some((to, wlbl)) = self.states[*sid].transitions.get(&lbl) {
-                        let step_ex = get_step_for_target_weight(
-                            *to, wlbl, &self.states, &fut, &comp_of, &pure_comp, &comps,
-                            &mut eps_cache_state, &mut eps_cache_comp, &mut step_cache_by_target_weight, &mut step_intern
-                        );
-                        if let Some(acc) = ex_groups.get_mut(&step_ex) {
+                        let mask = get_eps_mask(*to, &self.states, &fut, &comp_of, &pure_comp, &comps, &mut eps_cache_state, &mut eps_cache_comp, &mut step_intern);
+                        let key = StepGroupKey { mask, w: wlbl.clone(), fp: wlbl.fp };
+                        if let Some(acc) = ex_groups.get_mut(&key) {
                             *acc |= w_in;
                         } else {
-                            ex_groups.insert(step_ex, w_in.clone());
+                            ex_groups.insert(key, w_in.clone());
                         }
                     }
                     if let Some((to, wdef)) = &self.states[*sid].default {
-                        let step_def = get_step_for_target_weight(
-                            *to, wdef, &self.states, &fut, &comp_of, &pure_comp, &comps,
-                            &mut eps_cache_state, &mut eps_cache_comp, &mut step_cache_by_target_weight, &mut step_intern
-                        );
-                        if let Some(acc) = def_groups_for_explicit.get_mut(&step_def) {
+                        let mask = get_eps_mask(*to, &self.states, &fut, &comp_of, &pure_comp, &comps, &mut eps_cache_state, &mut eps_cache_comp, &mut step_intern);
+                        let key = StepGroupKey { mask, w: wdef.clone(), fp: wdef.fp };
+                        if let Some(acc) = def_groups_for_explicit.get_mut(&key) {
                             *acc |= w_in;
                         } else {
-                            def_groups_for_explicit.insert(step_def, w_in.clone());
+                            def_groups_for_explicit.insert(key, w_in.clone());
                         }
                     }
                 }
 
                 // Compute ex_add_map: contributions via explicit steps (target -> weight)
                 let mut ex_add_map: HashMap<NWAStateID, Weight> = HashMap::new();
-                for (step_vec, group_w) in ex_groups.into_iter() {
-                    for (t, wstep) in step_vec.iter() {
-                        let w = &group_w & wstep;
-                        if w.is_empty() { continue; }
-                        if let Some(old) = ex_add_map.get_mut(t) { *old |= &w; } else { ex_add_map.insert(*t, w); }
-                    }
+                for (key, group_w) in ex_groups.into_iter() {
+                    accumulate_step_group(&key.mask, &key.w, &group_w, &mut ex_add_map);
                 }
 
                 // Compute def_sub_map: contributions via default from the explicit states (to be removed)
                 let mut def_sub_map: HashMap<NWAStateID, Weight> = HashMap::new();
-                for (step_vec, group_w) in def_groups_for_explicit.into_iter() {
-                    for (t, wstep) in step_vec.iter() {
-                        let w = &group_w & wstep;
-                        if w.is_empty() { continue; }
-                        if let Some(old) = def_sub_map.get_mut(t) { *old |= &w; } else { def_sub_map.insert(*t, w); }
-                    }
+                for (key, group_w) in def_groups_for_explicit.into_iter() {
+                    accumulate_step_group(&key.mask, &key.w, &group_w, &mut def_sub_map);
                 }
 
                 if ex_add_map.is_empty() && def_sub_map.is_empty() {
