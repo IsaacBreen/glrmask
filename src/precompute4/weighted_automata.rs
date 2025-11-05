@@ -223,6 +223,10 @@ pub struct DWAState {
 }
 
 impl DWAState {
+    pub fn get_weight(&self, ch: i16) -> Option<&Weight> {
+        self.trans_weights_exceptions.get(&ch).or(self.trans_weight_default.as_ref())
+    }
+
     /// Intersects all weights in this state with the given weight.
     pub fn apply_weight(&mut self, weight: &Weight) {
         self.weight &= weight;
@@ -242,7 +246,6 @@ impl DWAState {
             *w &= weight;
         }
     }
-
 }
 
 #[derive(Clone, Debug, Default)]
