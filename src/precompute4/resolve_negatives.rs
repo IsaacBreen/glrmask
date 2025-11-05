@@ -50,7 +50,7 @@ fn resolve_negative_codes_in_dwa_internal(
 
     for (neg_code, b_orig_id) in negative_transitions {
         let p = neg_code.wrapping_sub(i16::MIN);
-        let w_neg = states[state_id].trans_weights_exceptions.get(&neg_code).unwrap().clone();
+        let w_neg = states[state_id].get_weight(neg_code).unwrap().clone();
 
         // Step 1: Copy B
         let b_copy_id = states.copy_state(b_orig_id);
@@ -73,7 +73,9 @@ fn resolve_negative_codes_in_dwa_internal(
         let b_orig_state_clone = states[b_orig_id].clone();
         if let Some(&c_orig_id) = b_orig_state_clone.transitions.get(p) {
             let c_copy_id = states.copy_state(c_orig_id);
-            states.apply_weight(c_copy_id, &w_neg);
+            let w_b_c = b_orig_state_clone.get_weight(p).unwrap();
+            let w = w_neg & w_b_c;
+            states.apply_weight(c_copy_id, &w);
             // Merge into A
             states.union_assign_state(state_id, c_copy_id);
         }
