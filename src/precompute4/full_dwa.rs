@@ -3,13 +3,14 @@ use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
 use crate::precompute4::weighted_automata::{DWABody, DWAState, DWAStates, StateID, Weight, DWA};
 use std::collections::{BTreeMap, BTreeSet};
-use crate::datastructures::trie::Trie;
+use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
 use std::cell::RefCell;
 use range_set_blaze::RangeSetBlaze;
 use crate::precompute4::utils;
+use crate::constraint::LLMTokenBV;
 use crate::precompute4::weighted_automata::{NWA, NWAStates, NWABody};
 
 pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
@@ -203,7 +204,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         states[start].final_weight = Some(Weight::all());
         NWABody { start_state: start }
     };
-    let initial_values = vec![(reversed_trie_root, initial_nwa_body)];
+    let initial_tokens = LLMTokenBV::max_ones();
+    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
     let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
     let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
 
@@ -214,7 +216,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         &traversal_data,
         initial_values,
         // step function
-        |current_nwa_body: &NWABody, edge_terminal_opt, dest_map| {
+        |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
+            let (current_nwa_body, current_tokens) = current_val;
             let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
                 let terminal_id = edge_terminal_opt.unwrap();
                 template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
@@ -222,8 +225,13 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 &ignore_dwa
             };
 
-            let mut results: Vec<(PrecomputeNode1Index, NWABody)> = Vec::new();
+            let mut results: Vec<(PrecomputeNode1Index, (NWABody, LLMTokenBV))> = Vec::new();
             for (dest_idx, llm_token_bv) in dest_map.iter() {
+                let next_tokens = current_tokens & llm_token_bv;
+                if next_tokens.is_empty() {
+                    continue;
+                }
+
                 let mut states = states_arena.borrow_mut();
 
                 // Convert template DWA to NWA and copy it into the arena
@@ -239,23 +247,31 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
                 crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
 
-                results.push((*dest_idx, composed_body));
+                results.push((*dest_idx, (composed_body, next_tokens)));
             }
             results
         },
         // merge function: union them via epsilon
-        |body1, body2| {
+        |val1, val2| {
+            let (body1, tokens1) = val1;
+            let (body2, tokens2) = val2;
             let mut states = states_arena.borrow_mut();
             crate::debug!(5, "Starting NWA::union_components: body1_start={} body2_start={}...", body1.start_state, body2.start_state);
             *body1 = NWA::union_components(&mut states, body1, &body2);
+            *tokens1 |= &tokens2;
             crate::debug!(5, "NWA::union_components finished. New start state: {}.", body1.start_state);
         },
         // process function: capture at original roots
-        |_node_data, node_idx, nwa_body| {
-            if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
+        |_node_data, node_idx, val| {
+            let (nwa_body, tokens) = val;
+            if !tokens.is_empty() {
+                if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
+                    final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
+                }
+                Some((nwa_body, tokens)) // continue traversal
+            } else {
+                None
             }
-            Some(nwa_body) // continue traversal
         },
     );
 
