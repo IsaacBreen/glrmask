@@ -1081,7 +1081,6 @@ impl DWA {
 
         let union_nwa = NWA { states: combined_states, body: union_body };
         let mut result_dwa = union_nwa.determinize_to_dwa();
-        result_dwa.simplify();
 
         if STOCHASTIC_DEBUG {
             DWA::stochastic_validate_union(&self, other, &result_dwa);
@@ -1106,7 +1105,6 @@ impl DWA {
 
         let concat_nwa = NWA { states: combined_states, body: concat_body };
         let mut result_dwa = concat_nwa.determinize_to_dwa();
-        result_dwa.simplify();
 
         if STOCHASTIC_DEBUG {
             DWA::stochastic_validate_concatenate(&self, other, &result_dwa);

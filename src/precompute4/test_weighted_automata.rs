@@ -253,19 +253,13 @@ impl DWA {
 
 pub fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
     // Strategy:
-    // 1) Simplify both automata to obtain canonical, minimized, and normalized forms
-    //    (unreachable pruned, sink-like states collapsed, redundant exceptions removed),
-    //    while aggregating edge/default weights as unions across merged states.
-    // 2) Perform a BFS isomorphism test from the start states. For each matched pair:
+    // 1) Perform a BFS isomorphism test from the start states. For each matched pair:
     //    - Compare state weights and final weights (None treated as zeros).
     //    - Compare default transition weights (None treated as zeros).
     //    - For each character in the union of exception keys, compare per-edge weights
     //      (falling back to default if exception weight absent).
     //    - Ensure default and per-exception targets correspond under the evolving bijection.
-    // 3) Verify that all states reachable in `b` are matched by some state of `a`.
-
-    a.simplify();
-    b.simplify();
+    // 2) Verify that all states reachable in `b` are matched by some state of `a`.
 
     // Helper: convert Option<Weight> to Weight (None => zeros).
     fn opt_w_to_w(ow: &Option<Weight>) -> Weight {
