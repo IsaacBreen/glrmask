@@ -20,6 +20,7 @@ pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
 /// This is correctness-first; performance will be improved later.
 fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     // Convert to NWA
+    crate::debug!(3, "Initial DWA: {}", dwa);
     let mut nwa = NWA::from_dwa(dwa);
     loop {
         let mut changed_in_pass = false;
@@ -39,12 +40,13 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         // Determinize to DWA then back to NWA to normalize the graph, which helps subsequent passes.
         let mut tmp_dwa = nwa.determinize_to_dwa();
         tmp_dwa.simplify();
-        // crate::debug!(3, "Intermediate DWA: {}", tmp_dwa);
+        crate::debug!(3, "Intermediate DWA: {}", tmp_dwa);
         nwa = NWA::from_dwa(&tmp_dwa);
     }
     // Final determinization to DWA
     let mut result = nwa.determinize_to_dwa();
     result.simplify();
+    crate::debug!(3, "Final DWA: {}", result);
     *dwa = result;
 }
 
