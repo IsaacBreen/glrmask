@@ -10,7 +10,7 @@ pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
 
 fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     dwa.simplify();
-    crate::debug!(5, "Initial DWA:\n{}", dwa);
+    crate::debug!(6, "Initial DWA:\n{}", dwa);
     loop {
         let mut changed_in_pass = false;
 
@@ -25,12 +25,12 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         if !changed_in_pass {
             break;
         }
-        // crate::debug!(5, "Before simplification pass:\n{}", dwa);
+        // crate::debug!(6, "Before simplification pass:\n{}", dwa);
         dwa.simplify();
-        crate::debug!(5, "After simplification pass:\n{}", dwa);
+        crate::debug!(6, "After simplification pass:\n{}", dwa);
     }
     dwa.simplify();
-    crate::debug!(5, "Resolved DWA:\n{}", dwa);
+    crate::debug!(6, "Resolved DWA:\n{}", dwa);
 }
 
 fn resolve_negative_codes_in_dwa_internal(

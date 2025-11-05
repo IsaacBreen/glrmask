@@ -169,7 +169,7 @@ fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<
 
 // Public API: precompute4 using DWA-only approach.
 pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
-    println!("Starting precompute4 (DWA-only)...");
+    crate::debug!(2, "Starting precompute4...");
     // 1. Build template DWAs for all terminals.
     let template_dwas = match build_template_dwas(parser) {
         Ok(m) => m,
