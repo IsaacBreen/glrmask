@@ -1287,7 +1287,9 @@ impl DWA {
             let new_state = &mut new_dwa.states[new_id];
 
             let agg_final_weight = if right_accepts_epsilon {
-                s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
+                let fw0 = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                let fw1_eps = other.states[right_start].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                fw0 & fw1_eps
             } else {
                 let mut fw = Weight::zeros();
                 for &id1 in &ids1 {
@@ -1338,12 +1340,20 @@ impl DWA {
                     get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
                 new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
 
-                let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                let w_d1_trans = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+                let mut w_d2_trans = Weight::zeros();
                 for &id1 in &ids1 {
                     if id1 != sink1 {
-                        tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                        if let Some(w) = other.states[id1].trans_weight_default.as_ref() {
+                            w_d2_trans |= w;
+                        }
                     }
                 }
+                let tw_def = if let Some(w_d1_final) = s0.and_then(|s| s.final_weight.as_ref()) {
+                    w_d1_trans | (w_d1_final.clone() & w_d2_trans)
+                } else {
+                    w_d1_trans | w_d2_trans
+                };
                 new_dwa.states[new_id].trans_weight_default = Some(tw_def);
             }
 
@@ -1364,12 +1374,20 @@ impl DWA {
                         get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
                     new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
 
-                    let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+                    let w_d1_trans = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+                    let mut w_d2_trans = Weight::zeros();
                     for &id1 in &ids1 {
                         if id1 != sink1 {
-                            tw_exc |= &other.states[id1].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
+                            if let Some(w) = other.states[id1].get_weight(ch) {
+                                w_d2_trans |= w;
+                            }
                         }
                     }
+                    let tw_exc = if let Some(w_d1_final) = s0.and_then(|s| s.final_weight.as_ref()) {
+                        w_d1_trans | (w_d1_final.clone() & w_d2_trans)
+                    } else {
+                        w_d1_trans | w_d2_trans
+                    };
                     new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
                 }
             }
