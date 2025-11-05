@@ -2577,6 +2577,32 @@ local_system:
           }
 
           #[test]
+          fn test_union_from_debug_log_simplified2_with_simplification_trick() {
+              // This test isolates two simple paths with different initial edge weights.
+              // A: path [0, 1] with weight [0]
+              // B: path [0, 1, 2] with weight [1]
+              // The union should correctly handle both.
+
+              // --- Build LEFT DWA (A) ---
+              let mut left = DWA::new();
+              let s1a = left.add_state();
+              left.add_transition(0, 0, s1a, Weight::from_item(0)).unwrap();
+              left.add_transition(0, 1, s1a, Weight::from_item(1)).unwrap();
+              left.set_final_weight(s1a, Weight::all()).unwrap();
+
+              // --- Build RIGHT DWA (B) ---
+              let mut right = DWA::new();
+              let s1b = right.add_state();
+              let s2b = right.add_state();
+              right.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
+              right.add_transition(s1b, 1, s2b, Weight::all()).unwrap();
+              right.set_final_weight(s2b, Weight::all()).unwrap();
+
+              let u = left.union(&right);
+              DWA::stochastic_validate_union(&left, &right, &u);
+          }
+
+          #[test]
           fn test_union_from_debug_log_simplified3() {
               // This test isolates two simple paths with different initial edge weights.
               // A: path [0, 1] with weight [0]
@@ -2986,6 +3012,24 @@ local_system:
                   *w &= weight;
               }
           }
+
+          /// Subtracts a weight from all weights in this state.
+          pub fn exclude_weight(&mut self, weight: &Weight) {
+              if let Some(fw) = &mut self.final_weight {
+                  *fw -= weight;
+                  if fw.is_empty() {
+                      self.final_weight = None;
+                  }
+              }
+
+              if let Some(twd) = &mut self.trans_weight_default {
+                  *twd -= weight;
+              }
+
+              for w in self.trans_weights_exceptions.values_mut() {
+                  *w -= weight;
+              }
+          }
       }
 
       #[derive(Clone, Debug, Default)]
@@ -3036,6 +3080,16 @@ local_system:
               self[state_id].apply_weight(weight);
           }
 
+          pub fn exclude_weight_from_state(&mut self, state_id: StateID, weight: &Weight) -> StateID {
+              assert!(state_id < self.len(), "state_id out of bounds");
+              if weight.is_empty() {
+                  return state_id;
+              }
+              let new_id = self.copy_state(state_id);
+              self[new_id].exclude_weight(weight);
+              new_id
+          }
+
           pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID) {
               assert!(s_from_id < self.len(), "s_from_id out of bounds");
               assert!(s_into_id < self.len(), "s_into_id out of bounds");
@@ -3074,16 +3128,24 @@ local_system:
               // Default transition
               let def_tgt_from = s_from.transitions.default;
               let def_tgt_into = s_into_orig.transitions.default;
+              let w_def_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+              let w_def_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
               let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
-                  (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+                  (Some(t1), Some(t2)) => if t1 == t2 {
+                      Some(t1)
+                  } else {
+                      let to_exclude_from_t2 = &w_def_from - &w_def_into;
+                      let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2);
+                      let to_exclude_from_t1 = &w_def_into - &w_def_from;
+                      let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1);
+                      Some(self.union_state(t1_gated, t2_gated))
+                  },
                   (Some(t), None) | (None, Some(t)) => Some(t),
                   (None, None) => None,
               };
               new_transitions.default = new_def_tgt_id;
               new_trans_weight_default = if new_def_tgt_id.is_some() {
-                  let w_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  let w_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  Some(w_from | w_into)
+                  Some(w_def_from | w_def_into)
               } else {
                   None
               };
@@ -3092,9 +3154,19 @@ local_system:
               for &ch in &critical_points {
                   let tgt_from = get_target(&s_from, ch);
                   let tgt_into = get_target(&s_into_orig, ch);
+                  let w_from = get_weight(&s_from, ch);
+                  let w_into = get_weight(&s_into_orig, ch);
 
                   let new_exc_tgt_id = match (tgt_from, tgt_into) {
-                      (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+                      (Some(t1), Some(t2)) => if t1 == t2 {
+                          Some(t1)
+                      } else {
+                          let to_exclude_from_t2 = &w_from - &w_into;
+                          let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2);
+                          let to_exclude_from_t1 = &w_into - &w_from;
+                          let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1);
+                          Some(self.union_state(t1_gated, t2_gated))
+                      },
                       (Some(t), None) | (None, Some(t)) => Some(t),
                       (None, None) => None,
                   };
@@ -3102,7 +3174,7 @@ local_system:
                   if new_exc_tgt_id != new_def_tgt_id {
                       if let Some(tgt_id) = new_exc_tgt_id {
                           new_transitions.exceptions.insert(ch, tgt_id);
-                          new_trans_weights_exceptions.insert(ch, get_weight(&s_from, ch) | get_weight(&s_into_orig, ch));
+                          new_trans_weights_exceptions.insert(ch, w_from | w_into);
                       }
                   }
               }
@@ -3973,12 +4045,23 @@ local_system:
                   // This temporary state will be removed by simplify().
                   let temp_id = new_dwa.states.add_existing_state(gated_b_start);
 
+                  // Before merging, clear the final weight of the `self` state.
+                  // We'll replace it with the correct junction final weight afterwards.
+                  new_dwa.states[s_a_id].final_weight = None;
+
                   // Merge the gated start state into the final `self` state.
-                  // This will union the final weights and transitions. The final weight
-                  // of the junction will be `final_weight(s_a_id) | final_weight(gated_b_start)`.
-                  // `final_weight(gated_b_start)` is `other.final_weight(start) & final_weight`,
-                  // which is the weight for concatenating with an empty string from `other`.
                   new_dwa.states.union_assign_state(temp_id, s_a_id);
+
+                  // Set the correct final weight at the junction.
+                  // It must be unioned with any final weight that might have been
+                  // propagated into s_a_id from other branches during the union.
+                  if let Some(w) = junction_final_weight {
+                      if let Some(existing_fw) = new_dwa.states[s_a_id].final_weight.as_mut() {
+                          *existing_fw |= &w;
+                      } else {
+                          new_dwa.states[s_a_id].final_weight = Some(w);
+                      }
+                  }
               }
 
               if STOCHASTIC_VALIDATION {
@@ -5233,7 +5316,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -7838,6 +7921,32 @@ messages:
           }
 
           #[test]
+          fn test_union_from_debug_log_simplified2_with_simplification_trick() {
+              // This test isolates two simple paths with different initial edge weights.
+              // A: path [0, 1] with weight [0]
+              // B: path [0, 1, 2] with weight [1]
+              // The union should correctly handle both.
+
+              // --- Build LEFT DWA (A) ---
+              let mut left = DWA::new();
+              let s1a = left.add_state();
+              left.add_transition(0, 0, s1a, Weight::from_item(0)).unwrap();
+              left.add_transition(0, 1, s1a, Weight::from_item(1)).unwrap();
+              left.set_final_weight(s1a, Weight::all()).unwrap();
+
+              // --- Build RIGHT DWA (B) ---
+              let mut right = DWA::new();
+              let s1b = right.add_state();
+              let s2b = right.add_state();
+              right.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
+              right.add_transition(s1b, 1, s2b, Weight::all()).unwrap();
+              right.set_final_weight(s2b, Weight::all()).unwrap();
+
+              let u = left.union(&right);
+              DWA::stochastic_validate_union(&left, &right, &u);
+          }
+
+          #[test]
           fn test_union_from_debug_log_simplified3() {
               // This test isolates two simple paths with different initial edge weights.
               // A: path [0, 1] with weight [0]
@@ -7870,8 +7979,8 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata.rs
-  - user: |2+
-
+  - user: |-
+      ```
       thread 'precompute4::weighted_automata::tests::test_union_from_debug_log_simplified2' (2877319) panicked at src/precompute4/weighted_automata.rs:1268:17:
       assertion `left == right` failed: Union weight mismatch vs expected A∪B.
       word: [0]
@@ -7918,28 +8027,40 @@ messages:
 
         left: 0..=1
        right: 0..=0
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::weighted_automata::DWA::stochastic_validate_union
-                   at ./src/precompute4/weighted_automata.rs:1268:17
-         5: sep1::precompute4::weighted_automata::DWA::union
-                   at ./src/precompute4/weighted_automata.rs:1094:13
-         6: sep1::precompute4::weighted_automata::tests::test_union_from_debug_log_simplified2
-                   at ./src/precompute4/weighted_automata.rs:2568:22
-         7: sep1::precompute4::weighted_automata::tests::test_union_from_debug_log_simplified2::{{closure}}
-                   at ./src/precompute4/weighted_automata.rs:2548:47
-         8: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         9: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+      ```
 
+      Fix `union_assign_state`. Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your solutions.
+
+      You might think a quick fix is to simplify first so weights get propogated. e.g. simplifying would turn it into these:
+
+      ```
+      DWA A:
+      DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: [0])
+        State 1:
+          final_weight: [0]
+
+
+      DWA B:
+      DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: [1])
+        State 1:
+          1 -> 2 (trans_weight: [1])
+        State 2:
+          final_weight: [1]
+      ```
+
+      BUT this is a hack and won't work in more complex instances. See `test_union_from_debug_log_simplified2_with_simplification_trick` for an example. Don't try to just quick fix it for this test either; your solution shouldn't be tailored to any test here. It should address the root cause of the issue and fix it *in general*.
+
+
+      Do it like this.
+
+      Add a method to exclude a weight from a state. It should take a state ID and a weight and return a state ID.
+      It should basically ensure that weight cannot do anything at the given state. It creates a copy of the state and subtracts the weight from final weights and any other weights appearing in it.
+
+      Use it in `union_assign_state` just before unioning two states. We take the weights from both edges, let's call them X and Y for dest state A and B respectively. We exclude from state A the set Y - X, and from B the set X - Y.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7959,87 +8080,189 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the test failure and the provided code. The panic in `test_union_from_debug_log_simplified2` points to a fundamental issue in how the `union` operation is implemented, particularly in how edge weights are combined for paths that have different lengths in the two automata. A simple fix for this seems difficult without a larger redesign of the union algorithm.
+      Of course. Here are the step-by-step instructions to fix the bug in `union_assign_state`, followed by the corresponding git diff.
 
-      However, while investigating, I found a related logic issue in the `concatenate` function that I can correct. This function modifies states in-place, and the way it handles final weights is complex and likely incorrect, especially if a final state is shared across multiple paths. The change I'm proposing simplifies this logic and makes it more robust. While this won't fix the failing `union` test, it addresses a similar underlying problem in state manipulation logic.
+      ### Hypothesis and Solution
 
-      Here are the step-by-step instructions to apply the fix to `DWA::concatenate`:
+      The root cause of the bug is in how `union_assign_state` merges transitions. When two states are merged, their outgoing transitions are also merged. If for a given input character, both original states had a transition, the new merged state will have a transition whose weight is the union of the original edge weights, and its target is the union of the original target states.
+
+      The problem is that this simple union of target states is incorrect. A path arriving with a certain weight `w` should only be allowed to proceed through the part of the unioned target state that corresponds to the original path valid for `w`. The simple union allows weights from one path to "leak" into the other, leading to incorrect, overly permissive weights for some words.
+
+      To fix this, we need to "gate" the target states before unioning them. If we are merging a transition `A -> tA` with weight `wA` and a transition `B -> tB` with weight `wB`, the new target state should be a union of modified versions of `tA` and `tB`.
+      -   The weights that are in `wA` but not `wB` should be excluded from `tB`.
+      -   The weights that are in `wB` but not `wA` should be excluded from `tA`.
+
+      This ensures that a path can only proceed through the parts of the automaton that are valid for its accumulated weight.
+
+      I will implement this by:
+      1.  Adding a method `exclude_weight` to `DWAState` that subtracts a weight from all weights within that state.
+      2.  Adding a helper method `exclude_weight_from_state` to `DWAStates` that creates a modified copy of a state with certain weights excluded.
+      3.  Updating `union_assign_state` to use this gating logic when merging transitions that lead to different target states.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/precompute4/weighted_automata.rs`**.
-      2.  **Navigate to the `concatenate` function**, around line 1365.
-      3.  **Locate the loop** that iterates over `final_self_states`.
-      4.  Inside the loop, you will find a block of code that clears the `final_weight` of a state, merges another state into it, and then restores a calculated final weight. This logic is flawed.
-      5.  **Delete the line** that sets the final weight to `None`:
+      1.  **File:** `src/precompute4/weighted_automata.rs`
+          *   In the `impl DWAState` block, after the `apply_weight` method (around line 432), insert the new `exclude_weight` method:
+
           ```rust
-          // Before merging, clear the final weight of the `self` state.
-          // We'll replace it with the correct junction final weight afterwards.
-          new_dwa.states[s_a_id].final_weight = None;
-          ```
-      6.  **Delete the entire `if let Some(w) = junction_final_weight { ... }` block** that follows the call to `union_assign_state`. The `union_assign_state` function will now correctly handle the union of final weights, making this block redundant and incorrect.
-
-      The `for` loop in `concatenate` should be modified to look like this after the changes:
-
-      ```rust
-              // For each final state from `self`, graft on a gated version of `other`.
-              for (s_a_id, final_weight) in final_self_states {
-                  // Create a copy of `other`'s start state, gated by `final_weight`.
-                  let mut gated_b_start = new_dwa.states[other_start_remapped].clone();
-                  gated_b_start.apply_weight(&final_weight);
-
-                  // The new final weight at the junction point is determined by whether `other`
-                  // could accept an empty string, gated by `final_weight`.
-                  let junction_final_weight = gated_b_start.final_weight.clone();
-
-                  // Add the gated state to the DWA to get an ID for union_assign_state.
-                  // This temporary state will be removed by simplify().
-                  let temp_id = new_dwa.states.add_existing_state(gated_b_start);
-
-                  // Merge the gated start state into the final `self` state.
-                  // This will union the final weights and transitions. The final weight
-                  // of the junction will be `final_weight(s_a_id) | final_weight(gated_b_start)`.
-                  // `final_weight(gated_b_start)` is `other.final_weight(start) & final_weight`,
-                  // which is the weight for concatenating with an empty string from `other`.
-                  new_dwa.states.union_assign_state(temp_id, s_a_id);
+              /// Subtracts a weight from all weights in this state.
+              pub fn exclude_weight(&mut self, weight: &Weight) {
+                  if let Some(fw) = &mut self.final_weight {
+                      *fw -= weight;
+                      if fw.is_empty() {
+                          self.final_weight = None;
+                      }
+                  }
+          
+                  if let Some(twd) = &mut self.trans_weight_default {
+                      *twd -= weight;
+                  }
+          
+                  for w in self.trans_weights_exceptions.values_mut() {
+                      *w -= weight;
+                  }
               }
-      ```
+          ```
+
+      2.  **File:** `src/precompute4/weighted_automata.rs`
+          *   In the `impl DWAStates` block, after the `apply_weight` method (around line 482), insert the new `exclude_weight_from_state` method:
+
+          ```rust
+              pub fn exclude_weight_from_state(&mut self, state_id: StateID, weight: &Weight) -> StateID {
+                  assert!(state_id < self.len(), "state_id out of bounds");
+                  if weight.is_empty() {
+                      return state_id;
+                  }
+                  let new_id = self.copy_state(state_id);
+                  self[new_id].exclude_weight(weight);
+                  new_id
+              }
+          ```
+
+      3.  **File:** `src/precompute4/weighted_automata.rs`
+          *   In the `union_assign_state` method, update the logic for merging default and exception transitions.
+
+          *   **For the default transition (around line 527):**
+              *   Get the weights for the default transitions from both `s_from` and `s_into_orig`.
+              *   In the `match` statement, when both states have a default transition to different targets (`t1 != t2`), calculate the weights to exclude, create gated versions of the target states using `exclude_weight_from_state`, and then union these new gated states.
+              *   Update the `new_trans_weight_default` calculation to use the pre-calculated weights.
+
+          *   **For exception transitions (inside the loop, around line 545):**
+              *   Get the transition weights for the current character `ch` from both states.
+              *   Similar to the default transition, update the `match` statement for `new_exc_tgt_id` to apply the gating logic when targets differ.
+              *   Update the `new_trans_weights_exceptions` insertion to use the pre-calculated weights.
 
       ### Git Diff
 
-      Here is the change in `diff` format:
+      Here is the git diff for the changes:
 
       ```diff
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -1380,22 +1380,12 @@
-                   // This temporary state will be removed by simplify().
-                   let temp_id = new_dwa.states.add_existing_state(gated_b_start);
-       
-      -            // Before merging, clear the final weight of the `self` state.
-      -            // We'll replace it with the correct junction final weight afterwards.
-      -            new_dwa.states[s_a_id].final_weight = None;
-      -
-                   // Merge the gated start state into the final `self` state.
-      +            // This will union the final weights and transitions. The final weight
-      +            // of the junction will be `final_weight(s_a_id) | final_weight(gated_b_start)`.
-      +            // `final_weight(gated_b_start)` is `other.final_weight(start) & final_weight`,
-      +            // which is the weight for concatenating with an empty string from `other`.
-                   new_dwa.states.union_assign_state(temp_id, s_a_id);
-      -
-      -            // Set the correct final weight at the junction.
-      -            // It must be unioned with any final weight that might have been
-      -            // propagated into s_a_id from other branches during the union.
-      -            if let Some(w) = junction_final_weight {
-      -                if let Some(existing_fw) = new_dwa.states[s_a_id].final_weight.as_mut() {
-      -                    *existing_fw |= &w;
-      -                } else {
-      -                    new_dwa.states[s_a_id].final_weight = Some(w);
-      -                }
-      -            }
+      @@ -432,6 +432,24 @@
+                   *w &= weight;
                }
+           }
+      +
+      +    /// Subtracts a weight from all weights in this state.
+      +    pub fn exclude_weight(&mut self, weight: &Weight) {
+      +        if let Some(fw) = &mut self.final_weight {
+      +            *fw -= weight;
+      +            if fw.is_empty() {
+      +                self.final_weight = None;
+      +            }
+      +        }
+      +
+      +        if let Some(twd) = &mut self.trans_weight_default {
+      +            *twd -= weight;
+      +        }
+      +
+      +        for w in self.trans_weights_exceptions.values_mut() {
+      +            *w -= weight;
+      +        }
+      +    }
+       }
        
-               if STOCHASTIC_VALIDATION {
+       #[derive(Clone, Debug, Default)]
+      @@ -478,6 +496,16 @@
+               self[state_id].apply_weight(weight);
+           }
+       
+      +    pub fn exclude_weight_from_state(&mut self, state_id: StateID, weight: &Weight) -> StateID {
+      +        assert!(state_id < self.len(), "state_id out of bounds");
+      +        if weight.is_empty() {
+      +            return state_id;
+      +        }
+      +        let new_id = self.copy_state(state_id);
+      +        self[new_id].exclude_weight(weight);
+      +        new_id
+      +    }
+      +
+           pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID) {
+               assert!(s_from_id < self.len(), "s_from_id out of bounds");
+               assert!(s_into_id < self.len(), "s_into_id out of bounds");
+      @@ -512,38 +540,53 @@
+       
+               // Default transition
+               let def_tgt_from = s_from.transitions.default;
+               let def_tgt_into = s_into_orig.transitions.default;
+      -        let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
+      -            (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+      +        let w_def_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      +        let w_def_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      +        let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
+      +            (Some(t1), Some(t2)) => if t1 == t2 {
+      +                Some(t1)
+      +            } else {
+      +                let to_exclude_from_t2 = &w_def_from - &w_def_into;
+      +                let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2);
+      +                let to_exclude_from_t1 = &w_def_into - &w_def_from;
+      +                let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1);
+      +                Some(self.union_state(t1_gated, t2_gated))
+      +            },
+                   (Some(t), None) | (None, Some(t)) => Some(t),
+                   (None, None) => None,
+               };
+               new_transitions.default = new_def_tgt_id;
+               new_trans_weight_default = if new_def_tgt_id.is_some() {
+      -            let w_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      -            let w_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      -            Some(w_from | w_into)
+      +            Some(w_def_from | w_def_into)
+               } else {
+                   None
+               };
+       
+               // Exception transitions
+               for &ch in &critical_points {
+                   let tgt_from = get_target(&s_from, ch);
+                   let tgt_into = get_target(&s_into_orig, ch);
+      +            let w_from = get_weight(&s_from, ch);
+      +            let w_into = get_weight(&s_into_orig, ch);
+       
+                   let new_exc_tgt_id = match (tgt_from, tgt_into) {
+      -                (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+      +                (Some(t1), Some(t2)) => if t1 == t2 {
+      +                    Some(t1)
+      +                } else {
+      +                    let to_exclude_from_t2 = &w_from - &w_into;
+      +                    let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2);
+      +                    let to_exclude_from_t1 = &w_into - &w_from;
+      +                    let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1);
+      +                    Some(self.union_state(t1_gated, t2_gated))
+      +                },
+                       (Some(t), None) | (None, Some(t)) => Some(t),
+                       (None, None) => None,
+                   };
+       
+                   if new_exc_tgt_id != new_def_tgt_id {
+                       if let Some(tgt_id) = new_exc_tgt_id {
+                           new_transitions.exceptions.insert(ch, tgt_id);
+      -                    new_trans_weights_exceptions.insert(ch, get_weight(&s_from, ch) | get_weight(&s_into_orig, ch));
+      +                    new_trans_weights_exceptions.insert(ch, w_from | w_into);
+                       }
+                   }
+               }
 
       ```
     metadata:
@@ -8052,7 +8275,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor DWA::concatenate to simplify
-      final weight handling and add test case for union logic"'
+  - user: 'Changes committed with message: "Fix DWA state union by gating target states
+      with weight exclusion before merging"'
     metadata:
 ...

@@ -377,6 +377,24 @@ impl DWAState {
             *w &= weight;
         }
     }
+
+    /// Subtracts a weight from all weights in this state.
+    pub fn exclude_weight(&mut self, weight: &Weight) {
+        if let Some(fw) = &mut self.final_weight {
+            *fw -= weight;
+            if fw.is_empty() {
+                self.final_weight = None;
+            }
+        }
+
+        if let Some(twd) = &mut self.trans_weight_default {
+            *twd -= weight;
+        }
+
+        for w in self.trans_weights_exceptions.values_mut() {
+            *w -= weight;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -427,6 +445,16 @@ impl DWAStates {
         self[state_id].apply_weight(weight);
     }
 
+    pub fn exclude_weight_from_state(&mut self, state_id: StateID, weight: &Weight) -> StateID {
+        assert!(state_id < self.len(), "state_id out of bounds");
+        if weight.is_empty() {
+            return state_id;
+        }
+        let new_id = self.copy_state(state_id);
+        self[new_id].exclude_weight(weight);
+        new_id
+    }
+
     pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID) {
         assert!(s_from_id < self.len(), "s_from_id out of bounds");
         assert!(s_into_id < self.len(), "s_into_id out of bounds");
@@ -465,16 +493,24 @@ impl DWAStates {
         // Default transition
         let def_tgt_from = s_from.transitions.default;
         let def_tgt_into = s_into_orig.transitions.default;
+        let w_def_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+        let w_def_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
         let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
-            (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+            (Some(t1), Some(t2)) => if t1 == t2 {
+                Some(t1)
+            } else {
+                let to_exclude_from_t2 = &w_def_from - &w_def_into;
+                let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2);
+                let to_exclude_from_t1 = &w_def_into - &w_def_from;
+                let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1);
+                Some(self.union_state(t1_gated, t2_gated))
+            },
             (Some(t), None) | (None, Some(t)) => Some(t),
             (None, None) => None,
         };
         new_transitions.default = new_def_tgt_id;
         new_trans_weight_default = if new_def_tgt_id.is_some() {
-            let w_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-            let w_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-            Some(w_from | w_into)
+            Some(w_def_from | w_def_into)
         } else {
             None
         };
@@ -483,9 +519,19 @@ impl DWAStates {
         for &ch in &critical_points {
             let tgt_from = get_target(&s_from, ch);
             let tgt_into = get_target(&s_into_orig, ch);
+            let w_from = get_weight(&s_from, ch);
+            let w_into = get_weight(&s_into_orig, ch);
 
             let new_exc_tgt_id = match (tgt_from, tgt_into) {
-                (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+                (Some(t1), Some(t2)) => if t1 == t2 {
+                    Some(t1)
+                } else {
+                    let to_exclude_from_t2 = &w_from - &w_into;
+                    let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2);
+                    let to_exclude_from_t1 = &w_into - &w_from;
+                    let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1);
+                    Some(self.union_state(t1_gated, t2_gated))
+                },
                 (Some(t), None) | (None, Some(t)) => Some(t),
                 (None, None) => None,
             };
@@ -493,7 +539,7 @@ impl DWAStates {
             if new_exc_tgt_id != new_def_tgt_id {
                 if let Some(tgt_id) = new_exc_tgt_id {
                     new_transitions.exceptions.insert(ch, tgt_id);
-                    new_trans_weights_exceptions.insert(ch, get_weight(&s_from, ch) | get_weight(&s_into_orig, ch));
+                    new_trans_weights_exceptions.insert(ch, w_from | w_into);
                 }
             }
         }
