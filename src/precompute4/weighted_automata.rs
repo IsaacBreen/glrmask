@@ -1599,22 +1599,18 @@ impl NWA {
             eps_cache: &'a mut HashMap<NWAStateID, Vec<(NWAStateID, Weight)>>,
             ex_cache: &'a mut HashMap<NWAStateID, HashMap<i16, Vec<(NWAStateID, Weight)>>>,
         ) -> Option<&'a Vec<(NWAStateID, Weight)>> {
-            if let Some(cached_vec) = ex_cache.get(&sid).and_then(|m| m.get(&lbl)) {
-                return Some(cached_vec);
-            }
-
-            if let Some((to, wlbl)) = states[sid].transitions.get(&lbl) {
-                let mask = get_eps_mask(*to, states, fut, eps_cache);
-                let mut v: Vec<(NWAStateID, Weight)> = Vec::with_capacity(mask.len());
-                for (t, m) in mask.iter() {
-                    let w = m & wlbl;
-                    if !w.is_empty() { v.push((*t, w)); }
+            if !ex_cache.get(&sid).map_or(false, |m| m.contains_key(&lbl)) {
+                if let Some((to, wlbl)) = states[sid].transitions.get(&lbl) {
+                    let mask = get_eps_mask(*to, states, fut, eps_cache);
+                    let mut v: Vec<(NWAStateID, Weight)> = Vec::with_capacity(mask.len());
+                    for (t, m) in mask.iter() {
+                        let w = m & wlbl;
+                        if !w.is_empty() { v.push((*t, w)); }
+                    }
+                    ex_cache.entry(sid).or_default().insert(lbl, v);
                 }
-                ex_cache.entry(sid).or_default().insert(lbl, v);
-                return ex_cache.get(&sid).and_then(|m| m.get(&lbl));
             }
-
-            None
+            ex_cache.get(&sid).and_then(|m| m.get(&lbl))
         }
 
         // Canonicalization key type
