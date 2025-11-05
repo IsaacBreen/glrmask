@@ -3859,7 +3859,7 @@ local_system:
               }
 
               if STOCHASTIC_VALIDATION {
-                  // Validate U against A and B via stochastic sampling.
+                  // Validate C against A and B via stochastic sampling.
                   DWA::stochastic_validate_concatenate(self, other, &new_dwa);
               }
 
@@ -4911,6 +4911,94 @@ local_system:
 
               let u = left.union(&right);
               DWA::stochastic_validate_union(&left, &right, &u);
+          }
+
+          #[test]
+          fn test_concatenate_complex_from_attachment() {
+              fn neg(x: i16) -> i16 {
+                  i16::MIN + x
+              }
+
+              // --- Build LEFT DWA ---
+              let mut left = DWA::new();
+              for _ in 0..25 {
+                  left.add_state();
+              }
+              left.body.start_state = 25;
+              assert_eq!(left.states.len(), 26);
+
+              let w_all = Weight::all();
+              let w_01 = Weight::from_iter(0..=1);
+
+              // State 0
+              left.add_transition(0, 2, 9, w_all.clone()).unwrap();
+              left.add_transition(0, 4, 1, w_all.clone()).unwrap();
+              left.add_transition(0, 5, 3, w_all.clone()).unwrap();
+              left.add_transition(0, 6, 11, w_all.clone()).unwrap();
+              left.add_transition(0, 8, 12, w_all.clone()).unwrap();
+              left.add_transition(0, 9, 4, w_all.clone()).unwrap();
+              left.add_transition(0, 10, 5, w_all.clone()).unwrap();
+              // State 3
+              left.add_transition(3, 7, 4, w_all.clone()).unwrap();
+              // State 4
+              left.add_transition(4, 0, 13, w_all.clone()).unwrap();
+              left.add_transition(4, 3, 17, w_all.clone()).unwrap();
+              left.add_transition(4, 7, 21, w_all.clone()).unwrap();
+              // State 5
+              left.add_transition(5, 5, 3, w_all.clone()).unwrap();
+              // State 6
+              left.add_transition(6, neg(5), 7, w_all.clone()).unwrap();
+              // State 7
+              left.add_transition(7, neg(10), 8, w_all.clone()).unwrap();
+              // State 8
+              left.set_final_weight(8, w_all.clone()).unwrap();
+              // State 9
+              left.set_default_transition(9, 10, w_all.clone()).unwrap();
+              // State 10
+              left.set_default_transition(10, 2, w_all.clone()).unwrap();
+              // State 11
+              left.set_default_transition(11, 3, w_all.clone()).unwrap();
+              // State 12
+              left.set_default_transition(12, 4, w_all.clone()).unwrap();
+              // State 13
+              left.add_transition(13, neg(0), 14, w_all.clone()).unwrap();
+              // State 14
+              left.add_transition(14, neg(5), 15, w_all.clone()).unwrap();
+              // State 15
+              left.add_transition(15, neg(10), 16, w_all.clone()).unwrap();
+              // State 16
+              left.set_final_weight(16, w_all.clone()).unwrap();
+              // State 17
+              left.add_transition(17, neg(3), 18, w_all.clone()).unwrap();
+              // State 18
+              left.add_transition(18, neg(5), 19, w_all.clone()).unwrap();
+              // State 19
+              left.add_transition(19, neg(10), 20, w_all.clone()).unwrap();
+              // State 20
+              left.set_final_weight(20, w_all.clone()).unwrap();
+              // State 21
+              left.add_transition(21, neg(7), 22, w_all.clone()).unwrap();
+              // State 22
+              left.add_transition(22, neg(5), 23, w_all.clone()).unwrap();
+              // State 23
+              left.add_transition(23, neg(10), 24, w_all.clone()).unwrap();
+              // State 24
+              left.set_final_weight(24, w_all.clone()).unwrap();
+              // State 25
+              left.add_transition(25, 2, 9, w_01.clone()).unwrap();
+              left.add_transition(25, 4, 1, w_01.clone()).unwrap();
+              left.add_transition(25, 5, 3, w_01.clone()).unwrap();
+              left.add_transition(25, 6, 11, w_01.clone()).unwrap();
+              left.add_transition(25, 8, 12, w_01.clone()).unwrap();
+              left.add_transition(25, 9, 4, w_01.clone()).unwrap();
+              left.add_transition(25, 10, 5, w_01.clone()).unwrap();
+
+              // --- Build RIGHT DWA ---
+              let mut right = DWA::new();
+              right.set_final_weight(0, Weight::all()).unwrap();
+
+              let c = left.concatenate(&right);
+              DWA::stochastic_validate_concatenate(&left, &right, &c);
           }
       }
   diffs_applied_this_send: true
@@ -7418,38 +7506,82 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata.rs
-  - user: |2+
+  - user: |-
+      ```
+      LEFT:
+      DWA (start: 25)
+        State 0:
+          2 -> 9 (trans_weight: ALL)
+          4 -> 1 (trans_weight: ALL)
+          5 -> 3 (trans_weight: ALL)
+          6 -> 11 (trans_weight: ALL)
+          8 -> 12 (trans_weight: ALL)
+          9 -> 4 (trans_weight: ALL)
+          10 -> 5 (trans_weight: ALL)
+        State 1:
+        State 2:
+        State 3:
+          7 -> 4 (trans_weight: ALL)
+        State 4:
+          0 -> 13 (trans_weight: ALL)
+          3 -> 17 (trans_weight: ALL)
+          7 -> 21 (trans_weight: ALL)
+        State 5:
+          5 -> 3 (trans_weight: ALL)
+        State 6:
+          neg(5) -> 7 (trans_weight: ALL)
+        State 7:
+          neg(10) -> 8 (trans_weight: ALL)
+        State 8:
+          final_weight: ALL
+        State 9:
+          * -> 10 (trans_weight: ALL)
+        State 10:
+          * -> 2 (trans_weight: ALL)
+        State 11:
+          * -> 3 (trans_weight: ALL)
+        State 12:
+          * -> 4 (trans_weight: ALL)
+        State 13:
+          neg(0) -> 14 (trans_weight: ALL)
+        State 14:
+          neg(5) -> 15 (trans_weight: ALL)
+        State 15:
+          neg(10) -> 16 (trans_weight: ALL)
+        State 16:
+          final_weight: ALL
+        State 17:
+          neg(3) -> 18 (trans_weight: ALL)
+        State 18:
+          neg(5) -> 19 (trans_weight: ALL)
+        State 19:
+          neg(10) -> 20 (trans_weight: ALL)
+        State 20:
+          final_weight: ALL
+        State 21:
+          neg(7) -> 22 (trans_weight: ALL)
+        State 22:
+          neg(5) -> 23 (trans_weight: ALL)
+        State 23:
+          neg(10) -> 24 (trans_weight: ALL)
+        State 24:
+          final_weight: ALL
+        State 25:
+          2 -> 9 (trans_weight: [0..=1])
+          4 -> 1 (trans_weight: [0..=1])
+          5 -> 3 (trans_weight: [0..=1])
+          6 -> 11 (trans_weight: [0..=1])
+          8 -> 12 (trans_weight: [0..=1])
+          9 -> 4 (trans_weight: [0..=1])
+          10 -> 5 (trans_weight: [0..=1])
 
-      thread 'precompute4::weighted_automata::tests::test_union_complex_from_attachment' (2645496) panicked at src/precompute4/weighted_automata.rs:1187:17:
-      assertion `left == right` failed: Union weight mismatch vs expected A∪B.
-      word: [8, 'i', 3, neg(3), neg(5), neg(10), 5, 7, 0, neg(0), neg(5), neg(10)]
-      A(w): []
-      B(w): [0]
-      U(w): [0..=1]
-      Expected: [0]
+      RIGHT:
+      DWA (start: 0)
+        State 0:
+          final_weight: ALL
+      ```
 
-        left: 0..=1
-       right: 0..=0
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::weighted_automata::DWA::stochastic_validate_union
-                   at ./src/precompute4/weighted_automata.rs:1187:17
-         5: sep1::precompute4::weighted_automata::tests::test_union_complex_from_attachment
-                   at ./src/precompute4/weighted_automata.rs:2290:9
-         6: sep1::precompute4::weighted_automata::tests::test_union_complex_from_attachment::{{closure}}
-                   at ./src/precompute4/weighted_automata.rs:2115:44
-         7: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         8: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
+      Add a test for concatenating these two DWA. Use stochastic testing.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7469,91 +7601,146 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As an AI assistant, I'd be happy to help you with your code. Dealing with test failures can be tricky, but let's walk through the issues and get them resolved.
+      Of course. Here are the step-by-step instructions to add the test and fix the stochastic validation calls, followed by the git diff.
 
-      The panic you're seeing in `test_union_complex_from_attachment` points to a fundamental issue in how weights are combined in the `union` operation. The product construction for weighted automata requires careful handling of weights from the underlying semiring, and the current implementation using set union (`|`) for transition weights leads to incorrect results.
+      ### Step-by-step Instructions
 
-      While the `union` function has this deep issue, I've also found a few other bugs in the provided code, particularly in the `concatenate` function, which seems to suffer from similar logical errors in weight combination. I'll provide fixes for these issues.
+      I'll make three changes to `src/precompute4/weighted_automata.rs`:
 
-      Here are the step-by-step instructions to apply the fixes:
+      1.  **Correct the stochastic validation call in `DWA::union`**: I'll locate the `union` method and change the incorrect call from `stochastic_validate_concatenate` to `stochastic_validate_union` within the `if STOCHASTIC_VALIDATION` block at the end of the function. I will also update the comment to reflect this.
 
-      ### `src/precompute4/weighted_automata.rs`
+      2.  **Correct the stochastic validation call in `DWA::concatenate`**: I'll find the `concatenate` method and, in the `if STOCHASTIC_VALIDATION` block at the end, replace the incorrect `stochastic_validate_union` call with `stochastic_validate_concatenate`, and update its comment.
 
-      1.  **Correct the stochastic validation call in `DWA::union`:**
-          In the `union` function, there's a copy-paste error inside the `if STOCHASTIC_VALIDATION` block. It calls `stochastic_validate_concatenate` when it should be calling `stochastic_validate_union`.
+      3.  **Add the new concatenation test**: I will add a new test function, `test_concatenate_complex_from_attachment`, to the end of the `tests` module. This test will:
+          *   Programmatically construct the `LEFT` and `RIGHT` DWAs from your description.
+          *   Call `left.concatenate(&right)`.
+          *   Invoke `DWA::stochastic_validate_concatenate` to verify the result.
 
-      2.  **Fix the final weight calculation in `DWA::concatenate`:**
-          The logic for calculating `agg_final_weight` inside `DWA::concatenate` is incorrect. The `if/else` based on `right_accepts_epsilon` doesn't correctly combine the two ways a concatenated word can be accepted. I'll replace this block with logic that correctly unions the weights from both possibilities:
-          *   The left automaton accepts the word and the right automaton accepts epsilon.
-          *   The right automaton accepts a suffix of the word.
+      ### Git Diff
 
-      3.  **Correct the stochastic validation call in `DWA::concatenate`:**
-          Similar to the `union` function, `concatenate` has a copy-paste error in its validation block, calling `stochastic_validate_union` instead of `stochastic_validate_concatenate`.
-
-      Below are the git diffs corresponding to these changes.
-
-      ***
+      Here is the git diff for `src/precompute4/weighted_automata.rs`:
 
       ```diff
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -1032,7 +1032,7 @@
+      @@ -1203,9 +1203,9 @@
+               }
        
                if STOCHASTIC_VALIDATION {
-                   // Validate C against A and B via stochastic sampling.
+      -            // Validate C against A and B via stochastic sampling.
       -            DWA::stochastic_validate_concatenate(self, other, &new_dwa);
+      +            // Validate U against A and B via stochastic sampling.
       +            DWA::stochastic_validate_union(self, other, &new_dwa);
                }
        
                new_dwa
-      @@ -1337,23 +1337,20 @@
-       
-                   let new_state = &mut new_dwa.states[new_id];
-       
-      -            let agg_final_weight = if right_accepts_epsilon {
-      -                s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
-      -            } else {
-      -                let mut fw = Weight::zeros();
-      -                for &id1 in &ids1 {
-      -                    if id1 != sink1 {
-      -                        if let Some(w) = &other.states[id1].final_weight {
-      -                            fw |= w;
-      -                        }
-      +            let s0_fw = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-      +            let other_epsilon_w = other.states[right_start].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-      +
-      +            let mut final_w_from_b = Weight::zeros();
-      +            for &id1 in &ids1 {
-      +                if id1 != sink1 {
-      +                    if let Some(w) = &other.states[id1].final_weight {
-      +                        final_w_from_b |= w;
-                           }
-                       }
-      -                fw
-      -            };
-      +            }
-      +            let agg_final_weight = (s0_fw & other_epsilon_w) | final_w_from_b;
-       
-                   if !agg_final_weight.is_empty() {
-                       new_state.final_weight = Some(agg_final_weight);
-                   }
-       
-                   // Collect critical points
-      @@ -1420,7 +1417,7 @@
+           }
+      @@ -1552,9 +1552,9 @@
+               }
        
                if STOCHASTIC_VALIDATION {
-                   // Validate U against A and B via stochastic sampling.
+      -            // Validate U against A and B via stochastic sampling.
       -            DWA::stochastic_validate_union(self, other, &new_dwa);
+      +            // Validate C against A and B via stochastic sampling.
       +            DWA::stochastic_validate_concatenate(self, other, &new_dwa);
                }
        
                new_dwa
+      @@ -2372,4 +2372,83 @@
+               let u = left.union(&right);
+               DWA::stochastic_validate_union(&left, &right, &u);
+           }
+      +
+      +    #[test]
+      +    fn test_concatenate_complex_from_attachment() {
+      +        fn neg(x: i16) -> i16 {
+      +            i16::MIN + x
+      +        }
+      +
+      +        // --- Build LEFT DWA ---
+      +        let mut left = DWA::new();
+      +        for _ in 0..25 {
+      +            left.add_state();
+      +        }
+      +        left.body.start_state = 25;
+      +        assert_eq!(left.states.len(), 26);
+      +
+      +        let w_all = Weight::all();
+      +        let w_01 = Weight::from_iter(0..=1);
+      +
+      +        // State 0
+      +        left.add_transition(0, 2, 9, w_all.clone()).unwrap();
+      +        left.add_transition(0, 4, 1, w_all.clone()).unwrap();
+      +        left.add_transition(0, 5, 3, w_all.clone()).unwrap();
+      +        left.add_transition(0, 6, 11, w_all.clone()).unwrap();
+      +        left.add_transition(0, 8, 12, w_all.clone()).unwrap();
+      +        left.add_transition(0, 9, 4, w_all.clone()).unwrap();
+      +        left.add_transition(0, 10, 5, w_all.clone()).unwrap();
+      +        // State 3
+      +        left.add_transition(3, 7, 4, w_all.clone()).unwrap();
+      +        // State 4
+      +        left.add_transition(4, 0, 13, w_all.clone()).unwrap();
+      +        left.add_transition(4, 3, 17, w_all.clone()).unwrap();
+      +        left.add_transition(4, 7, 21, w_all.clone()).unwrap();
+      +        // State 5
+      +        left.add_transition(5, 5, 3, w_all.clone()).unwrap();
+      +        // State 6
+      +        left.add_transition(6, neg(5), 7, w_all.clone()).unwrap();
+      +        // State 7
+      +        left.add_transition(7, neg(10), 8, w_all.clone()).unwrap();
+      +        // State 8
+      +        left.set_final_weight(8, w_all.clone()).unwrap();
+      +        // State 9
+      +        left.set_default_transition(9, 10, w_all.clone()).unwrap();
+      +        // State 10
+      +        left.set_default_transition(10, 2, w_all.clone()).unwrap();
+      +        // State 11
+      +        left.set_default_transition(11, 3, w_all.clone()).unwrap();
+      +        // State 12
+      +        left.set_default_transition(12, 4, w_all.clone()).unwrap();
+      +        // State 13
+      +        left.add_transition(13, neg(0), 14, w_all.clone()).unwrap();
+      +        // State 14
+      +        left.add_transition(14, neg(5), 15, w_all.clone()).unwrap();
+      +        // State 15
+      +        left.add_transition(15, neg(10), 16, w_all.clone()).unwrap();
+      +        // State 16
+      +        left.set_final_weight(16, w_all.clone()).unwrap();
+      +        // State 17
+      +        left.add_transition(17, neg(3), 18, w_all.clone()).unwrap();
+      +        // State 18
+      +        left.add_transition(18, neg(5), 19, w_all.clone()).unwrap();
+      +        // State 19
+      +        left.add_transition(19, neg(10), 20, w_all.clone()).unwrap();
+      +        // State 20
+      +        left.set_final_weight(20, w_all.clone()).unwrap();
+      +        // State 21
+      +        left.add_transition(21, neg(7), 22, w_all.clone()).unwrap();
+      +        // State 22
+      +        left.add_transition(22, neg(5), 23, w_all.clone()).unwrap();
+      +        // State 23
+      +        left.add_transition(23, neg(10), 24, w_all.clone()).unwrap();
+      +        // State 24
+      +        left.set_final_weight(24, w_all.clone()).unwrap();
+      +        // State 25
+      +        left.add_transition(25, 2, 9, w_01.clone()).unwrap();
+      +        left.add_transition(25, 4, 1, w_01.clone()).unwrap();
+      +        left.add_transition(25, 5, 3, w_01.clone()).unwrap();
+      +        left.add_transition(25, 6, 11, w_01.clone()).unwrap();
+      +        left.add_transition(25, 8, 12, w_01.clone()).unwrap();
+      +        left.add_transition(25, 9, 4, w_01.clone()).unwrap();
+      +        left.add_transition(25, 10, 5, w_01.clone()).unwrap();
+      +
+      +        // --- Build RIGHT DWA ---
+      +        let mut right = DWA::new();
+      +        right.set_final_weight(0, Weight::all()).unwrap();
+      +
+      +        let c = left.concatenate(&right);
+      +        DWA::stochastic_validate_concatenate(&left, &right, &c);
+      +    }
+       }
 
       ```
-
-      These changes correct clear bugs in your automata logic. While the fix for `concatenate` doesn't directly address the panic in the `union` test, the underlying problem of incorrect weight combination is systemic. Correcting it in `concatenate` is a necessary step toward making the automata operations robust. The issue in `union` is more fundamental and may require a more significant algorithmic change, but the provided fixes address the immediate, unambiguous errors in the file.
-
-      Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -7564,7 +7751,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix weight combination logic in concatenate
-      and correct stochastic validation calls in union/concatenate"'
+  - user: 'Changes committed with message: "Fix stochastic validation calls in DWA::union/concatenate
+      and add test for complex DWA concatenation"'
     metadata:
 ...

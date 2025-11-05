@@ -1375,7 +1375,7 @@ impl DWA {
         }
 
         if STOCHASTIC_VALIDATION {
-            // Validate U against A and B via stochastic sampling.
+            // Validate C against A and B via stochastic sampling.
             DWA::stochastic_validate_concatenate(self, other, &new_dwa);
         }
 
@@ -2427,5 +2427,93 @@ mod tests {
 
         let u = left.union(&right);
         DWA::stochastic_validate_union(&left, &right, &u);
+    }
+
+    #[test]
+    fn test_concatenate_complex_from_attachment() {
+        fn neg(x: i16) -> i16 {
+            i16::MIN + x
+        }
+
+        // --- Build LEFT DWA ---
+        let mut left = DWA::new();
+        for _ in 0..25 {
+            left.add_state();
+        }
+        left.body.start_state = 25;
+        assert_eq!(left.states.len(), 26);
+
+        let w_all = Weight::all();
+        let w_01 = Weight::from_iter(0..=1);
+
+        // State 0
+        left.add_transition(0, 2, 9, w_all.clone()).unwrap();
+        left.add_transition(0, 4, 1, w_all.clone()).unwrap();
+        left.add_transition(0, 5, 3, w_all.clone()).unwrap();
+        left.add_transition(0, 6, 11, w_all.clone()).unwrap();
+        left.add_transition(0, 8, 12, w_all.clone()).unwrap();
+        left.add_transition(0, 9, 4, w_all.clone()).unwrap();
+        left.add_transition(0, 10, 5, w_all.clone()).unwrap();
+        // State 3
+        left.add_transition(3, 7, 4, w_all.clone()).unwrap();
+        // State 4
+        left.add_transition(4, 0, 13, w_all.clone()).unwrap();
+        left.add_transition(4, 3, 17, w_all.clone()).unwrap();
+        left.add_transition(4, 7, 21, w_all.clone()).unwrap();
+        // State 5
+        left.add_transition(5, 5, 3, w_all.clone()).unwrap();
+        // State 6
+        left.add_transition(6, neg(5), 7, w_all.clone()).unwrap();
+        // State 7
+        left.add_transition(7, neg(10), 8, w_all.clone()).unwrap();
+        // State 8
+        left.set_final_weight(8, w_all.clone()).unwrap();
+        // State 9
+        left.set_default_transition(9, 10, w_all.clone()).unwrap();
+        // State 10
+        left.set_default_transition(10, 2, w_all.clone()).unwrap();
+        // State 11
+        left.set_default_transition(11, 3, w_all.clone()).unwrap();
+        // State 12
+        left.set_default_transition(12, 4, w_all.clone()).unwrap();
+        // State 13
+        left.add_transition(13, neg(0), 14, w_all.clone()).unwrap();
+        // State 14
+        left.add_transition(14, neg(5), 15, w_all.clone()).unwrap();
+        // State 15
+        left.add_transition(15, neg(10), 16, w_all.clone()).unwrap();
+        // State 16
+        left.set_final_weight(16, w_all.clone()).unwrap();
+        // State 17
+        left.add_transition(17, neg(3), 18, w_all.clone()).unwrap();
+        // State 18
+        left.add_transition(18, neg(5), 19, w_all.clone()).unwrap();
+        // State 19
+        left.add_transition(19, neg(10), 20, w_all.clone()).unwrap();
+        // State 20
+        left.set_final_weight(20, w_all.clone()).unwrap();
+        // State 21
+        left.add_transition(21, neg(7), 22, w_all.clone()).unwrap();
+        // State 22
+        left.add_transition(22, neg(5), 23, w_all.clone()).unwrap();
+        // State 23
+        left.add_transition(23, neg(10), 24, w_all.clone()).unwrap();
+        // State 24
+        left.set_final_weight(24, w_all.clone()).unwrap();
+        // State 25
+        left.add_transition(25, 2, 9, w_01.clone()).unwrap();
+        left.add_transition(25, 4, 1, w_01.clone()).unwrap();
+        left.add_transition(25, 5, 3, w_01.clone()).unwrap();
+        left.add_transition(25, 6, 11, w_01.clone()).unwrap();
+        left.add_transition(25, 8, 12, w_01.clone()).unwrap();
+        left.add_transition(25, 9, 4, w_01.clone()).unwrap();
+        left.add_transition(25, 10, 5, w_01.clone()).unwrap();
+
+        // --- Build RIGHT DWA ---
+        let mut right = DWA::new();
+        right.set_final_weight(0, Weight::all()).unwrap();
+
+        let c = left.concatenate(&right);
+        DWA::stochastic_validate_concatenate(&left, &right, &c);
     }
 }
