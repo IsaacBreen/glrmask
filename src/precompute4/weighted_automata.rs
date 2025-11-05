@@ -26,7 +26,7 @@ pub struct SimpleBitset(pub RangeSetBlaze<usize>);
 
 // --- Stochastic validation controls and RNG ---
 // Toggle this to true to enable stochastic validation in union() and concatenate().
-const STOCHASTIC_VALIDATION: bool = false;
+const STOCHASTIC_VALIDATION: bool = true;
 const VALIDATION_SAMPLES: usize = 32;
 const VALIDATION_MAX_STEPS: usize = 12;
 const SAMPLING_TRIES: usize = 100;
@@ -1384,11 +1384,11 @@ impl DWA {
                     w.extend_from_slice(&wb_word);
                     let wc = c.eval_word_weight(&w);
                     let expected_simple = &wa & &wb;
-                    assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nA(word): {}\nB(word): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", wa, wb, a, b, c);
-                    assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wa, wb, wc, expected_simple, a, b, c);
+                    assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nword_a: {}\nword_b: {}\nA(word_a): {}\nB(word_b): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), wa, wb, a, b, c);
+                    assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword_a: {}\nword_b: {}\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wa, wb, wc, expected_simple, a, b, c);
                     // Also verify full expected across all splits equals C's result
                     let expected_all = DWA::expected_concat_weight(a, b, &w);
-                    assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected_all, a, b, c);
+                    assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword_a: {}\nword_b: {}\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wc, expected_all, a, b, c);
                 }
             }
 
