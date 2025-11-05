@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 pub fn dwa_to_precompute3(
     dwa: &DWA,
     trie3_god: &Trie3GodWrapper,
-    _internal_max_llm_token: usize,
+    internal_max_llm_token: usize,
     max_parser_state_id: usize,
 ) -> PrecomputeNode3Index {
     let mut dwa_state_to_trie_node: BTreeMap<StateID, PrecomputeNode3Index> = BTreeMap::new();
@@ -15,7 +15,7 @@ pub fn dwa_to_precompute3(
 
     // Create all nodes first
     for (dwa_id, dwa_state) in dwa.states.0.iter().enumerate() {
-        let live_tokens = LLMTokenBV::from(dwa_state.weight.0.clone());
+        let live_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
         // All nodes from DWA states are internal; a shared 'end_node' will represent final states.
         let contents = PrecomputedNodeContents { end: false, live_tokens };
         let trie_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(contents)));
