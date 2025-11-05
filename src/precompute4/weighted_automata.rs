@@ -1432,8 +1432,6 @@ impl DWA {
             let new_id = *composition_to_new_id.get(&(id0, rf.clone())).unwrap();
             let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
 
-            let new_state = &mut new_dwa.states[new_id];
-
             // Aggregate final weight: union over active right branches of (gate ∧ right.final).
             let mut agg_final = Weight::zeros();
             for (&id1, gate) in &rf {
@@ -1447,9 +1445,11 @@ impl DWA {
                     }
                 }
             }
-            if !agg_final.is_empty() {
-                new_state.final_weight = Some(agg_final);
-            }
+            let final_weight = if !agg_final.is_empty() {
+                Some(agg_final)
+            } else {
+                None
+            };
 
             // Collect critical points (characters with exceptions) from left and all active right states.
             let mut critical_points = BTreeSet::new();
@@ -1518,14 +1518,17 @@ impl DWA {
 
             let edge_w_def = &tw_left_def | &right_def_weight_sum;
             let def_comp = (def_tgt0, next_rf_def.clone());
-            if s0_has_default || any_s1_has_default {
+            let (new_def_tgt, new_def_weight) = if s0_has_default || any_s1_has_default {
                 let new_def_tgt =
                     get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                new_state.transitions.default = Some(new_def_tgt);
-                new_state.trans_weight_default = Some(edge_w_def);
-            }
+                (Some(new_def_tgt), Some(edge_w_def))
+            } else {
+                (None, None)
+            };
 
             // Exception transitions: per critical character
+            let mut new_exceptions = BTreeMap::new();
+            let mut new_exception_weights = BTreeMap::new();
             for &ch in &critical_points {
                 // Left target and weight for this char
                 let tgt0_exc = s0
@@ -1586,11 +1589,19 @@ impl DWA {
                 if exc_comp != def_comp {
                     let new_exc_tgt =
                         get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                    new_state.transitions.exceptions.insert(ch, new_exc_tgt);
+                    new_exceptions.insert(ch, new_exc_tgt);
                     let edge_w_exc = &tw_left_exc | &right_exc_weight_sum;
-                    new_state.trans_weights_exceptions.insert(ch, edge_w_exc);
+                    new_exception_weights.insert(ch, edge_w_exc);
                 }
             }
+
+            // Commit all computed values to the new state.
+            let new_state = &mut new_dwa.states[new_id];
+            new_state.final_weight = final_weight;
+            new_state.transitions.default = new_def_tgt;
+            new_state.trans_weight_default = new_def_weight;
+            new_state.transitions.exceptions = new_exceptions;
+            new_state.trans_weights_exceptions = new_exception_weights;
         }
 
         if STOCHASTIC_VALIDATION {
