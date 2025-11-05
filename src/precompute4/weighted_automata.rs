@@ -7,7 +7,7 @@ use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // --- Part 1: SimpleBitset ---
@@ -235,17 +235,43 @@ impl<'a> BitOr<SimpleBitset> for &'a SimpleBitset {
     }
 }
 
+impl SubAssign<&SimpleBitset> for SimpleBitset {
+    fn sub_assign(&mut self, rhs: &SimpleBitset) {
+        self.0 = &self.0 - &rhs.0;
+    }
+}
+
+impl SubAssign<SimpleBitset> for SimpleBitset {
+    fn sub_assign(&mut self, rhs: SimpleBitset) {
+        self.0 = &self.0 - &rhs.0;
+    }
+}
+
+impl Sub<SimpleBitset> for SimpleBitset {
+    type Output = SimpleBitset;
+    fn sub(self, rhs: SimpleBitset) -> Self::Output {
+        &self - &rhs
+    }
+    }
+
+impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
+    type Output = SimpleBitset;
+    fn sub(self, rhs: &'a SimpleBitset) -> Self::Output {
+        SimpleBitset(&self.0 - &rhs.0)
+    }
+}
+
 impl Not for SimpleBitset {
     type Output = SimpleBitset;
     fn not(self) -> Self::Output {
-        SimpleBitset(self.0.complement())
+        &SimpleBitset::all() - &self
     }
 }
 
 impl Not for &SimpleBitset {
     type Output = SimpleBitset;
     fn not(self) -> Self::Output {
-        SimpleBitset(self.0.complement())
+        &SimpleBitset::all() - self
     }
 }
 
