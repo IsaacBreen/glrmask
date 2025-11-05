@@ -1834,323 +1834,6 @@ local_system:
 
               assert_dwa_equivalent(c, expected);
           }
-
-          #[test]
-          fn test_union_complex_from_attachment() {
-              fn neg(x: i16) -> i16 {
-                  i16::MIN + x
-              }
-
-              // --- Build LEFT DWA ---
-              let mut left = DWA::new();
-              for _ in 0..47 {
-                  left.add_state();
-              }
-
-              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 2, 2, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 3, 3, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 4, 4, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 5, 5, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 6, 6, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 7, 7, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 8, 8, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 9, 9, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 10, 10, Weight::from_item(1)).unwrap();
-              left.add_transition(1, neg(0), 11, Weight::all()).unwrap();
-              left.set_default_transition(2, 12, Weight::all()).unwrap();
-              left.add_transition(3, neg(3), 13, Weight::all()).unwrap();
-              left.add_transition(5, 3, 14, Weight::all()).unwrap();
-              left.add_transition(5, 7, 9, Weight::all()).unwrap();
-              left.set_default_transition(6, 5, Weight::all()).unwrap();
-              left.add_transition(7, neg(7), 15, Weight::all()).unwrap();
-              left.set_default_transition(8, 9, Weight::all()).unwrap();
-              left.add_transition(9, 3, 16, Weight::all()).unwrap();
-              left.add_transition(9, 7, 9, Weight::all()).unwrap();
-              left.add_transition(10, 5, 5, Weight::all()).unwrap();
-              left.add_transition(11, neg(9), 17, Weight::all()).unwrap();
-              left.set_default_transition(12, 18, Weight::all()).unwrap();
-              left.add_transition(13, neg(9), 19, Weight::all()).unwrap();
-              left.add_transition(14, neg(3), 20, Weight::all()).unwrap();
-              left.add_transition(15, neg(9), 21, Weight::all()).unwrap();
-              left.add_transition(16, neg(3), 22, Weight::all()).unwrap();
-              let w01 = Weight::from_iter(0..=1);
-              left.add_transition(17, 2, 23, w01.clone()).unwrap();
-              left.add_transition(17, 4, 24, w01.clone()).unwrap();
-              left.add_transition(17, 5, 25, w01.clone()).unwrap();
-              left.add_transition(17, 6, 26, w01.clone()).unwrap();
-              left.add_transition(17, 8, 27, w01.clone()).unwrap();
-              left.add_transition(17, 9, 28, w01.clone()).unwrap();
-              left.add_transition(17, 10, 29, w01.clone()).unwrap();
-              left.add_transition(19, 2, 23, w01.clone()).unwrap();
-              left.add_transition(19, 4, 24, w01.clone()).unwrap();
-              left.add_transition(19, 5, 25, w01.clone()).unwrap();
-              left.add_transition(19, 6, 26, w01.clone()).unwrap();
-              left.add_transition(19, 8, 27, w01.clone()).unwrap();
-              left.add_transition(19, 9, 28, w01.clone()).unwrap();
-              left.add_transition(19, 10, 29, w01.clone()).unwrap();
-              left.add_transition(20, neg(0), 30, Weight::all()).unwrap();
-              left.add_transition(21, 2, 23, w01.clone()).unwrap();
-              left.add_transition(21, 4, 24, w01.clone()).unwrap();
-              left.add_transition(21, 5, 25, w01.clone()).unwrap();
-              left.add_transition(21, 6, 26, w01.clone()).unwrap();
-              left.add_transition(21, 8, 27, w01.clone()).unwrap();
-              left.add_transition(21, 9, 28, w01.clone()).unwrap();
-              left.add_transition(21, 10, 29, w01.clone()).unwrap();
-              left.add_transition(22, neg(0), 31, Weight::all()).unwrap();
-              left.set_default_transition(23, 32, Weight::all()).unwrap();
-              left.add_transition(25, 7, 28, Weight::all()).unwrap();
-              left.set_default_transition(26, 25, Weight::all()).unwrap();
-              left.set_default_transition(27, 28, Weight::all()).unwrap();
-              left.add_transition(28, 0, 33, Weight::all()).unwrap();
-              left.add_transition(28, 3, 34, Weight::all()).unwrap();
-              left.add_transition(28, 7, 35, Weight::all()).unwrap();
-              left.add_transition(29, 5, 25, Weight::all()).unwrap();
-              left.add_transition(30, neg(9), 36, Weight::all()).unwrap();
-              left.add_transition(31, neg(9), 37, Weight::all()).unwrap();
-              left.set_default_transition(32, 38, Weight::all()).unwrap();
-              left.add_transition(33, neg(0), 39, Weight::all()).unwrap();
-              left.add_transition(34, neg(3), 40, Weight::all()).unwrap();
-              left.add_transition(35, neg(7), 41, Weight::all()).unwrap();
-              left.add_transition(36, 2, 23, w01.clone()).unwrap();
-              left.add_transition(36, 4, 24, w01.clone()).unwrap();
-              left.add_transition(36, 5, 25, w01.clone()).unwrap();
-              left.add_transition(36, 6, 26, w01.clone()).unwrap();
-              left.add_transition(36, 8, 27, w01.clone()).unwrap();
-              left.add_transition(36, 9, 28, w01.clone()).unwrap();
-              left.add_transition(36, 10, 29, w01.clone()).unwrap();
-              left.add_transition(37, 2, 23, w01.clone()).unwrap();
-              left.add_transition(37, 4, 24, w01.clone()).unwrap();
-              left.add_transition(37, 5, 25, w01.clone()).unwrap();
-              left.add_transition(37, 6, 26, w01.clone()).unwrap();
-              left.add_transition(37, 8, 27, w01.clone()).unwrap();
-              left.add_transition(37, 9, 28, w01.clone()).unwrap();
-              left.add_transition(37, 10, 29, w01.clone()).unwrap();
-              left.add_transition(39, neg(5), 42, Weight::all()).unwrap();
-              left.add_transition(40, neg(5), 43, Weight::all()).unwrap();
-              left.add_transition(41, neg(5), 44, Weight::all()).unwrap();
-              left.add_transition(42, neg(10), 45, Weight::all()).unwrap();
-              left.add_transition(43, neg(10), 46, Weight::all()).unwrap();
-              left.add_transition(44, neg(10), 47, Weight::all()).unwrap();
-              left.set_final_weight(45, Weight::all()).unwrap();
-              left.set_final_weight(46, Weight::all()).unwrap();
-              left.set_final_weight(47, Weight::all()).unwrap();
-
-              // --- Build RIGHT DWA ---
-              let mut right = DWA::new();
-              for _ in 0..42 {
-                  right.add_state();
-              }
-
-              right.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 4, 2, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 5, 3, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 6, 4, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 8, 5, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 9, 6, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 10, 7, Weight::from_item(0)).unwrap();
-              right.set_default_transition(1, 8, Weight::all()).unwrap();
-              right.add_transition(3, 7, 6, Weight::all()).unwrap();
-              right.set_default_transition(4, 3, Weight::all()).unwrap();
-              right.set_default_transition(5, 6, Weight::all()).unwrap();
-              right.add_transition(6, 0, 9, Weight::all()).unwrap();
-              right.add_transition(6, 3, 10, Weight::all()).unwrap();
-              right.add_transition(6, 7, 11, Weight::all()).unwrap();
-              right.add_transition(7, 5, 3, Weight::all()).unwrap();
-              right.set_default_transition(8, 12, Weight::all()).unwrap();
-              right.add_transition(9, neg(0), 13, Weight::all()).unwrap();
-              right.add_transition(10, neg(3), 14, Weight::all()).unwrap();
-              right.add_transition(11, neg(7), 15, Weight::all()).unwrap();
-              right.add_transition(13, neg(5), 16, Weight::all()).unwrap();
-              right.add_transition(14, neg(5), 17, Weight::all()).unwrap();
-              right.add_transition(15, neg(5), 18, Weight::all()).unwrap();
-              right.add_transition(16, neg(10), 19, Weight::all()).unwrap();
-              right.add_transition(17, neg(10), 20, Weight::all()).unwrap();
-              right.add_transition(18, neg(10), 21, Weight::all()).unwrap();
-              right.add_transition(19, 2, 22, w01.clone()).unwrap();
-              right.add_transition(19, 4, 23, w01.clone()).unwrap();
-              right.add_transition(19, 5, 24, w01.clone()).unwrap();
-              right.add_transition(19, 6, 25, w01.clone()).unwrap();
-              right.add_transition(19, 8, 26, w01.clone()).unwrap();
-              right.add_transition(19, 9, 27, w01.clone()).unwrap();
-              right.add_transition(19, 10, 28, w01.clone()).unwrap();
-              right.add_transition(20, 2, 22, w01.clone()).unwrap();
-              right.add_transition(20, 4, 23, w01.clone()).unwrap();
-              right.add_transition(20, 5, 24, w01.clone()).unwrap();
-              right.add_transition(20, 6, 25, w01.clone()).unwrap();
-              right.add_transition(20, 8, 26, w01.clone()).unwrap();
-              right.add_transition(20, 9, 27, w01.clone()).unwrap();
-              right.add_transition(20, 10, 28, w01.clone()).unwrap();
-              right.add_transition(21, 2, 22, w01.clone()).unwrap();
-              right.add_transition(21, 4, 23, w01.clone()).unwrap();
-              right.add_transition(21, 5, 24, w01.clone()).unwrap();
-              right.add_transition(21, 6, 25, w01.clone()).unwrap();
-              right.add_transition(21, 8, 26, w01.clone()).unwrap();
-              right.add_transition(21, 9, 27, w01.clone()).unwrap();
-              right.add_transition(21, 10, 28, w01.clone()).unwrap();
-              right.set_default_transition(22, 29, Weight::all()).unwrap();
-              right.add_transition(24, 7, 27, Weight::all()).unwrap();
-              right.set_default_transition(25, 24, Weight::all()).unwrap();
-              right.set_default_transition(26, 27, Weight::all()).unwrap();
-              right.add_transition(27, 0, 30, Weight::all()).unwrap();
-              right.add_transition(27, 3, 31, Weight::all()).unwrap();
-              right.add_transition(27, 7, 32, Weight::all()).unwrap();
-              right.add_transition(28, 5, 24, Weight::all()).unwrap();
-              right.set_default_transition(29, 33, Weight::all()).unwrap();
-              right.add_transition(30, neg(0), 34, Weight::all()).unwrap();
-              right.add_transition(31, neg(3), 35, Weight::all()).unwrap();
-              right.add_transition(32, neg(7), 36, Weight::all()).unwrap();
-              right.add_transition(34, neg(5), 37, Weight::all()).unwrap();
-              right.add_transition(35, neg(5), 38, Weight::all()).unwrap();
-              right.add_transition(36, neg(5), 39, Weight::all()).unwrap();
-              right.add_transition(37, neg(10), 40, Weight::all()).unwrap();
-              right.add_transition(38, neg(10), 41, Weight::all()).unwrap();
-              right.add_transition(39, neg(10), 42, Weight::all()).unwrap();
-              right.set_final_weight(40, Weight::all()).unwrap();
-              right.set_final_weight(41, Weight::all()).unwrap();
-              right.set_final_weight(42, Weight::all()).unwrap();
-
-              todo!();
-          }
-
-          #[test]
-          fn test_union_complex_from_attachment_simpified() {
-              fn neg(val: i16) -> i16 {
-                  val.wrapping_add(i16::MIN)
-              }
-
-              // Build left DWA
-              let mut left = DWA::new();
-              for _ in 0..20 {
-                  left.add_state();
-              }
-              assert_eq!(left.states.len(), 21);
-
-              // State 0
-              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 3, 2, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 5, 3, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 6, 4, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 7, 5, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 8, 4, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 9, 3, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 10, 6, Weight::from_item(1)).unwrap();
-              // State 1
-              left.add_transition(1, neg(0), 7, Weight::all()).unwrap();
-              // State 2
-              left.add_transition(2, neg(3), 7, Weight::all()).unwrap();
-              // State 3
-              left.add_transition(3, 3, 8, Weight::all()).unwrap();
-              left.add_transition(3, 7, 3, Weight::all()).unwrap();
-              // State 4
-              left.set_default_transition(4, 3, Weight::all()).unwrap();
-              // State 5
-              left.add_transition(5, neg(7), 7, Weight::all()).unwrap();
-              // State 6
-              left.add_transition(6, 5, 3, Weight::all()).unwrap();
-              // State 7
-              left.add_transition(7, neg(9), 9, Weight::all()).unwrap();
-              // State 8
-              left.add_transition(8, neg(3), 1, Weight::all()).unwrap();
-              // State 9
-              left.add_transition(9, 5, 10, Weight::from_iter(0..=1)).unwrap();
-              left.add_transition(9, 6, 11, Weight::from_iter(0..=1)).unwrap();
-              left.add_transition(9, 8, 12, Weight::from_iter(0..=1)).unwrap();
-              left.add_transition(9, 9, 13, Weight::from_iter(0..=1)).unwrap();
-              left.add_transition(9, 10, 14, Weight::from_iter(0..=1)).unwrap();
-              // State 10
-              left.add_transition(10, 7, 13, Weight::all()).unwrap();
-              // State 11
-              left.set_default_transition(11, 10, Weight::all()).unwrap();
-              // State 12
-              left.set_default_transition(12, 13, Weight::all()).unwrap();
-              // State 13
-              left.add_transition(13, 0, 15, Weight::all()).unwrap();
-              left.add_transition(13, 3, 16, Weight::all()).unwrap();
-              left.add_transition(13, 7, 17, Weight::all()).unwrap();
-              // State 14
-              left.add_transition(14, 5, 10, Weight::all()).unwrap();
-              // State 15
-              left.add_transition(15, neg(0), 18, Weight::all()).unwrap();
-              // State 16
-              left.add_transition(16, neg(3), 18, Weight::all()).unwrap();
-              // State 17
-              left.add_transition(17, neg(7), 18, Weight::all()).unwrap();
-              // State 18
-              left.add_transition(18, neg(5), 19, Weight::all()).unwrap();
-              // State 19
-              left.add_transition(19, neg(10), 20, Weight::all()).unwrap();
-              // State 20
-              left.set_final_weight(20, Weight::from_item(1)).unwrap();
-
-              // Build right DWA
-              let mut right = DWA::new();
-              for _ in 0..22 {
-                  right.add_state();
-              }
-              assert_eq!(right.states.len(), 23);
-
-              // State 0
-              right.add_transition(0, 5, 1, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 6, 2, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 8, 3, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 9, 4, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 10, 5, Weight::from_item(0)).unwrap();
-              // State 1
-              right.add_transition(1, 7, 4, Weight::all()).unwrap();
-              // State 2
-              right.set_default_transition(2, 1, Weight::all()).unwrap();
-              // State 3
-              right.set_default_transition(3, 4, Weight::all()).unwrap();
-              // State 4
-              right.add_transition(4, 0, 6, Weight::all()).unwrap();
-              right.add_transition(4, 3, 7, Weight::all()).unwrap();
-              right.add_transition(4, 7, 8, Weight::all()).unwrap();
-              // State 5
-              right.add_transition(5, 5, 1, Weight::all()).unwrap();
-              // State 6
-              right.add_transition(6, neg(0), 9, Weight::all()).unwrap();
-              // State 7
-              right.add_transition(7, neg(3), 9, Weight::all()).unwrap();
-              // State 8
-              right.add_transition(8, neg(7), 9, Weight::all()).unwrap();
-              // State 9
-              right.add_transition(9, neg(5), 10, Weight::all()).unwrap();
-              // State 10
-              right.add_transition(10, neg(10), 11, Weight::all()).unwrap();
-              // State 11
-              right.add_transition(11, 5, 12, Weight::from_iter(0..=1)).unwrap();
-              right.add_transition(11, 6, 13, Weight::from_iter(0..=1)).unwrap();
-              right.add_transition(11, 8, 14, Weight::from_iter(0..=1)).unwrap();
-              right.add_transition(11, 9, 15, Weight::from_iter(0..=1)).unwrap();
-              right.add_transition(11, 10, 16, Weight::from_iter(0..=1)).unwrap();
-              // State 12
-              right.add_transition(12, 7, 15, Weight::all()).unwrap();
-              // State 13
-              right.set_default_transition(13, 12, Weight::all()).unwrap();
-              // State 14
-              right.set_default_transition(14, 15, Weight::all()).unwrap();
-              // State 15
-              right.add_transition(15, 0, 17, Weight::all()).unwrap();
-              right.add_transition(15, 3, 18, Weight::all()).unwrap();
-              right.add_transition(15, 7, 19, Weight::all()).unwrap();
-              // State 16
-              right.add_transition(16, 5, 12, Weight::all()).unwrap();
-              // State 17
-              right.add_transition(17, neg(0), 20, Weight::all()).unwrap();
-              // State 18
-              right.add_transition(18, neg(3), 20, Weight::all()).unwrap();
-              // State 19
-              right.add_transition(19, neg(7), 20, Weight::all()).unwrap();
-              // State 20
-              right.add_transition(20, neg(5), 21, Weight::all()).unwrap();
-              // State 21
-              right.add_transition(21, neg(10), 22, Weight::all()).unwrap();
-              // State 22
-              right.set_final_weight(22, Weight::from_item(0)).unwrap();
-
-              todo!();
-          }
       }
   prev_file_contents:
     src/precompute4/utils.rs: |-
@@ -3985,187 +3668,6 @@ local_system:
 
           #[test]
           fn test_union_complex_from_attachment() {
-              fn neg(x: i16) -> i16 {
-                  i16::MIN + x
-              }
-
-              // --- Build LEFT DWA ---
-              let mut left = DWA::new();
-              for _ in 0..47 {
-                  left.add_state();
-              }
-
-              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 2, 2, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 3, 3, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 4, 4, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 5, 5, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 6, 6, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 7, 7, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 8, 8, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 9, 9, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 10, 10, Weight::from_item(1)).unwrap();
-              left.add_transition(1, neg(0), 11, Weight::all()).unwrap();
-              left.set_default_transition(2, 12, Weight::all()).unwrap();
-              left.add_transition(3, neg(3), 13, Weight::all()).unwrap();
-              left.add_transition(5, 3, 14, Weight::all()).unwrap();
-              left.add_transition(5, 7, 9, Weight::all()).unwrap();
-              left.set_default_transition(6, 5, Weight::all()).unwrap();
-              left.add_transition(7, neg(7), 15, Weight::all()).unwrap();
-              left.set_default_transition(8, 9, Weight::all()).unwrap();
-              left.add_transition(9, 3, 16, Weight::all()).unwrap();
-              left.add_transition(9, 7, 9, Weight::all()).unwrap();
-              left.add_transition(10, 5, 5, Weight::all()).unwrap();
-              left.add_transition(11, neg(9), 17, Weight::all()).unwrap();
-              left.set_default_transition(12, 18, Weight::all()).unwrap();
-              left.add_transition(13, neg(9), 19, Weight::all()).unwrap();
-              left.add_transition(14, neg(3), 20, Weight::all()).unwrap();
-              left.add_transition(15, neg(9), 21, Weight::all()).unwrap();
-              left.add_transition(16, neg(3), 22, Weight::all()).unwrap();
-              let w01 = Weight::from_iter(0..=1);
-              left.add_transition(17, 2, 23, w01.clone()).unwrap();
-              left.add_transition(17, 4, 24, w01.clone()).unwrap();
-              left.add_transition(17, 5, 25, w01.clone()).unwrap();
-              left.add_transition(17, 6, 26, w01.clone()).unwrap();
-              left.add_transition(17, 8, 27, w01.clone()).unwrap();
-              left.add_transition(17, 9, 28, w01.clone()).unwrap();
-              left.add_transition(17, 10, 29, w01.clone()).unwrap();
-              left.add_transition(19, 2, 23, w01.clone()).unwrap();
-              left.add_transition(19, 4, 24, w01.clone()).unwrap();
-              left.add_transition(19, 5, 25, w01.clone()).unwrap();
-              left.add_transition(19, 6, 26, w01.clone()).unwrap();
-              left.add_transition(19, 8, 27, w01.clone()).unwrap();
-              left.add_transition(19, 9, 28, w01.clone()).unwrap();
-              left.add_transition(19, 10, 29, w01.clone()).unwrap();
-              left.add_transition(20, neg(0), 30, Weight::all()).unwrap();
-              left.add_transition(21, 2, 23, w01.clone()).unwrap();
-              left.add_transition(21, 4, 24, w01.clone()).unwrap();
-              left.add_transition(21, 5, 25, w01.clone()).unwrap();
-              left.add_transition(21, 6, 26, w01.clone()).unwrap();
-              left.add_transition(21, 8, 27, w01.clone()).unwrap();
-              left.add_transition(21, 9, 28, w01.clone()).unwrap();
-              left.add_transition(21, 10, 29, w01.clone()).unwrap();
-              left.add_transition(22, neg(0), 31, Weight::all()).unwrap();
-              left.set_default_transition(23, 32, Weight::all()).unwrap();
-              left.add_transition(25, 7, 28, Weight::all()).unwrap();
-              left.set_default_transition(26, 25, Weight::all()).unwrap();
-              left.set_default_transition(27, 28, Weight::all()).unwrap();
-              left.add_transition(28, 0, 33, Weight::all()).unwrap();
-              left.add_transition(28, 3, 34, Weight::all()).unwrap();
-              left.add_transition(28, 7, 35, Weight::all()).unwrap();
-              left.add_transition(29, 5, 25, Weight::all()).unwrap();
-              left.add_transition(30, neg(9), 36, Weight::all()).unwrap();
-              left.add_transition(31, neg(9), 37, Weight::all()).unwrap();
-              left.set_default_transition(32, 38, Weight::all()).unwrap();
-              left.add_transition(33, neg(0), 39, Weight::all()).unwrap();
-              left.add_transition(34, neg(3), 40, Weight::all()).unwrap();
-              left.add_transition(35, neg(7), 41, Weight::all()).unwrap();
-              left.add_transition(36, 2, 23, w01.clone()).unwrap();
-              left.add_transition(36, 4, 24, w01.clone()).unwrap();
-              left.add_transition(36, 5, 25, w01.clone()).unwrap();
-              left.add_transition(36, 6, 26, w01.clone()).unwrap();
-              left.add_transition(36, 8, 27, w01.clone()).unwrap();
-              left.add_transition(36, 9, 28, w01.clone()).unwrap();
-              left.add_transition(36, 10, 29, w01.clone()).unwrap();
-              left.add_transition(37, 2, 23, w01.clone()).unwrap();
-              left.add_transition(37, 4, 24, w01.clone()).unwrap();
-              left.add_transition(37, 5, 25, w01.clone()).unwrap();
-              left.add_transition(37, 6, 26, w01.clone()).unwrap();
-              left.add_transition(37, 8, 27, w01.clone()).unwrap();
-              left.add_transition(37, 9, 28, w01.clone()).unwrap();
-              left.add_transition(37, 10, 29, w01.clone()).unwrap();
-              left.add_transition(39, neg(5), 42, Weight::all()).unwrap();
-              left.add_transition(40, neg(5), 43, Weight::all()).unwrap();
-              left.add_transition(41, neg(5), 44, Weight::all()).unwrap();
-              left.add_transition(42, neg(10), 45, Weight::all()).unwrap();
-              left.add_transition(43, neg(10), 46, Weight::all()).unwrap();
-              left.add_transition(44, neg(10), 47, Weight::all()).unwrap();
-              left.set_final_weight(45, Weight::all()).unwrap();
-              left.set_final_weight(46, Weight::all()).unwrap();
-              left.set_final_weight(47, Weight::all()).unwrap();
-
-              // --- Build RIGHT DWA ---
-              let mut right = DWA::new();
-              for _ in 0..42 {
-                  right.add_state();
-              }
-
-              right.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 4, 2, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 5, 3, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 6, 4, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 8, 5, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 9, 6, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 10, 7, Weight::from_item(0)).unwrap();
-              right.set_default_transition(1, 8, Weight::all()).unwrap();
-              right.add_transition(3, 7, 6, Weight::all()).unwrap();
-              right.set_default_transition(4, 3, Weight::all()).unwrap();
-              right.set_default_transition(5, 6, Weight::all()).unwrap();
-              right.add_transition(6, 0, 9, Weight::all()).unwrap();
-              right.add_transition(6, 3, 10, Weight::all()).unwrap();
-              right.add_transition(6, 7, 11, Weight::all()).unwrap();
-              right.add_transition(7, 5, 3, Weight::all()).unwrap();
-              right.set_default_transition(8, 12, Weight::all()).unwrap();
-              right.add_transition(9, neg(0), 13, Weight::all()).unwrap();
-              right.add_transition(10, neg(3), 14, Weight::all()).unwrap();
-              right.add_transition(11, neg(7), 15, Weight::all()).unwrap();
-              right.add_transition(13, neg(5), 16, Weight::all()).unwrap();
-              right.add_transition(14, neg(5), 17, Weight::all()).unwrap();
-              right.add_transition(15, neg(5), 18, Weight::all()).unwrap();
-              right.add_transition(16, neg(10), 19, Weight::all()).unwrap();
-              right.add_transition(17, neg(10), 20, Weight::all()).unwrap();
-              right.add_transition(18, neg(10), 21, Weight::all()).unwrap();
-              right.add_transition(19, 2, 22, w01.clone()).unwrap();
-              right.add_transition(19, 4, 23, w01.clone()).unwrap();
-              right.add_transition(19, 5, 24, w01.clone()).unwrap();
-              right.add_transition(19, 6, 25, w01.clone()).unwrap();
-              right.add_transition(19, 8, 26, w01.clone()).unwrap();
-              right.add_transition(19, 9, 27, w01.clone()).unwrap();
-              right.add_transition(19, 10, 28, w01.clone()).unwrap();
-              right.add_transition(20, 2, 22, w01.clone()).unwrap();
-              right.add_transition(20, 4, 23, w01.clone()).unwrap();
-              right.add_transition(20, 5, 24, w01.clone()).unwrap();
-              right.add_transition(20, 6, 25, w01.clone()).unwrap();
-              right.add_transition(20, 8, 26, w01.clone()).unwrap();
-              right.add_transition(20, 9, 27, w01.clone()).unwrap();
-              right.add_transition(20, 10, 28, w01.clone()).unwrap();
-              right.add_transition(21, 2, 22, w01.clone()).unwrap();
-              right.add_transition(21, 4, 23, w01.clone()).unwrap();
-              right.add_transition(21, 5, 24, w01.clone()).unwrap();
-              right.add_transition(21, 6, 25, w01.clone()).unwrap();
-              right.add_transition(21, 8, 26, w01.clone()).unwrap();
-              right.add_transition(21, 9, 27, w01.clone()).unwrap();
-              right.add_transition(21, 10, 28, w01.clone()).unwrap();
-              right.set_default_transition(22, 29, Weight::all()).unwrap();
-              right.add_transition(24, 7, 27, Weight::all()).unwrap();
-              right.set_default_transition(25, 24, Weight::all()).unwrap();
-              right.set_default_transition(26, 27, Weight::all()).unwrap();
-              right.add_transition(27, 0, 30, Weight::all()).unwrap();
-              right.add_transition(27, 3, 31, Weight::all()).unwrap();
-              right.add_transition(27, 7, 32, Weight::all()).unwrap();
-              right.add_transition(28, 5, 24, Weight::all()).unwrap();
-              right.set_default_transition(29, 33, Weight::all()).unwrap();
-              right.add_transition(30, neg(0), 34, Weight::all()).unwrap();
-              right.add_transition(31, neg(3), 35, Weight::all()).unwrap();
-              right.add_transition(32, neg(7), 36, Weight::all()).unwrap();
-              right.add_transition(34, neg(5), 37, Weight::all()).unwrap();
-              right.add_transition(35, neg(5), 38, Weight::all()).unwrap();
-              right.add_transition(36, neg(5), 39, Weight::all()).unwrap();
-              right.add_transition(37, neg(10), 40, Weight::all()).unwrap();
-              right.add_transition(38, neg(10), 41, Weight::all()).unwrap();
-              right.add_transition(39, neg(10), 42, Weight::all()).unwrap();
-              right.set_final_weight(40, Weight::all()).unwrap();
-              right.set_final_weight(41, Weight::all()).unwrap();
-              right.set_final_weight(42, Weight::all()).unwrap();
-
-              // Test commutativity and idempotence
-              assert_dwa_equivalent(left.union(&right), right.union(&left));
-              assert_dwa_equivalent(left.clone(), left.union(&left));
-              assert_dwa_equivalent(right.clone(), right.union(&right));
-          }
-
-          #[test]
-          fn test_union_complex_from_attachment_simplified() {
               fn neg(val: i16) -> i16 {
                   val.wrapping_add(i16::MIN)
               }
@@ -4300,10 +3802,9 @@ local_system:
               // State 22
               right.set_final_weight(22, Weight::from_item(0)).unwrap();
 
-              // Test commutativity and idempotence
-              assert_dwa_equivalent(left.union(&right), right.union(&left));
-              assert_dwa_equivalent(left.clone(), left.union(&left));
-              assert_dwa_equivalent(right.clone(), right.union(&right));
+              // Perform union and simplify. The test passes if it doesn't panic.
+              let mut u = left.union(&right);
+              u.simplify();
           }
       }
   diffs_applied_this_send: true
@@ -6182,187 +5683,174 @@ messages:
 
               assert_dwa_equivalent(c, expected);
           }
+      }
 
+      ```
+    metadata:
+      filename: src/precompute4/weighted_automata.rs
+  - user: |-
+      `````ad-attachment
+      collapse: closed
+
+      ```
+      left: DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: [1])
+          3 -> 2 (trans_weight: [1])
+          5 -> 3 (trans_weight: [1])
+          6 -> 4 (trans_weight: [1])
+          7 -> 5 (trans_weight: [1])
+          8 -> 4 (trans_weight: [1])
+          9 -> 3 (trans_weight: [1])
+          10 -> 6 (trans_weight: [1])
+        State 1:
+          neg(0) -> 7 (trans_weight: ALL)
+        State 2:
+          neg(3) -> 7 (trans_weight: ALL)
+        State 3:
+          3 -> 8 (trans_weight: ALL)
+          7 -> 3 (trans_weight: ALL)
+        State 4:
+          * -> 3 (trans_weight: ALL)
+        State 5:
+          neg(7) -> 7 (trans_weight: ALL)
+        State 6:
+          5 -> 3 (trans_weight: ALL)
+        State 7:
+          neg(9) -> 9 (trans_weight: ALL)
+        State 8:
+          neg(3) -> 1 (trans_weight: ALL)
+        State 9:
+          5 -> 10 (trans_weight: [0..=1])
+          6 -> 11 (trans_weight: [0..=1])
+          8 -> 12 (trans_weight: [0..=1])
+          9 -> 13 (trans_weight: [0..=1])
+          10 -> 14 (trans_weight: [0..=1])
+        State 10:
+          7 -> 13 (trans_weight: ALL)
+        State 11:
+          * -> 10 (trans_weight: ALL)
+        State 12:
+          * -> 13 (trans_weight: ALL)
+        State 13:
+          0 -> 15 (trans_weight: ALL)
+          3 -> 16 (trans_weight: ALL)
+          7 -> 17 (trans_weight: ALL)
+        State 14:
+          5 -> 10 (trans_weight: ALL)
+        State 15:
+          neg(0) -> 18 (trans_weight: ALL)
+        State 16:
+          neg(3) -> 18 (trans_weight: ALL)
+        State 17:
+          neg(7) -> 18 (trans_weight: ALL)
+        State 18:
+          neg(5) -> 19 (trans_weight: ALL)
+        State 19:
+          neg(10) -> 20 (trans_weight: ALL)
+        State 20:
+          final_weight: [1]
+
+      right: DWA (start: 0)
+        State 0:
+          5 -> 1 (trans_weight: [0])
+          6 -> 2 (trans_weight: [0])
+          8 -> 3 (trans_weight: [0])
+          9 -> 4 (trans_weight: [0])
+          10 -> 5 (trans_weight: [0])
+        State 1:
+          7 -> 4 (trans_weight: ALL)
+        State 2:
+          * -> 1 (trans_weight: ALL)
+        State 3:
+          * -> 4 (trans_weight: ALL)
+        State 4:
+          0 -> 6 (trans_weight: ALL)
+          3 -> 7 (trans_weight: ALL)
+          7 -> 8 (trans_weight: ALL)
+        State 5:
+          5 -> 1 (trans_weight: ALL)
+        State 6:
+          neg(0) -> 9 (trans_weight: ALL)
+        State 7:
+          neg(3) -> 9 (trans_weight: ALL)
+        State 8:
+          neg(7) -> 9 (trans_weight: ALL)
+        State 9:
+          neg(5) -> 10 (trans_weight: ALL)
+        State 10:
+          neg(10) -> 11 (trans_weight: ALL)
+        State 11:
+          5 -> 12 (trans_weight: [0..=1])
+          6 -> 13 (trans_weight: [0..=1])
+          8 -> 14 (trans_weight: [0..=1])
+          9 -> 15 (trans_weight: [0..=1])
+          10 -> 16 (trans_weight: [0..=1])
+        State 12:
+          7 -> 15 (trans_weight: ALL)
+        State 13:
+          * -> 12 (trans_weight: ALL)
+        State 14:
+          * -> 15 (trans_weight: ALL)
+        State 15:
+          0 -> 17 (trans_weight: ALL)
+          3 -> 18 (trans_weight: ALL)
+          7 -> 19 (trans_weight: ALL)
+        State 16:
+          5 -> 12 (trans_weight: ALL)
+        State 17:
+          neg(0) -> 20 (trans_weight: ALL)
+        State 18:
+          neg(3) -> 20 (trans_weight: ALL)
+        State 19:
+          neg(7) -> 20 (trans_weight: ALL)
+        State 20:
+          neg(5) -> 21 (trans_weight: ALL)
+        State 21:
+          neg(10) -> 22 (trans_weight: ALL)
+        State 22:
+          final_weight: [0]
+      ```
+
+      `````
+
+      Add a union test with these exact DWAs.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to add the requested test, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file**: `src/precompute4/weighted_automata.rs`.
+      2.  **Navigate to the end of the `tests` module**: Go to the very end of the file, just before the final closing brace `}` of the `mod tests { ... }` block.
+      3.  **Insert the new test function**: Add the following Rust code to define a new test named `test_union_complex_from_attachment`. This test will:
+          *   Define a helper function to create the negative `i16` values used for special transitions.
+          *   Programmatically construct the `left` DWA with 21 states as specified in the attachment.
+          *   Programmatically construct the `right` DWA with 23 states as specified in the attachment.
+          *   Perform the `union` operation on these two DWAs.
+          *   Call `simplify()` on the resulting DWA.
+          *   The test's purpose is to act as a regression test, ensuring that the `union` and `simplify` operations on these large, complex automata complete successfully without panicking.
+
+      ```rust
           #[test]
           fn test_union_complex_from_attachment() {
-              fn neg(x: i16) -> i16 {
-                  i16::MIN + x
-              }
-
-              // --- Build LEFT DWA ---
-              let mut left = DWA::new();
-              for _ in 0..47 {
-                  left.add_state();
-              }
-
-              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 2, 2, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 3, 3, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 4, 4, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 5, 5, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 6, 6, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 7, 7, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 8, 8, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 9, 9, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 10, 10, Weight::from_item(1)).unwrap();
-              left.add_transition(1, neg(0), 11, Weight::all()).unwrap();
-              left.set_default_transition(2, 12, Weight::all()).unwrap();
-              left.add_transition(3, neg(3), 13, Weight::all()).unwrap();
-              left.add_transition(5, 3, 14, Weight::all()).unwrap();
-              left.add_transition(5, 7, 9, Weight::all()).unwrap();
-              left.set_default_transition(6, 5, Weight::all()).unwrap();
-              left.add_transition(7, neg(7), 15, Weight::all()).unwrap();
-              left.set_default_transition(8, 9, Weight::all()).unwrap();
-              left.add_transition(9, 3, 16, Weight::all()).unwrap();
-              left.add_transition(9, 7, 9, Weight::all()).unwrap();
-              left.add_transition(10, 5, 5, Weight::all()).unwrap();
-              left.add_transition(11, neg(9), 17, Weight::all()).unwrap();
-              left.set_default_transition(12, 18, Weight::all()).unwrap();
-              left.add_transition(13, neg(9), 19, Weight::all()).unwrap();
-              left.add_transition(14, neg(3), 20, Weight::all()).unwrap();
-              left.add_transition(15, neg(9), 21, Weight::all()).unwrap();
-              left.add_transition(16, neg(3), 22, Weight::all()).unwrap();
-              let w01 = Weight::from_iter(0..=1);
-              left.add_transition(17, 2, 23, w01.clone()).unwrap();
-              left.add_transition(17, 4, 24, w01.clone()).unwrap();
-              left.add_transition(17, 5, 25, w01.clone()).unwrap();
-              left.add_transition(17, 6, 26, w01.clone()).unwrap();
-              left.add_transition(17, 8, 27, w01.clone()).unwrap();
-              left.add_transition(17, 9, 28, w01.clone()).unwrap();
-              left.add_transition(17, 10, 29, w01.clone()).unwrap();
-              left.add_transition(19, 2, 23, w01.clone()).unwrap();
-              left.add_transition(19, 4, 24, w01.clone()).unwrap();
-              left.add_transition(19, 5, 25, w01.clone()).unwrap();
-              left.add_transition(19, 6, 26, w01.clone()).unwrap();
-              left.add_transition(19, 8, 27, w01.clone()).unwrap();
-              left.add_transition(19, 9, 28, w01.clone()).unwrap();
-              left.add_transition(19, 10, 29, w01.clone()).unwrap();
-              left.add_transition(20, neg(0), 30, Weight::all()).unwrap();
-              left.add_transition(21, 2, 23, w01.clone()).unwrap();
-              left.add_transition(21, 4, 24, w01.clone()).unwrap();
-              left.add_transition(21, 5, 25, w01.clone()).unwrap();
-              left.add_transition(21, 6, 26, w01.clone()).unwrap();
-              left.add_transition(21, 8, 27, w01.clone()).unwrap();
-              left.add_transition(21, 9, 28, w01.clone()).unwrap();
-              left.add_transition(21, 10, 29, w01.clone()).unwrap();
-              left.add_transition(22, neg(0), 31, Weight::all()).unwrap();
-              left.set_default_transition(23, 32, Weight::all()).unwrap();
-              left.add_transition(25, 7, 28, Weight::all()).unwrap();
-              left.set_default_transition(26, 25, Weight::all()).unwrap();
-              left.set_default_transition(27, 28, Weight::all()).unwrap();
-              left.add_transition(28, 0, 33, Weight::all()).unwrap();
-              left.add_transition(28, 3, 34, Weight::all()).unwrap();
-              left.add_transition(28, 7, 35, Weight::all()).unwrap();
-              left.add_transition(29, 5, 25, Weight::all()).unwrap();
-              left.add_transition(30, neg(9), 36, Weight::all()).unwrap();
-              left.add_transition(31, neg(9), 37, Weight::all()).unwrap();
-              left.set_default_transition(32, 38, Weight::all()).unwrap();
-              left.add_transition(33, neg(0), 39, Weight::all()).unwrap();
-              left.add_transition(34, neg(3), 40, Weight::all()).unwrap();
-              left.add_transition(35, neg(7), 41, Weight::all()).unwrap();
-              left.add_transition(36, 2, 23, w01.clone()).unwrap();
-              left.add_transition(36, 4, 24, w01.clone()).unwrap();
-              left.add_transition(36, 5, 25, w01.clone()).unwrap();
-              left.add_transition(36, 6, 26, w01.clone()).unwrap();
-              left.add_transition(36, 8, 27, w01.clone()).unwrap();
-              left.add_transition(36, 9, 28, w01.clone()).unwrap();
-              left.add_transition(36, 10, 29, w01.clone()).unwrap();
-              left.add_transition(37, 2, 23, w01.clone()).unwrap();
-              left.add_transition(37, 4, 24, w01.clone()).unwrap();
-              left.add_transition(37, 5, 25, w01.clone()).unwrap();
-              left.add_transition(37, 6, 26, w01.clone()).unwrap();
-              left.add_transition(37, 8, 27, w01.clone()).unwrap();
-              left.add_transition(37, 9, 28, w01.clone()).unwrap();
-              left.add_transition(37, 10, 29, w01.clone()).unwrap();
-              left.add_transition(39, neg(5), 42, Weight::all()).unwrap();
-              left.add_transition(40, neg(5), 43, Weight::all()).unwrap();
-              left.add_transition(41, neg(5), 44, Weight::all()).unwrap();
-              left.add_transition(42, neg(10), 45, Weight::all()).unwrap();
-              left.add_transition(43, neg(10), 46, Weight::all()).unwrap();
-              left.add_transition(44, neg(10), 47, Weight::all()).unwrap();
-              left.set_final_weight(45, Weight::all()).unwrap();
-              left.set_final_weight(46, Weight::all()).unwrap();
-              left.set_final_weight(47, Weight::all()).unwrap();
-
-              // --- Build RIGHT DWA ---
-              let mut right = DWA::new();
-              for _ in 0..42 {
-                  right.add_state();
-              }
-
-              right.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 4, 2, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 5, 3, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 6, 4, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 8, 5, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 9, 6, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 10, 7, Weight::from_item(0)).unwrap();
-              right.set_default_transition(1, 8, Weight::all()).unwrap();
-              right.add_transition(3, 7, 6, Weight::all()).unwrap();
-              right.set_default_transition(4, 3, Weight::all()).unwrap();
-              right.set_default_transition(5, 6, Weight::all()).unwrap();
-              right.add_transition(6, 0, 9, Weight::all()).unwrap();
-              right.add_transition(6, 3, 10, Weight::all()).unwrap();
-              right.add_transition(6, 7, 11, Weight::all()).unwrap();
-              right.add_transition(7, 5, 3, Weight::all()).unwrap();
-              right.set_default_transition(8, 12, Weight::all()).unwrap();
-              right.add_transition(9, neg(0), 13, Weight::all()).unwrap();
-              right.add_transition(10, neg(3), 14, Weight::all()).unwrap();
-              right.add_transition(11, neg(7), 15, Weight::all()).unwrap();
-              right.add_transition(13, neg(5), 16, Weight::all()).unwrap();
-              right.add_transition(14, neg(5), 17, Weight::all()).unwrap();
-              right.add_transition(15, neg(5), 18, Weight::all()).unwrap();
-              right.add_transition(16, neg(10), 19, Weight::all()).unwrap();
-              right.add_transition(17, neg(10), 20, Weight::all()).unwrap();
-              right.add_transition(18, neg(10), 21, Weight::all()).unwrap();
-              right.add_transition(19, 2, 22, w01.clone()).unwrap();
-              right.add_transition(19, 4, 23, w01.clone()).unwrap();
-              right.add_transition(19, 5, 24, w01.clone()).unwrap();
-              right.add_transition(19, 6, 25, w01.clone()).unwrap();
-              right.add_transition(19, 8, 26, w01.clone()).unwrap();
-              right.add_transition(19, 9, 27, w01.clone()).unwrap();
-              right.add_transition(19, 10, 28, w01.clone()).unwrap();
-              right.add_transition(20, 2, 22, w01.clone()).unwrap();
-              right.add_transition(20, 4, 23, w01.clone()).unwrap();
-              right.add_transition(20, 5, 24, w01.clone()).unwrap();
-              right.add_transition(20, 6, 25, w01.clone()).unwrap();
-              right.add_transition(20, 8, 26, w01.clone()).unwrap();
-              right.add_transition(20, 9, 27, w01.clone()).unwrap();
-              right.add_transition(20, 10, 28, w01.clone()).unwrap();
-              right.add_transition(21, 2, 22, w01.clone()).unwrap();
-              right.add_transition(21, 4, 23, w01.clone()).unwrap();
-              right.add_transition(21, 5, 24, w01.clone()).unwrap();
-              right.add_transition(21, 6, 25, w01.clone()).unwrap();
-              right.add_transition(21, 8, 26, w01.clone()).unwrap();
-              right.add_transition(21, 9, 27, w01.clone()).unwrap();
-              right.add_transition(21, 10, 28, w01.clone()).unwrap();
-              right.set_default_transition(22, 29, Weight::all()).unwrap();
-              right.add_transition(24, 7, 27, Weight::all()).unwrap();
-              right.set_default_transition(25, 24, Weight::all()).unwrap();
-              right.set_default_transition(26, 27, Weight::all()).unwrap();
-              right.add_transition(27, 0, 30, Weight::all()).unwrap();
-              right.add_transition(27, 3, 31, Weight::all()).unwrap();
-              right.add_transition(27, 7, 32, Weight::all()).unwrap();
-              right.add_transition(28, 5, 24, Weight::all()).unwrap();
-              right.set_default_transition(29, 33, Weight::all()).unwrap();
-              right.add_transition(30, neg(0), 34, Weight::all()).unwrap();
-              right.add_transition(31, neg(3), 35, Weight::all()).unwrap();
-              right.add_transition(32, neg(7), 36, Weight::all()).unwrap();
-              right.add_transition(34, neg(5), 37, Weight::all()).unwrap();
-              right.add_transition(35, neg(5), 38, Weight::all()).unwrap();
-              right.add_transition(36, neg(5), 39, Weight::all()).unwrap();
-              right.add_transition(37, neg(10), 40, Weight::all()).unwrap();
-              right.add_transition(38, neg(10), 41, Weight::all()).unwrap();
-              right.add_transition(39, neg(10), 42, Weight::all()).unwrap();
-              right.set_final_weight(40, Weight::all()).unwrap();
-              right.set_final_weight(41, Weight::all()).unwrap();
-              right.set_final_weight(42, Weight::all()).unwrap();
-
-              todo!();
-          }
-
-          #[test]
-          fn test_union_complex_from_attachment_simpified() {
               fn neg(val: i16) -> i16 {
                   val.wrapping_add(i16::MIN)
               }
@@ -6497,102 +5985,164 @@ messages:
               // State 22
               right.set_final_weight(22, Weight::from_item(0)).unwrap();
 
-              todo!();
+              // Perform union and simplify. The test passes if it doesn't panic.
+              let mut u = left.union(&right);
+              u.simplify();
           }
-      }
-
       ```
-    metadata:
-      filename: src/precompute4/weighted_automata.rs
-  - user: Complete the two tests at the bottom of this code. Figure out what the expected
-      should be.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
-                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      Of course. Here are the step-by-step instructions to complete the tests, followed by the corresponding git diff.
-
-      ### Instructions
-
-      I will complete the two `todo!()` tests in `src/precompute4/weighted_automata.rs`. Since the provided automata are very complex, manually constructing the expected result of the union is not feasible. Instead, I will test fundamental algebraic properties of the `union` operation:
-
-      1.  **Commutativity**: `A.union(B)` should be equivalent to `B.union(A)`.
-      2.  **Idempotence**: `A.union(A)` should be equivalent to `A`.
-
-      These properties will be verified using the existing `assert_dwa_equivalent` helper function, which performs a full minimization and equivalence check.
-
-      I will also correct a small typo in the name of the second test function.
-
-      Here are the edits for `src/precompute4/weighted_automata.rs`:
-
-      1.  **Correct test name**: In `src/precompute4/weighted_automata.rs`, locate the test function `test_union_complex_from_attachment_simpified` and rename it to `test_union_complex_from_attachment_simplified`.
-
-      2.  **Complete the first test**: In the `test_union_complex_from_attachment` function, replace the `todo!();` line with the following code to test for commutativity and idempotence:
-          ```rust
-                  // Test commutativity and idempotence
-                  assert_dwa_equivalent(left.union(&right), right.union(&left));
-                  assert_dwa_equivalent(left.clone(), left.union(&left));
-                  assert_dwa_equivalent(right.clone(), right.union(&right));
-          ```
-
-      3.  **Complete the second test**: In the now-renamed `test_union_complex_from_attachment_simplified` function, replace the `todo!();` line with the same set of assertions:
-          ```rust
-                  // Test commutativity and idempotence
-                  assert_dwa_equivalent(left.union(&right), right.union(&left));
-                  assert_dwa_equivalent(left.clone(), left.union(&left));
-                  assert_dwa_equivalent(right.clone(), right.union(&right));
-          ```
 
       ### Git Diff
 
-      Here is the git diff for the changes:
+      Here is the git patch for the change.
 
       ```diff
-      diff --git a/src/precompute4/weighted_automata.rs b/src/precompute4/weighted_automata.rs
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -1547,11 +1547,14 @@
-               right.set_final_weight(41, Weight::all()).unwrap();
-               right.set_final_weight(42, Weight::all()).unwrap();
+      @@ -1415,4 +1415,115 @@
        
-      -        todo!();
-      +        // Test commutativity and idempotence
-      +        assert_dwa_equivalent(left.union(&right), right.union(&left));
-      +        assert_dwa_equivalent(left.clone(), left.union(&left));
-      +        assert_dwa_equivalent(right.clone(), right.union(&right));
+               assert_dwa_equivalent(c, expected);
            }
-       
-           #[test]
-      -    fn test_union_complex_from_attachment_simpified() {
-      +    fn test_union_complex_from_attachment_simplified() {
-               fn neg(val: i16) -> i16 {
-                   val.wrapping_add(i16::MIN)
-               }
-      @@ -1695,7 +1698,10 @@
-               // State 22
-               right.set_final_weight(22, Weight::from_item(0)).unwrap();
-       
-      -        todo!();
-      +        // Test commutativity and idempotence
-      +        assert_dwa_equivalent(left.union(&right), right.union(&left));
-      +        assert_dwa_equivalent(left.clone(), left.union(&left));
-      +        assert_dwa_equivalent(right.clone(), right.union(&right));
-           }
+      +
+      +    #[test]
+      +    fn test_union_complex_from_attachment() {
+      +        fn neg(val: i16) -> i16 {
+      +            val.wrapping_add(i16::MIN)
+      +        }
+      +
+      +        // Build left DWA
+      +        let mut left = DWA::new();
+      +        for _ in 0..20 {
+      +            left.add_state();
+      +        }
+      +        assert_eq!(left.states.len(), 21);
+      +
+      +        // State 0
+      +        left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+      +        left.add_transition(0, 3, 2, Weight::from_item(1)).unwrap();
+      +        left.add_transition(0, 5, 3, Weight::from_item(1)).unwrap();
+      +        left.add_transition(0, 6, 4, Weight::from_item(1)).unwrap();
+      +        left.add_transition(0, 7, 5, Weight::from_item(1)).unwrap();
+      +        left.add_transition(0, 8, 4, Weight::from_item(1)).unwrap();
+      +        left.add_transition(0, 9, 3, Weight::from_item(1)).unwrap();
+      +        left.add_transition(0, 10, 6, Weight::from_item(1)).unwrap();
+      +        // State 1
+      +        left.add_transition(1, neg(0), 7, Weight::all()).unwrap();
+      +        // State 2
+      +        left.add_transition(2, neg(3), 7, Weight::all()).unwrap();
+      +        // State 3
+      +        left.add_transition(3, 3, 8, Weight::all()).unwrap();
+      +        left.add_transition(3, 7, 3, Weight::all()).unwrap();
+      +        // State 4
+      +        left.set_default_transition(4, 3, Weight::all()).unwrap();
+      +        // State 5
+      +        left.add_transition(5, neg(7), 7, Weight::all()).unwrap();
+      +        // State 6
+      +        left.add_transition(6, 5, 3, Weight::all()).unwrap();
+      +        // State 7
+      +        left.add_transition(7, neg(9), 9, Weight::all()).unwrap();
+      +        // State 8
+      +        left.add_transition(8, neg(3), 1, Weight::all()).unwrap();
+      +        // State 9
+      +        left.add_transition(9, 5, 10, Weight::from_iter(0..=1)).unwrap();
+      +        left.add_transition(9, 6, 11, Weight::from_iter(0..=1)).unwrap();
+      +        left.add_transition(9, 8, 12, Weight::from_iter(0..=1)).unwrap();
+      +        left.add_transition(9, 9, 13, Weight::from_iter(0..=1)).unwrap();
+      +        left.add_transition(9, 10, 14, Weight::from_iter(0..=1)).unwrap();
+      +        // State 10
+      +        left.add_transition(10, 7, 13, Weight::all()).unwrap();
+      +        // State 11
+      +        left.set_default_transition(11, 10, Weight::all()).unwrap();
+      +        // State 12
+      +        left.set_default_transition(12, 13, Weight::all()).unwrap();
+      +        // State 13
+      +        left.add_transition(13, 0, 15, Weight::all()).unwrap();
+      +        left.add_transition(13, 3, 16, Weight::all()).unwrap();
+      +        left.add_transition(13, 7, 17, Weight::all()).unwrap();
+      +        // State 14
+      +        left.add_transition(14, 5, 10, Weight::all()).unwrap();
+      +        // State 15
+      +        left.add_transition(15, neg(0), 18, Weight::all()).unwrap();
+      +        // State 16
+      +        left.add_transition(16, neg(3), 18, Weight::all()).unwrap();
+      +        // State 17
+      +        left.add_transition(17, neg(7), 18, Weight::all()).unwrap();
+      +        // State 18
+      +        left.add_transition(18, neg(5), 19, Weight::all()).unwrap();
+      +        // State 19
+      +        left.add_transition(19, neg(10), 20, Weight::all()).unwrap();
+      +        // State 20
+      +        left.set_final_weight(20, Weight::from_item(1)).unwrap();
+      +
+      +        // Build right DWA
+      +        let mut right = DWA::new();
+      +        for _ in 0..22 {
+      +            right.add_state();
+      +        }
+      +        assert_eq!(right.states.len(), 23);
+      +
+      +        // State 0
+      +        right.add_transition(0, 5, 1, Weight::from_item(0)).unwrap();
+      +        right.add_transition(0, 6, 2, Weight::from_item(0)).unwrap();
+      +        right.add_transition(0, 8, 3, Weight::from_item(0)).unwrap();
+      +        right.add_transition(0, 9, 4, Weight::from_item(0)).unwrap();
+      +        right.add_transition(0, 10, 5, Weight::from_item(0)).unwrap();
+      +        // State 1
+      +        right.add_transition(1, 7, 4, Weight::all()).unwrap();
+      +        // State 2
+      +        right.set_default_transition(2, 1, Weight::all()).unwrap();
+      +        // State 3
+      +        right.set_default_transition(3, 4, Weight::all()).unwrap();
+      +        // State 4
+      +        right.add_transition(4, 0, 6, Weight::all()).unwrap();
+      +        right.add_transition(4, 3, 7, Weight::all()).unwrap();
+      +        right.add_transition(4, 7, 8, Weight::all()).unwrap();
+      +        // State 5
+      +        right.add_transition(5, 5, 1, Weight::all()).unwrap();
+      +        // State 6
+      +        right.add_transition(6, neg(0), 9, Weight::all()).unwrap();
+      +        // State 7
+      +        right.add_transition(7, neg(3), 9, Weight::all()).unwrap();
+      +        // State 8
+      +        right.add_transition(8, neg(7), 9, Weight::all()).unwrap();
+      +        // State 9
+      +        right.add_transition(9, neg(5), 10, Weight::all()).unwrap();
+      +        // State 10
+      +        right.add_transition(10, neg(10), 11, Weight::all()).unwrap();
+      +        // State 11
+      +        right.add_transition(11, 5, 12, Weight::from_iter(0..=1)).unwrap();
+      +        right.add_transition(11, 6, 13, Weight::from_iter(0..=1)).unwrap();
+      +        right.add_transition(11, 8, 14, Weight::from_iter(0..=1)).unwrap();
+      +        right.add_transition(11, 9, 15, Weight::from_iter(0..=1)).unwrap();
+      +        right.add_transition(11, 10, 16, Weight::from_iter(0..=1)).unwrap();
+      +        // State 12
+      +        right.add_transition(12, 7, 15, Weight::all()).unwrap();
+      +        // State 13
+      +        right.set_default_transition(13, 12, Weight::all()).unwrap();
+      +        // State 14
+      +        right.set_default_transition(14, 15, Weight::all()).unwrap();
+      +        // State 15
+      +        right.add_transition(15, 0, 17, Weight::all()).unwrap();
+      +        right.add_transition(15, 3, 18, Weight::all()).unwrap();
+      +        right.add_transition(15, 7, 19, Weight::all()).unwrap();
+      +        // State 16
+      +        right.add_transition(16, 5, 12, Weight::all()).unwrap();
+      +        // State 17
+      +        right.add_transition(17, neg(0), 20, Weight::all()).unwrap();
+      +        // State 18
+      +        right.add_transition(18, neg(3), 20, Weight::all()).unwrap();
+      +        // State 19
+      +        right.add_transition(19, neg(7), 20, Weight::all()).unwrap();
+      +        // State 20
+      +        right.add_transition(20, neg(5), 21, Weight::all()).unwrap();
+      +        // State 21
+      +        right.add_transition(21, neg(10), 22, Weight::all()).unwrap();
+      +        // State 22
+      +        right.set_final_weight(22, Weight::from_item(0)).unwrap();
+      +
+      +        // Perform union and simplify. The test passes if it doesn't panic.
+      +        let mut u = left.union(&right);
+      +        u.simplify();
+      +    }
        }
 
       ```
@@ -6606,7 +6156,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Test: Complete union tests with commutativity/idempotence
-      checks and fix typo"'
+  - user: 'Changes committed with message: "test: Add regression test for union/simplify
+      with complex attachment DWAs"'
     metadata:
 ...
