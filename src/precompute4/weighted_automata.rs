@@ -8,12 +8,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
+use crate::precompute4::test_weighted_automata;
 use std::time::Instant;
 
 // --- Part 1: SimpleBitset ---
 
+const STOCHASTIC_DEBUG: bool = true; // Set to true to enable expensive stochastic validation
+
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct SimpleBitset(pub RangeSetBlaze<usize>);
+
 
 impl SimpleBitset {
     pub fn zeros() -> Self {
@@ -520,7 +524,16 @@ impl DWA {
     }
 
     pub fn simplify(&mut self) {
-        Self::simplify_components(&mut self.states, &mut self.body)
+        let before_simplify = if STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
+
+        Self::simplify_components(&mut self.states, &mut self.body);
+
+        if STOCHASTIC_DEBUG {
+            if let Some(before) = before_simplify {
+                // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
+                test_weighted_automata::assert_dwa_equivalent(before, self.clone());
+            }
+        }
     }
 
     pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody) {
@@ -1063,6 +1076,11 @@ impl DWA {
         let union_nwa = NWA { states: combined_states, body: union_body };
         let mut result_dwa = union_nwa.determinize_to_dwa();
         result_dwa.simplify();
+
+        if STOCHASTIC_DEBUG {
+            DWA::stochastic_validate_union(&self, other, &result_dwa);
+        }
+
         result_dwa
     }
 
@@ -1083,6 +1101,11 @@ impl DWA {
         let concat_nwa = NWA { states: combined_states, body: concat_body };
         let mut result_dwa = concat_nwa.determinize_to_dwa();
         result_dwa.simplify();
+
+        if STOCHASTIC_DEBUG {
+            DWA::stochastic_validate_concatenate(&self, other, &result_dwa);
+        }
+
         result_dwa
     }
 

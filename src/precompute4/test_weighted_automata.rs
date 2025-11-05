@@ -194,7 +194,7 @@ impl DWA {
         acc
     }
 
-    fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
+    pub fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
         let mut rng = SimpleRng::from_time();
         for _ in 0..VALIDATION_SAMPLES {
             // Sample a path from A -> must be in U, and U == A ∪ B for that word.
@@ -223,7 +223,7 @@ impl DWA {
         }
     }
 
-    fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
+    pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
         let mut rng = SimpleRng::from_time();
         for _ in 0..VALIDATION_SAMPLES {
             // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
