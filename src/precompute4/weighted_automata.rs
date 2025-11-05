@@ -1060,6 +1060,77 @@ impl DWA {
         true
     }
 
+    fn compute_future_weights(states: &DWAStates) -> Vec<Weight> {
+        let n = states.len();
+        if n == 0 {
+            return vec![];
+        }
+
+        // 1. Compute future weights via backward analysis.
+        // future_weights[i] = union of weights of all accepting paths starting from i.
+        let mut rev_adj: Vec<Vec<StateID>> = vec![vec![]; n];
+        for i in 0..n {
+            if let Some(d) = states[i].transitions.default {
+                if d < n {
+                    rev_adj[d].push(i);
+                }
+            }
+            for &v in states[i].transitions.exceptions.values() {
+                if v < n {
+                    rev_adj[v].push(i);
+                }
+            }
+        }
+        for preds in rev_adj.iter_mut() {
+            preds.sort_unstable();
+            preds.dedup();
+        }
+
+        let mut future_weights = vec![Weight::zeros(); n];
+        let mut worklist = VecDeque::new();
+        for i in 0..n {
+            if let Some(fw) = &states[i].final_weight {
+                if !fw.is_empty() {
+                    future_weights[i] = fw.clone();
+                    for &pred in &rev_adj[i] {
+                        worklist.push_back(pred);
+                    }
+                }
+            }
+        }
+
+        while let Some(u) = worklist.pop_front() {
+            let mut u_new_fw = states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
+            let u_state = &states[u];
+
+            // Default transition
+            if let Some(v) = u_state.transitions.default {
+                if v < n {
+                    if let Some(edge_w) = u_state.trans_weight_default.as_ref() {
+                        u_new_fw |= &(edge_w & &future_weights[v]);
+                    }
+                }
+            }
+
+            // Exception transitions
+            for (&ch, &v) in &u_state.transitions.exceptions {
+                if v < n {
+                    if let Some(edge_w) = u_state.trans_weights_exceptions.get(&ch) {
+                        u_new_fw |= &(edge_w & &future_weights[v]);
+                    }
+                }
+            }
+
+            if u_new_fw != future_weights[u] {
+                future_weights[u] = u_new_fw;
+                for &pred in &rev_adj[u] {
+                    worklist.push_back(pred);
+                }
+            }
+        }
+        future_weights
+    }
+
     /// Union of two DWAs via product construction.
     /// The states of the new DWA correspond to pairs of states from the input DWAs.
     /// A state is final if either of the original states is final.
@@ -1103,8 +1174,16 @@ impl DWA {
 
             let new_state = &mut new_dwa.states[new_id];
 
-            let fw0 = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-            let fw1 = s1.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+            let fw0 = if id0 < sink0 && future_weights0[id0].is_empty() {
+                Weight::zeros()
+            } else {
+                s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
+            };
+            let fw1 = if id1 < sink1 && future_weights1[id1].is_empty() {
+                Weight::zeros()
+            } else {
+                s1.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
+            };
             let final_w = fw0 | fw1;
             if !final_w.is_empty() {
                 new_state.final_weight = Some(final_w);
