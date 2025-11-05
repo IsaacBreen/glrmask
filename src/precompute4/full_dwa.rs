@@ -10,7 +10,7 @@ use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
 use std::cell::RefCell;
 use range_set_blaze::RangeSetBlaze;
 use crate::precompute4::utils;
-use crate::precompute4::nwa::{NWA, NWAStates, NWABody};
+use crate::precompute4::weighted_automata::{NWA, NWAStates, NWABody};
 
 pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
 

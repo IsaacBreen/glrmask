@@ -1,6 +1,5 @@
 use crate::precompute4::full_dwa::Precomputed4;
-use crate::precompute4::weighted_automata::{DWA, DWAStates, StateID, Weight};
-use crate::precompute4::nwa::{NWA, NWAStates, NWAStateID, NWABody};
+use crate::precompute4::weighted_automata::{DWA, DWAStates, StateID, Weight, NWA, NWAStates, NWAStateID, NWABody};
 use std::collections::{BTreeMap};
 
 pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
