@@ -1,6 +1,7 @@
 use crate::precompute4::full_dwa::Precomputed4;
-use crate::precompute4::weighted_automata::{DWA, DWAStates, StateID, Weight};
-use std::collections::{BTreeMap, HashMap};
+use crate::precompute4::nwa::{NWA, NWAStates};
+use crate::precompute4::weighted_automata::{DWA, StateID, Weight};
+use std::collections::BTreeMap;
 
 pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
     for (_sid, dwa) in precomputed4.iter_mut() {
@@ -10,98 +11,102 @@ pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
 
 fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     dwa.simplify();
-    crate::debug!(6, "Initial DWA:\n{}", dwa);
+    crate::debug!(6, "Initial DWA for negative resolution:\n{}", dwa);
     loop {
-        let mut changed_in_pass = false;
+        let mut nwa = NWA::from_dwa(dwa);
+        let changed = resolve_negative_codes_in_nwa(&mut nwa);
 
-        for state_id in 0..dwa.states.len() {
-            let changed =
-                resolve_negative_codes_in_dwa_internal(state_id, &mut dwa.states);
-            if changed {
-                changed_in_pass = true;
-            }
-        }
-
-        if !changed_in_pass {
+        if !changed {
             break;
         }
-        // crate::debug!(6, "Before simplification pass:\n{}", dwa);
+
+        *dwa = nwa.determinize();
         dwa.simplify();
-        crate::debug!(6, "After simplification pass:\n{}", dwa);
+        crate::debug!(6, "After one pass of negative resolution and determinization:\n{}", dwa);
     }
     dwa.simplify();
-    crate::debug!(6, "Resolved DWA:\n{}", dwa);
+    crate::debug!(6, "Final resolved DWA:\n{}", dwa);
 }
 
-fn resolve_negative_codes_in_dwa_internal(
-    state_id: StateID,
-    states: &mut DWAStates,
-) -> bool {
-    let mut changed = false;
-    let mut memo = HashMap::new();
-    let mut gating_memo = HashMap::new();
+fn resolve_negative_codes_in_nwa(nwa: &mut NWA) -> bool {
+    let mut changed_in_pass = false;
+    let state_ids: Vec<StateID> = (0..nwa.states.len()).collect();
 
-    // We need to collect the negative transitions first because we'll be modifying the state's transitions.
-    let negative_transitions: Vec<(i16, StateID)> = states[state_id]
+    for state_id in state_ids {
+        let changed = resolve_negative_codes_in_state(state_id, &mut nwa.states);
+        if changed {
+            changed_in_pass = true;
+        }
+    }
+
+    changed_in_pass
+}
+
+fn resolve_negative_codes_in_state(state_id: StateID, states: &mut NWAStates) -> bool {
+    let mut changed = false;
+
+    let state_clone = states[state_id].clone();
+    let negative_transitions: Vec<(i16, StateID)> = state_clone
         .transitions
-        .exceptions
         .iter()
         .filter(|(k, _)| **k < 0)
         .map(|(k, v)| (*k, *v))
         .collect();
 
+    if negative_transitions.is_empty() {
+        return false;
+    }
+
     for (neg_code, b_orig_id) in negative_transitions {
+        changed = true;
         let p = neg_code.wrapping_sub(i16::MIN);
-        let w_neg = states[state_id].get_weight(neg_code).unwrap().clone();
+        let w_neg = state_clone.trans_weights.get(&neg_code).unwrap().clone();
 
-        // Step 1: Copy B
-        let b_copy_id = states.copy_state(b_orig_id);
+        // Remove the original A -> B transition
+        states[state_id].transitions.remove(&neg_code);
+        states[state_id].trans_weights.remove(&neg_code);
 
-        // Step 2: Handle final weight from B
-        if let Some(b_final_weight) = states[b_copy_id].final_weight.take() {
-            changed = true;
+        let b_orig_clone = states[b_orig_id].clone();
+
+        // Case 1: Cancellation with a positive edge B --p--> C
+        if let Some(&c_orig_id) = b_orig_clone.transitions.get(&p) {
+            let w_pos = b_orig_clone.trans_weights.get(&p).unwrap();
+            let gate_weight = &w_neg & w_pos;
+
+            // Create a gated copy of C's subgraph
+            let (c_copy_start, _) = states.copy_subgraph_from(states, c_orig_id);
+            states.apply_weight_to_subgraph(c_copy_start, &gate_weight);
+
+            // Add epsilon transition A --> C_copy
+            states[state_id].epsilon_transitions.push((c_copy_start, Weight::all()));
+        }
+
+        // Case 2: Propagate final weight from B
+        if let Some(b_final_weight) = &b_orig_clone.final_weight {
             let new_a_final_weight = b_final_weight & &w_neg;
             if !new_a_final_weight.is_empty() {
-                let a_state = &mut states[state_id];
-                if let Some(a_fw) = a_state.final_weight.as_mut() {
+                if let Some(a_fw) = states[state_id].final_weight.as_mut() {
                     *a_fw |= &new_a_final_weight;
                 } else {
-                    a_state.final_weight = Some(new_a_final_weight);
+                    states[state_id].final_weight = Some(new_a_final_weight);
                 }
             }
         }
 
-        // Step 3: Discard all positive edges from B_copy
-        let b_orig_state_clone = states[b_orig_id].clone();
-        let b_copy_state = &mut states[b_copy_id];
-        b_copy_state.transitions.exceptions.retain(|k, _| *k < 0);
-        b_copy_state.trans_weights_exceptions.retain(|k, _| *k < 0);
-        b_copy_state.transitions.default = None;
-        b_copy_state.trans_weight_default = None;
+        // Case 3: Propagate other transitions from B.
+        // Create a copy of B, remove the matching positive transition, gate it, and link from A.
+        let (b_copy_id, _) = states.copy_subgraph_from(states, b_orig_id);
+        states[b_copy_id].transitions.remove(&p);
+        states[b_copy_id].trans_weights.remove(&p);
+        states.apply_weight_to_subgraph(b_copy_id, &w_neg);
 
-        // Step 4: Replace A -> B with A -> B_copy
-        if b_copy_state != &b_orig_state_clone {
-            changed = true;
-            states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
-        } else {
-            assert_eq!(states.len(), b_copy_id + 1);
-            states.0.pop();
-        }
-
-        // Step 5: Handle matching positive edge (cancellation)
-        if let Some(&c_orig_id) = b_orig_state_clone.transitions.get(p) {
-            changed = true;
-            let c_copy_id = states.copy_state(c_orig_id);
-            let w_b_c = b_orig_state_clone.get_weight(p).unwrap();
-            let w = w_neg & w_b_c;
-            states.apply_weight(c_copy_id, &w);
-            // Merge into A
-            states.union_assign_state(c_copy_id, state_id, &mut memo, &mut gating_memo);
-        }
+        // Add epsilon transition A --> B_copy
+        states[state_id].epsilon_transitions.push((b_copy_id, Weight::all()));
     }
 
     changed
 }
+
 
 #[cfg(test)]
 mod tests {
