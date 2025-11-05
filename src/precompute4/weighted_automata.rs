@@ -282,6 +282,12 @@ impl DWAStates {
         id
     }
 
+    pub fn copy_state(&mut self, state_id: StateID) -> StateID {
+        assert!(state_id < self.len(), "state_id out of bounds");
+        let state = self[state_id].clone();
+        self.add_existing_state(state)
+    }
+
     /// Merges two states that are transition-equivalent into a new state.
     /// The new state's weights are the union of the original states' weights.
     ///
