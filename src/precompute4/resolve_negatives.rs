@@ -73,12 +73,11 @@ fn resolve_negative_codes_in_state(state_id: StateID, states: &mut NWAStates) ->
             let w_pos = b_orig_clone.trans_weights.get(&p).unwrap();
             let gate_weight = &w_neg & w_pos;
 
-            // Create a gated copy of C's subgraph
-            let (c_copy_start, _) = states.copy_subgraph_from(states, c_orig_id);
-            states.apply_weight_to_subgraph(c_copy_start, &gate_weight);
-
             // Add epsilon transition A --> C_copy
-            states[state_id].epsilon_transitions.push((c_copy_start, Weight::all()));
+            states[state_id].epsilon_transitions.push((
+                c_orig_id,
+                gate_weight.clone(),
+            ));
         }
 
         // Case 2: Propagate final weight from B
