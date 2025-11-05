@@ -2554,6 +2554,68 @@ local_system:
               let c = left.concatenate(&right);
               DWA::stochastic_validate_concatenate(&left, &right, &c);
           }
+
+          #[test]
+          fn test_union_from_debug_log() {
+              fn neg(x: i16) -> i16 {
+                  i16::MIN + x
+              }
+
+              // --- Build LEFT DWA ---
+              let mut left = DWA::new();
+              for _ in 0..9 {
+                  left.add_state();
+              }
+              assert_eq!(left.states.len(), 10);
+
+              left.set_final_weight(0, Weight::from_item(2)).unwrap();
+              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 1, 2, Weight::from_iter(0..=1)).unwrap();
+              left.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
+              left.add_transition(0, 3, 4, Weight::from_iter(0..=1)).unwrap();
+
+              left.add_transition(1, neg(0), 5, Weight::all()).unwrap();
+              left.set_default_transition(2, 6, Weight::all()).unwrap();
+              left.add_transition(3, neg(2), 7, Weight::all()).unwrap();
+              // state 4 is sink
+              left.add_transition(5, neg(1), 8, Weight::all()).unwrap();
+              // state 6 is sink
+              left.add_transition(7, neg(0), 9, Weight::all()).unwrap();
+
+              left.set_final_weight(8, Weight::all()).unwrap();
+              left.set_final_weight(9, Weight::all()).unwrap();
+
+              // --- Build RIGHT DWA ---
+              let mut right = DWA::new();
+              for _ in 0..12 {
+                  right.add_state();
+              }
+              assert_eq!(right.states.len(), 13);
+
+              right.add_transition(0, 1, 1, Weight::from_item(3)).unwrap();
+              right.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
+              right.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
+
+              right.set_default_transition(1, 4, Weight::all()).unwrap();
+              right.add_transition(2, neg(2), 5, Weight::all()).unwrap();
+              // state 3 is sink
+              // state 4 is sink
+              right.add_transition(5, neg(0), 6, Weight::all()).unwrap();
+
+              right.add_transition(6, 0, 7, Weight::from_item(3)).unwrap();
+              right.add_transition(6, 1, 8, Weight::from_item(3)).unwrap();
+              right.add_transition(6, 3, 9, Weight::from_item(3)).unwrap();
+
+              right.add_transition(7, neg(0), 10, Weight::all()).unwrap();
+              right.set_default_transition(8, 11, Weight::all()).unwrap();
+              // state 9 is sink
+              right.add_transition(10, neg(1), 12, Weight::all()).unwrap();
+              // state 11 is sink
+              right.set_final_weight(12, Weight::all()).unwrap();
+
+              let u = left.union(&right);
+              DWA::stochastic_validate_union(&left, &right, &u);
+          }
       }
   prev_file_contents:
     src/precompute4/utils.rs: |-
@@ -3837,25 +3899,25 @@ local_system:
                   // Sample a path from A -> must be in U, and U == A ∪ B for that word.
                   if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
                       let wu = u.eval_word_weight(&w);
-                      assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
-                      assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
+                      assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, wu, a, b, u);
+                      assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, wu, a, b, u);
                       let expected = DWA::expected_union_weight(a, b, &w);
-                      assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), wa, b.eval_word_weight(&w), wu, expected);
+                      assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, b.eval_word_weight(&w), wu, expected, a, b, u);
                   }
 
                   // Sample a path from B -> must be in U, and U == A ∪ B for that word.
                   if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
                       let wu = u.eval_word_weight(&w);
-                      assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
-                      assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
+                      assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wb, wu, a, b, u);
+                      assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wb, wu, a, b, u);
                       let expected = DWA::expected_union_weight(a, b, &w);
-                      assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), wb, wu, expected);
+                      assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), a.eval_word_weight(&w), wb, wu, expected, a, b, u);
                   }
 
                   // Sample a path from U -> ensure it's in A ∪ B (equality check).
                   if let Some((w, wu)) = u.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
                       let expected = DWA::expected_union_weight(a, b, &w);
-                      assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected);
+                      assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected, a, b, u);
                   }
               }
           }
@@ -3870,18 +3932,18 @@ local_system:
                           w.extend_from_slice(&wb_word);
                           let wc = c.eval_word_weight(&w);
                           let expected_simple = &wa & &wb;
-                          assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nA(word): {}\nB(word): {}\n", wa, wb);
-                          assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n", format_word(&w), wa, wb, wc, expected_simple);
+                          assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nA(word): {}\nB(word): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", wa, wb, a, b, c);
+                          assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wa, wb, wc, expected_simple, a, b, c);
                           // Also verify full expected across all splits equals C's result
                           let expected_all = DWA::expected_concat_weight(a, b, &w);
-                          assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected_all);
+                          assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected_all, a, b, c);
                       }
                   }
 
                   // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
                   if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
                       let expected = DWA::expected_concat_weight(a, b, &w);
-                      assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected);
+                      assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected, a, b, c);
                   }
               }
           }
@@ -7764,98 +7826,7 @@ messages:
               let c = left.concatenate(&right);
               DWA::stochastic_validate_concatenate(&left, &right, &c);
           }
-      }
 
-      ```
-    metadata:
-      filename: src/precompute4/weighted_automata.rs
-  - user: |-
-      ```
-      [DEBUG] 5] src/precompute4/full_dwa.rs:238: Unioning DWAs:
-      LEFT:
-      DWA (start: 0)
-        State 0:
-          final_weight: [2]
-          0 -> 1 (trans_weight: [1])
-          1 -> 2 (trans_weight: [0..=1])
-          2 -> 3 (trans_weight: [0])
-          3 -> 4 (trans_weight: [0..=1])
-        State 1:
-          neg(0) -> 5 (trans_weight: ALL)
-        State 2:
-          * -> 6 (trans_weight: ALL)
-        State 3:
-          neg(2) -> 7 (trans_weight: ALL)
-        State 4:
-        State 5:
-          neg(1) -> 8 (trans_weight: ALL)
-        State 6:
-        State 7:
-          neg(0) -> 9 (trans_weight: ALL)
-        State 8:
-          final_weight: ALL
-        State 9:
-          final_weight: ALL
-
-      RIGHT:
-      DWA (start: 0)
-        State 0:
-          1 -> 1 (trans_weight: [3])
-          2 -> 2 (trans_weight: [3])
-          3 -> 3 (trans_weight: [3])
-        State 1:
-          * -> 4 (trans_weight: ALL)
-        State 2:
-          neg(2) -> 5 (trans_weight: ALL)
-        State 3:
-        State 4:
-        State 5:
-          neg(0) -> 6 (trans_weight: ALL)
-        State 6:
-          0 -> 7 (trans_weight: [3])
-          1 -> 8 (trans_weight: [3])
-          3 -> 9 (trans_weight: [3])
-        State 7:
-          neg(0) -> 10 (trans_weight: ALL)
-        State 8:
-          * -> 11 (trans_weight: ALL)
-        State 9:
-        State 10:
-          neg(1) -> 12 (trans_weight: ALL)
-        State 11:
-        State 12:
-          final_weight: ALL
-      ```
-
-      Add a test for this union. Use stochastic check.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
-                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      Of course. Here are the step-by-step instructions to add the requested test, followed by the git diff.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file `src/precompute4/weighted_automata.rs`**.
-      2.  **Navigate to the end of the `tests` module**. You can find this by searching for `#[cfg(test)] mod tests {`. Go to the very end of this module, just before its closing curly brace `}`.
-      3.  **Insert the new test case**. Copy and paste the following code block to add the new test function `test_union_from_debug_log`.
-
-      ```rust
           #[test]
           fn test_union_from_debug_log() {
               fn neg(x: i16) -> i16 {
@@ -7917,83 +7888,115 @@ messages:
               let u = left.union(&right);
               DWA::stochastic_validate_union(&left, &right, &u);
           }
+      }
+
       ```
+    metadata:
+      filename: src/precompute4/weighted_automata.rs
+  - user: 'chatllm send --init --code-completion-model cp --attach src/precompute4/utils.rs
+      src/precompute4/weighted_automata.rs --apply git-llm --model gp --paste -- "Make
+      it so that when stochastic_validate_union or stochastic_validate_concatenate
+      fail, they also display the DWAs themselves: A, B, and the resulting DWA."'
+    metadata:
+  - user: 'Make it so that when stochastic_validate_union or stochastic_validate_concatenate
+      fail, they also display the DWAs themselves: A, B, and the resulting DWA.'
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. To enhance the debugging output for failing stochastic validation tests, I'll modify the assertion messages to include the full definitions of the DWAs involved. Here are the step-by-step instructions and the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      I will edit the file `src/precompute4/weighted_automata.rs` to update the assertion messages in two functions: `stochastic_validate_union` and `stochastic_validate_concatenate`.
+
+      1.  **In `stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA)`:**
+          *   For each of the seven `assert!` and `assert_eq!` macros in this function, I will append `\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}` to the format string and pass `a, b, u` as additional arguments. This will cause the full DWA structures to be printed upon assertion failure.
+
+      2.  **In `stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA)`:**
+          *   Similarly, for each of the four `assert!` and `assert_eq!` macros, I will append `\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}` to the format string and pass `a, b, c` as additional arguments. This will provide the complete context of the concatenation operation when a validation check fails.
+
+      These changes will make debugging validation failures much easier by showing the exact automata that caused the issue.
 
       ### Git Diff
 
-      Here is the git patch that applies the changes described above.
+      Here is the git diff with the necessary changes for `src/precompute4/weighted_automata.rs`:
 
       ```diff
-      diff --git a/src/precompute4/weighted_automata.rs b/src/precompute4/weighted_automata.rs
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -1763,4 +1763,60 @@
-               let c = left.concatenate(&right);
-               DWA::stochastic_validate_concatenate(&left, &right, &c);
+      @@ -1406,29 +1406,29 @@
+               for _ in 0..VALIDATION_SAMPLES {
+                   // Sample a path from A -> must be in U, and U == A ∪ B for that word.
+                   if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                       let wu = u.eval_word_weight(&w);
+      -                assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
+      -                assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
+      +                assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, wu, a, b, u);
+      +                assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, wu, a, b, u);
+                       let expected = DWA::expected_union_weight(a, b, &w);
+      -                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), wa, b.eval_word_weight(&w), wu, expected);
+      +                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, b.eval_word_weight(&w), wu, expected, a, b, u);
+                   }
+       
+                   // Sample a path from B -> must be in U, and U == A ∪ B for that word.
+                   if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                       let wu = u.eval_word_weight(&w);
+      -                assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
+      -                assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
+      +                assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wb, wu, a, b, u);
+      +                assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wb, wu, a, b, u);
+                       let expected = DWA::expected_union_weight(a, b, &w);
+      -                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), wb, wu, expected);
+      +                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), a.eval_word_weight(&w), wb, wu, expected, a, b, u);
+                   }
+       
+                   // Sample a path from U -> ensure it's in A ∪ B (equality check).
+                   if let Some((w, wu)) = u.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                       let expected = DWA::expected_union_weight(a, b, &w);
+      -                assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected);
+      +                assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected, a, b, u);
+                   }
+               }
            }
-      +
-      +    #[test]
-      +    fn test_union_from_debug_log() {
-      +        fn neg(x: i16) -> i16 {
-      +            i16::MIN + x
-      +        }
-      +
-      +        // --- Build LEFT DWA ---
-      +        let mut left = DWA::new();
-      +        for _ in 0..9 {
-      +            left.add_state();
-      +        }
-      +        assert_eq!(left.states.len(), 10);
-      +
-      +        left.set_final_weight(0, Weight::from_item(2)).unwrap();
-      +        left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-      +        left.add_transition(0, 1, 2, Weight::from_iter(0..=1)).unwrap();
-      +        left.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
-      +        left.add_transition(0, 3, 4, Weight::from_iter(0..=1)).unwrap();
-      +
-      +        left.add_transition(1, neg(0), 5, Weight::all()).unwrap();
-      +        left.set_default_transition(2, 6, Weight::all()).unwrap();
-      +        left.add_transition(3, neg(2), 7, Weight::all()).unwrap();
-      +        // state 4 is sink
-      +        left.add_transition(5, neg(1), 8, Weight::all()).unwrap();
-      +        // state 6 is sink
-      +        left.add_transition(7, neg(0), 9, Weight::all()).unwrap();
-      +
-      +        left.set_final_weight(8, Weight::all()).unwrap();
-      +        left.set_final_weight(9, Weight::all()).unwrap();
-      +
-      +        // --- Build RIGHT DWA ---
-      +        let mut right = DWA::new();
-      +        for _ in 0..12 {
-      +            right.add_state();
-      +        }
-      +        assert_eq!(right.states.len(), 13);
-      +
-      +        right.add_transition(0, 1, 1, Weight::from_item(3)).unwrap();
-      +        right.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
-      +        right.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
-      +
-      +        right.set_default_transition(1, 4, Weight::all()).unwrap();
-      +        right.add_transition(2, neg(2), 5, Weight::all()).unwrap();
-      +        // state 3 is sink
-      +        // state 4 is sink
-      +        right.add_transition(5, neg(0), 6, Weight::all()).unwrap();
-      +
-      +        right.add_transition(6, 0, 7, Weight::from_item(3)).unwrap();
-      +        right.add_transition(6, 1, 8, Weight::from_item(3)).unwrap();
-      +        right.add_transition(6, 3, 9, Weight::from_item(3)).unwrap();
-      +
-      +        right.add_transition(7, neg(0), 10, Weight::all()).unwrap();
-      +        right.set_default_transition(8, 11, Weight::all()).unwrap();
-      +        // state 9 is sink
-      +        right.add_transition(10, neg(1), 12, Weight::all()).unwrap();
-      +        // state 11 is sink
-      +        right.set_final_weight(12, Weight::all()).unwrap();
-      +
-      +        let u = left.union(&right);
-      +        DWA::stochastic_validate_union(&left, &right, &u);
-      +    }
-       }
+      @@ -1442,18 +1442,18 @@
+                           w.extend_from_slice(&wb_word);
+                           let wc = c.eval_word_weight(&w);
+                           let expected_simple = &wa & &wb;
+      -                    assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nA(word): {}\nB(word): {}\n", wa, wb);
+      -                    assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n", format_word(&w), wa, wb, wc, expected_simple);
+      +                    assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nA(word): {}\nB(word): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", wa, wb, a, b, c);
+      +                    assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wa, wb, wc, expected_simple, a, b, c);
+                           // Also verify full expected across all splits equals C's result
+                           let expected_all = DWA::expected_concat_weight(a, b, &w);
+      -                    assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected_all);
+      +                    assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected_all, a, b, c);
+                       }
+                   }
+       
+                   // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
+                   if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                       let expected = DWA::expected_concat_weight(a, b, &w);
+      -                assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected);
+      +                assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected, a, b, c);
+                   }
+               }
+           }
 
       ```
     metadata:
@@ -8006,7 +8009,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Add stochastic test for DWA union
-      based on debug log example"'
+  - user: 'Changes committed with message: "Enhance stochastic validation failure
+      messages to include DWAs A, B, and the result DWA"'
     metadata:
 ...

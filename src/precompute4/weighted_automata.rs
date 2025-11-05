@@ -1257,25 +1257,25 @@ impl DWA {
             // Sample a path from A -> must be in U, and U == A ∪ B for that word.
             if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
                 let wu = u.eval_word_weight(&w);
-                assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
-                assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
+                assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, wu, a, b, u);
+                assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, wu, a, b, u);
                 let expected = DWA::expected_union_weight(a, b, &w);
-                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), wa, b.eval_word_weight(&w), wu, expected);
+                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, b.eval_word_weight(&w), wu, expected, a, b, u);
             }
 
             // Sample a path from B -> must be in U, and U == A ∪ B for that word.
             if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
                 let wu = u.eval_word_weight(&w);
-                assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
-                assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
+                assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wb, wu, a, b, u);
+                assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wb, wu, a, b, u);
                 let expected = DWA::expected_union_weight(a, b, &w);
-                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), wb, wu, expected);
+                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), a.eval_word_weight(&w), wb, wu, expected, a, b, u);
             }
 
             // Sample a path from U -> ensure it's in A ∪ B (equality check).
             if let Some((w, wu)) = u.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
                 let expected = DWA::expected_union_weight(a, b, &w);
-                assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected);
+                assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected, a, b, u);
             }
         }
     }
@@ -1290,18 +1290,18 @@ impl DWA {
                     w.extend_from_slice(&wb_word);
                     let wc = c.eval_word_weight(&w);
                     let expected_simple = &wa & &wb;
-                    assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nA(word): {}\nB(word): {}\n", wa, wb);
-                    assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n", format_word(&w), wa, wb, wc, expected_simple);
+                    assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nA(word): {}\nB(word): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", wa, wb, a, b, c);
+                    assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wa, wb, wc, expected_simple, a, b, c);
                     // Also verify full expected across all splits equals C's result
                     let expected_all = DWA::expected_concat_weight(a, b, &w);
-                    assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected_all);
+                    assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected_all, a, b, c);
                 }
             }
 
             // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
             if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
                 let expected = DWA::expected_concat_weight(a, b, &w);
-                assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected);
+                assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected, a, b, c);
             }
         }
     }
