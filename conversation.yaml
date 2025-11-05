@@ -5393,6 +5393,21 @@ local_system:
               let u = left.union(&right);
               DWA::stochastic_validate_union(&left, &right, &u);
           }
+
+          #[test]
+          fn test_union_identical_cyclic() {
+              // DWA that accepts a* with final weight [1].
+              let mut d1 = DWA::new();
+              d1.add_transition(d1.body.start_state, 'a' as i16, d1.body.start_state, Weight::all()).unwrap();
+              d1.set_final_weight(d1.body.start_state, Weight::from_item(1)).unwrap();
+
+              let d2 = d1.clone();
+
+              let u = d1.union(&d2);
+
+              // The union of two identical automata should be equivalent to the original.
+              assert_dwa_equivalent(u, d1);
+          }
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -8125,7 +8140,7 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata.rs
-  - user: Ensure `union_assign_state` works even for cycles.
+  - user: Add a test for `union` where there's two identical very simple cyclic DWA.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8145,144 +8160,57 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to make `union_assign_state` work correctly with cycles, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions and the corresponding git diff to add the requested test.
 
-      ### Step-by-step Instructions
+      ### Instructions
 
-      Here are the edits for `src/precompute4/weighted_automata.rs`:
+      1.  Open the file `src/precompute4/weighted_automata.rs`.
+      2.  Navigate to the `tests` module at the end of the file.
+      3.  Add the following new test function, `test_union_identical_cyclic`, inside the `mod tests { ... }` block, after the existing `test_union_from_debug_log_simplified3` test.
 
-      1.  **Modify `DWAStates::union_assign_state`:**
-          *   Locate the function definition for `pub fn union_assign_state`.
-          *   Add a new parameter to its signature: `memo: &mut HashMap<(StateID, StateID), StateID>`.
-          *   Inside the function, find the two recursive calls to `self.union_state(...)`.
-          *   Update both calls to pass the new `memo` parameter, like so: `self.union_state(t1_gated, t2_gated, memo)`.
+      ```rust
+          #[test]
+          fn test_union_identical_cyclic() {
+              // DWA that accepts a* with final weight [1].
+              let mut d1 = DWA::new();
+              d1.add_transition(d1.body.start_state, 'a' as i16, d1.body.start_state, Weight::all()).unwrap();
+              d1.set_final_weight(d1.body.start_state, Weight::from_item(1)).unwrap();
 
-      2.  **Modify `DWAStates::union_state`:**
-          *   Locate the function definition for `pub fn union_state`.
-          *   Add the same `memo: &mut HashMap<(StateID, StateID), StateID>` parameter to its signature.
-          *   At the very beginning of the function, add the following memoization logic to check for and return a cached state ID if one exists:
-              ```rust
-              let key = (s1_id.min(s2_id), s1_id.max(s2_id));
-              if let Some(&id) = memo.get(&key) {
-                  return id;
-              }
-              ```
-          *   Immediately after the line `let new_id = self.copy_state(s1_id);`, insert the new state ID into the memoization map. This must be done *before* any recursive calls to handle cycles correctly.
-              ```rust
-              // Crucial: insert into memo *before* recursive calls to handle cycles.
-              memo.insert(key, new_id);
-              ```
-          *   Update the call to `self.union_assign_state` at the end of the function to pass along the `memo` parameter: `self.union_assign_state(s2_id, new_id, memo);`.
+              let d2 = d1.clone();
 
-      3.  **Update `DWA::union`:**
-          *   In the `union` method of the `DWA` implementation, find the line that calls `new_dwa.states.union_state(...)`.
-          *   Just before this line, initialize a new `HashMap` for memoization: `let mut memo = HashMap::new();`.
-          *   Update the call to `union_state` to pass a mutable reference to this new map.
+              let u = d1.union(&d2);
 
-      4.  **Update `DWA::concatenate`:**
-          *   In the `concatenate` method of the `DWA` implementation, find the `for` loop that iterates over `final_self_states`.
-          *   Just before this loop begins, initialize a new `HashMap` for memoization: `let mut memo = HashMap::new();`.
-          *   Inside the loop, find the call to `new_dwa.states.union_assign_state(...)`.
-          *   Update this call to pass a mutable reference to the `memo` map.
+              // The union of two identical automata should be equivalent to the original.
+              assert_dwa_equivalent(u, d1);
+          }
+      ```
 
       ### Git Diff
-
-      Here is the git diff that applies the changes described above.
 
       ```diff
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -510,7 +510,12 @@
-               new_id
+      @@ -1811,4 +1811,20 @@
+               let u = left.union(&right);
+               DWA::stochastic_validate_union(&left, &right, &u);
            }
-       
-      -    pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID) {
-      +    pub fn union_assign_state(
-      +        &mut self,
-      +        s_from_id: StateID,
-      +        s_into_id: StateID,
-      +        memo: &mut HashMap<(StateID, StateID), StateID>,
-      +    ) {
-               assert!(s_from_id < self.len(), "s_from_id out of bounds");
-               assert!(s_into_id < self.len(), "s_into_id out of bounds");
-               if s_from_id == s_into_id {
-      @@ -555,7 +560,7 @@
-                       let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2);
-                       let to_exclude_from_t1 = &w_def_into - &w_def_from;
-                       let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1);
-      -                Some(self.union_state(t1_gated, t2_gated))
-      +                Some(self.union_state(t1_gated, t2_gated, memo))
-                   },
-                   (Some(t), None) | (None, Some(t)) => Some(t),
-                   (None, None) => None,
-      @@ -581,7 +586,7 @@
-                           let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2);
-                           let to_exclude_from_t1 = &w_into - &w_from;
-                           let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1);
-      -                    Some(self.union_state(t1_gated, t2_gated))
-      +                    Some(self.union_state(t1_gated, t2_gated, memo))
-                       },
-                       (Some(t), None) | (None, Some(t)) => Some(t),
-                       (None, None) => None,
-      @@ -602,15 +607,27 @@
-               s_into.trans_weights_exceptions = new_trans_weights_exceptions;
-           }
-       
-      -    pub fn union_state(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
-      +    pub fn union_state(
-      +        &mut self,
-      +        s1_id: StateID,
-      +        s2_id: StateID,
-      +        memo: &mut HashMap<(StateID, StateID), StateID>,
-      +    ) -> StateID {
-               assert!(s1_id < self.len(), "s1_id out of bounds");
-               assert!(s2_id < self.len(), "s2_id out of bounds");
-       
-      +        let key = (s1_id.min(s2_id), s1_id.max(s2_id));
-      +        if let Some(&id) = memo.get(&key) {
-      +            return id;
-      +        }
+      -}
       +
-               // Create a new state by copying s1
-               let new_id = self.copy_state(s1_id);
-       
-      +        // Crucial: insert into memo *before* recursive calls to handle cycles.
-      +        memo.insert(key, new_id);
+      +    #[test]
+      +    fn test_union_identical_cyclic() {
+      +        // DWA that accepts a* with final weight [1].
+      +        let mut d1 = DWA::new();
+      +        d1.add_transition(d1.body.start_state, 'a' as i16, d1.body.start_state, Weight::all()).unwrap();
+      +        d1.set_final_weight(d1.body.start_state, Weight::from_item(1)).unwrap();
       +
-               // Merge s2 into the new state
-      -        self.union_assign_state(s2_id, new_id);
-      +        self.union_assign_state(s2_id, new_id, memo);
-       
-               new_id
-           }
-      @@ -1118,8 +1135,9 @@
-               let other_start_remapped = other.body.start_state + offset;
-               let self_start = new_dwa.body.start_state;
-       
-      -        let new_start = new_dwa.states.union_state(self_start, other_start_remapped);
-      +        let mut memo = HashMap::new();
-      +        let new_start = new_dwa.states.union_state(self_start, other_start_remapped, &mut memo);
-               new_dwa.body.start_state = new_start;
-       
-               if STOCHASTIC_VALIDATION {
-      @@ -1263,6 +1281,8 @@
-               let mut new_dwa = self.clone();
-               let offset = new_dwa.states.len();
-       
-      +        let mut memo = HashMap::new();
+      +        let d2 = d1.clone();
       +
-               // Add all of other's states to the new DWA, remapping their transition targets.
-               for other_state in &other.states.0 {
-                   let mut new_state = other_state.clone();
-      @@ -1298,7 +1318,7 @@
-                   new_dwa.states[s_a_id].final_weight = None;
-       
-                   // Merge the gated start state into the final `self` state.
-      -            new_dwa.states.union_assign_state(temp_id, s_a_id);
-      +            new_dwa.states.union_assign_state(temp_id, s_a_id, &mut memo);
-       
-                   // Set the correct final weight at the junction.
-                   // It must be unioned with any final weight that might have been
+      +        let u = d1.union(&d2);
+      +
+      +        // The union of two identical automata should be equivalent to the original.
+      +        assert_dwa_equivalent(u, d1);
+      +    }
+      +}
 
       ```
     metadata:
@@ -8295,7 +8223,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Introduce memoization to DWA state
-      union for cycle handling"'
+  - user: 'Changes committed with message: "Refactor DWA state union to use memoization
+      for cycle handling and add test for identical cyclic automata union"'
     metadata:
 ...

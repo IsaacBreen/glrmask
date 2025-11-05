@@ -2701,4 +2701,19 @@ mod tests {
         let u = left.union(&right);
         DWA::stochastic_validate_union(&left, &right, &u);
     }
+
+    #[test]
+    fn test_union_identical_cyclic() {
+        // DWA that accepts a* with final weight [1].
+        let mut d1 = DWA::new();
+        d1.add_transition(d1.body.start_state, 'a' as i16, d1.body.start_state, Weight::all()).unwrap();
+        d1.set_final_weight(d1.body.start_state, Weight::from_item(1)).unwrap();
+
+        let d2 = d1.clone();
+
+        let u = d1.union(&d2);
+
+        // The union of two identical automata should be equivalent to the original.
+        assert_dwa_equivalent(u, d1);
+    }
 }
