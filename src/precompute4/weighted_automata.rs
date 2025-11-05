@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // --- Part 1: SimpleBitset ---
 
@@ -23,6 +23,82 @@ use std::time::Instant;
 /// monotone and terminate because unions only ever add elements.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct SimpleBitset(pub RangeSetBlaze<usize>);
+
+// --- Stochastic validation controls and RNG ---
+// Toggle this to true to enable stochastic validation in union() and concatenate().
+const STOCHASTIC_VALIDATION: bool = false;
+const VALIDATION_SAMPLES: usize = 32;
+const VALIDATION_MAX_STEPS: usize = 12;
+const SAMPLING_TRIES: usize = 100;
+
+#[derive(Clone, Debug)]
+struct SimpleRng(u64);
+impl SimpleRng {
+    fn new(seed: u64) -> Self {
+        SimpleRng(seed)
+    }
+    fn from_time() -> Self {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let mixed = (now.as_nanos() as u128 ^ ((now.as_secs() as u128) << 64)) as u64;
+        SimpleRng::new(mixed)
+    }
+    fn next_u64(&mut self) -> u64 {
+        // LCG constants from Numerical Recipes
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.0
+    }
+    fn gen_usize(&mut self, upper: usize) -> usize {
+        if upper <= 1 {
+            0
+        } else {
+            (self.next_u64() as usize) % upper
+        }
+    }
+    fn gen_bool_ratio(&mut self, num: u32, den: u32) -> bool {
+        if den == 0 {
+            true
+        } else {
+            (self.next_u64() % (den as u64)) < (num as u64)
+        }
+    }
+}
+
+// Small fixed alphabet used for default-edge sampling and variety.
+// Includes ASCII letters/digits, some small integers, and negative-coded inputs used in tests.
+const BASE_ALPHABET: &[i16] = &[
+    b'a' as i16, b'b' as i16, b'c' as i16, b'd' as i16, b'e' as i16, b'f' as i16, b'g' as i16,
+    b'h' as i16, b'i' as i16, b'j' as i16, b'k' as i16, b'l' as i16, b'm' as i16, b'n' as i16,
+    b'o' as i16, b'p' as i16, b'q' as i16, b'r' as i16, b's' as i16, b't' as i16, b'u' as i16,
+    b'v' as i16, b'w' as i16, b'x' as i16, b'y' as i16, b'z' as i16, b' ' as i16,
+    b'0' as i16, b'1' as i16, b'2' as i16, b'3' as i16, b'4' as i16, b'5' as i16,
+    b'6' as i16, b'7' as i16, b'8' as i16, b'9' as i16,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    i16::MIN + 0, i16::MIN + 1, i16::MIN + 2, i16::MIN + 3, i16::MIN + 4,
+    i16::MIN + 5, i16::MIN + 6, i16::MIN + 7, i16::MIN + 8, i16::MIN + 9, i16::MIN + 10,
+];
+
+fn pick_default_char_for_state(st: &DWAState, rng: &mut SimpleRng) -> i16 {
+    let ex = &st.transitions.exceptions;
+    // Try random from base alphabet
+    if !BASE_ALPHABET.is_empty() {
+        let mut idx = rng.gen_usize(BASE_ALPHABET.len());
+        for _ in 0..BASE_ALPHABET.len() {
+            let ch = BASE_ALPHABET[idx % BASE_ALPHABET.len()];
+            if !ex.contains_key(&ch) {
+                return ch;
+            }
+            idx = idx.wrapping_add(1);
+        }
+    }
+    // Fallback: scan integers to find a non-exception char (always exists since exceptions are finite).
+    let mut probe: i16 = 0;
+    loop {
+        if !ex.contains_key(&probe) {
+            return probe;
+        }
+        probe = probe.wrapping_add(1);
+    }
+}
 
 impl SimpleBitset {
     pub fn zeros() -> Self {
@@ -185,6 +261,24 @@ impl<T> I16Map<T> {
     }
 }
 
+fn weight_subset(sub: &Weight, sup: &Weight) -> bool {
+    (sub & sup) == sub.clone()
+}
+
+fn format_pos_code(code: i16) -> String {
+    let u = code as u16;
+    if let Some(c) = char::from_u32(u as u32) {
+        if c.is_ascii_graphic() || c == ' ' {
+            format!("'{}'", c)
+        } else {
+            format!("{}", u)
+        }
+    } else {
+        format!("{}", u)
+    }
+}
+fn format_i16_char(code: i16) -> String { if code >= 0 { format_pos_code(code) } else { format!("neg({})", code.wrapping_sub(i16::MIN)) } }
+fn format_word(word: &[i16]) -> String { let parts: Vec<String> = word.iter().map(|&c| format_i16_char(c)).collect(); format!("[{}]", parts.join(", ")) }
 // --- Part 3: Automata Definitions (DWA only) ---
 
 pub type StateID = usize;
@@ -905,7 +999,226 @@ impl DWA {
             }
         }
 
+        if STOCHASTIC_VALIDATION {
+            // Validate C against A and B via stochastic sampling.
+            DWA::stochastic_validate_concatenate(self, other, &new_dwa);
+        }
+
         new_dwa
+    }
+
+    // --- Evaluation and sampling helpers ---
+    /// Evaluate a word's weight in this DWA by intersecting per-edge weights and the final state's weight.
+    /// Returns zeros if the word is not accepted or any transition is missing.
+    pub fn eval_word_weight(&self, word: &[i16]) -> Weight {
+        if self.states.0.is_empty() {
+            return Weight::zeros();
+        }
+        let mut s = self.body.start_state;
+        let mut acc = Weight::all();
+        for &ch in word {
+            if s >= self.states.len() {
+                return Weight::zeros();
+            }
+            let st = &self.states[s];
+            if let Some(&t) = st.transitions.get(ch) {
+                if let Some(w) = st.get_weight(ch) {
+                    acc &= w;
+                } else {
+                    return Weight::zeros();
+                }
+                if acc.is_empty() {
+                    return Weight::zeros();
+                }
+                s = t;
+            } else {
+                return Weight::zeros();
+            }
+        }
+        if s >= self.states.len() {
+            return Weight::zeros();
+        }
+        match &self.states[s].final_weight {
+            Some(fw) => {
+                let res = &acc & fw;
+                if res.is_empty() { Weight::zeros() } else { res }
+            }
+            None => Weight::zeros(),
+        }
+    }
+
+    /// Evaluate a word; None if rejected (weight empty).
+    pub fn eval_word(&self, word: &[i16]) -> Option<Weight> {
+        let w = self.eval_word_weight(word);
+        if w.is_empty() { None } else { Some(w) }
+    }
+
+    /// Sample an accepted path (word and weight) using a time-based seed.
+    /// Returns None if no accepted path was found within the attempt budget.
+    pub fn sample_accepted_path(&self, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+        let mut rng = SimpleRng::from_time();
+        self.sample_accepted_path_with_rng(&mut rng, max_steps)
+    }
+
+    /// Sample an accepted path (word and weight) with a fixed seed (deterministic).
+    pub fn sample_accepted_path_with_seed(&self, seed: u64, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+        let mut rng = SimpleRng::new(seed);
+        self.sample_accepted_path_with_rng(&mut rng, max_steps)
+    }
+
+    /// Core sampler with a provided RNG. Tries multiple attempts to find an accepted word.
+    pub fn sample_accepted_path_with_rng(&self, rng: &mut SimpleRng, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+        if self.states.0.is_empty() {
+            return None;
+        }
+        for _attempt in 0..SAMPLING_TRIES {
+            let mut word: Vec<i16> = Vec::new();
+            let mut s = self.body.start_state;
+            let mut acc = Weight::all();
+
+            for step in 0..max_steps {
+                // Early stop with some probability if we can accept here.
+                if let Some(fw) = &self.states[s].final_weight {
+                    if rng.gen_bool_ratio(1, 3) || step == max_steps - 1 {
+                        let w = &acc & fw;
+                        if !w.is_empty() {
+                            return Some((word, w));
+                        }
+                    }
+                }
+
+                // Choose next character: one of the exception keys or a default-character if default exists.
+                let st = &self.states[s];
+                let mut choices: Vec<i16> = st.transitions.exceptions.keys().copied().collect();
+                let has_default = st.transitions.default.is_some();
+                let total = choices.len() + if has_default { 1 } else { 0 };
+                if total == 0 {
+                    // Dead-end; try to finalize or abort attempt.
+                    if let Some(fw) = &st.final_weight {
+                        let w = &acc & fw;
+                        if !w.is_empty() {
+                            return Some((word, w));
+                        }
+                    }
+                    break; // new attempt
+                }
+                let pick = rng.gen_usize(total);
+                let ch = if has_default && pick == choices.len() {
+                    pick_default_char_for_state(st, rng)
+                } else {
+                    choices[pick]
+                };
+
+                let next = st.transitions.get(ch).copied();
+                if next.is_none() {
+                    break;
+                }
+                let edge_w = st.get_weight(ch).cloned().unwrap_or_else(Weight::zeros);
+                if edge_w.is_empty() {
+                    break;
+                }
+                let new_acc = &acc & &edge_w;
+                if new_acc.is_empty() {
+                    break;
+                }
+                acc = new_acc;
+                s = next.unwrap();
+                word.push(ch);
+            }
+
+            // Finalize at end of attempt if possible:
+            if s < self.states.len() {
+                if let Some(fw) = &self.states[s].final_weight {
+                    let w = &acc & fw;
+                    if !w.is_empty() {
+                        return Some((word, w));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn expected_union_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
+        let wa = a.eval_word_weight(word);
+        let wb = b.eval_word_weight(word);
+        &wa | &wb
+    }
+
+    /// Expected concatenation weight:
+    /// union over all split points i of (A(word[..i]) ∧ B(word[i..])).
+    fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
+        let mut acc = Weight::zeros();
+        for i in 0..=word.len() {
+            let wa = a.eval_word_weight(&word[..i]);
+            if wa.is_empty() {
+                continue;
+            }
+            let wb = b.eval_word_weight(&word[i..]);
+            if wb.is_empty() {
+                continue;
+            }
+            let both = &wa & &wb;
+            if !both.is_empty() {
+                acc |= &both;
+            }
+        }
+        acc
+    }
+
+    fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
+        let mut rng = SimpleRng::from_time();
+        for _ in 0..VALIDATION_SAMPLES {
+            // Sample a path from A -> must be in U, and U == A ∪ B for that word.
+            if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                let wu = u.eval_word_weight(&w);
+                assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
+                assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
+                let expected = DWA::expected_union_weight(a, b, &w);
+                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), wa, b.eval_word_weight(&w), wu, expected);
+            }
+
+            // Sample a path from B -> must be in U, and U == A ∪ B for that word.
+            if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                let wu = u.eval_word_weight(&w);
+                assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
+                assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
+                let expected = DWA::expected_union_weight(a, b, &w);
+                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), wb, wu, expected);
+            }
+
+            // Sample a path from U -> ensure it's in A ∪ B (equality check).
+            if let Some((w, wu)) = u.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                let expected = DWA::expected_union_weight(a, b, &w);
+                assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected);
+            }
+        }
+    }
+
+    fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
+        let mut rng = SimpleRng::from_time();
+        for _ in 0..VALIDATION_SAMPLES {
+            // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
+            if let Some((wa_word, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                if let Some((wb_word, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                    let mut w = wa_word.clone();
+                    w.extend_from_slice(&wb_word);
+                    let wc = c.eval_word_weight(&w);
+                    let expected_simple = &wa & &wb;
+                    assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nA(word): {}\nB(word): {}\n", wa, wb);
+                    assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n", format_word(&w), wa, wb, wc, expected_simple);
+                    // Also verify full expected across all splits equals C's result
+                    let expected_all = DWA::expected_concat_weight(a, b, &w);
+                    assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected_all);
+                }
+            }
+
+            // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
+            if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                let expected = DWA::expected_concat_weight(a, b, &w);
+                assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected);
+            }
+        }
     }
 
     /// Concatenation-like operation on two DWAs.
@@ -1062,6 +1375,11 @@ impl DWA {
             }
         }
 
+        if STOCHASTIC_VALIDATION {
+            // Validate U against A and B via stochastic sampling.
+            DWA::stochastic_validate_union(self, other, &new_dwa);
+        }
+
         new_dwa
     }
 
@@ -1110,19 +1428,6 @@ impl Display for DWA {
                     writeln!(f, "    * -> {}", to)?;
                 }
             }
-            let format_pos_code = |code: i16| -> String {
-                let u = code as u16;
-                if let Some(c) = char::from_u32(u as u32) {
-                    if c.is_ascii_graphic() || c == ' ' {
-                        format!("'{}'", c)
-                    } else {
-                        format!("{}", u)
-                    }
-                } else {
-                    format!("{}", u)
-                }
-            };
-
             for (on, to) in &state.transitions.exceptions {
                 // Represent positive codes as char if ASCII; negatives as '-char' or '-num'
                 let char_repr = if *on >= 0 {

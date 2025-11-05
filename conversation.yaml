@@ -1,31 +1,9 @@
 local_system:
   attached_files:
-    - src/precompute4/utils.rs
     - src/precompute4/weighted_automata.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/precompute4/utils.rs: |-
-      use crate::glr::table::StateID as ParserStateID;
-      use crate::precompute4::full_dwa::FullDWABuildError;
-
-      pub fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          if id.0 > i16::MAX as usize {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(id.0 as i16)
-          }
-      }
-
-      pub fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          // Negative codes for stack-hitching. We store as i16::MIN + id.
-          // This requires that parser state IDs are not too large.
-          if id.0 > (i16::MAX as usize) {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(i16::MIN + (id.0 as i16))
-          }
-      }
     src/precompute4/weighted_automata.rs: |
       // src/precompute4/weighted_automata.rs
 
@@ -1834,29 +1812,189 @@ local_system:
 
               assert_dwa_equivalent(c, expected);
           }
+
+          #[test]
+          #[ignore] // This test is very slow in debug builds.
+          fn test_union_commutativity_from_debug_log() {
+              fn neg(x: i16) -> i16 {
+                  i16::MIN + x
+              }
+
+              // --- Build LEFT DWA ---
+              let mut left = DWA::new();
+              for _ in 0..47 {
+                  left.add_state();
+              }
+
+              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 2, 2, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 3, 3, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 4, 4, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 5, 5, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 6, 6, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 7, 7, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 8, 8, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 9, 9, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 10, 10, Weight::from_item(1)).unwrap();
+              left.add_transition(1, neg(0), 11, Weight::all()).unwrap();
+              left.set_default_transition(2, 12, Weight::all()).unwrap();
+              left.add_transition(3, neg(3), 13, Weight::all()).unwrap();
+              left.add_transition(5, 3, 14, Weight::all()).unwrap();
+              left.add_transition(5, 7, 9, Weight::all()).unwrap();
+              left.set_default_transition(6, 5, Weight::all()).unwrap();
+              left.add_transition(7, neg(7), 15, Weight::all()).unwrap();
+              left.set_default_transition(8, 9, Weight::all()).unwrap();
+              left.add_transition(9, 3, 16, Weight::all()).unwrap();
+              left.add_transition(9, 7, 9, Weight::all()).unwrap();
+              left.add_transition(10, 5, 5, Weight::all()).unwrap();
+              left.add_transition(11, neg(9), 17, Weight::all()).unwrap();
+              left.set_default_transition(12, 18, Weight::all()).unwrap();
+              left.add_transition(13, neg(9), 19, Weight::all()).unwrap();
+              left.add_transition(14, neg(3), 20, Weight::all()).unwrap();
+              left.add_transition(15, neg(9), 21, Weight::all()).unwrap();
+              left.add_transition(16, neg(3), 22, Weight::all()).unwrap();
+              let w01 = Weight::from_iter(0..=1);
+              left.add_transition(17, 2, 23, w01.clone()).unwrap();
+              left.add_transition(17, 4, 24, w01.clone()).unwrap();
+              left.add_transition(17, 5, 25, w01.clone()).unwrap();
+              left.add_transition(17, 6, 26, w01.clone()).unwrap();
+              left.add_transition(17, 8, 27, w01.clone()).unwrap();
+              left.add_transition(17, 9, 28, w01.clone()).unwrap();
+              left.add_transition(17, 10, 29, w01.clone()).unwrap();
+              left.add_transition(19, 2, 23, w01.clone()).unwrap();
+              left.add_transition(19, 4, 24, w01.clone()).unwrap();
+              left.add_transition(19, 5, 25, w01.clone()).unwrap();
+              left.add_transition(19, 6, 26, w01.clone()).unwrap();
+              left.add_transition(19, 8, 27, w01.clone()).unwrap();
+              left.add_transition(19, 9, 28, w01.clone()).unwrap();
+              left.add_transition(19, 10, 29, w01.clone()).unwrap();
+              left.add_transition(20, neg(0), 30, Weight::all()).unwrap();
+              left.add_transition(21, 2, 23, w01.clone()).unwrap();
+              left.add_transition(21, 4, 24, w01.clone()).unwrap();
+              left.add_transition(21, 5, 25, w01.clone()).unwrap();
+              left.add_transition(21, 6, 26, w01.clone()).unwrap();
+              left.add_transition(21, 8, 27, w01.clone()).unwrap();
+              left.add_transition(21, 9, 28, w01.clone()).unwrap();
+              left.add_transition(21, 10, 29, w01.clone()).unwrap();
+              left.add_transition(22, neg(0), 31, Weight::all()).unwrap();
+              left.set_default_transition(23, 32, Weight::all()).unwrap();
+              left.add_transition(25, 7, 28, Weight::all()).unwrap();
+              left.set_default_transition(26, 25, Weight::all()).unwrap();
+              left.set_default_transition(27, 28, Weight::all()).unwrap();
+              left.add_transition(28, 0, 33, Weight::all()).unwrap();
+              left.add_transition(28, 3, 34, Weight::all()).unwrap();
+              left.add_transition(28, 7, 35, Weight::all()).unwrap();
+              left.add_transition(29, 5, 25, Weight::all()).unwrap();
+              left.add_transition(30, neg(9), 36, Weight::all()).unwrap();
+              left.add_transition(31, neg(9), 37, Weight::all()).unwrap();
+              left.set_default_transition(32, 38, Weight::all()).unwrap();
+              left.add_transition(33, neg(0), 39, Weight::all()).unwrap();
+              left.add_transition(34, neg(3), 40, Weight::all()).unwrap();
+              left.add_transition(35, neg(7), 41, Weight::all()).unwrap();
+              left.add_transition(36, 2, 23, w01.clone()).unwrap();
+              left.add_transition(36, 4, 24, w01.clone()).unwrap();
+              left.add_transition(36, 5, 25, w01.clone()).unwrap();
+              left.add_transition(36, 6, 26, w01.clone()).unwrap();
+              left.add_transition(36, 8, 27, w01.clone()).unwrap();
+              left.add_transition(36, 9, 28, w01.clone()).unwrap();
+              left.add_transition(36, 10, 29, w01.clone()).unwrap();
+              left.add_transition(37, 2, 23, w01.clone()).unwrap();
+              left.add_transition(37, 4, 24, w01.clone()).unwrap();
+              left.add_transition(37, 5, 25, w01.clone()).unwrap();
+              left.add_transition(37, 6, 26, w01.clone()).unwrap();
+              left.add_transition(37, 8, 27, w01.clone()).unwrap();
+              left.add_transition(37, 9, 28, w01.clone()).unwrap();
+              left.add_transition(37, 10, 29, w01.clone()).unwrap();
+              left.add_transition(39, neg(5), 42, Weight::all()).unwrap();
+              left.add_transition(40, neg(5), 43, Weight::all()).unwrap();
+              left.add_transition(41, neg(5), 44, Weight::all()).unwrap();
+              left.add_transition(42, neg(10), 45, Weight::all()).unwrap();
+              left.add_transition(43, neg(10), 46, Weight::all()).unwrap();
+              left.add_transition(44, neg(10), 47, Weight::all()).unwrap();
+              left.set_final_weight(45, Weight::all()).unwrap();
+              left.set_final_weight(46, Weight::all()).unwrap();
+              left.set_final_weight(47, Weight::all()).unwrap();
+
+              // --- Build RIGHT DWA ---
+              let mut right = DWA::new();
+              for _ in 0..42 {
+                  right.add_state();
+              }
+
+              right.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 4, 2, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 5, 3, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 6, 4, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 8, 5, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 9, 6, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 10, 7, Weight::from_item(0)).unwrap();
+              right.set_default_transition(1, 8, Weight::all()).unwrap();
+              right.add_transition(3, 7, 6, Weight::all()).unwrap();
+              right.set_default_transition(4, 3, Weight::all()).unwrap();
+              right.set_default_transition(5, 6, Weight::all()).unwrap();
+              right.add_transition(6, 0, 9, Weight::all()).unwrap();
+              right.add_transition(6, 3, 10, Weight::all()).unwrap();
+              right.add_transition(6, 7, 11, Weight::all()).unwrap();
+              right.add_transition(7, 5, 3, Weight::all()).unwrap();
+              right.set_default_transition(8, 12, Weight::all()).unwrap();
+              right.add_transition(9, neg(0), 13, Weight::all()).unwrap();
+              right.add_transition(10, neg(3), 14, Weight::all()).unwrap();
+              right.add_transition(11, neg(7), 15, Weight::all()).unwrap();
+              right.add_transition(13, neg(5), 16, Weight::all()).unwrap();
+              right.add_transition(14, neg(5), 17, Weight::all()).unwrap();
+              right.add_transition(15, neg(5), 18, Weight::all()).unwrap();
+              right.add_transition(16, neg(10), 19, Weight::all()).unwrap();
+              right.add_transition(17, neg(10), 20, Weight::all()).unwrap();
+              right.add_transition(18, neg(10), 21, Weight::all()).unwrap();
+              right.add_transition(19, 2, 22, w01.clone()).unwrap();
+              right.add_transition(19, 4, 23, w01.clone()).unwrap();
+              right.add_transition(19, 5, 24, w01.clone()).unwrap();
+              right.add_transition(19, 6, 25, w01.clone()).unwrap();
+              right.add_transition(19, 8, 26, w01.clone()).unwrap();
+              right.add_transition(19, 9, 27, w01.clone()).unwrap();
+              right.add_transition(19, 10, 28, w01.clone()).unwrap();
+              right.add_transition(20, 2, 22, w01.clone()).unwrap();
+              right.add_transition(20, 4, 23, w01.clone()).unwrap();
+              right.add_transition(20, 5, 24, w01.clone()).unwrap();
+              right.add_transition(20, 6, 25, w01.clone()).unwrap();
+              right.add_transition(20, 8, 26, w01.clone()).unwrap();
+              right.add_transition(20, 9, 27, w01.clone()).unwrap();
+              right.add_transition(20, 10, 28, w01.clone()).unwrap();
+              right.add_transition(21, 2, 22, w01.clone()).unwrap();
+              right.add_transition(21, 4, 23, w01.clone()).unwrap();
+              right.add_transition(21, 5, 24, w01.clone()).unwrap();
+              right.add_transition(21, 6, 25, w01.clone()).unwrap();
+              right.add_transition(21, 8, 26, w01.clone()).unwrap();
+              right.add_transition(21, 9, 27, w01.clone()).unwrap();
+              right.add_transition(21, 10, 28, w01.clone()).unwrap();
+              right.set_default_transition(22, 29, Weight::all()).unwrap();
+              right.add_transition(24, 7, 27, Weight::all()).unwrap();
+              right.set_default_transition(25, 24, Weight::all()).unwrap();
+              right.set_default_transition(26, 27, Weight::all()).unwrap();
+              right.add_transition(27, 0, 30, Weight::all()).unwrap();
+              right.add_transition(27, 3, 31, Weight::all()).unwrap();
+              right.add_transition(27, 7, 32, Weight::all()).unwrap();
+              right.add_transition(28, 5, 24, Weight::all()).unwrap();
+              right.set_default_transition(29, 33, Weight::all()).unwrap();
+              right.add_transition(30, neg(0), 34, Weight::all()).unwrap();
+              right.add_transition(31, neg(3), 35, Weight::all()).unwrap();
+              right.add_transition(32, neg(7), 36, Weight::all()).unwrap();
+              right.add_transition(34, neg(5), 37, Weight::all()).unwrap();
+              right.add_transition(35, neg(5), 38, Weight::all()).unwrap();
+              right.add_transition(36, neg(5), 39, Weight::all()).unwrap();
+              right.add_transition(37, neg(10), 40, Weight::all()).unwrap();
+              right.add_transition(38, neg(10), 41, Weight::all()).unwrap();
+              right.add_transition(39, neg(10), 42, Weight::all()).unwrap();
+              right.set_final_weight(40, Weight::all()).unwrap();
+              right.set_final_weight(41, Weight::all()).unwrap();
+              right.set_final_weight(42, Weight::all()).unwrap();
+
+              let u1 = left.union(&right);
+              let u2 = right.union(&left);
+              assert_dwa_equivalent(u1, u2);
+          }
       }
   prev_file_contents:
-    src/precompute4/utils.rs: |-
-      use crate::glr::table::StateID as ParserStateID;
-      use crate::precompute4::full_dwa::FullDWABuildError;
-
-      pub fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          if id.0 > i16::MAX as usize {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(id.0 as i16)
-          }
-      }
-
-      pub fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          // Negative codes for stack-hitching. We store as i16::MIN + id.
-          // This requires that parser state IDs are not too large.
-          if id.0 > (i16::MAX as usize) {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(i16::MIN + (id.0 as i16))
-          }
-      }
     src/precompute4/weighted_automata.rs: |
       // src/precompute4/weighted_automata.rs
 
@@ -1868,7 +2006,7 @@ local_system:
       use std::fmt::{Debug, Display, Formatter};
       use std::iter::FromIterator;
       use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut};
-      use std::time::Instant;
+      use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
       // --- Part 1: SimpleBitset ---
 
@@ -1883,6 +2021,82 @@ local_system:
       /// monotone and terminate because unions only ever add elements.
       #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
       pub struct SimpleBitset(pub RangeSetBlaze<usize>);
+
+      // --- Stochastic validation controls and RNG ---
+      // Toggle this to true to enable stochastic validation in union() and concatenate().
+      const STOCHASTIC_VALIDATION: bool = false;
+      const VALIDATION_SAMPLES: usize = 32;
+      const VALIDATION_MAX_STEPS: usize = 12;
+      const SAMPLING_TRIES: usize = 100;
+
+      #[derive(Clone, Debug)]
+      struct SimpleRng(u64);
+      impl SimpleRng {
+          fn new(seed: u64) -> Self {
+              SimpleRng(seed)
+          }
+          fn from_time() -> Self {
+              let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+              let mixed = (now.as_nanos() as u128 ^ ((now.as_secs() as u128) << 64)) as u64;
+              SimpleRng::new(mixed)
+          }
+          fn next_u64(&mut self) -> u64 {
+              // LCG constants from Numerical Recipes
+              self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+              self.0
+          }
+          fn gen_usize(&mut self, upper: usize) -> usize {
+              if upper <= 1 {
+                  0
+              } else {
+                  (self.next_u64() as usize) % upper
+              }
+          }
+          fn gen_bool_ratio(&mut self, num: u32, den: u32) -> bool {
+              if den == 0 {
+                  true
+              } else {
+                  (self.next_u64() % (den as u64)) < (num as u64)
+              }
+          }
+      }
+
+      // Small fixed alphabet used for default-edge sampling and variety.
+      // Includes ASCII letters/digits, some small integers, and negative-coded inputs used in tests.
+      const BASE_ALPHABET: &[i16] = &[
+          b'a' as i16, b'b' as i16, b'c' as i16, b'd' as i16, b'e' as i16, b'f' as i16, b'g' as i16,
+          b'h' as i16, b'i' as i16, b'j' as i16, b'k' as i16, b'l' as i16, b'm' as i16, b'n' as i16,
+          b'o' as i16, b'p' as i16, b'q' as i16, b'r' as i16, b's' as i16, b't' as i16, b'u' as i16,
+          b'v' as i16, b'w' as i16, b'x' as i16, b'y' as i16, b'z' as i16, b' ' as i16,
+          b'0' as i16, b'1' as i16, b'2' as i16, b'3' as i16, b'4' as i16, b'5' as i16,
+          b'6' as i16, b'7' as i16, b'8' as i16, b'9' as i16,
+          0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+          i16::MIN + 0, i16::MIN + 1, i16::MIN + 2, i16::MIN + 3, i16::MIN + 4,
+          i16::MIN + 5, i16::MIN + 6, i16::MIN + 7, i16::MIN + 8, i16::MIN + 9, i16::MIN + 10,
+      ];
+
+      fn pick_default_char_for_state(st: &DWAState, rng: &mut SimpleRng) -> i16 {
+          let ex = &st.transitions.exceptions;
+          // Try random from base alphabet
+          if !BASE_ALPHABET.is_empty() {
+              let mut idx = rng.gen_usize(BASE_ALPHABET.len());
+              for _ in 0..BASE_ALPHABET.len() {
+                  let ch = BASE_ALPHABET[idx % BASE_ALPHABET.len()];
+                  if !ex.contains_key(&ch) {
+                      return ch;
+                  }
+                  idx = idx.wrapping_add(1);
+              }
+          }
+          // Fallback: scan integers to find a non-exception char (always exists since exceptions are finite).
+          let mut probe: i16 = 0;
+          loop {
+              if !ex.contains_key(&probe) {
+                  return probe;
+              }
+              probe = probe.wrapping_add(1);
+          }
+      }
 
       impl SimpleBitset {
           pub fn zeros() -> Self {
@@ -2045,6 +2259,24 @@ local_system:
           }
       }
 
+      fn weight_subset(sub: &Weight, sup: &Weight) -> bool {
+          (sub & sup) == sub.clone()
+      }
+
+      fn format_pos_code(code: i16) -> String {
+          let u = code as u16;
+          if let Some(c) = char::from_u32(u as u32) {
+              if c.is_ascii_graphic() || c == ' ' {
+                  format!("'{}'", c)
+              } else {
+                  format!("{}", u)
+              }
+          } else {
+              format!("{}", u)
+          }
+      }
+      fn format_i16_char(code: i16) -> String { if code >= 0 { format_pos_code(code) } else { format!("neg({})", code.wrapping_sub(i16::MIN)) } }
+      fn format_word(word: &[i16]) -> String { let parts: Vec<String> = word.iter().map(|&c| format_i16_char(c)).collect(); format!("[{}]", parts.join(", ")) }
       // --- Part 3: Automata Definitions (DWA only) ---
 
       pub type StateID = usize;
@@ -2765,7 +2997,226 @@ local_system:
                   }
               }
 
+              if STOCHASTIC_VALIDATION {
+                  // Validate C against A and B via stochastic sampling.
+                  DWA::stochastic_validate_concatenate(self, other, &new_dwa);
+              }
+
               new_dwa
+          }
+
+          // --- Evaluation and sampling helpers ---
+          /// Evaluate a word's weight in this DWA by intersecting per-edge weights and the final state's weight.
+          /// Returns zeros if the word is not accepted or any transition is missing.
+          pub fn eval_word_weight(&self, word: &[i16]) -> Weight {
+              if self.states.0.is_empty() {
+                  return Weight::zeros();
+              }
+              let mut s = self.body.start_state;
+              let mut acc = Weight::all();
+              for &ch in word {
+                  if s >= self.states.len() {
+                      return Weight::zeros();
+                  }
+                  let st = &self.states[s];
+                  if let Some(&t) = st.transitions.get(ch) {
+                      if let Some(w) = st.get_weight(ch) {
+                          acc &= w;
+                      } else {
+                          return Weight::zeros();
+                      }
+                      if acc.is_empty() {
+                          return Weight::zeros();
+                      }
+                      s = t;
+                  } else {
+                      return Weight::zeros();
+                  }
+              }
+              if s >= self.states.len() {
+                  return Weight::zeros();
+              }
+              match &self.states[s].final_weight {
+                  Some(fw) => {
+                      let res = &acc & fw;
+                      if res.is_empty() { Weight::zeros() } else { res }
+                  }
+                  None => Weight::zeros(),
+              }
+          }
+
+          /// Evaluate a word; None if rejected (weight empty).
+          pub fn eval_word(&self, word: &[i16]) -> Option<Weight> {
+              let w = self.eval_word_weight(word);
+              if w.is_empty() { None } else { Some(w) }
+          }
+
+          /// Sample an accepted path (word and weight) using a time-based seed.
+          /// Returns None if no accepted path was found within the attempt budget.
+          pub fn sample_accepted_path(&self, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+              let mut rng = SimpleRng::from_time();
+              self.sample_accepted_path_with_rng(&mut rng, max_steps)
+          }
+
+          /// Sample an accepted path (word and weight) with a fixed seed (deterministic).
+          pub fn sample_accepted_path_with_seed(&self, seed: u64, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+              let mut rng = SimpleRng::new(seed);
+              self.sample_accepted_path_with_rng(&mut rng, max_steps)
+          }
+
+          /// Core sampler with a provided RNG. Tries multiple attempts to find an accepted word.
+          pub fn sample_accepted_path_with_rng(&self, rng: &mut SimpleRng, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+              if self.states.0.is_empty() {
+                  return None;
+              }
+              for _attempt in 0..SAMPLING_TRIES {
+                  let mut word: Vec<i16> = Vec::new();
+                  let mut s = self.body.start_state;
+                  let mut acc = Weight::all();
+
+                  for step in 0..max_steps {
+                      // Early stop with some probability if we can accept here.
+                      if let Some(fw) = &self.states[s].final_weight {
+                          if rng.gen_bool_ratio(1, 3) || step == max_steps - 1 {
+                              let w = &acc & fw;
+                              if !w.is_empty() {
+                                  return Some((word, w));
+                              }
+                          }
+                      }
+
+                      // Choose next character: one of the exception keys or a default-character if default exists.
+                      let st = &self.states[s];
+                      let mut choices: Vec<i16> = st.transitions.exceptions.keys().copied().collect();
+                      let has_default = st.transitions.default.is_some();
+                      let total = choices.len() + if has_default { 1 } else { 0 };
+                      if total == 0 {
+                          // Dead-end; try to finalize or abort attempt.
+                          if let Some(fw) = &st.final_weight {
+                              let w = &acc & fw;
+                              if !w.is_empty() {
+                                  return Some((word, w));
+                              }
+                          }
+                          break; // new attempt
+                      }
+                      let pick = rng.gen_usize(total);
+                      let ch = if has_default && pick == choices.len() {
+                          pick_default_char_for_state(st, rng)
+                      } else {
+                          choices[pick]
+                      };
+
+                      let next = st.transitions.get(ch).copied();
+                      if next.is_none() {
+                          break;
+                      }
+                      let edge_w = st.get_weight(ch).cloned().unwrap_or_else(Weight::zeros);
+                      if edge_w.is_empty() {
+                          break;
+                      }
+                      let new_acc = &acc & &edge_w;
+                      if new_acc.is_empty() {
+                          break;
+                      }
+                      acc = new_acc;
+                      s = next.unwrap();
+                      word.push(ch);
+                  }
+
+                  // Finalize at end of attempt if possible:
+                  if s < self.states.len() {
+                      if let Some(fw) = &self.states[s].final_weight {
+                          let w = &acc & fw;
+                          if !w.is_empty() {
+                              return Some((word, w));
+                          }
+                      }
+                  }
+              }
+              None
+          }
+
+          fn expected_union_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
+              let wa = a.eval_word_weight(word);
+              let wb = b.eval_word_weight(word);
+              &wa | &wb
+          }
+
+          /// Expected concatenation weight:
+          /// union over all split points i of (A(word[..i]) ∧ B(word[i..])).
+          fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
+              let mut acc = Weight::zeros();
+              for i in 0..=word.len() {
+                  let wa = a.eval_word_weight(&word[..i]);
+                  if wa.is_empty() {
+                      continue;
+                  }
+                  let wb = b.eval_word_weight(&word[i..]);
+                  if wb.is_empty() {
+                      continue;
+                  }
+                  let both = &wa & &wb;
+                  if !both.is_empty() {
+                      acc |= &both;
+                  }
+              }
+              acc
+          }
+
+          fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
+              let mut rng = SimpleRng::from_time();
+              for _ in 0..VALIDATION_SAMPLES {
+                  // Sample a path from A -> must be in U, and U == A ∪ B for that word.
+                  if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                      let wu = u.eval_word_weight(&w);
+                      assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
+                      assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
+                      let expected = DWA::expected_union_weight(a, b, &w);
+                      assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), wa, b.eval_word_weight(&w), wu, expected);
+                  }
+
+                  // Sample a path from B -> must be in U, and U == A ∪ B for that word.
+                  if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                      let wu = u.eval_word_weight(&w);
+                      assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
+                      assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
+                      let expected = DWA::expected_union_weight(a, b, &w);
+                      assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), wb, wu, expected);
+                  }
+
+                  // Sample a path from U -> ensure it's in A ∪ B (equality check).
+                  if let Some((w, wu)) = u.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                      let expected = DWA::expected_union_weight(a, b, &w);
+                      assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected);
+                  }
+              }
+          }
+
+          fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
+              let mut rng = SimpleRng::from_time();
+              for _ in 0..VALIDATION_SAMPLES {
+                  // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
+                  if let Some((wa_word, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                      if let Some((wb_word, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                          let mut w = wa_word.clone();
+                          w.extend_from_slice(&wb_word);
+                          let wc = c.eval_word_weight(&w);
+                          let expected_simple = &wa & &wb;
+                          assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nA(word): {}\nB(word): {}\n", wa, wb);
+                          assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n", format_word(&w), wa, wb, wc, expected_simple);
+                          // Also verify full expected across all splits equals C's result
+                          let expected_all = DWA::expected_concat_weight(a, b, &w);
+                          assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected_all);
+                      }
+                  }
+
+                  // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
+                  if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                      let expected = DWA::expected_concat_weight(a, b, &w);
+                      assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected);
+                  }
+              }
           }
 
           /// Concatenation-like operation on two DWAs.
@@ -2922,6 +3373,11 @@ local_system:
                   }
               }
 
+              if STOCHASTIC_VALIDATION {
+                  // Validate U against A and B via stochastic sampling.
+                  DWA::stochastic_validate_union(self, other, &new_dwa);
+              }
+
               new_dwa
           }
 
@@ -2970,19 +3426,6 @@ local_system:
                           writeln!(f, "    * -> {}", to)?;
                       }
                   }
-                  let format_pos_code = |code: i16| -> String {
-                      let u = code as u16;
-                      if let Some(c) = char::from_u32(u as u32) {
-                          if c.is_ascii_graphic() || c == ' ' {
-                              format!("'{}'", c)
-                          } else {
-                              format!("{}", u)
-                          }
-                      } else {
-                          format!("{}", u)
-                      }
-                  };
-
                   for (on, to) in &state.transitions.exceptions {
                       // Represent positive codes as char if ASCII; negatives as '-char' or '-num'
                       let char_repr = if *on >= 0 {
@@ -3668,6 +4111,184 @@ local_system:
 
           #[test]
           fn test_union_complex_from_attachment() {
+              fn neg(x: i16) -> i16 {
+                  i16::MIN + x
+              }
+
+              // --- Build LEFT DWA ---
+              let mut left = DWA::new();
+              for _ in 0..47 {
+                  left.add_state();
+              }
+
+              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 2, 2, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 3, 3, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 4, 4, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 5, 5, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 6, 6, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 7, 7, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 8, 8, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 9, 9, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 10, 10, Weight::from_item(1)).unwrap();
+              left.add_transition(1, neg(0), 11, Weight::all()).unwrap();
+              left.set_default_transition(2, 12, Weight::all()).unwrap();
+              left.add_transition(3, neg(3), 13, Weight::all()).unwrap();
+              left.add_transition(5, 3, 14, Weight::all()).unwrap();
+              left.add_transition(5, 7, 9, Weight::all()).unwrap();
+              left.set_default_transition(6, 5, Weight::all()).unwrap();
+              left.add_transition(7, neg(7), 15, Weight::all()).unwrap();
+              left.set_default_transition(8, 9, Weight::all()).unwrap();
+              left.add_transition(9, 3, 16, Weight::all()).unwrap();
+              left.add_transition(9, 7, 9, Weight::all()).unwrap();
+              left.add_transition(10, 5, 5, Weight::all()).unwrap();
+              left.add_transition(11, neg(9), 17, Weight::all()).unwrap();
+              left.set_default_transition(12, 18, Weight::all()).unwrap();
+              left.add_transition(13, neg(9), 19, Weight::all()).unwrap();
+              left.add_transition(14, neg(3), 20, Weight::all()).unwrap();
+              left.add_transition(15, neg(9), 21, Weight::all()).unwrap();
+              left.add_transition(16, neg(3), 22, Weight::all()).unwrap();
+              let w01 = Weight::from_iter(0..=1);
+              left.add_transition(17, 2, 23, w01.clone()).unwrap();
+              left.add_transition(17, 4, 24, w01.clone()).unwrap();
+              left.add_transition(17, 5, 25, w01.clone()).unwrap();
+              left.add_transition(17, 6, 26, w01.clone()).unwrap();
+              left.add_transition(17, 8, 27, w01.clone()).unwrap();
+              left.add_transition(17, 9, 28, w01.clone()).unwrap();
+              left.add_transition(17, 10, 29, w01.clone()).unwrap();
+              left.add_transition(19, 2, 23, w01.clone()).unwrap();
+              left.add_transition(19, 4, 24, w01.clone()).unwrap();
+              left.add_transition(19, 5, 25, w01.clone()).unwrap();
+              left.add_transition(19, 6, 26, w01.clone()).unwrap();
+              left.add_transition(19, 8, 27, w01.clone()).unwrap();
+              left.add_transition(19, 9, 28, w01.clone()).unwrap();
+              left.add_transition(19, 10, 29, w01.clone()).unwrap();
+              left.add_transition(20, neg(0), 30, Weight::all()).unwrap();
+              left.add_transition(21, 2, 23, w01.clone()).unwrap();
+              left.add_transition(21, 4, 24, w01.clone()).unwrap();
+              left.add_transition(21, 5, 25, w01.clone()).unwrap();
+              left.add_transition(21, 6, 26, w01.clone()).unwrap();
+              left.add_transition(21, 8, 27, w01.clone()).unwrap();
+              left.add_transition(21, 9, 28, w01.clone()).unwrap();
+              left.add_transition(21, 10, 29, w01.clone()).unwrap();
+              left.add_transition(22, neg(0), 31, Weight::all()).unwrap();
+              left.set_default_transition(23, 32, Weight::all()).unwrap();
+              left.add_transition(25, 7, 28, Weight::all()).unwrap();
+              left.set_default_transition(26, 25, Weight::all()).unwrap();
+              left.set_default_transition(27, 28, Weight::all()).unwrap();
+              left.add_transition(28, 0, 33, Weight::all()).unwrap();
+              left.add_transition(28, 3, 34, Weight::all()).unwrap();
+              left.add_transition(28, 7, 35, Weight::all()).unwrap();
+              left.add_transition(29, 5, 25, Weight::all()).unwrap();
+              left.add_transition(30, neg(9), 36, Weight::all()).unwrap();
+              left.add_transition(31, neg(9), 37, Weight::all()).unwrap();
+              left.set_default_transition(32, 38, Weight::all()).unwrap();
+              left.add_transition(33, neg(0), 39, Weight::all()).unwrap();
+              left.add_transition(34, neg(3), 40, Weight::all()).unwrap();
+              left.add_transition(35, neg(7), 41, Weight::all()).unwrap();
+              left.add_transition(36, 2, 23, w01.clone()).unwrap();
+              left.add_transition(36, 4, 24, w01.clone()).unwrap();
+              left.add_transition(36, 5, 25, w01.clone()).unwrap();
+              left.add_transition(36, 6, 26, w01.clone()).unwrap();
+              left.add_transition(36, 8, 27, w01.clone()).unwrap();
+              left.add_transition(36, 9, 28, w01.clone()).unwrap();
+              left.add_transition(36, 10, 29, w01.clone()).unwrap();
+              left.add_transition(37, 2, 23, w01.clone()).unwrap();
+              left.add_transition(37, 4, 24, w01.clone()).unwrap();
+              left.add_transition(37, 5, 25, w01.clone()).unwrap();
+              left.add_transition(37, 6, 26, w01.clone()).unwrap();
+              left.add_transition(37, 8, 27, w01.clone()).unwrap();
+              left.add_transition(37, 9, 28, w01.clone()).unwrap();
+              left.add_transition(37, 10, 29, w01.clone()).unwrap();
+              left.add_transition(39, neg(5), 42, Weight::all()).unwrap();
+              left.add_transition(40, neg(5), 43, Weight::all()).unwrap();
+              left.add_transition(41, neg(5), 44, Weight::all()).unwrap();
+              left.add_transition(42, neg(10), 45, Weight::all()).unwrap();
+              left.add_transition(43, neg(10), 46, Weight::all()).unwrap();
+              left.add_transition(44, neg(10), 47, Weight::all()).unwrap();
+              left.set_final_weight(45, Weight::all()).unwrap();
+              left.set_final_weight(46, Weight::all()).unwrap();
+              left.set_final_weight(47, Weight::all()).unwrap();
+
+              // --- Build RIGHT DWA ---
+              let mut right = DWA::new();
+              for _ in 0..42 {
+                  right.add_state();
+              }
+
+              right.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 4, 2, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 5, 3, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 6, 4, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 8, 5, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 9, 6, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 10, 7, Weight::from_item(0)).unwrap();
+              right.set_default_transition(1, 8, Weight::all()).unwrap();
+              right.add_transition(3, 7, 6, Weight::all()).unwrap();
+              right.set_default_transition(4, 3, Weight::all()).unwrap();
+              right.set_default_transition(5, 6, Weight::all()).unwrap();
+              right.add_transition(6, 0, 9, Weight::all()).unwrap();
+              right.add_transition(6, 3, 10, Weight::all()).unwrap();
+              right.add_transition(6, 7, 11, Weight::all()).unwrap();
+              right.add_transition(7, 5, 3, Weight::all()).unwrap();
+              right.set_default_transition(8, 12, Weight::all()).unwrap();
+              right.add_transition(9, neg(0), 13, Weight::all()).unwrap();
+              right.add_transition(10, neg(3), 14, Weight::all()).unwrap();
+              right.add_transition(11, neg(7), 15, Weight::all()).unwrap();
+              right.add_transition(13, neg(5), 16, Weight::all()).unwrap();
+              right.add_transition(14, neg(5), 17, Weight::all()).unwrap();
+              right.add_transition(15, neg(5), 18, Weight::all()).unwrap();
+              right.add_transition(16, neg(10), 19, Weight::all()).unwrap();
+              right.add_transition(17, neg(10), 20, Weight::all()).unwrap();
+              right.add_transition(18, neg(10), 21, Weight::all()).unwrap();
+              right.add_transition(19, 2, 22, w01.clone()).unwrap();
+              right.add_transition(19, 4, 23, w01.clone()).unwrap();
+              right.add_transition(19, 5, 24, w01.clone()).unwrap();
+              right.add_transition(19, 6, 25, w01.clone()).unwrap();
+              right.add_transition(19, 8, 26, w01.clone()).unwrap();
+              right.add_transition(19, 9, 27, w01.clone()).unwrap();
+              right.add_transition(19, 10, 28, w01.clone()).unwrap();
+              right.add_transition(20, 2, 22, w01.clone()).unwrap();
+              right.add_transition(20, 4, 23, w01.clone()).unwrap();
+              right.add_transition(20, 5, 24, w01.clone()).unwrap();
+              right.add_transition(20, 6, 25, w01.clone()).unwrap();
+              right.add_transition(20, 8, 26, w01.clone()).unwrap();
+              right.add_transition(20, 9, 27, w01.clone()).unwrap();
+              right.add_transition(20, 10, 28, w01.clone()).unwrap();
+              right.add_transition(21, 2, 22, w01.clone()).unwrap();
+              right.add_transition(21, 4, 23, w01.clone()).unwrap();
+              right.add_transition(21, 5, 24, w01.clone()).unwrap();
+              right.add_transition(21, 6, 25, w01.clone()).unwrap();
+              right.add_transition(21, 8, 26, w01.clone()).unwrap();
+              right.add_transition(21, 9, 27, w01.clone()).unwrap();
+              right.add_transition(21, 10, 28, w01.clone()).unwrap();
+              right.set_default_transition(22, 29, Weight::all()).unwrap();
+              right.add_transition(24, 7, 27, Weight::all()).unwrap();
+              right.set_default_transition(25, 24, Weight::all()).unwrap();
+              right.set_default_transition(26, 27, Weight::all()).unwrap();
+              right.add_transition(27, 0, 30, Weight::all()).unwrap();
+              right.add_transition(27, 3, 31, Weight::all()).unwrap();
+              right.add_transition(27, 7, 32, Weight::all()).unwrap();
+              right.add_transition(28, 5, 24, Weight::all()).unwrap();
+              right.set_default_transition(29, 33, Weight::all()).unwrap();
+              right.add_transition(30, neg(0), 34, Weight::all()).unwrap();
+              right.add_transition(31, neg(3), 35, Weight::all()).unwrap();
+              right.add_transition(32, neg(7), 36, Weight::all()).unwrap();
+              right.add_transition(34, neg(5), 37, Weight::all()).unwrap();
+              right.add_transition(35, neg(5), 38, Weight::all()).unwrap();
+              right.add_transition(36, neg(5), 39, Weight::all()).unwrap();
+              right.add_transition(37, neg(10), 40, Weight::all()).unwrap();
+              right.add_transition(38, neg(10), 41, Weight::all()).unwrap();
+              right.add_transition(39, neg(10), 42, Weight::all()).unwrap();
+              right.set_final_weight(40, Weight::all()).unwrap();
+              right.set_final_weight(41, Weight::all()).unwrap();
+              right.set_final_weight(42, Weight::all()).unwrap();
+
+              todo!();
+          }
+
+          #[test]
+          fn test_union_complex_from_attachment_simpified() {
               fn neg(val: i16) -> i16 {
                   val.wrapping_add(i16::MIN)
               }
@@ -3802,9 +4423,7 @@ local_system:
               // State 22
               right.set_final_weight(22, Weight::from_item(0)).unwrap();
 
-              // Perform union and simplify. The test passes if it doesn't panic.
-              let mut u = left.union(&right);
-              u.simplify();
+              todo!();
           }
       }
   diffs_applied_this_send: true
@@ -3818,7 +4437,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -3849,31 +4468,6 @@ messages:
       kind: core-guidance
       role: developer
       ephemeral: false
-  - user: |-
-      ```rust "src/precompute4/utils.rs"
-      use crate::glr::table::StateID as ParserStateID;
-      use crate::precompute4::full_dwa::FullDWABuildError;
-
-      pub fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          if id.0 > i16::MAX as usize {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(id.0 as i16)
-          }
-      }
-
-      pub fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          // Negative codes for stack-hitching. We store as i16::MIN + id.
-          // This requires that parser state IDs are not too large.
-          if id.0 > (i16::MAX as usize) {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(i16::MIN + (id.0 as i16))
-          }
-      }
-      ```
-    metadata:
-      filename: src/precompute4/utils.rs
   - user: |-
       ```rust "src/precompute4/weighted_automata.rs"
       // src/precompute4/weighted_automata.rs
@@ -5683,138 +6277,201 @@ messages:
 
               assert_dwa_equivalent(c, expected);
           }
+
+          #[test]
+          #[ignore] // This test is very slow in debug builds.
+          fn test_union_commutativity_from_debug_log() {
+              fn neg(x: i16) -> i16 {
+                  i16::MIN + x
+              }
+
+              // --- Build LEFT DWA ---
+              let mut left = DWA::new();
+              for _ in 0..47 {
+                  left.add_state();
+              }
+
+              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 2, 2, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 3, 3, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 4, 4, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 5, 5, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 6, 6, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 7, 7, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 8, 8, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 9, 9, Weight::from_item(1)).unwrap();
+              left.add_transition(0, 10, 10, Weight::from_item(1)).unwrap();
+              left.add_transition(1, neg(0), 11, Weight::all()).unwrap();
+              left.set_default_transition(2, 12, Weight::all()).unwrap();
+              left.add_transition(3, neg(3), 13, Weight::all()).unwrap();
+              left.add_transition(5, 3, 14, Weight::all()).unwrap();
+              left.add_transition(5, 7, 9, Weight::all()).unwrap();
+              left.set_default_transition(6, 5, Weight::all()).unwrap();
+              left.add_transition(7, neg(7), 15, Weight::all()).unwrap();
+              left.set_default_transition(8, 9, Weight::all()).unwrap();
+              left.add_transition(9, 3, 16, Weight::all()).unwrap();
+              left.add_transition(9, 7, 9, Weight::all()).unwrap();
+              left.add_transition(10, 5, 5, Weight::all()).unwrap();
+              left.add_transition(11, neg(9), 17, Weight::all()).unwrap();
+              left.set_default_transition(12, 18, Weight::all()).unwrap();
+              left.add_transition(13, neg(9), 19, Weight::all()).unwrap();
+              left.add_transition(14, neg(3), 20, Weight::all()).unwrap();
+              left.add_transition(15, neg(9), 21, Weight::all()).unwrap();
+              left.add_transition(16, neg(3), 22, Weight::all()).unwrap();
+              let w01 = Weight::from_iter(0..=1);
+              left.add_transition(17, 2, 23, w01.clone()).unwrap();
+              left.add_transition(17, 4, 24, w01.clone()).unwrap();
+              left.add_transition(17, 5, 25, w01.clone()).unwrap();
+              left.add_transition(17, 6, 26, w01.clone()).unwrap();
+              left.add_transition(17, 8, 27, w01.clone()).unwrap();
+              left.add_transition(17, 9, 28, w01.clone()).unwrap();
+              left.add_transition(17, 10, 29, w01.clone()).unwrap();
+              left.add_transition(19, 2, 23, w01.clone()).unwrap();
+              left.add_transition(19, 4, 24, w01.clone()).unwrap();
+              left.add_transition(19, 5, 25, w01.clone()).unwrap();
+              left.add_transition(19, 6, 26, w01.clone()).unwrap();
+              left.add_transition(19, 8, 27, w01.clone()).unwrap();
+              left.add_transition(19, 9, 28, w01.clone()).unwrap();
+              left.add_transition(19, 10, 29, w01.clone()).unwrap();
+              left.add_transition(20, neg(0), 30, Weight::all()).unwrap();
+              left.add_transition(21, 2, 23, w01.clone()).unwrap();
+              left.add_transition(21, 4, 24, w01.clone()).unwrap();
+              left.add_transition(21, 5, 25, w01.clone()).unwrap();
+              left.add_transition(21, 6, 26, w01.clone()).unwrap();
+              left.add_transition(21, 8, 27, w01.clone()).unwrap();
+              left.add_transition(21, 9, 28, w01.clone()).unwrap();
+              left.add_transition(21, 10, 29, w01.clone()).unwrap();
+              left.add_transition(22, neg(0), 31, Weight::all()).unwrap();
+              left.set_default_transition(23, 32, Weight::all()).unwrap();
+              left.add_transition(25, 7, 28, Weight::all()).unwrap();
+              left.set_default_transition(26, 25, Weight::all()).unwrap();
+              left.set_default_transition(27, 28, Weight::all()).unwrap();
+              left.add_transition(28, 0, 33, Weight::all()).unwrap();
+              left.add_transition(28, 3, 34, Weight::all()).unwrap();
+              left.add_transition(28, 7, 35, Weight::all()).unwrap();
+              left.add_transition(29, 5, 25, Weight::all()).unwrap();
+              left.add_transition(30, neg(9), 36, Weight::all()).unwrap();
+              left.add_transition(31, neg(9), 37, Weight::all()).unwrap();
+              left.set_default_transition(32, 38, Weight::all()).unwrap();
+              left.add_transition(33, neg(0), 39, Weight::all()).unwrap();
+              left.add_transition(34, neg(3), 40, Weight::all()).unwrap();
+              left.add_transition(35, neg(7), 41, Weight::all()).unwrap();
+              left.add_transition(36, 2, 23, w01.clone()).unwrap();
+              left.add_transition(36, 4, 24, w01.clone()).unwrap();
+              left.add_transition(36, 5, 25, w01.clone()).unwrap();
+              left.add_transition(36, 6, 26, w01.clone()).unwrap();
+              left.add_transition(36, 8, 27, w01.clone()).unwrap();
+              left.add_transition(36, 9, 28, w01.clone()).unwrap();
+              left.add_transition(36, 10, 29, w01.clone()).unwrap();
+              left.add_transition(37, 2, 23, w01.clone()).unwrap();
+              left.add_transition(37, 4, 24, w01.clone()).unwrap();
+              left.add_transition(37, 5, 25, w01.clone()).unwrap();
+              left.add_transition(37, 6, 26, w01.clone()).unwrap();
+              left.add_transition(37, 8, 27, w01.clone()).unwrap();
+              left.add_transition(37, 9, 28, w01.clone()).unwrap();
+              left.add_transition(37, 10, 29, w01.clone()).unwrap();
+              left.add_transition(39, neg(5), 42, Weight::all()).unwrap();
+              left.add_transition(40, neg(5), 43, Weight::all()).unwrap();
+              left.add_transition(41, neg(5), 44, Weight::all()).unwrap();
+              left.add_transition(42, neg(10), 45, Weight::all()).unwrap();
+              left.add_transition(43, neg(10), 46, Weight::all()).unwrap();
+              left.add_transition(44, neg(10), 47, Weight::all()).unwrap();
+              left.set_final_weight(45, Weight::all()).unwrap();
+              left.set_final_weight(46, Weight::all()).unwrap();
+              left.set_final_weight(47, Weight::all()).unwrap();
+
+              // --- Build RIGHT DWA ---
+              let mut right = DWA::new();
+              for _ in 0..42 {
+                  right.add_state();
+              }
+
+              right.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 4, 2, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 5, 3, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 6, 4, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 8, 5, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 9, 6, Weight::from_item(0)).unwrap();
+              right.add_transition(0, 10, 7, Weight::from_item(0)).unwrap();
+              right.set_default_transition(1, 8, Weight::all()).unwrap();
+              right.add_transition(3, 7, 6, Weight::all()).unwrap();
+              right.set_default_transition(4, 3, Weight::all()).unwrap();
+              right.set_default_transition(5, 6, Weight::all()).unwrap();
+              right.add_transition(6, 0, 9, Weight::all()).unwrap();
+              right.add_transition(6, 3, 10, Weight::all()).unwrap();
+              right.add_transition(6, 7, 11, Weight::all()).unwrap();
+              right.add_transition(7, 5, 3, Weight::all()).unwrap();
+              right.set_default_transition(8, 12, Weight::all()).unwrap();
+              right.add_transition(9, neg(0), 13, Weight::all()).unwrap();
+              right.add_transition(10, neg(3), 14, Weight::all()).unwrap();
+              right.add_transition(11, neg(7), 15, Weight::all()).unwrap();
+              right.add_transition(13, neg(5), 16, Weight::all()).unwrap();
+              right.add_transition(14, neg(5), 17, Weight::all()).unwrap();
+              right.add_transition(15, neg(5), 18, Weight::all()).unwrap();
+              right.add_transition(16, neg(10), 19, Weight::all()).unwrap();
+              right.add_transition(17, neg(10), 20, Weight::all()).unwrap();
+              right.add_transition(18, neg(10), 21, Weight::all()).unwrap();
+              right.add_transition(19, 2, 22, w01.clone()).unwrap();
+              right.add_transition(19, 4, 23, w01.clone()).unwrap();
+              right.add_transition(19, 5, 24, w01.clone()).unwrap();
+              right.add_transition(19, 6, 25, w01.clone()).unwrap();
+              right.add_transition(19, 8, 26, w01.clone()).unwrap();
+              right.add_transition(19, 9, 27, w01.clone()).unwrap();
+              right.add_transition(19, 10, 28, w01.clone()).unwrap();
+              right.add_transition(20, 2, 22, w01.clone()).unwrap();
+              right.add_transition(20, 4, 23, w01.clone()).unwrap();
+              right.add_transition(20, 5, 24, w01.clone()).unwrap();
+              right.add_transition(20, 6, 25, w01.clone()).unwrap();
+              right.add_transition(20, 8, 26, w01.clone()).unwrap();
+              right.add_transition(20, 9, 27, w01.clone()).unwrap();
+              right.add_transition(20, 10, 28, w01.clone()).unwrap();
+              right.add_transition(21, 2, 22, w01.clone()).unwrap();
+              right.add_transition(21, 4, 23, w01.clone()).unwrap();
+              right.add_transition(21, 5, 24, w01.clone()).unwrap();
+              right.add_transition(21, 6, 25, w01.clone()).unwrap();
+              right.add_transition(21, 8, 26, w01.clone()).unwrap();
+              right.add_transition(21, 9, 27, w01.clone()).unwrap();
+              right.add_transition(21, 10, 28, w01.clone()).unwrap();
+              right.set_default_transition(22, 29, Weight::all()).unwrap();
+              right.add_transition(24, 7, 27, Weight::all()).unwrap();
+              right.set_default_transition(25, 24, Weight::all()).unwrap();
+              right.set_default_transition(26, 27, Weight::all()).unwrap();
+              right.add_transition(27, 0, 30, Weight::all()).unwrap();
+              right.add_transition(27, 3, 31, Weight::all()).unwrap();
+              right.add_transition(27, 7, 32, Weight::all()).unwrap();
+              right.add_transition(28, 5, 24, Weight::all()).unwrap();
+              right.set_default_transition(29, 33, Weight::all()).unwrap();
+              right.add_transition(30, neg(0), 34, Weight::all()).unwrap();
+              right.add_transition(31, neg(3), 35, Weight::all()).unwrap();
+              right.add_transition(32, neg(7), 36, Weight::all()).unwrap();
+              right.add_transition(34, neg(5), 37, Weight::all()).unwrap();
+              right.add_transition(35, neg(5), 38, Weight::all()).unwrap();
+              right.add_transition(36, neg(5), 39, Weight::all()).unwrap();
+              right.add_transition(37, neg(10), 40, Weight::all()).unwrap();
+              right.add_transition(38, neg(10), 41, Weight::all()).unwrap();
+              right.add_transition(39, neg(10), 42, Weight::all()).unwrap();
+              right.set_final_weight(40, Weight::all()).unwrap();
+              right.set_final_weight(41, Weight::all()).unwrap();
+              right.set_final_weight(42, Weight::all()).unwrap();
+
+              let u1 = left.union(&right);
+              let u2 = right.union(&left);
+              assert_dwa_equivalent(u1, u2);
+          }
       }
 
       ```
     metadata:
       filename: src/precompute4/weighted_automata.rs
-  - user: |-
-      `````ad-attachment
-      collapse: closed
-
-      ```
-      left: DWA (start: 0)
-        State 0:
-          0 -> 1 (trans_weight: [1])
-          3 -> 2 (trans_weight: [1])
-          5 -> 3 (trans_weight: [1])
-          6 -> 4 (trans_weight: [1])
-          7 -> 5 (trans_weight: [1])
-          8 -> 4 (trans_weight: [1])
-          9 -> 3 (trans_weight: [1])
-          10 -> 6 (trans_weight: [1])
-        State 1:
-          neg(0) -> 7 (trans_weight: ALL)
-        State 2:
-          neg(3) -> 7 (trans_weight: ALL)
-        State 3:
-          3 -> 8 (trans_weight: ALL)
-          7 -> 3 (trans_weight: ALL)
-        State 4:
-          * -> 3 (trans_weight: ALL)
-        State 5:
-          neg(7) -> 7 (trans_weight: ALL)
-        State 6:
-          5 -> 3 (trans_weight: ALL)
-        State 7:
-          neg(9) -> 9 (trans_weight: ALL)
-        State 8:
-          neg(3) -> 1 (trans_weight: ALL)
-        State 9:
-          5 -> 10 (trans_weight: [0..=1])
-          6 -> 11 (trans_weight: [0..=1])
-          8 -> 12 (trans_weight: [0..=1])
-          9 -> 13 (trans_weight: [0..=1])
-          10 -> 14 (trans_weight: [0..=1])
-        State 10:
-          7 -> 13 (trans_weight: ALL)
-        State 11:
-          * -> 10 (trans_weight: ALL)
-        State 12:
-          * -> 13 (trans_weight: ALL)
-        State 13:
-          0 -> 15 (trans_weight: ALL)
-          3 -> 16 (trans_weight: ALL)
-          7 -> 17 (trans_weight: ALL)
-        State 14:
-          5 -> 10 (trans_weight: ALL)
-        State 15:
-          neg(0) -> 18 (trans_weight: ALL)
-        State 16:
-          neg(3) -> 18 (trans_weight: ALL)
-        State 17:
-          neg(7) -> 18 (trans_weight: ALL)
-        State 18:
-          neg(5) -> 19 (trans_weight: ALL)
-        State 19:
-          neg(10) -> 20 (trans_weight: ALL)
-        State 20:
-          final_weight: [1]
-
-      right: DWA (start: 0)
-        State 0:
-          5 -> 1 (trans_weight: [0])
-          6 -> 2 (trans_weight: [0])
-          8 -> 3 (trans_weight: [0])
-          9 -> 4 (trans_weight: [0])
-          10 -> 5 (trans_weight: [0])
-        State 1:
-          7 -> 4 (trans_weight: ALL)
-        State 2:
-          * -> 1 (trans_weight: ALL)
-        State 3:
-          * -> 4 (trans_weight: ALL)
-        State 4:
-          0 -> 6 (trans_weight: ALL)
-          3 -> 7 (trans_weight: ALL)
-          7 -> 8 (trans_weight: ALL)
-        State 5:
-          5 -> 1 (trans_weight: ALL)
-        State 6:
-          neg(0) -> 9 (trans_weight: ALL)
-        State 7:
-          neg(3) -> 9 (trans_weight: ALL)
-        State 8:
-          neg(7) -> 9 (trans_weight: ALL)
-        State 9:
-          neg(5) -> 10 (trans_weight: ALL)
-        State 10:
-          neg(10) -> 11 (trans_weight: ALL)
-        State 11:
-          5 -> 12 (trans_weight: [0..=1])
-          6 -> 13 (trans_weight: [0..=1])
-          8 -> 14 (trans_weight: [0..=1])
-          9 -> 15 (trans_weight: [0..=1])
-          10 -> 16 (trans_weight: [0..=1])
-        State 12:
-          7 -> 15 (trans_weight: ALL)
-        State 13:
-          * -> 12 (trans_weight: ALL)
-        State 14:
-          * -> 15 (trans_weight: ALL)
-        State 15:
-          0 -> 17 (trans_weight: ALL)
-          3 -> 18 (trans_weight: ALL)
-          7 -> 19 (trans_weight: ALL)
-        State 16:
-          5 -> 12 (trans_weight: ALL)
-        State 17:
-          neg(0) -> 20 (trans_weight: ALL)
-        State 18:
-          neg(3) -> 20 (trans_weight: ALL)
-        State 19:
-          neg(7) -> 20 (trans_weight: ALL)
-        State 20:
-          neg(5) -> 21 (trans_weight: ALL)
-        State 21:
-          neg(10) -> 22 (trans_weight: ALL)
-        State 22:
-          final_weight: [0]
-      ```
-
-      `````
-
-      Add a union test with these exact DWAs.
+  - user: Add stochastic validation to this code. Add code to sample a path (incl
+      weight) from a DWA. Add a debug flag to the top of the code. If it's enabled,
+      then in DWA::union validate it. Ensure that if a path is in A then it's in the
+      union, and same for B. And ensure that if a path is in the union then it's in
+      either A or B. Validate in DWA::concatenate as well. For any path in A and other
+      path in B, the concatenated path should be in the concatenation of A and B.
+      And for any path in the concatenation, its prefix should be in A, and the rest
+      of it (after the prefix in A) should be in B, and the combined weight should
+      be equal to the concatenation's
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5834,317 +6491,454 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the requested test, followed by the corresponding git diff.
+      Below are the steps to add stochastic validation and path sampling to your DWA implementation, followed by the corresponding git patch.
 
-      ### Step-by-step Instructions
+      Step-by-step instructions
 
-      1.  **Open the file**: `src/precompute4/weighted_automata.rs`.
-      2.  **Navigate to the end of the `tests` module**: Go to the very end of the file, just before the final closing brace `}` of the `mod tests { ... }` block.
-      3.  **Insert the new test function**: Add the following Rust code to define a new test named `test_union_complex_from_attachment`. This test will:
-          *   Define a helper function to create the negative `i16` values used for special transitions.
-          *   Programmatically construct the `left` DWA with 21 states as specified in the attachment.
-          *   Programmatically construct the `right` DWA with 23 states as specified in the attachment.
-          *   Perform the `union` operation on these two DWAs.
-          *   Call `simplify()` on the resulting DWA.
-          *   The test's purpose is to act as a regression test, ensuring that the `union` and `simplify` operations on these large, complex automata complete successfully without panicking.
+      1) Open src/precompute4/weighted_automata.rs and update imports
+      - Change the std::time import to include SystemTime and UNIX_EPOCH, which we’ll use for seeding a simple RNG.
+      - Add a small set of constants to control validation behavior.
+      - Add a simple, dependency-free RNG to avoid pulling in external crates.
 
-      ```rust
-          #[test]
-          fn test_union_complex_from_attachment() {
-              fn neg(val: i16) -> i16 {
-                  val.wrapping_add(i16::MIN)
-              }
+      2) Add debug flag and RNG
+      - Immediately after the imports, add:
+        - STOCHASTIC_VALIDATION: a top-level const bool flag that gates all validation code.
+        - VALIDATION_SAMPLES, VALIDATION_MAX_STEPS, SAMPLING_TRIES: tunables for stochastic validation.
+        - SimpleRng: a tiny linear-congruential generator for deterministic random numbers without external dependencies.
 
-              // Build left DWA
-              let mut left = DWA::new();
-              for _ in 0..20 {
-                  left.add_state();
-              }
-              assert_eq!(left.states.len(), 21);
+      3) Add a small alphabet and utilities
+      - Add a default alphabet for sampling transitions, including ASCII characters, digits, some small integers, and the “neg” encoding used in tests (i16::MIN + x).
+      - Add helper functions:
+        - pick_default_char_for_state: picks a character that would follow the default transition (i.e., not in exceptions).
+        - weight_subset: predicate to check set inclusion (subset) between Weight values.
+        - format_i16_char and format_word: to format debug messages.
 
-              // State 0
-              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 3, 2, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 5, 3, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 6, 4, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 7, 5, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 8, 4, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 9, 3, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 10, 6, Weight::from_item(1)).unwrap();
-              // State 1
-              left.add_transition(1, neg(0), 7, Weight::all()).unwrap();
-              // State 2
-              left.add_transition(2, neg(3), 7, Weight::all()).unwrap();
-              // State 3
-              left.add_transition(3, 3, 8, Weight::all()).unwrap();
-              left.add_transition(3, 7, 3, Weight::all()).unwrap();
-              // State 4
-              left.set_default_transition(4, 3, Weight::all()).unwrap();
-              // State 5
-              left.add_transition(5, neg(7), 7, Weight::all()).unwrap();
-              // State 6
-              left.add_transition(6, 5, 3, Weight::all()).unwrap();
-              // State 7
-              left.add_transition(7, neg(9), 9, Weight::all()).unwrap();
-              // State 8
-              left.add_transition(8, neg(3), 1, Weight::all()).unwrap();
-              // State 9
-              left.add_transition(9, 5, 10, Weight::from_iter(0..=1)).unwrap();
-              left.add_transition(9, 6, 11, Weight::from_iter(0..=1)).unwrap();
-              left.add_transition(9, 8, 12, Weight::from_iter(0..=1)).unwrap();
-              left.add_transition(9, 9, 13, Weight::from_iter(0..=1)).unwrap();
-              left.add_transition(9, 10, 14, Weight::from_iter(0..=1)).unwrap();
-              // State 10
-              left.add_transition(10, 7, 13, Weight::all()).unwrap();
-              // State 11
-              left.set_default_transition(11, 10, Weight::all()).unwrap();
-              // State 12
-              left.set_default_transition(12, 13, Weight::all()).unwrap();
-              // State 13
-              left.add_transition(13, 0, 15, Weight::all()).unwrap();
-              left.add_transition(13, 3, 16, Weight::all()).unwrap();
-              left.add_transition(13, 7, 17, Weight::all()).unwrap();
-              // State 14
-              left.add_transition(14, 5, 10, Weight::all()).unwrap();
-              // State 15
-              left.add_transition(15, neg(0), 18, Weight::all()).unwrap();
-              // State 16
-              left.add_transition(16, neg(3), 18, Weight::all()).unwrap();
-              // State 17
-              left.add_transition(17, neg(7), 18, Weight::all()).unwrap();
-              // State 18
-              left.add_transition(18, neg(5), 19, Weight::all()).unwrap();
-              // State 19
-              left.add_transition(19, neg(10), 20, Weight::all()).unwrap();
-              // State 20
-              left.set_final_weight(20, Weight::from_item(1)).unwrap();
+      4) Add DWA path evaluation and sampling
+      - In the DWA impl:
+        - eval_word_weight(&self, word: &[i16]) -> Weight: evaluates a word’s weight along the unique deterministic path (intersection of edge weights and final weight), returning zeros if the path is invalid or not final.
+        - eval_word(&self, word: &[i16]) -> Option<Weight>: convenience wrapper that maps empty to None.
+        - sample_accepted_path(&self, max_steps: usize) -> Option<(Vec<i16>, Weight)>: samples an accepted path (word and weight) using the SimpleRng seeded with system time.
+        - sample_accepted_path_with_seed and sample_accepted_path_with_rng: seeded variants with retries to find an accepted path.
 
-              // Build right DWA
-              let mut right = DWA::new();
-              for _ in 0..22 {
-                  right.add_state();
-              }
-              assert_eq!(right.states.len(), 23);
+      5) Add expected semantics helpers
+      - In the DWA impl:
+        - expected_union_weight(a, b, word) -> Weight: evaluates the expected union weight WA ∪ WB.
+        - expected_concat_weight(a, b, word) -> Weight: evaluates the expected concatenation weight as the union over all split points i of WA(prefix_i) ∧ WB(suffix_i).
 
-              // State 0
-              right.add_transition(0, 5, 1, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 6, 2, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 8, 3, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 9, 4, Weight::from_item(0)).unwrap();
-              right.add_transition(0, 10, 5, Weight::from_item(0)).unwrap();
-              // State 1
-              right.add_transition(1, 7, 4, Weight::all()).unwrap();
-              // State 2
-              right.set_default_transition(2, 1, Weight::all()).unwrap();
-              // State 3
-              right.set_default_transition(3, 4, Weight::all()).unwrap();
-              // State 4
-              right.add_transition(4, 0, 6, Weight::all()).unwrap();
-              right.add_transition(4, 3, 7, Weight::all()).unwrap();
-              right.add_transition(4, 7, 8, Weight::all()).unwrap();
-              // State 5
-              right.add_transition(5, 5, 1, Weight::all()).unwrap();
-              // State 6
-              right.add_transition(6, neg(0), 9, Weight::all()).unwrap();
-              // State 7
-              right.add_transition(7, neg(3), 9, Weight::all()).unwrap();
-              // State 8
-              right.add_transition(8, neg(7), 9, Weight::all()).unwrap();
-              // State 9
-              right.add_transition(9, neg(5), 10, Weight::all()).unwrap();
-              // State 10
-              right.add_transition(10, neg(10), 11, Weight::all()).unwrap();
-              // State 11
-              right.add_transition(11, 5, 12, Weight::from_iter(0..=1)).unwrap();
-              right.add_transition(11, 6, 13, Weight::from_iter(0..=1)).unwrap();
-              right.add_transition(11, 8, 14, Weight::from_iter(0..=1)).unwrap();
-              right.add_transition(11, 9, 15, Weight::from_iter(0..=1)).unwrap();
-              right.add_transition(11, 10, 16, Weight::from_iter(0..=1)).unwrap();
-              // State 12
-              right.add_transition(12, 7, 15, Weight::all()).unwrap();
-              // State 13
-              right.set_default_transition(13, 12, Weight::all()).unwrap();
-              // State 14
-              right.set_default_transition(14, 15, Weight::all()).unwrap();
-              // State 15
-              right.add_transition(15, 0, 17, Weight::all()).unwrap();
-              right.add_transition(15, 3, 18, Weight::all()).unwrap();
-              right.add_transition(15, 7, 19, Weight::all()).unwrap();
-              // State 16
-              right.add_transition(16, 5, 12, Weight::all()).unwrap();
-              // State 17
-              right.add_transition(17, neg(0), 20, Weight::all()).unwrap();
-              // State 18
-              right.add_transition(18, neg(3), 20, Weight::all()).unwrap();
-              // State 19
-              right.add_transition(19, neg(7), 20, Weight::all()).unwrap();
-              // State 20
-              right.add_transition(20, neg(5), 21, Weight::all()).unwrap();
-              // State 21
-              right.add_transition(21, neg(10), 22, Weight::all()).unwrap();
-              // State 22
-              right.set_final_weight(22, Weight::from_item(0)).unwrap();
+      6) Add stochastic validation routines
+      - In the DWA impl:
+        - stochastic_validate_union(a, b, u): checks three things across sampled paths:
+          - If a path is accepted in A, then it’s accepted by the union U and U’s weight equals WA ∪ WB.
+          - Same for B.
+          - If a path is accepted in U, then U’s weight equals WA ∪ WB (ensuring it’s in either A or B).
+        - stochastic_validate_concatenate(a, b, c):
+          - For sampled accepted paths a∈A and b∈B, checks that c accepts a∘b and contains WA ∧ WB.
+          - For sampled accepted paths in C, checks that C’s weight equals the union over all split points WA(prefix_i) ∧ WB(suffix_i).
 
-              // Perform union and simplify. The test passes if it doesn't panic.
-              let mut u = left.union(&right);
-              u.simplify();
-          }
-      ```
+      7) Hook validation into union and concatenate
+      - At the end of DWA::union and DWA::concatenate, add guarded calls:
+        - if STOCHASTIC_VALIDATION { DWA::stochastic_validate_union(self, other, &new_dwa); }
+        - if STOCHASTIC_VALIDATION { DWA::stochastic_validate_concatenate(self, other, &new_dwa); }
 
-      ### Git Diff
+      Notes and assumptions
+      - The validation is gated entirely by the STOCHASTIC_VALIDATION const. Set it to true to enable runtime checks.
+      - Path sampling aims to find accepted paths; it retries up to SAMPLING_TRIES attempts per sample.
+      - eval_word semantics: intersect per-step edge weights and final state weight. Missing transitions or empty intersections yield zeros (mapped to None via eval_word).
+      - Union validation asserts U(word) equals A(word) ∪ B(word).
+      - Concatenation validation asserts C(word) equals union over splits of A(prefix) ∧ B(suffix). For sampled a∈A and b∈B, we additionally check C(a∘b) contains A(a) ∧ B(b).
 
-      Here is the git patch for the change.
+      Git patch
 
       ```diff
+      diff --git a/src/precompute4/weighted_automata.rs b/src/precompute4/weighted_automata.rs
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -1415,4 +1415,115 @@
+      @@ -10,7 +10,7 @@
+       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+       use std::fmt::{Debug, Display, Formatter};
+       use std::iter::FromIterator;
+      -use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut};
+      -use std::time::Instant;
+      +use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut};
+      +use std::time::{Instant, SystemTime, UNIX_EPOCH};
        
-               assert_dwa_equivalent(c, expected);
-           }
+       // --- Part 1: SimpleBitset ---
+       
+      @@ -28,6 +28,68 @@
+       #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
+       pub struct SimpleBitset(pub RangeSetBlaze<usize>);
+       
+      +// --- Stochastic validation controls and RNG ---
+      +// Toggle this to true to enable stochastic validation in union() and concatenate().
+      +const STOCHASTIC_VALIDATION: bool = false;
+      +const VALIDATION_SAMPLES: usize = 32;
+      +const VALIDATION_MAX_STEPS: usize = 12;
+      +const SAMPLING_TRIES: usize = 100;
       +
-      +    #[test]
-      +    fn test_union_complex_from_attachment() {
-      +        fn neg(val: i16) -> i16 {
-      +            val.wrapping_add(i16::MIN)
-      +        }
-      +
-      +        // Build left DWA
-      +        let mut left = DWA::new();
-      +        for _ in 0..20 {
-      +            left.add_state();
-      +        }
-      +        assert_eq!(left.states.len(), 21);
-      +
-      +        // State 0
-      +        left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-      +        left.add_transition(0, 3, 2, Weight::from_item(1)).unwrap();
-      +        left.add_transition(0, 5, 3, Weight::from_item(1)).unwrap();
-      +        left.add_transition(0, 6, 4, Weight::from_item(1)).unwrap();
-      +        left.add_transition(0, 7, 5, Weight::from_item(1)).unwrap();
-      +        left.add_transition(0, 8, 4, Weight::from_item(1)).unwrap();
-      +        left.add_transition(0, 9, 3, Weight::from_item(1)).unwrap();
-      +        left.add_transition(0, 10, 6, Weight::from_item(1)).unwrap();
-      +        // State 1
-      +        left.add_transition(1, neg(0), 7, Weight::all()).unwrap();
-      +        // State 2
-      +        left.add_transition(2, neg(3), 7, Weight::all()).unwrap();
-      +        // State 3
-      +        left.add_transition(3, 3, 8, Weight::all()).unwrap();
-      +        left.add_transition(3, 7, 3, Weight::all()).unwrap();
-      +        // State 4
-      +        left.set_default_transition(4, 3, Weight::all()).unwrap();
-      +        // State 5
-      +        left.add_transition(5, neg(7), 7, Weight::all()).unwrap();
-      +        // State 6
-      +        left.add_transition(6, 5, 3, Weight::all()).unwrap();
-      +        // State 7
-      +        left.add_transition(7, neg(9), 9, Weight::all()).unwrap();
-      +        // State 8
-      +        left.add_transition(8, neg(3), 1, Weight::all()).unwrap();
-      +        // State 9
-      +        left.add_transition(9, 5, 10, Weight::from_iter(0..=1)).unwrap();
-      +        left.add_transition(9, 6, 11, Weight::from_iter(0..=1)).unwrap();
-      +        left.add_transition(9, 8, 12, Weight::from_iter(0..=1)).unwrap();
-      +        left.add_transition(9, 9, 13, Weight::from_iter(0..=1)).unwrap();
-      +        left.add_transition(9, 10, 14, Weight::from_iter(0..=1)).unwrap();
-      +        // State 10
-      +        left.add_transition(10, 7, 13, Weight::all()).unwrap();
-      +        // State 11
-      +        left.set_default_transition(11, 10, Weight::all()).unwrap();
-      +        // State 12
-      +        left.set_default_transition(12, 13, Weight::all()).unwrap();
-      +        // State 13
-      +        left.add_transition(13, 0, 15, Weight::all()).unwrap();
-      +        left.add_transition(13, 3, 16, Weight::all()).unwrap();
-      +        left.add_transition(13, 7, 17, Weight::all()).unwrap();
-      +        // State 14
-      +        left.add_transition(14, 5, 10, Weight::all()).unwrap();
-      +        // State 15
-      +        left.add_transition(15, neg(0), 18, Weight::all()).unwrap();
-      +        // State 16
-      +        left.add_transition(16, neg(3), 18, Weight::all()).unwrap();
-      +        // State 17
-      +        left.add_transition(17, neg(7), 18, Weight::all()).unwrap();
-      +        // State 18
-      +        left.add_transition(18, neg(5), 19, Weight::all()).unwrap();
-      +        // State 19
-      +        left.add_transition(19, neg(10), 20, Weight::all()).unwrap();
-      +        // State 20
-      +        left.set_final_weight(20, Weight::from_item(1)).unwrap();
-      +
-      +        // Build right DWA
-      +        let mut right = DWA::new();
-      +        for _ in 0..22 {
-      +            right.add_state();
-      +        }
-      +        assert_eq!(right.states.len(), 23);
-      +
-      +        // State 0
-      +        right.add_transition(0, 5, 1, Weight::from_item(0)).unwrap();
-      +        right.add_transition(0, 6, 2, Weight::from_item(0)).unwrap();
-      +        right.add_transition(0, 8, 3, Weight::from_item(0)).unwrap();
-      +        right.add_transition(0, 9, 4, Weight::from_item(0)).unwrap();
-      +        right.add_transition(0, 10, 5, Weight::from_item(0)).unwrap();
-      +        // State 1
-      +        right.add_transition(1, 7, 4, Weight::all()).unwrap();
-      +        // State 2
-      +        right.set_default_transition(2, 1, Weight::all()).unwrap();
-      +        // State 3
-      +        right.set_default_transition(3, 4, Weight::all()).unwrap();
-      +        // State 4
-      +        right.add_transition(4, 0, 6, Weight::all()).unwrap();
-      +        right.add_transition(4, 3, 7, Weight::all()).unwrap();
-      +        right.add_transition(4, 7, 8, Weight::all()).unwrap();
-      +        // State 5
-      +        right.add_transition(5, 5, 1, Weight::all()).unwrap();
-      +        // State 6
-      +        right.add_transition(6, neg(0), 9, Weight::all()).unwrap();
-      +        // State 7
-      +        right.add_transition(7, neg(3), 9, Weight::all()).unwrap();
-      +        // State 8
-      +        right.add_transition(8, neg(7), 9, Weight::all()).unwrap();
-      +        // State 9
-      +        right.add_transition(9, neg(5), 10, Weight::all()).unwrap();
-      +        // State 10
-      +        right.add_transition(10, neg(10), 11, Weight::all()).unwrap();
-      +        // State 11
-      +        right.add_transition(11, 5, 12, Weight::from_iter(0..=1)).unwrap();
-      +        right.add_transition(11, 6, 13, Weight::from_iter(0..=1)).unwrap();
-      +        right.add_transition(11, 8, 14, Weight::from_iter(0..=1)).unwrap();
-      +        right.add_transition(11, 9, 15, Weight::from_iter(0..=1)).unwrap();
-      +        right.add_transition(11, 10, 16, Weight::from_iter(0..=1)).unwrap();
-      +        // State 12
-      +        right.add_transition(12, 7, 15, Weight::all()).unwrap();
-      +        // State 13
-      +        right.set_default_transition(13, 12, Weight::all()).unwrap();
-      +        // State 14
-      +        right.set_default_transition(14, 15, Weight::all()).unwrap();
-      +        // State 15
-      +        right.add_transition(15, 0, 17, Weight::all()).unwrap();
-      +        right.add_transition(15, 3, 18, Weight::all()).unwrap();
-      +        right.add_transition(15, 7, 19, Weight::all()).unwrap();
-      +        // State 16
-      +        right.add_transition(16, 5, 12, Weight::all()).unwrap();
-      +        // State 17
-      +        right.add_transition(17, neg(0), 20, Weight::all()).unwrap();
-      +        // State 18
-      +        right.add_transition(18, neg(3), 20, Weight::all()).unwrap();
-      +        // State 19
-      +        right.add_transition(19, neg(7), 20, Weight::all()).unwrap();
-      +        // State 20
-      +        right.add_transition(20, neg(5), 21, Weight::all()).unwrap();
-      +        // State 21
-      +        right.add_transition(21, neg(10), 22, Weight::all()).unwrap();
-      +        // State 22
-      +        right.set_final_weight(22, Weight::from_item(0)).unwrap();
-      +
-      +        // Perform union and simplify. The test passes if it doesn't panic.
-      +        let mut u = left.union(&right);
-      +        u.simplify();
+      +#[derive(Clone, Debug)]
+      +struct SimpleRng(u64);
+      +impl SimpleRng {
+      +    fn new(seed: u64) -> Self {
+      +        SimpleRng(seed)
       +    }
+      +    fn from_time() -> Self {
+      +        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+      +        let mixed = (now.as_nanos() as u128 ^ ((now.as_secs() as u128) << 64)) as u64;
+      +        SimpleRng::new(mixed)
+      +    }
+      +    fn next_u64(&mut self) -> u64 {
+      +        // LCG constants from Numerical Recipes
+      +        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+      +        self.0
+      +    }
+      +    fn gen_usize(&mut self, upper: usize) -> usize {
+      +        if upper <= 1 {
+      +            0
+      +        } else {
+      +            (self.next_u64() as usize) % upper
+      +        }
+      +    }
+      +    fn gen_bool_ratio(&mut self, num: u32, den: u32) -> bool {
+      +        if den == 0 {
+      +            true
+      +        } else {
+      +            (self.next_u64() % (den as u64)) < (num as u64)
+      +        }
+      +    }
+      +}
+      +
+      +// Small fixed alphabet used for default-edge sampling and variety.
+      +// Includes ASCII letters/digits, some small integers, and negative-coded inputs used in tests.
+      +const BASE_ALPHABET: &[i16] = &[
+      +    b'a' as i16, b'b' as i16, b'c' as i16, b'd' as i16, b'e' as i16, b'f' as i16, b'g' as i16,
+      +    b'h' as i16, b'i' as i16, b'j' as i16, b'k' as i16, b'l' as i16, b'm' as i16, b'n' as i16,
+      +    b'o' as i16, b'p' as i16, b'q' as i16, b'r' as i16, b's' as i16, b't' as i16, b'u' as i16,
+      +    b'v' as i16, b'w' as i16, b'x' as i16, b'y' as i16, b'z' as i16, b' ' as i16,
+      +    b'0' as i16, b'1' as i16, b'2' as i16, b'3' as i16, b'4' as i16, b'5' as i16,
+      +    b'6' as i16, b'7' as i16, b'8' as i16, b'9' as i16,
+      +    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      +    i16::MIN + 0, i16::MIN + 1, i16::MIN + 2, i16::MIN + 3, i16::MIN + 4,
+      +    i16::MIN + 5, i16::MIN + 6, i16::MIN + 7, i16::MIN + 8, i16::MIN + 9, i16::MIN + 10,
+      +];
+      +
+      +fn pick_default_char_for_state(st: &DWAState, rng: &mut SimpleRng) -> i16 {
+      +    let ex = &st.transitions.exceptions;
+      +    // Try random from base alphabet
+      +    if !BASE_ALPHABET.is_empty() {
+      +        let mut idx = rng.gen_usize(BASE_ALPHABET.len());
+      +        for _ in 0..BASE_ALPHABET.len() {
+      +            let ch = BASE_ALPHABET[idx % BASE_ALPHABET.len()];
+      +            if !ex.contains_key(&ch) {
+      +                return ch;
+      +            }
+      +            idx = idx.wrapping_add(1);
+      +        }
+      +    }
+      +    // Fallback: scan integers to find a non-exception char (always exists since exceptions are finite).
+      +    let mut probe: i16 = 0;
+      +    loop {
+      +        if !ex.contains_key(&probe) {
+      +            return probe;
+      +        }
+      +        probe = probe.wrapping_add(1);
+      +    }
+      +}
+      +
+       impl SimpleBitset {
+           pub fn zeros() -> Self {
+               SimpleBitset(RangeSetBlaze::new())
+      @@ -283,6 +345,24 @@
+           }
        }
-
+       
+      +fn weight_subset(sub: &Weight, sup: &Weight) -> bool {
+      +    (sub & sup) == sub.clone()
+      +}
+      +
+      +fn format_pos_code(code: i16) -> String {
+      +    let u = code as u16;
+      +    if let Some(c) = char::from_u32(u as u32) {
+      +        if c.is_ascii_graphic() || c == ' ' {
+      +            format!("'{}'", c)
+      +        } else {
+      +            format!("{}", u)
+      +        }
+      +    } else {
+      +        format!("{}", u)
+      +    }
+      +}
+      +fn format_i16_char(code: i16) -> String { if code >= 0 { format_pos_code(code) } else { format!("neg({})", code.wrapping_sub(i16::MIN)) } }
+      +fn format_word(word: &[i16]) -> String { let parts: Vec<String> = word.iter().map(|&c| format_i16_char(c)).collect(); format!("[{}]", parts.join(", ")) }
+       // --- Part 3: Automata Definitions (DWA only) ---
+       
+       pub type StateID = usize;
+      @@ -674,6 +754,187 @@
+               new_dwa
+           }
+       
+      +    // --- Evaluation and sampling helpers ---
+      +    /// Evaluate a word's weight in this DWA by intersecting per-edge weights and the final state's weight.
+      +    /// Returns zeros if the word is not accepted or any transition is missing.
+      +    pub fn eval_word_weight(&self, word: &[i16]) -> Weight {
+      +        if self.states.0.is_empty() {
+      +            return Weight::zeros();
+      +        }
+      +        let mut s = self.body.start_state;
+      +        let mut acc = Weight::all();
+      +        for &ch in word {
+      +            if s >= self.states.len() {
+      +                return Weight::zeros();
+      +            }
+      +            let st = &self.states[s];
+      +            if let Some(&t) = st.transitions.get(ch) {
+      +                if let Some(w) = st.get_weight(ch) {
+      +                    acc &= w;
+      +                } else {
+      +                    return Weight::zeros();
+      +                }
+      +                if acc.is_empty() {
+      +                    return Weight::zeros();
+      +                }
+      +                s = t;
+      +            } else {
+      +                return Weight::zeros();
+      +            }
+      +        }
+      +        if s >= self.states.len() {
+      +            return Weight::zeros();
+      +        }
+      +        match &self.states[s].final_weight {
+      +            Some(fw) => {
+      +                let res = &acc & fw;
+      +                if res.is_empty() { Weight::zeros() } else { res }
+      +            }
+      +            None => Weight::zeros(),
+      +        }
+      +    }
+      +
+      +    /// Evaluate a word; None if rejected (weight empty).
+      +    pub fn eval_word(&self, word: &[i16]) -> Option<Weight> {
+      +        let w = self.eval_word_weight(word);
+      +        if w.is_empty() { None } else { Some(w) }
+      +    }
+      +
+      +    /// Sample an accepted path (word and weight) using a time-based seed.
+      +    /// Returns None if no accepted path was found within the attempt budget.
+      +    pub fn sample_accepted_path(&self, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+      +        let mut rng = SimpleRng::from_time();
+      +        self.sample_accepted_path_with_rng(&mut rng, max_steps)
+      +    }
+      +
+      +    /// Sample an accepted path (word and weight) with a fixed seed (deterministic).
+      +    pub fn sample_accepted_path_with_seed(&self, seed: u64, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+      +        let mut rng = SimpleRng::new(seed);
+      +        self.sample_accepted_path_with_rng(&mut rng, max_steps)
+      +    }
+      +
+      +    /// Core sampler with a provided RNG. Tries multiple attempts to find an accepted word.
+      +    pub fn sample_accepted_path_with_rng(&self, rng: &mut SimpleRng, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+      +        if self.states.0.is_empty() {
+      +            return None;
+      +        }
+      +        for _attempt in 0..SAMPLING_TRIES {
+      +            let mut word: Vec<i16> = Vec::new();
+      +            let mut s = self.body.start_state;
+      +            let mut acc = Weight::all();
+      +
+      +            for step in 0..max_steps {
+      +                // Early stop with some probability if we can accept here.
+      +                if let Some(fw) = &self.states[s].final_weight {
+      +                    if rng.gen_bool_ratio(1, 3) || step == max_steps - 1 {
+      +                        let w = &acc & fw;
+      +                        if !w.is_empty() {
+      +                            return Some((word, w));
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // Choose next character: one of the exception keys or a default-character if default exists.
+      +                let st = &self.states[s];
+      +                let mut choices: Vec<i16> = st.transitions.exceptions.keys().copied().collect();
+      +                let has_default = st.transitions.default.is_some();
+      +                let total = choices.len() + if has_default { 1 } else { 0 };
+      +                if total == 0 {
+      +                    // Dead-end; try to finalize or abort attempt.
+      +                    if let Some(fw) = &st.final_weight {
+      +                        let w = &acc & fw;
+      +                        if !w.is_empty() {
+      +                            return Some((word, w));
+      +                        }
+      +                    }
+      +                    break; // new attempt
+      +                }
+      +                let pick = rng.gen_usize(total);
+      +                let ch = if has_default && pick == choices.len() {
+      +                    pick_default_char_for_state(st, rng)
+      +                } else {
+      +                    choices[pick]
+      +                };
+      +
+      +                let next = st.transitions.get(ch).copied();
+      +                if next.is_none() {
+      +                    break;
+      +                }
+      +                let edge_w = st.get_weight(ch).cloned().unwrap_or_else(Weight::zeros);
+      +                if edge_w.is_empty() {
+      +                    break;
+      +                }
+      +                let new_acc = &acc & &edge_w;
+      +                if new_acc.is_empty() {
+      +                    break;
+      +                }
+      +                acc = new_acc;
+      +                s = next.unwrap();
+      +                word.push(ch);
+      +            }
+      +
+      +            // Finalize at end of attempt if possible:
+      +            if s < self.states.len() {
+      +                if let Some(fw) = &self.states[s].final_weight {
+      +                    let w = &acc & fw;
+      +                    if !w.is_empty() {
+      +                        return Some((word, w));
+      +                    }
+      +                }
+      +            }
+      +        }
+      +        None
+      +    }
+      +
+      +    fn expected_union_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
+      +        let wa = a.eval_word_weight(word);
+      +        let wb = b.eval_word_weight(word);
+      +        &wa | &wb
+      +    }
+      +
+      +    /// Expected concatenation weight:
+      +    /// union over all split points i of (A(word[..i]) ∧ B(word[i..])).
+      +    fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
+      +        let mut acc = Weight::zeros();
+      +        for i in 0..=word.len() {
+      +            let wa = a.eval_word_weight(&word[..i]);
+      +            if wa.is_empty() {
+      +                continue;
+      +            }
+      +            let wb = b.eval_word_weight(&word[i..]);
+      +            if wb.is_empty() {
+      +                continue;
+      +            }
+      +            let both = &wa & &wb;
+      +            if !both.is_empty() {
+      +                acc |= &both;
+      +            }
+      +        }
+      +        acc
+      +    }
+      +
+      +    fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
+      +        let mut rng = SimpleRng::from_time();
+      +        for _ in 0..VALIDATION_SAMPLES {
+      +            // Sample a path from A -> must be in U, and U == A ∪ B for that word.
+      +            if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+      +                let wu = u.eval_word_weight(&w);
+      +                assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
+      +                assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n", format_word(&w), wa, wu);
+      +                let expected = DWA::expected_union_weight(a, b, &w);
+      +                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), wa, b.eval_word_weight(&w), wu, expected);
+      +            }
+      +
+      +            // Sample a path from B -> must be in U, and U == A ∪ B for that word.
+      +            if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+      +                let wu = u.eval_word_weight(&w);
+      +                assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
+      +                assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n", format_word(&w), wb, wu);
+      +                let expected = DWA::expected_union_weight(a, b, &w);
+      +                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), wb, wu, expected);
+      +            }
+      +
+      +            // Sample a path from U -> ensure it's in A ∪ B (equality check).
+      +            if let Some((w, wu)) = u.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+      +                let expected = DWA::expected_union_weight(a, b, &w);
+      +                assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected);
+      +            }
+      +        }
+      +    }
+      +
+      +    fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
+      +        let mut rng = SimpleRng::from_time();
+      +        for _ in 0..VALIDATION_SAMPLES {
+      +            // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
+      +            if let Some((wa_word, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+      +                if let Some((wb_word, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+      +                    let mut w = wa_word.clone();
+      +                    w.extend_from_slice(&wb_word);
+      +                    let wc = c.eval_word_weight(&w);
+      +                    let expected_simple = &wa & &wb;
+      +                    assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nA(word): {}\nB(word): {}\n", wa, wb);
+      +                    assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n", format_word(&w), wa, wb, wc, expected_simple);
+      +                    // Also verify full expected across all splits equals C's result
+      +                    let expected_all = DWA::expected_concat_weight(a, b, &w);
+      +                    assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected_all);
+      +                }
+      +            }
+      +
+      +            // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
+      +            if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+      +                let expected = DWA::expected_concat_weight(a, b, &w);
+      +                assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n", format_word(&w), wc, expected);
+      +            }
+      +        }
+      +    }
+      +
+           /// Concatenation-like operation on two DWAs.
+           /// "Join all ends to all starts": whenever the left component reaches a final state,
+           /// we also (lazily) activate the right automaton's start state. If the left start is final,
+      @@ -755,6 +1016,11 @@
+                   }
+               }
+       
+      +        if STOCHASTIC_VALIDATION {
+      +            // Validate C against A and B via stochastic sampling.
+      +            DWA::stochastic_validate_concatenate(self, other, &new_dwa);
+      +        }
+      +
+               new_dwa
+           }
+       
+      @@ -833,6 +1099,11 @@
+                   }
+               }
+       
+      +        if STOCHASTIC_VALIDATION {
+      +            // Validate U against A and B via stochastic sampling.
+      +            DWA::stochastic_validate_union(self, other, &new_dwa);
+      +        }
+      +
+               new_dwa
+           }
+       
+      @@ -978,20 +1249,6 @@
+                       } else {
+                           writeln!(f, "    * -> {}", to)?;
+                       }
+      -            }
+      -            let format_pos_code = |code: i16| -> String {
+      -                let u = code as u16;
+      -                if let Some(c) = char::from_u32(u as u32) {
+      -                    if c.is_ascii_graphic() || c == ' ' {
+      -                        format!("'{}'", c)
+      -                    } else {
+      -                        format!("{}", u)
+      -                    }
+      -                } else {
+      -                    format!("{}", u)
+      -                }
+      -            };
+      -
+      +            }
+                   for (on, to) in &state.transitions.exceptions {
+                       // Represent positive codes as char if ASCII; negatives as '-char' or '-num'
+                       let char_repr = if *on >= 0 {
       ```
     metadata:
   - user: |
@@ -6156,7 +6950,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Add regression test for union/simplify
-      with complex attachment DWAs"'
+  - user: 'Changes committed with message: "Implement DWA path sampling, word evaluation,
+      and stochastic validation for union/concatenate operations"'
     metadata:
 ...
