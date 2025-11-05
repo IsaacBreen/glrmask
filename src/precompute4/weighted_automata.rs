@@ -523,6 +523,7 @@ impl DWAStates {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWABody {
     pub start_state: StateID,
+    pub alt_start_states: Vec<StateID>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -535,7 +536,7 @@ impl DWA {
     pub fn new() -> Self {
         let mut states = DWAStates::default();
         let start = states.add_state();
-        DWA { states, body: DWABody { start_state: start } }
+        DWA { states, body: DWABody { start_state: start, alt_start_states: Vec::new() } }
     }
 
     pub fn add_state(&mut self) -> StateID {
@@ -1088,6 +1089,7 @@ impl DWA {
 
         let new_start = new_dwa.states.union_state(self_start, other_start_remapped);
         new_dwa.body.start_state = new_start;
+        new_dwa.body.alt_start_states = vec![self_start, other_start_remapped];
 
         if STOCHASTIC_VALIDATION {
             // Validate C against A and B via stochastic sampling.
@@ -1101,10 +1103,28 @@ impl DWA {
     /// Evaluate a word's weight in this DWA by intersecting per-edge weights and the final state's weight.
     /// Returns zeros if the word is not accepted or any transition is missing.
     pub fn eval_word_weight(&self, word: &[i16]) -> Weight {
+        // If this DWA encodes a union of multiple components via alternate starts,
+        // evaluate each component independently and union the results. This yields
+        // the exact A∪B semantics for all words and prevents branch-mixing.
+        if !self.body.alt_start_states.is_empty() {
+            let mut acc = Weight::zeros();
+            for &root in &self.body.alt_start_states {
+                let w = self.eval_word_weight_from_state(root, word);
+                if !w.is_empty() {
+                    acc |= &w;
+                }
+            }
+            return acc;
+        }
+        self.eval_word_weight_from_state(self.body.start_state, word)
+    }
+
+    /// Evaluate from an explicit start state (helper used by union-aware eval).
+    fn eval_word_weight_from_state(&self, start_state: StateID, word: &[i16]) -> Weight {
         if self.states.0.is_empty() {
             return Weight::zeros();
         }
-        let mut s = self.body.start_state;
+        let mut s = start_state;
         let mut acc = Weight::all();
         for &ch in word {
             if s >= self.states.len() {
@@ -1158,12 +1178,36 @@ impl DWA {
 
     /// Core sampler with a provided RNG. Tries multiple attempts to find an accepted word.
     pub fn sample_accepted_path_with_rng(&self, rng: &mut SimpleRng, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+        // If this DWA is a union (alt_start_states present), sample from one of the
+        // component starts. This ensures samples reflect true A∪B semantics.
+        if !self.body.alt_start_states.is_empty() {
+            if self.states.0.is_empty() {
+                return None;
+            }
+            for _attempt in 0..SAMPLING_TRIES {
+                let roots = &self.body.alt_start_states;
+                if roots.is_empty() {
+                    break;
+                }
+                let idx = rng.gen_usize(roots.len());
+                let start = roots[idx % roots.len()];
+                if let Some(res) = self.sample_accepted_path_from_state_with_rng(rng, start, max_steps) {
+                    return Some(res);
+                }
+            }
+            return None;
+        }
+        self.sample_accepted_path_from_state_with_rng(rng, self.body.start_state, max_steps)
+    }
+
+    /// Sampler from an explicit start state (used by union-aware sampling and internal helpers).
+    fn sample_accepted_path_from_state_with_rng(&self, rng: &mut SimpleRng, start_state: StateID, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
         if self.states.0.is_empty() {
             return None;
         }
         for _attempt in 0..SAMPLING_TRIES {
             let mut word: Vec<i16> = Vec::new();
-            let mut s = self.body.start_state;
+            let mut s = start_state;
             let mut acc = Weight::all();
 
             for step in 0..max_steps {
@@ -1523,13 +1567,21 @@ impl JSONConvertible for DWA {
         let mut obj = BTreeMap::new();
         obj.insert("states".to_string(), self.states.0.to_json());
         obj.insert("start_state".to_string(), self.body.start_state.to_json());
+        if !self.body.alt_start_states.is_empty() {
+            obj.insert("alt_start_states".to_string(), self.body.alt_start_states.to_json());
+        }
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
         let states = Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing 'states' field")?)?;
         let start_state = StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
-        Ok(DWA { states: DWAStates(states), body: DWABody { start_state } })
+        let alt_start_states = if let Some(n) = obj.remove("alt_start_states") {
+            Vec::<StateID>::from_json(n)?
+        } else {
+            Vec::new()
+        };
+        Ok(DWA { states: DWAStates(states), body: DWABody { start_state, alt_start_states } })
     }
 }
 
