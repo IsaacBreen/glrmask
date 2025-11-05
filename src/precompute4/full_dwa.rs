@@ -236,16 +236,16 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
                 // Convert template DWA to NWA and copy it into the arena
                 let template_nwa = NWA::from_dwa(template_dwa);
-                crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
+                crate::debug!(6, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
                 let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
-                crate::debug!(5, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
+                crate::debug!(6, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
                 let left_body = NWABody { start_state: template_start_in_arena };
 
                 // Concatenate: left then current (right) via epsilon with weight = llm_token_bv
-                crate::debug!(5, "Starting NWA::concatenate_components: left_start={} right_start={}...", left_body.start_state, current_nwa_body.start_state);
+                crate::debug!(6, "Starting NWA::concatenate_components: left_start={} right_start={}...", left_body.start_state, current_nwa_body.start_state);
                 let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
                 let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
-                crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
+                crate::debug!(6, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
 
                 results.push((*dest_idx, (composed_body, next_tokens)));
             }
@@ -256,10 +256,10 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             let (body1, tokens1) = val1;
             let (body2, tokens2) = val2;
             let mut states = states_arena.borrow_mut();
-            crate::debug!(5, "Starting NWA::union_components: body1_start={} body2_start={}...", body1.start_state, body2.start_state);
+            crate::debug!(6, "Starting NWA::union_components: body1_start={} body2_start={}...", body1.start_state, body2.start_state);
             *body1 = NWA::union_components(&mut states, body1, &body2);
             *tokens1 |= &tokens2;
-            crate::debug!(5, "NWA::union_components finished. New start state: {}.", body1.start_state);
+            crate::debug!(6, "NWA::union_components finished. New start state: {}.", body1.start_state);
         },
         // process function: capture at original roots
         |_node_data, node_idx, val| {
@@ -279,17 +279,17 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let final_nwa_states = states_arena.into_inner();
     let mut final_dwas = BTreeMap::new();
     for (tok_id, body) in final_bodies {
-        crate::debug!(5, "Determinizing final NWA subgraph for tokenizer state {:?} (start: {})...", tok_id, body.start_state);
+        crate::debug!(6, "Determinizing final NWA subgraph for tokenizer state {:?} (start: {})...", tok_id, body.start_state);
         let mut new_dwa = NWA::determinize_components(&final_nwa_states, &body);
-        crate::debug!(5, "Determinization produced DWA with {} states. Starting simplification...", new_dwa.states.len());
+        crate::debug!(6, "Determinization produced DWA with {} states. Starting simplification...", new_dwa.states.len());
         new_dwa.simplify();
-        crate::debug!(5, "Simplification finished ({} states).", new_dwa.states.len());
+        crate::debug!(6, "Simplification finished ({} states).", new_dwa.states.len());
         final_dwas.insert(tok_id, new_dwa);
     }
 
-    crate::debug!(5, "Starting resolve_negative_codes_for_all...");
+    crate::debug!(6, "Starting resolve_negative_codes_for_all...");
     resolve_negative_codes_for_all(&mut final_dwas);
-    crate::debug!(5, "resolve_negative_codes_for_all finished.");
+    crate::debug!(6, "resolve_negative_codes_for_all finished.");
 
     final_dwas
 }
