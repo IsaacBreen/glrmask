@@ -1871,6 +1871,7 @@ impl NWA {
         type StepVec = Arc<Vec<(NWAStateID, Weight)>>;
         #[derive(Clone)]
         struct StepKeyArc {
+            // Interned vector of (state, weight) pairs representing a subset or mask
             entries: StepVec,
             fp: u64,
         }
@@ -1921,6 +1922,92 @@ impl NWA {
                     arc
                 }
             }
+        }
+
+        // Cache for compiled group distributions:
+        // For a group key (mask, w), compile once the distribution to targets:
+        // compiled[t] = union over mask entries (m & w). Later, given a group
+        // weight gw, the contribution becomes compiled[t] & gw.
+        let mut compiled_group_cache: HashMap<StepGroupKey, StepVec> = HashMap::new();
+
+        // Cache for union-of-weights over a StepVec (used to compute edge weights quickly).
+        let mut stepvec_union_cache: HashMap<StepKeyArc, Weight> = HashMap::new();
+
+        // Compile a group (mask, w) to a compact target map, interned.
+        fn compiled_group_for(
+            key: &StepGroupKey,
+            intern: &mut HashMap<StepKeyArc, StepVec>,
+            cache: &mut HashMap<StepGroupKey, StepVec>,
+        ) -> StepVec {
+            if let Some(sv) = cache.get(key) {
+                return sv.clone();
+            }
+            // Accumulate base contributions: base[t] = ⋃ (m & w)
+            let mut base: HashMap<NWAStateID, Weight> = HashMap::new();
+            let gw_all = false; // unused, but we mirror signature for clarity
+            let w = &key.w;
+            // Iterate mask once; merge per-target
+            for (t, m) in key.mask.iter() {
+                let mw = m & w;
+                if mw.is_empty() { continue; }
+                if let Some(old) = base.get_mut(t) {
+                    *old |= &mw;
+                } else {
+                    base.insert(*t, mw);
+                }
+            }
+            if base.is_empty() {
+                // Intern an empty vec to keep pointer identity stable.
+                let arc = intern_step_vec(Vec::new(), intern);
+                cache.insert(key.clone(), arc.clone());
+                return arc;
+            }
+            let mut vec_pairs: Vec<(NWAStateID, Weight)> = base.into_iter().collect();
+            vec_pairs.sort_by_key(|(k, _)| *k);
+            let arc = intern_step_vec(vec_pairs, intern);
+            cache.insert(key.clone(), arc.clone());
+            arc
+        }
+
+        // Apply a compiled group to an accumulator with a group-weight gw:
+        // add compiled[t] & gw into acc[t].
+        fn accumulate_compiled_group(
+            compiled: &StepVec,
+            gw: &Weight,
+            acc: &mut HashMap<NWAStateID, Weight>,
+        ) {
+            let gw_all = gw.is_all_fast();
+            for (t, base) in compiled.iter() {
+                if gw_all {
+                    if let Some(old) = acc.get_mut(t) { *old |= base; } else { acc.insert(*t, base.clone()); }
+                } else {
+                    let contrib = base & gw;
+                    if contrib.is_empty() { continue; }
+                    if let Some(old) = acc.get_mut(t) { *old |= &contrib; } else { acc.insert(*t, contrib); }
+                }
+            }
+        }
+
+        // Compute and cache the union of all weights inside a StepVec.
+        fn union_weight_of_sv(
+            sv: &StepVec,
+            cache: &mut HashMap<StepKeyArc, Weight>,
+        ) -> Weight {
+            let key = StepKeyArc::new(sv.clone());
+            if let Some(w) = cache.get(&key) {
+                return w.clone();
+            }
+            let mut acc_opt: Option<Weight> = None;
+            for (_, w) in sv.iter() {
+                if let Some(ref mut acc) = acc_opt {
+                    *acc |= w;
+                } else {
+                    acc_opt = Some(w.clone());
+                }
+            }
+            let res = acc_opt.unwrap_or_else(Weight::zeros);
+            cache.insert(key, res.clone());
+            res
         }
 
         // 1) Epsilon closures with future gating: shared per epsilon-pure SCC, or per state otherwise.
@@ -2046,28 +2133,6 @@ impl NWA {
             let d_id = *subset_to_d_id.get(&subset_key).unwrap();
             let subset_vec: &[(NWAStateID, Weight)] = &subset_key.entries;
 
-            // Helper: Lazily apply a (mask, w) group with an aggregated group-weight gw
-            // into an accumulator map (target -> weight).
-            fn accumulate_step_group(
-                mask: &StepVec,
-                w: &Weight,
-                gw: &Weight,
-                acc: &mut HashMap<NWAStateID, Weight>,
-            ) {
-                let gw_all = gw.is_all_fast();
-                for (t, m) in mask.iter() {
-                    let mw = m & w;
-                    if mw.is_empty() { continue; }
-                    if gw_all {
-                        if let Some(old) = acc.get_mut(t) { *old |= &mw; } else { acc.insert(*t, mw); }
-                    } else {
-                        let contrib = &mw & gw;
-                        if contrib.is_empty() { continue; }
-                        if let Some(old) = acc.get_mut(t) { *old |= &contrib; } else { acc.insert(*t, contrib); }
-                    }
-                }
-            }
-
             // Compute final weight
             let mut d_final: Option<Weight> = None;
             for (sid, w_in) in subset_vec.iter() {
@@ -2085,7 +2150,7 @@ impl NWA {
             dwa.states[d_id].final_weight = d_final;
 
             // Precompute default grouping: group states by their default step-vectors (by target+weight).
-            let mut def_groups_all: HashMap<StepGroupKey, Weight> = HashMap::new();
+            let mut def_groups_all: HashMap<StepGroupKey, Weight> = HashMap::with_capacity(subset_vec.len());
             for (sid, w_in) in subset_vec.iter() {
                 if let Some((to, wdef)) = &self.states[*sid].default {
                     // Group by (mask, wdef)
@@ -2099,9 +2164,10 @@ impl NWA {
                 }
             }
             // Distribute default groups to targets.
-            let mut def_acc: HashMap<NWAStateID, Weight> = HashMap::new();
+            let mut def_acc: HashMap<NWAStateID, Weight> = HashMap::with_capacity(def_groups_all.len() * 2 + 1);
             for (key, group_w) in def_groups_all.iter() {
-                accumulate_step_group(&key.mask, &key.w, group_w, &mut def_acc);
+                let compiled = compiled_group_for(key, &mut step_intern, &mut compiled_group_cache);
+                accumulate_compiled_group(&compiled, group_w, &mut def_acc);
             }
             // Establish default edge (if any)
             let mut def_edge_target: Option<StateID> = None;
@@ -2121,16 +2187,11 @@ impl NWA {
                     if let Some(p) = &pb { p.set_length(subset_to_d_id.len() as u64); }
                     nid
                 };
-                // Edge weight = union of weights in def_sv
-                let mut def_w_opt: Option<Weight> = None;
-                for (_, w) in def_sv.iter() {
-                    if let Some(ref mut acc) = def_w_opt { *acc |= w; } else { def_w_opt = Some(w.clone()); }
-                }
-                if let Some(def_w) = def_w_opt {
-                    dwa.set_default_transition(d_id, def_target, def_w.clone()).expect("DWA default insertion should not fail");
-                    def_edge_target = Some(def_target);
-                    def_edge_weight = Some(def_w);
-                }
+                // Edge weight = union of weights in def_sv (cached)
+                let def_w = union_weight_of_sv(&def_sv, &mut stepvec_union_cache);
+                dwa.set_default_transition(d_id, def_target, def_w.clone()).expect("DWA default insertion should not fail");
+                def_edge_target = Some(def_target);
+                def_edge_weight = Some(def_w);
                 def_target_subset_sv = Some(def_sv);
             }
 
@@ -2154,8 +2215,8 @@ impl NWA {
                 let idxs = label_to_indices.get(&lbl).unwrap();
                 if idxs.is_empty() { continue; }
 
-                let mut ex_groups: HashMap<StepGroupKey, Weight> = HashMap::new();
-                let mut def_groups_for_explicit: HashMap<StepGroupKey, Weight> = HashMap::new();
+                let mut ex_groups: HashMap<StepGroupKey, Weight> = HashMap::with_capacity(idxs.len());
+                let mut def_groups_for_explicit: HashMap<StepGroupKey, Weight> = HashMap::with_capacity(idxs.len());
                 for &idx in idxs {
                     let (sid, w_in) = &subset_vec[idx];
                     if let Some((to, wlbl)) = self.states[*sid].transitions.get(&lbl) {
@@ -2179,15 +2240,17 @@ impl NWA {
                 }
 
                 // Compute ex_add_map: contributions via explicit steps (target -> weight)
-                let mut ex_add_map: HashMap<NWAStateID, Weight> = HashMap::new();
+                let mut ex_add_map: HashMap<NWAStateID, Weight> = HashMap::with_capacity(ex_groups.len() * 2 + 1);
                 for (key, group_w) in ex_groups.into_iter() {
-                    accumulate_step_group(&key.mask, &key.w, &group_w, &mut ex_add_map);
+                    let compiled = compiled_group_for(&key, &mut step_intern, &mut compiled_group_cache);
+                    accumulate_compiled_group(&compiled, &group_w, &mut ex_add_map);
                 }
 
                 // Compute def_sub_map: contributions via default from the explicit states (to be removed)
-                let mut def_sub_map: HashMap<NWAStateID, Weight> = HashMap::new();
+                let mut def_sub_map: HashMap<NWAStateID, Weight> = HashMap::with_capacity(def_groups_for_explicit.len() * 2 + 1);
                 for (key, group_w) in def_groups_for_explicit.into_iter() {
-                    accumulate_step_group(&key.mask, &key.w, &group_w, &mut def_sub_map);
+                    let compiled = compiled_group_for(&key, &mut step_intern, &mut compiled_group_cache);
+                    accumulate_compiled_group(&compiled, &group_w, &mut def_sub_map);
                 }
 
                 if ex_add_map.is_empty() && def_sub_map.is_empty() {
@@ -2240,25 +2303,16 @@ impl NWA {
                     nid
                 };
 
-                // Edge weight = union of all weights in accumulated target_sv
-                let mut edge_w_opt: Option<Weight> = None;
-                for (_, w) in target_sv.iter() {
-                    if let Some(ref mut acc_w) = edge_w_opt {
-                        *acc_w |= w;
-                    } else {
-                        edge_w_opt = Some(w.clone());
+                // Edge weight = union of all weights in accumulated target_sv (cached)
+                let edge_w = union_weight_of_sv(&target_sv, &mut stepvec_union_cache);
+                // If identical to default (target and weight), skip creating an exception.
+                if let (Some(def_t), Some(ref def_w)) = (def_edge_target, def_edge_weight.as_ref()) {
+                    if def_t == target_d_id && **def_w == edge_w {
+                        continue;
                     }
                 }
-                if let Some(edge_w) = edge_w_opt {
-                    // If identical to default (target and weight), skip creating an exception.
-                    if let (Some(def_t), Some(ref def_w)) = (def_edge_target, def_edge_weight.as_ref()) {
-                        if def_t == target_d_id && **def_w == edge_w {
-                            continue;
-                        }
-                    }
-                    // Add exception for lbl
-                    dwa.add_transition(d_id, lbl, target_d_id, edge_w).expect("DWA insertion should not fail");
-                }
+                // Add exception for lbl
+                dwa.add_transition(d_id, lbl, target_d_id, edge_w).expect("DWA insertion should not fail");
             }
         }
 
