@@ -1,32 +1,9 @@
 local_system:
   attached_files:
-    - src/precompute4/utils.rs
     - src/precompute4/weighted_automata.rs
-    - src/precompute4/resolve_negatives.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/precompute4/utils.rs: |-
-      use crate::glr::table::StateID as ParserStateID;
-      use crate::precompute4::full_dwa::FullDWABuildError;
-
-      pub fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          if id.0 > i16::MAX as usize {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(id.0 as i16)
-          }
-      }
-
-      pub fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          // Negative codes for stack-hitching. We store as i16::MIN + id.
-          // This requires that parser state IDs are not too large.
-          if id.0 > (i16::MAX as usize) {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(i16::MIN + (id.0 as i16))
-          }
-      }
     src/precompute4/weighted_automata.rs: |
       // src/precompute4/weighted_automata.rs
 
@@ -316,6 +293,11 @@ local_system:
               assert!(state_id < self.len(), "state_id out of bounds");
               let state = self[state_id].clone();
               self.add_existing_state(state)
+          }
+
+          pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
+              assert!(state_id < self.len(), "state_id out of bounds");
+              self[state_id].apply_weight(weight);
           }
 
           /// Merges two states that are transition-equivalent into a new state.
@@ -1846,150 +1828,9 @@ local_system:
               expected.set_final_weight(expected.body.start_state, Weight::from_item(0)).unwrap();
 
               assert_dwa_equivalent(c, expected);
-          }
-      }
-    src/precompute4/resolve_negatives.rs: |
-      use crate::precompute4::full_dwa::Precomputed4;
-      use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, StateID, Weight};
-      use std::collections::BTreeMap;
-
-      pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
-          for (_sid, dwa) in precomputed4.iter_mut() {
-              resolve_negative_codes_in_dwa(dwa);
-          }
-      }
-
-      fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          crate::debug!(5, "Initial DWA:\n{}", dwa);
-          loop {
-              let mut changed_in_pass = false;
-
-              for state_id in 0..dwa.states.len() {
-                  let changed =
-                      resolve_negative_codes_in_dwa_internal(state_id, &mut dwa.states);
-                  if changed {
-                      changed_in_pass = true;
-                  }
-              }
-
-              if !changed_in_pass {
-                  break;
-              }
-          }
-          dwa.simplify();
-          crate::debug!(5, "Resolved DWA:\n{}", dwa);
-      }
-
-      fn resolve_negative_codes_in_dwa_internal(
-          state_id: StateID,
-          states: &mut DWAStates,
-      ) -> bool {
-          todo!()
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use super::*;
-          use crate::precompute4::weighted_automata::{assert_dwa_equivalent, DWA, Weight};
-
-          #[test]
-          fn test_resolve_negatives_simple_cancellation() {
-              // Corresponds to a sequence like `a, neg(a)`.
-              // The DWA should resolve to an automaton that accepts `a` and is final.
-              let mut d = DWA::new();
-              let s1 = d.add_state();
-              let s2 = d.add_state();
-
-              let code_a = 7;
-              let neg_code_a = i16::MIN + code_a;
-
-              // 0 --a--> 1
-              d.add_transition(d.body.start_state, code_a, s1, Weight::from_item(2)).unwrap();
-              // 1 --neg(a)--> 2
-              d.add_transition(s1, neg_code_a, s2, Weight::all()).unwrap();
-              // 2 is final
-              d.set_final_weight(s2, Weight::all()).unwrap();
-
-              resolve_negative_codes_in_dwa(&mut d);
-
-              // Expected: 0 --a--> final_state
-              let mut expected = DWA::new();
-              let s_final = expected.add_state();
-              expected.add_transition(expected.body.start_state, code_a, s_final, Weight::from_item(2)).unwrap();
-              // The final weight is the intersection of the edge weight (2) and the final weight (all),
-              // constrained by reachability during simplification.
-              expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
-
-              assert_dwa_equivalent(d, expected);
-          }
-
-          #[test]
-          fn test_resolve_negatives_long_cancellation_chain() {
-              // This test models a path from a real-world DWA that involves multiple cancellations.
-              // The path is: 0 --7--> 5 --neg(7)--> 10 --neg(3)--> 13 --3--> 15 --7--> 22 --neg(7)--> 27 --neg(1)--> 29 --neg(2)--> 30(final)
-              let mut d = DWA::new();
-              let s5 = d.add_state();
-              let s10 = d.add_state();
-              let s13 = d.add_state();
-              let s15 = d.add_state();
-              let s22 = d.add_state();
-              let s27 = d.add_state();
-              let s29 = d.add_state();
-              let s30 = d.add_state();
-
-              let code7 = 7;
-              let neg_code7 = i16::MIN + code7;
-              let code3 = 3;
-              let neg_code3 = i16::MIN + code3;
-              let code1 = 1;
-              let neg_code1 = i16::MIN + code1;
-              let code2 = 2;
-              let neg_code2 = i16::MIN + code2;
-
-              d.add_transition(d.body.start_state, code7, s5, Weight::all()).unwrap();
-              d.add_transition(s5, neg_code7, s10, Weight::all()).unwrap();
-              d.add_transition(s10, neg_code3, s13, Weight::all()).unwrap();
-              d.add_transition(s13, code3, s15, Weight::all()).unwrap();
-              d.add_transition(s15, code7, s22, Weight::all()).unwrap();
-              d.add_transition(s22, neg_code7, s27, Weight::all()).unwrap();
-              d.add_transition(s27, neg_code1, s29, Weight::all()).unwrap();
-              d.add_transition(s29, neg_code2, s30, Weight::all()).unwrap();
-              d.set_final_weight(s30, Weight::all()).unwrap();
-
-              resolve_negative_codes_in_dwa(&mut d);
-
-              // After resolution and simplification, the chain of cancellations should result
-              // in an automaton that accepts the "7".
-              let mut expected = DWA::new();
-              let s_final = expected.add_state();
-              expected.add_transition(expected.body.start_state, code7, s_final, Weight::all()).unwrap();
-              expected.set_final_weight(s_final, Weight::all()).unwrap();
-
-              assert_dwa_equivalent(d, expected);
           }
       }
   prev_file_contents:
-    src/precompute4/utils.rs: |-
-      use crate::glr::table::StateID as ParserStateID;
-      use crate::precompute4::full_dwa::FullDWABuildError;
-
-      pub fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          if id.0 > i16::MAX as usize {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(id.0 as i16)
-          }
-      }
-
-      pub fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          // Negative codes for stack-hitching. We store as i16::MIN + id.
-          // This requires that parser state IDs are not too large.
-          if id.0 > (i16::MAX as usize) {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(i16::MIN + (id.0 as i16))
-          }
-      }
     src/precompute4/weighted_automata.rs: |
       // src/precompute4/weighted_automata.rs
 
@@ -2281,6 +2122,56 @@ local_system:
               self.add_existing_state(state)
           }
 
+          pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
+              assert!(state_id < self.len(), "state_id out of bounds");
+              self[state_id].apply_weight(weight);
+          }
+
+          /// Merges `s_from_id` into `s_into_id`.
+          /// The weights of `s_into_id` become the union of both states' weights.
+          /// `s_from_id` is not modified.
+          ///
+          /// This function asserts that the two states have identical transition structures.
+          pub fn merge_state_into(&mut self, s_from_id: StateID, s_into_id: StateID) {
+              assert!(s_from_id < self.len(), "s_from_id out of bounds");
+              assert!(s_into_id < self.len(), "s_into_id out of bounds");
+              assert_ne!(s_from_id, s_into_id, "Cannot merge a state into itself");
+
+              // To satisfy the borrow checker, we need to clone the from_state's data
+              // because we're modifying self[s_into_id].
+              let s_from = self[s_from_id].clone();
+              let s_into = &self[s_into_id];
+
+              assert_eq!(s_from.transitions, s_into.transitions, "States must be transition-equivalent to be merged.");
+
+              let s_into_mut = &mut self[s_into_id];
+
+              // Merge state and final weights
+              s_into_mut.weight |= &s_from.weight;
+              let fw_from = s_from.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+              let fw_into = s_into_mut.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+              let final_w = fw_into | fw_from;
+              if !final_w.is_empty() {
+                  s_into_mut.final_weight = Some(final_w);
+              } else {
+                  s_into_mut.final_weight = None;
+              }
+
+              // Merge default transition weight
+              if s_into_mut.transitions.default.is_some() {
+                  let tw_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                  let tw_into = s_into_mut.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                  s_into_mut.trans_weight_default = Some(tw_into | tw_from);
+              }
+
+              // Merge exception transition weights
+              for ch in s_from.transitions.exceptions.keys() {
+                  let w_from = s_from.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+                  let w_into = s_into_mut.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+                  s_into_mut.trans_weights_exceptions.insert(*ch, w_into | w_from);
+              }
+          }
+
           /// Merges two states that are transition-equivalent into a new state.
           /// The new state's weights are the union of the original states' weights.
           ///
@@ -2294,43 +2185,12 @@ local_system:
               assert!(s1_id < self.len(), "s1_id out of bounds");
               assert!(s2_id < self.len(), "s2_id out of bounds");
 
-              let s1 = &self[s1_id];
-              let s2 = &self[s2_id];
+              // Create a new state by copying s1
+              let new_id = self.copy_state(s1_id);
 
-              // For this to be correct, s1 and s2 must be behaviorally equivalent,
-              // i.e., for any input they transition to the same state.
-              assert_eq!(s1.transitions, s2.transitions, "States must be transition-equivalent to be merged.");
+              // Merge s2 into the new state
+              self.merge_state_into(s2_id, new_id);
 
-              let mut new_state = DWAState::default();
-
-              // Copy transition structure from s1 (since it's same as s2)
-              new_state.transitions = s1.transitions.clone();
-
-              // Merge state and final weights
-              new_state.weight = &s1.weight | &s2.weight;
-              let fw1 = s1.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let fw2 = s2.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let final_w = fw1 | fw2;
-              if !final_w.is_empty() {
-                  new_state.final_weight = Some(final_w);
-              }
-
-              // Merge default transition weight
-              if new_state.transitions.default.is_some() {
-                  let tw1 = s1.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  let tw2 = s2.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  new_state.trans_weight_default = Some(tw1 | tw2);
-              }
-
-              // Merge exception transition weights
-              for (ch, _tgt) in &new_state.transitions.exceptions {
-                  let w1 = s1.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  let w2 = s2.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  new_state.trans_weights_exceptions.insert(*ch, w1 | w2);
-              }
-
-              let new_id = self.add_state();
-              self[new_id] = new_state;
               new_id
           }
       }
@@ -3809,217 +3669,6 @@ local_system:
               expected.set_final_weight(expected.body.start_state, Weight::from_item(0)).unwrap();
 
               assert_dwa_equivalent(c, expected);
-          }
-      }
-    src/precompute4/resolve_negatives.rs: |
-      use crate::precompute4::full_dwa::Precomputed4;
-      use crate::precompute4::weighted_automata::{DWA, DWAStates, StateID, Weight};
-      use std::collections::BTreeMap;
-
-      pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
-          for (_sid, dwa) in precomputed4.iter_mut() {
-              resolve_negative_codes_in_dwa(dwa);
-          }
-      }
-
-      fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          crate::debug!(5, "Initial DWA:\n{}", dwa);
-          loop {
-              let mut changed_in_pass = false;
-
-              for state_id in 0..dwa.states.len() {
-                  let changed =
-                      resolve_negative_codes_in_dwa_internal(state_id, &mut dwa.states);
-                  if changed {
-                      changed_in_pass = true;
-                  }
-              }
-
-              if !changed_in_pass {
-                  break;
-              }
-          }
-          dwa.simplify();
-          crate::debug!(5, "Resolved DWA:\n{}", dwa);
-      }
-
-      fn resolve_negative_codes_in_dwa_internal(
-          state_id: StateID,
-          states: &mut DWAStates,
-      ) -> bool {
-          let mut changed = false;
-          // We need to collect the negative transitions first because we'll be modifying the state's transitions.
-          let state_a_clone = states[state_id].clone();
-          let negative_transitions: Vec<(i16, StateID)> = state_a_clone
-              .transitions
-              .exceptions
-              .iter()
-              .filter(|(k, _)| **k < 0)
-              .map(|(k, v)| (*k, *v))
-              .collect();
-
-          if negative_transitions.is_empty() {
-              return false;
-          }
-
-          for (neg_code, b_orig_id) in negative_transitions {
-              changed = true;
-              let p = neg_code.wrapping_sub(i16::MIN);
-              let w_neg = state_a_clone.trans_weights_exceptions.get(&neg_code).unwrap().clone();
-
-              // Step 1: Copy B
-              let b_copy_id = states.copy_state(b_orig_id);
-
-              // Step 2: Handle final weight from B
-              if let Some(b_final_weight) = states[b_copy_id].final_weight.take() {
-                  let new_a_final_weight = b_final_weight & &w_neg;
-                  if !new_a_final_weight.is_empty() {
-                      let a_state = &mut states[state_id];
-                      if let Some(a_fw) = a_state.final_weight.as_mut() {
-                          *a_fw |= &new_a_final_weight;
-                      } else {
-                          a_state.final_weight = Some(new_a_final_weight);
-                      }
-                  }
-              }
-
-              // Step 3: Handle matching positive edge (cancellation)
-              let b_orig_state_clone = states[b_orig_id].clone();
-              if let Some(&c_orig_id) = b_orig_state_clone.transitions.exceptions.get(&p) {
-                  let c_copy_id = states.copy_state(c_orig_id);
-                  states[c_copy_id].apply_weight(&w_neg);
-                  let c_copy_state = states[c_copy_id].clone();
-                  let a_state = &mut states[state_id];
-
-                  // Merge C's weights and transitions into A
-                  a_state.weight |= &c_copy_state.weight;
-                  if let Some(c_fw) = c_copy_state.final_weight {
-                      if !c_fw.is_empty() {
-                          if let Some(a_fw) = a_state.final_weight.as_mut() {
-                              *a_fw |= &c_fw;
-                          } else {
-                              a_state.final_weight = Some(c_fw);
-                          }
-                      }
-                  }
-
-                  if let Some(c_default_target) = c_copy_state.transitions.default {
-                      let a_def_w = a_state.trans_weight_default.get_or_insert_with(Weight::zeros);
-                      if let Some(c_def_w) = c_copy_state.trans_weight_default {
-                          *a_def_w |= &c_def_w;
-                      }
-                      a_state.transitions.default = Some(c_default_target);
-                  }
-
-                  for (on, c_target) in c_copy_state.transitions.exceptions {
-                      let c_weight = c_copy_state.trans_weights_exceptions.get(&on).unwrap().clone();
-                      if let Some(a_weight) = a_state.trans_weights_exceptions.get_mut(&on) {
-                          if a_state.transitions.exceptions.get(&on) == Some(&c_target) {
-                              *a_weight |= &c_weight;
-                          } else {
-                              a_state.transitions.exceptions.insert(on, c_target);
-                              *a_weight = c_weight;
-                          }
-                      } else {
-                          a_state.transitions.exceptions.insert(on, c_target);
-                          a_state.trans_weights_exceptions.insert(on, c_weight);
-                      }
-                  }
-              }
-
-              // Step 4: Discard all positive edges from B_copy
-              let b_copy_state = &mut states[b_copy_id];
-              b_copy_state.transitions.exceptions.retain(|k, _| *k < 0);
-              b_copy_state.trans_weights_exceptions.retain(|k, _| *k < 0);
-              b_copy_state.transitions.default = None;
-              b_copy_state.trans_weight_default = None;
-
-              // Step 5: Replace A -> B with A -> B_copy
-              states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
-          }
-
-          changed
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use super::*;
-          use crate::precompute4::weighted_automata::{assert_dwa_equivalent, DWA, Weight};
-
-          #[test]
-          fn test_resolve_negatives_simple_cancellation() {
-              // Corresponds to a sequence like `a, neg(a)`.
-              // The DWA should resolve to an automaton that accepts `a` and is final.
-              let mut d = DWA::new();
-              let s1 = d.add_state();
-              let s2 = d.add_state();
-
-              let code_a = 7;
-              let neg_code_a = i16::MIN + code_a;
-
-              // 0 --a--> 1
-              d.add_transition(d.body.start_state, code_a, s1, Weight::from_item(2)).unwrap();
-              // 1 --neg(a)--> 2
-              d.add_transition(s1, neg_code_a, s2, Weight::all()).unwrap();
-              // 2 is final
-              d.set_final_weight(s2, Weight::all()).unwrap();
-
-              resolve_negative_codes_in_dwa(&mut d);
-
-              // Expected: 0 --a--> final_state
-              let mut expected = DWA::new();
-              let s_final = expected.add_state();
-              expected.add_transition(expected.body.start_state, code_a, s_final, Weight::from_item(2)).unwrap();
-              // The final weight is the intersection of the edge weight (2) and the final weight (all),
-              // constrained by reachability during simplification.
-              expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
-
-              assert_dwa_equivalent(d, expected);
-          }
-
-          #[test]
-          fn test_resolve_negatives_long_cancellation_chain() {
-              // This test models a path from a real-world DWA that involves multiple cancellations.
-              // The path is: 0 --7--> 5 --neg(7)--> 10 --neg(3)--> 13 --3--> 15 --7--> 22 --neg(7)--> 27 --neg(1)--> 29 --neg(2)--> 30(final)
-              let mut d = DWA::new();
-              let s5 = d.add_state();
-              let s10 = d.add_state();
-              let s13 = d.add_state();
-              let s15 = d.add_state();
-              let s22 = d.add_state();
-              let s27 = d.add_state();
-              let s29 = d.add_state();
-              let s30 = d.add_state();
-
-              let code7 = 7;
-              let neg_code7 = i16::MIN + code7;
-              let code3 = 3;
-              let neg_code3 = i16::MIN + code3;
-              let code1 = 1;
-              let neg_code1 = i16::MIN + code1;
-              let code2 = 2;
-              let neg_code2 = i16::MIN + code2;
-
-              d.add_transition(d.body.start_state, code7, s5, Weight::all()).unwrap();
-              d.add_transition(s5, neg_code7, s10, Weight::all()).unwrap();
-              d.add_transition(s10, neg_code3, s13, Weight::all()).unwrap();
-              d.add_transition(s13, code3, s15, Weight::all()).unwrap();
-              d.add_transition(s15, code7, s22, Weight::all()).unwrap();
-              d.add_transition(s22, neg_code7, s27, Weight::all()).unwrap();
-              d.add_transition(s27, neg_code1, s29, Weight::all()).unwrap();
-              d.add_transition(s29, neg_code2, s30, Weight::all()).unwrap();
-              d.set_final_weight(s30, Weight::all()).unwrap();
-
-              resolve_negative_codes_in_dwa(&mut d);
-
-              // After resolution and simplification, the chain of cancellations should result
-              // in an automaton that accepts the "7".
-              let mut expected = DWA::new();
-              let s_final = expected.add_state();
-              expected.add_transition(expected.body.start_state, code7, s_final, Weight::all()).unwrap();
-              expected.set_final_weight(s_final, Weight::all()).unwrap();
-
-              assert_dwa_equivalent(d, expected);
           }
       }
   diffs_applied_this_send: true
@@ -4033,7 +3682,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -4064,31 +3713,6 @@ messages:
       kind: core-guidance
       role: developer
       ephemeral: false
-  - user: |-
-      ```rust "src/precompute4/utils.rs"
-      use crate::glr::table::StateID as ParserStateID;
-      use crate::precompute4::full_dwa::FullDWABuildError;
-
-      pub fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          if id.0 > i16::MAX as usize {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(id.0 as i16)
-          }
-      }
-
-      pub fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
-          // Negative codes for stack-hitching. We store as i16::MIN + id.
-          // This requires that parser state IDs are not too large.
-          if id.0 > (i16::MAX as usize) {
-              Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
-          } else {
-              Ok(i16::MIN + (id.0 as i16))
-          }
-      }
-      ```
-    metadata:
-      filename: src/precompute4/utils.rs
   - user: |-
       ```rust "src/precompute4/weighted_automata.rs"
       // src/precompute4/weighted_automata.rs
@@ -4379,6 +4003,11 @@ messages:
               assert!(state_id < self.len(), "state_id out of bounds");
               let state = self[state_id].clone();
               self.add_existing_state(state)
+          }
+
+          pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
+              assert!(state_id < self.len(), "state_id out of bounds");
+              self[state_id].apply_weight(weight);
           }
 
           /// Merges two states that are transition-equivalent into a new state.
@@ -5915,149 +5544,8 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata.rs
-  - user: |-
-      ```rust "src/precompute4/resolve_negatives.rs"
-      use crate::precompute4::full_dwa::Precomputed4;
-      use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, StateID, Weight};
-      use std::collections::BTreeMap;
-
-      pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
-          for (_sid, dwa) in precomputed4.iter_mut() {
-              resolve_negative_codes_in_dwa(dwa);
-          }
-      }
-
-      fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          crate::debug!(5, "Initial DWA:\n{}", dwa);
-          loop {
-              let mut changed_in_pass = false;
-
-              for state_id in 0..dwa.states.len() {
-                  let changed =
-                      resolve_negative_codes_in_dwa_internal(state_id, &mut dwa.states);
-                  if changed {
-                      changed_in_pass = true;
-                  }
-              }
-
-              if !changed_in_pass {
-                  break;
-              }
-          }
-          dwa.simplify();
-          crate::debug!(5, "Resolved DWA:\n{}", dwa);
-      }
-
-      fn resolve_negative_codes_in_dwa_internal(
-          state_id: StateID,
-          states: &mut DWAStates,
-      ) -> bool {
-          todo!()
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use super::*;
-          use crate::precompute4::weighted_automata::{assert_dwa_equivalent, DWA, Weight};
-
-          #[test]
-          fn test_resolve_negatives_simple_cancellation() {
-              // Corresponds to a sequence like `a, neg(a)`.
-              // The DWA should resolve to an automaton that accepts `a` and is final.
-              let mut d = DWA::new();
-              let s1 = d.add_state();
-              let s2 = d.add_state();
-
-              let code_a = 7;
-              let neg_code_a = i16::MIN + code_a;
-
-              // 0 --a--> 1
-              d.add_transition(d.body.start_state, code_a, s1, Weight::from_item(2)).unwrap();
-              // 1 --neg(a)--> 2
-              d.add_transition(s1, neg_code_a, s2, Weight::all()).unwrap();
-              // 2 is final
-              d.set_final_weight(s2, Weight::all()).unwrap();
-
-              resolve_negative_codes_in_dwa(&mut d);
-
-              // Expected: 0 --a--> final_state
-              let mut expected = DWA::new();
-              let s_final = expected.add_state();
-              expected.add_transition(expected.body.start_state, code_a, s_final, Weight::from_item(2)).unwrap();
-              // The final weight is the intersection of the edge weight (2) and the final weight (all),
-              // constrained by reachability during simplification.
-              expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
-
-              assert_dwa_equivalent(d, expected);
-          }
-
-          #[test]
-          fn test_resolve_negatives_long_cancellation_chain() {
-              // This test models a path from a real-world DWA that involves multiple cancellations.
-              // The path is: 0 --7--> 5 --neg(7)--> 10 --neg(3)--> 13 --3--> 15 --7--> 22 --neg(7)--> 27 --neg(1)--> 29 --neg(2)--> 30(final)
-              let mut d = DWA::new();
-              let s5 = d.add_state();
-              let s10 = d.add_state();
-              let s13 = d.add_state();
-              let s15 = d.add_state();
-              let s22 = d.add_state();
-              let s27 = d.add_state();
-              let s29 = d.add_state();
-              let s30 = d.add_state();
-
-              let code7 = 7;
-              let neg_code7 = i16::MIN + code7;
-              let code3 = 3;
-              let neg_code3 = i16::MIN + code3;
-              let code1 = 1;
-              let neg_code1 = i16::MIN + code1;
-              let code2 = 2;
-              let neg_code2 = i16::MIN + code2;
-
-              d.add_transition(d.body.start_state, code7, s5, Weight::all()).unwrap();
-              d.add_transition(s5, neg_code7, s10, Weight::all()).unwrap();
-              d.add_transition(s10, neg_code3, s13, Weight::all()).unwrap();
-              d.add_transition(s13, code3, s15, Weight::all()).unwrap();
-              d.add_transition(s15, code7, s22, Weight::all()).unwrap();
-              d.add_transition(s22, neg_code7, s27, Weight::all()).unwrap();
-              d.add_transition(s27, neg_code1, s29, Weight::all()).unwrap();
-              d.add_transition(s29, neg_code2, s30, Weight::all()).unwrap();
-              d.set_final_weight(s30, Weight::all()).unwrap();
-
-              resolve_negative_codes_in_dwa(&mut d);
-
-              // After resolution and simplification, the chain of cancellations should result
-              // in an automaton that accepts the "7".
-              let mut expected = DWA::new();
-              let s_final = expected.add_state();
-              expected.add_transition(expected.body.start_state, code7, s_final, Weight::all()).unwrap();
-              expected.set_final_weight(s_final, Weight::all()).unwrap();
-
-              assert_dwa_equivalent(d, expected);
-          }
-      }
-
-      ```
-    metadata:
-      filename: src/precompute4/resolve_negatives.rs
-  - user: |-
-      I want to implement `resolve_negative_codes_in_dwa_internal` like this.
-      We consider processing one state at a time until no further changes are possible.
-
-      - Consider a state.
-      - Loop through negative edges A -> B
-        - Copy B.
-        - If the dst has final weight, take (remove) it (from the copy), intersect with the edge's weight, and put it in A.
-        - If there is a positive edge B -> C that matches the negative edge A -> B, get a copy of C. Apply the weight of the edge to it. Then merge it into this node. If there isn't such a positive edge, do nothing.
-        - Discard all positive edges B -> C from the copy.
-        - Replace A -> B in A so it points to the new copy of B.
-
-      That's it for this node!
-
-      Try to work directly with `DWAState` inside `DWAStates` rather than as a separate entity. e.g. if we have two `DWAState` instances and we want to merge them, we can't do that without putting them inside `DWAStates` first (since it may require merging of their children and such).
-      For copying state B, use `DWAStates::copy_state()`.
-
-      Note that default transitions only apply for non-negatives, not for negatives.
+  - user: Turn `merge_states` into `merge_state_into`. Add another method `merge_states`
+      that just uses `merge_state_into`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -6077,242 +5565,243 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to implement the negative code resolution logic, followed by the git diff.
+      Of course. Here are the step-by-step instructions to refactor `merge_states`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      #### File: `src/precompute4/resolve_negatives.rs`
+      1.  **Open the file `src/precompute4/weighted_automata.rs`**.
 
-      1.  **Add necessary `use` statement:**
-          At the top of the file, add `use crate::precompute4::weighted_automata::Weight;` to bring the `Weight` type into scope.
+      2.  **Locate the `impl DWAStates` block.** Inside this block, find the `merge_states` method (around line 335).
 
-      2.  **Implement `resolve_negative_codes_in_dwa_internal`:**
-          Replace the `todo!()` in `resolve_negative_codes_in_dwa_internal` with the logic to handle negative transitions. The implementation will follow these steps for each state:
-          *   Find all negative-code transitions.
-          *   For each such transition from `A` to `B` on `neg(p)`:
-              a. Create a copy of state `B`, let's call it `B_copy`.
-              b. If `B_copy` is a final state, transfer its final weight to state `A`, intersecting it with the transition's weight.
-              c. Check if `B` has a canceling positive-code transition on `p` to a state `C`.
-                  i. If it does, this is a cancellation. We merge a weighted copy of `C`'s behavior (weights and transitions) into `A`. This effectively creates a shortcut.
-              d. Remove all positive-code transitions from `B_copy`, as they are not accessible through a negative transition.
-              e. Update `A`'s original negative transition to point to the new, modified `B_copy`.
+      3.  **Insert the new `merge_state_into` method** immediately before the `merge_states` method. Paste the following code:
 
-      This iterative process, combined with the `simplify()` call, will collapse chains of cancellations and resolve the negative codes.
+          ```rust
+          /// Merges `s_from_id` into `s_into_id`.
+          /// The weights of `s_into_id` become the union of both states' weights.
+          /// `s_from_id` is not modified.
+          ///
+          /// This function asserts that the two states have identical transition structures.
+          pub fn merge_state_into(&mut self, s_from_id: StateID, s_into_id: StateID) {
+              assert!(s_from_id < self.len(), "s_from_id out of bounds");
+              assert!(s_into_id < self.len(), "s_into_id out of bounds");
+              assert_ne!(s_from_id, s_into_id, "Cannot merge a state into itself");
 
-      Here is the code to replace the `todo!()`:
+              // To satisfy the borrow checker, we need to clone the from_state's data
+              // because we're modifying self[s_into_id].
+              let s_from = self[s_from_id].clone();
+              let s_into = &self[s_into_id];
 
-      ```rust
-      fn resolve_negative_codes_in_dwa_internal(
-          state_id: StateID,
-          states: &mut DWAStates,
-      ) -> bool {
-          let mut changed = false;
-          // We need to collect the negative transitions first because we'll be modifying the state's transitions.
-          let state_a_clone = states[state_id].clone();
-          let negative_transitions: Vec<(i16, StateID)> = state_a_clone
-              .transitions
-              .exceptions
-              .iter()
-              .filter(|(k, _)| **k < 0)
-              .map(|(k, v)| (*k, *v))
-              .collect();
+              assert_eq!(s_from.transitions, s_into.transitions, "States must be transition-equivalent to be merged.");
 
-          if negative_transitions.is_empty() {
-              return false;
-          }
+              let s_into_mut = &mut self[s_into_id];
 
-          for (neg_code, b_orig_id) in negative_transitions {
-              changed = true;
-              let p = neg_code.wrapping_sub(i16::MIN);
-              let w_neg = state_a_clone.trans_weights_exceptions.get(&neg_code).unwrap().clone();
-
-              // Step 1: Copy B
-              let b_copy_id = states.copy_state(b_orig_id);
-
-              // Step 2: Handle final weight from B
-              if let Some(b_final_weight) = states[b_copy_id].final_weight.take() {
-                  let new_a_final_weight = b_final_weight & &w_neg;
-                  if !new_a_final_weight.is_empty() {
-                      let a_state = &mut states[state_id];
-                      if let Some(a_fw) = a_state.final_weight.as_mut() {
-                          *a_fw |= &new_a_final_weight;
-                      } else {
-                          a_state.final_weight = Some(new_a_final_weight);
-                      }
-                  }
+              // Merge state and final weights
+              s_into_mut.weight |= &s_from.weight;
+              let fw_from = s_from.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+              let fw_into = s_into_mut.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+              let final_w = fw_into | fw_from;
+              if !final_w.is_empty() {
+                  s_into_mut.final_weight = Some(final_w);
+              } else {
+                  s_into_mut.final_weight = None;
               }
 
-              // Step 3: Handle matching positive edge (cancellation)
-              let b_orig_state_clone = states[b_orig_id].clone();
-              if let Some(&c_orig_id) = b_orig_state_clone.transitions.exceptions.get(&p) {
-                  let c_copy_id = states.copy_state(c_orig_id);
-                  states[c_copy_id].apply_weight(&w_neg);
-                  let c_copy_state = states[c_copy_id].clone();
-                  let a_state = &mut states[state_id];
-
-                  // Merge C's weights and transitions into A
-                  a_state.weight |= &c_copy_state.weight;
-                  if let Some(c_fw) = c_copy_state.final_weight {
-                      if !c_fw.is_empty() {
-                          if let Some(a_fw) = a_state.final_weight.as_mut() {
-                              *a_fw |= &c_fw;
-                          } else {
-                              a_state.final_weight = Some(c_fw);
-                          }
-                      }
-                  }
-
-                  if let Some(c_default_target) = c_copy_state.transitions.default {
-                      let a_def_w = a_state.trans_weight_default.get_or_insert_with(Weight::zeros);
-                      if let Some(c_def_w) = c_copy_state.trans_weight_default {
-                          *a_def_w |= &c_def_w;
-                      }
-                      a_state.transitions.default = Some(c_default_target);
-                  }
-
-                  for (on, c_target) in c_copy_state.transitions.exceptions {
-                      let c_weight = c_copy_state.trans_weights_exceptions.get(&on).unwrap().clone();
-                      if let Some(a_weight) = a_state.trans_weights_exceptions.get_mut(&on) {
-                          if a_state.transitions.exceptions.get(&on) == Some(&c_target) {
-                              *a_weight |= &c_weight;
-                          } else {
-                              a_state.transitions.exceptions.insert(on, c_target);
-                              *a_weight = c_weight;
-                          }
-                      } else {
-                          a_state.transitions.exceptions.insert(on, c_target);
-                          a_state.trans_weights_exceptions.insert(on, c_weight);
-                      }
-                  }
+              // Merge default transition weight
+              if s_into_mut.transitions.default.is_some() {
+                  let tw_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                  let tw_into = s_into_mut.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                  s_into_mut.trans_weight_default = Some(tw_into | tw_from);
               }
 
-              // Step 4: Discard all positive edges from B_copy
-              let b_copy_state = &mut states[b_copy_id];
-              b_copy_state.transitions.exceptions.retain(|k, _| *k < 0);
-              b_copy_state.trans_weights_exceptions.retain(|k, _| *k < 0);
-              b_copy_state.transitions.default = None;
-              b_copy_state.trans_weight_default = None;
-
-              // Step 5: Replace A -> B with A -> B_copy
-              states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
+              // Merge exception transition weights
+              for ch in s_from.transitions.exceptions.keys() {
+                  let w_from = s_from.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+                  let w_into = s_into_mut.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+                  s_into_mut.trans_weights_exceptions.insert(*ch, w_into | w_from);
+              }
           }
+          ```
 
-          changed
-      }
-      ```
+      4.  **Replace the implementation of the `merge_states` method** with the new version that calls `merge_state_into`. The signature and documentation comments should remain unchanged.
 
-      ### Git Diffs
+          *From this:*
+          ```rust
+          pub fn merge_states(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
+              assert!(s1_id < self.len(), "s1_id out of bounds");
+              assert!(s2_id < self.len(), "s2_id out of bounds");
+
+              let s1 = &self[s1_id];
+              let s2 = &self[s2_id];
+
+              // For this to be correct, s1 and s2 must be behaviorally equivalent,
+              // i.e., for any input they transition to the same state.
+              assert_eq!(s1.transitions, s2.transitions, "States must be transition-equivalent to be merged.");
+
+              let mut new_state = DWAState::default();
+
+              // Copy transition structure from s1 (since it's same as s2)
+              new_state.transitions = s1.transitions.clone();
+
+              // Merge state and final weights
+              new_state.weight = &s1.weight | &s2.weight;
+              let fw1 = s1.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+              let fw2 = s2.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+              let final_w = fw1 | fw2;
+              if !final_w.is_empty() {
+                  new_state.final_weight = Some(final_w);
+              }
+
+              // Merge default transition weight
+              if new_state.transitions.default.is_some() {
+                  let tw1 = s1.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                  let tw2 = s2.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                  new_state.trans_weight_default = Some(tw1 | tw2);
+              }
+
+              // Merge exception transition weights
+              for (ch, _tgt) in &new_state.transitions.exceptions {
+                  let w1 = s1.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+                  let w2 = s2.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+                  new_state.trans_weights_exceptions.insert(*ch, w1 | w2);
+              }
+
+              let new_id = self.add_state();
+              self[new_id] = new_state;
+              new_id
+          }
+          ```
+
+          *To this:*
+          ```rust
+          pub fn merge_states(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
+              assert!(s1_id < self.len(), "s1_id out of bounds");
+              assert!(s2_id < self.len(), "s2_id out of bounds");
+
+              // Create a new state by copying s1
+              let new_id = self.copy_state(s1_id);
+
+              // Merge s2 into the new state
+              self.merge_state_into(s2_id, new_id);
+
+              new_id
+          }
+          ```
+
+      ### Git Diff
+
+      Here is the git diff for the changes described above.
 
       ```diff
-      --- a/src/precompute4/resolve_negatives.rs
-      +++ b/src/precompute4/resolve_negatives.rs
-      @@ -1,5 +1,5 @@
-       use crate::precompute4::full_dwa::Precomputed4;
-      -use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, StateID, Weight};
-      +use crate::precompute4::weighted_automata::{DWA, DWAStates, StateID, Weight};
-       use std::collections::BTreeMap;
+      --- a/src/precompute4/weighted_automata.rs
+      +++ b/src/precompute4/weighted_automata.rs
+      @@ -323,53 +323,65 @@
+               self[state_id].apply_weight(weight);
+           }
        
-       pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
-      @@ -33,7 +33,90 @@
-           state_id: StateID,
-           states: &mut DWAStates,
-       ) -> bool {
-      -    todo!()
-      +    let mut changed = false;
-      +    // We need to collect the negative transitions first because we'll be modifying the state's transitions.
-      +    let state_a_clone = states[state_id].clone();
-      +    let negative_transitions: Vec<(i16, StateID)> = state_a_clone
-      +        .transitions
-      +        .exceptions
-      +        .iter()
-      +        .filter(|(k, _)| **k < 0)
-      +        .map(|(k, v)| (*k, *v))
-      +        .collect();
+      +    /// Merges `s_from_id` into `s_into_id`.
+      +    /// The weights of `s_into_id` become the union of both states' weights.
+      +    /// `s_from_id` is not modified.
+      +    ///
+      +    /// This function asserts that the two states have identical transition structures.
+      +    pub fn merge_state_into(&mut self, s_from_id: StateID, s_into_id: StateID) {
+      +        assert!(s_from_id < self.len(), "s_from_id out of bounds");
+      +        assert!(s_into_id < self.len(), "s_into_id out of bounds");
+      +        assert_ne!(s_from_id, s_into_id, "Cannot merge a state into itself");
       +
-      +    if negative_transitions.is_empty() {
-      +        return false;
-      +    }
+      +        // To satisfy the borrow checker, we need to clone the from_state's data
+      +        // because we're modifying self[s_into_id].
+      +        let s_from = self[s_from_id].clone();
+      +        let s_into = &self[s_into_id];
       +
-      +    for (neg_code, b_orig_id) in negative_transitions {
-      +        changed = true;
-      +        let p = neg_code.wrapping_sub(i16::MIN);
-      +        let w_neg = state_a_clone.trans_weights_exceptions.get(&neg_code).unwrap().clone();
+      +        assert_eq!(s_from.transitions, s_into.transitions, "States must be transition-equivalent to be merged.");
       +
-      +        // Step 1: Copy B
-      +        let b_copy_id = states.copy_state(b_orig_id);
+      +        let s_into_mut = &mut self[s_into_id];
       +
-      +        // Step 2: Handle final weight from B
-      +        if let Some(b_final_weight) = states[b_copy_id].final_weight.take() {
-      +            let new_a_final_weight = b_final_weight & &w_neg;
-      +            if !new_a_final_weight.is_empty() {
-      +                let a_state = &mut states[state_id];
-      +                if let Some(a_fw) = a_state.final_weight.as_mut() {
-      +                    *a_fw |= &new_a_final_weight;
-      +                } else {
-      +                    a_state.final_weight = Some(new_a_final_weight);
-      +                }
-      +            }
+      +        // Merge state and final weights
+      +        s_into_mut.weight |= &s_from.weight;
+      +        let fw_from = s_from.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      +        let fw_into = s_into_mut.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      +        let final_w = fw_into | fw_from;
+      +        if !final_w.is_empty() {
+      +            s_into_mut.final_weight = Some(final_w);
+      +        } else {
+      +            s_into_mut.final_weight = None;
       +        }
       +
-      +        // Step 3: Handle matching positive edge (cancellation)
-      +        let b_orig_state_clone = states[b_orig_id].clone();
-      +        if let Some(&c_orig_id) = b_orig_state_clone.transitions.exceptions.get(&p) {
-      +            let c_copy_id = states.copy_state(c_orig_id);
-      +            states[c_copy_id].apply_weight(&w_neg);
-      +            let c_copy_state = states[c_copy_id].clone();
-      +            let a_state = &mut states[state_id];
-      +
-      +            // Merge C's weights and transitions into A
-      +            a_state.weight |= &c_copy_state.weight;
-      +            if let Some(c_fw) = c_copy_state.final_weight {
-      +                if !c_fw.is_empty() {
-      +                    if let Some(a_fw) = a_state.final_weight.as_mut() {
-      +                        *a_fw |= &c_fw;
-      +                    } else {
-      +                        a_state.final_weight = Some(c_fw);
-      +                    }
-      +                }
-      +            }
-      +
-      +            if let Some(c_default_target) = c_copy_state.transitions.default {
-      +                let a_def_w = a_state.trans_weight_default.get_or_insert_with(Weight::zeros);
-      +                if let Some(c_def_w) = c_copy_state.trans_weight_default {
-      +                    *a_def_w |= &c_def_w;
-      +                }
-      +                a_state.transitions.default = Some(c_default_target);
-      +            }
-      +
-      +            for (on, c_target) in c_copy_state.transitions.exceptions {
-      +                let c_weight = c_copy_state.trans_weights_exceptions.get(&on).unwrap().clone();
-      +                if let Some(a_weight) = a_state.trans_weights_exceptions.get_mut(&on) {
-      +                    if a_state.transitions.exceptions.get(&on) == Some(&c_target) {
-      +                        *a_weight |= &c_weight;
-      +                    } else {
-      +                        a_state.transitions.exceptions.insert(on, c_target);
-      +                        *a_weight = c_weight;
-      +                    }
-      +                } else {
-      +                    a_state.transitions.exceptions.insert(on, c_target);
-      +                    a_state.trans_weights_exceptions.insert(on, c_weight);
-      +                }
-      +            }
+      +        // Merge default transition weight
+      +        if s_into_mut.transitions.default.is_some() {
+      +            let tw_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      +            let tw_into = s_into_mut.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      +            s_into_mut.trans_weight_default = Some(tw_into | tw_from);
       +        }
       +
-      +        // Step 4: Discard all positive edges from B_copy
-      +        let b_copy_state = &mut states[b_copy_id];
-      +        b_copy_state.transitions.exceptions.retain(|k, _| *k < 0);
-      +        b_copy_state.trans_weights_exceptions.retain(|k, _| *k < 0);
-      +        b_copy_state.transitions.default = None;
-      +        b_copy_state.trans_weight_default = None;
-      +
-      +        // Step 5: Replace A -> B with A -> B_copy
-      +        states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
+      +        // Merge exception transition weights
+      +        for ch in s_from.transitions.exceptions.keys() {
+      +            let w_from = s_from.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+      +            let w_into = s_into_mut.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+      +            s_into_mut.trans_weights_exceptions.insert(*ch, w_into | w_from);
+      +        }
       +    }
       +
-      +    changed
+           /// Merges two states that are transition-equivalent into a new state.
+           /// The new state's weights are the union of the original states' weights.
+           ///
+           /// This function asserts that the two states have identical transition structures
+           /// (i.e., for any input, they transition to the same destination state).
+           ///
+           /// It does NOT update any transitions in the automaton that point to the old
+           /// states (`s1_id`, `s2_id`). The caller is responsible for remapping any such
+           /// transitions to the returned `StateID` of the new merged state.
+           pub fn merge_states(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
+               assert!(s1_id < self.len(), "s1_id out of bounds");
+               assert!(s2_id < self.len(), "s2_id out of bounds");
+       
+      -        let s1 = &self[s1_id];
+      -        let s2 = &self[s2_id];
+      -
+      -        // For this to be correct, s1 and s2 must be behaviorally equivalent,
+      -        // i.e., for any input they transition to the same state.
+      -        assert_eq!(s1.transitions, s2.transitions, "States must be transition-equivalent to be merged.");
+      -
+      -        let mut new_state = DWAState::default();
+      -
+      -        // Copy transition structure from s1 (since it's same as s2)
+      -        new_state.transitions = s1.transitions.clone();
+      -
+      -        // Merge state and final weights
+      -        new_state.weight = &s1.weight | &s2.weight;
+      -        let fw1 = s1.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      -        let fw2 = s2.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      -        let final_w = fw1 | fw2;
+      -        if !final_w.is_empty() {
+      -            new_state.final_weight = Some(final_w);
+      -        }
+      -
+      -        // Merge default transition weight
+      -        if new_state.transitions.default.is_some() {
+      -            let tw1 = s1.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      -            let tw2 = s2.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      -            new_state.trans_weight_default = Some(tw1 | tw2);
+      -        }
+      -
+      -        // Merge exception transition weights
+      -        for (ch, _tgt) in &new_state.transitions.exceptions {
+      -            let w1 = s1.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+      -            let w2 = s2.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+      -            new_state.trans_weights_exceptions.insert(*ch, w1 | w2);
+      -        }
+      -
+      -        let new_id = self.add_state();
+      -        self[new_id] = new_state;
+      +        // Create a new state by copying s1
+      +        let new_id = self.copy_state(s1_id);
+      +
+      +        // Merge s2 into the new state
+      +        self.merge_state_into(s2_id, new_id);
+      +
+               new_id
+           }
        }
-       
-       #[cfg(test)]
 
       ```
     metadata:
@@ -6321,11 +5810,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/resolve_negatives.rs
-      Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
+      Identified target file: src/precompute4/weighted_automata.rs
+      Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Implement negative code resolution logic
-      in DWA and add DWAStates::apply_weight"'
+  - user: 'Changes committed with message: "Refactor: Introduce `merge_state_into`
+      and update `merge_states` to use it for merging weights"'
     metadata:
 ...

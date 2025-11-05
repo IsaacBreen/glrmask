@@ -74,43 +74,8 @@ fn resolve_negative_codes_in_dwa_internal(
         if let Some(&c_orig_id) = b_orig_state_clone.transitions.exceptions.get(&p) {
             let c_copy_id = states.copy_state(c_orig_id);
             states.apply_weight(c_copy_id, &w_neg);
-            let c_copy_state = states[c_copy_id].clone();
-            let a_state = &mut states[state_id];
-
-            // Merge C's weights and transitions into A
-            a_state.weight |= &c_copy_state.weight;
-            if let Some(c_fw) = c_copy_state.final_weight {
-                if !c_fw.is_empty() {
-                    if let Some(a_fw) = a_state.final_weight.as_mut() {
-                        *a_fw |= &c_fw;
-                    } else {
-                        a_state.final_weight = Some(c_fw);
-                    }
-                }
-            }
-
-            if let Some(c_default_target) = c_copy_state.transitions.default {
-                let a_def_w = a_state.trans_weight_default.get_or_insert_with(Weight::zeros);
-                if let Some(c_def_w) = c_copy_state.trans_weight_default {
-                    *a_def_w |= &c_def_w;
-                }
-                a_state.transitions.default = Some(c_default_target);
-            }
-
-            for (on, c_target) in c_copy_state.transitions.exceptions {
-                let c_weight = c_copy_state.trans_weights_exceptions.get(&on).unwrap().clone();
-                if let Some(a_weight) = a_state.trans_weights_exceptions.get_mut(&on) {
-                    if a_state.transitions.exceptions.get(&on) == Some(&c_target) {
-                        *a_weight |= &c_weight;
-                    } else {
-                        a_state.transitions.exceptions.insert(on, c_target);
-                        *a_weight = c_weight;
-                    }
-                } else {
-                    a_state.transitions.exceptions.insert(on, c_target);
-                    a_state.trans_weights_exceptions.insert(on, c_weight);
-                }
-            }
+            // Merge
+            states.merge_state_into(b_copy_id, c_copy_id);
         }
 
         // Step 4: Discard all positive edges from B_copy
