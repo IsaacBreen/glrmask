@@ -33,6 +33,8 @@ fn resolve_negative_codes_in_dwa_internal(
     state_id: StateID,
     states: &mut DWAStates,
 ) -> bool {
+    let mut changed = false;
+
     // We need to collect the negative transitions first because we'll be modifying the state's transitions.
     let state_a_clone = states[state_id].clone();
     let negative_transitions: Vec<(i16, StateID)> = state_a_clone
@@ -43,11 +45,6 @@ fn resolve_negative_codes_in_dwa_internal(
         .map(|(k, v)| (*k, *v))
         .collect();
 
-    // Look at any negative edges. Check whether their dest has a final weight. Check whether their dest has any positive edge (not necessarily just a matching one). If not, then no changes are possible.
-    if state_a_clone.final_weight.is_none() && !negative_transitions.iter().any(|(neg_code, b_orig_id)| states[*b_orig_id].transitions.default.is_some() || states[*b_orig_id].transitions.exceptions.iter().any(|(k, _)| *k >= 0)) {
-        return false;
-    }
-
     for (neg_code, b_orig_id) in negative_transitions {
         let p = neg_code.wrapping_sub(i16::MIN);
         let w_neg = state_a_clone.trans_weights_exceptions.get(&neg_code).unwrap().clone();
@@ -57,6 +54,7 @@ fn resolve_negative_codes_in_dwa_internal(
 
         // Step 2: Handle final weight from B
         if let Some(b_final_weight) = states[b_copy_id].final_weight.take() {
+            changed = true;
             let new_a_final_weight = b_final_weight & &w_neg;
             if !new_a_final_weight.is_empty() {
                 let a_state = &mut states[state_id];
@@ -70,7 +68,7 @@ fn resolve_negative_codes_in_dwa_internal(
 
         // Step 3: Handle matching positive edge (cancellation)
         let b_orig_state_clone = states[b_orig_id].clone();
-        if let Some(&c_orig_id) = b_orig_state_clone.transitions.exceptions.get(&p) {
+        if let Some(&c_orig_id) = b_orig_state_clone.transitions.get(p) {
             let c_copy_id = states.copy_state(c_orig_id);
             states.apply_weight(c_copy_id, &w_neg);
             // Merge
@@ -85,10 +83,13 @@ fn resolve_negative_codes_in_dwa_internal(
         b_copy_state.trans_weight_default = None;
 
         // Step 5: Replace A -> B with A -> B_copy
-        states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
+        if b_copy_state != &b_orig_state_clone {
+            changed = true;
+            states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
+        }
     }
 
-    true
+    changed
 }
 
 #[cfg(test)]
