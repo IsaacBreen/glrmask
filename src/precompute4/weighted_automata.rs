@@ -310,6 +310,8 @@ impl DWAStates {
         let s_from = self.0[s_from_id].clone();
         let s_into_orig = self.0[s_into_id].clone();
 
+        println!("Unioning state {} into state {}:\n{:?}\n{:?}", s_from_id, s_into_id, s_from, s_into_orig);
+
         // Union weights
         let new_weight = &s_into_orig.weight | &s_from.weight;
         let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
