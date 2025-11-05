@@ -1822,40 +1822,14 @@ impl NWA {
                 modified_vec.sort_by_key(|(t, _)| *t);
 
                 // Merge unchanged default targets with modified ones into target_vec (sorted).
-                let mut target_vec: Vec<(NWAStateID, Weight)> = Vec::with_capacity(def_vec_sorted.len() + modified_vec.len());
-                let mut i_def = 0usize;
-                let mut i_mod = 0usize;
-                while i_def < def_vec_sorted.len() && i_mod < modified_vec.len() {
-                    let (t_def, w_def) = &def_vec_sorted[i_def];
-                    let (t_mod, w_mod) = &modified_vec[i_mod];
-                    if t_def < t_mod {
-                        // Unchanged target
+                let mut target_vec: Vec<(NWAStateID, Weight)> = Vec::with_capacity(def_vec_sorted.len());
+                for (t_def, w_def) in &def_vec_sorted {
+                    if !modified_targets.contains(t_def) {
                         target_vec.push((*t_def, w_def.clone()));
-                        i_def += 1;
-                    } else if t_mod < t_def {
-                        // New target introduced by explicit steps
-                        target_vec.push((*t_mod, w_mod.clone()));
-                        i_mod += 1;
-                    } else {
-                        // Same target: use modified weight
-                        target_vec.push((*t_mod, w_mod.clone()));
-                        i_def += 1;
-                        i_mod += 1;
                     }
                 }
-                // Remaining unchanged defaults
-                while i_def < def_vec_sorted.len() {
-                    let (t_def, w_def) = &def_vec_sorted[i_def];
-                    // Skip if this target was modified (shouldn't happen due to merge logic), else keep
-                    target_vec.push((*t_def, w_def.clone()));
-                    i_def += 1;
-                }
-                // Remaining modified-only targets
-                while i_mod < modified_vec.len() {
-                    let (t_mod, w_mod) = &modified_vec[i_mod];
-                    target_vec.push((*t_mod, w_mod.clone()));
-                    i_mod += 1;
-                }
+                target_vec.extend(modified_vec);
+                target_vec.sort_by_key(|(t, _)| *t);
 
                 if target_vec.is_empty() {
                     continue;
