@@ -1681,14 +1681,14 @@ impl NWA {
                     }
                 }
             }
-            // Establish default edge (if any); keep def_acc for reuse in deltas
+            // Establish default edge (if any)
             let mut def_edge_target: Option<StateID> = None;
             let mut def_edge_weight: Option<Weight> = None;
-            let mut def_sorted: Vec<(NWAStateID, Weight)> = Vec::new();
+            let mut def_target_subset_vec: Option<Vec<(NWAStateID, Weight)>> = None;
             if !def_acc.is_empty() {
-                def_sorted = def_acc.iter().map(|(t, w)| (*t, w.clone())).collect();
-                def_sorted.sort_by_key(|(k, _)| *k);
-                let def_key = SubsetKey(def_sorted.clone());
+                let mut def_vec: Vec<(NWAStateID, Weight)> = def_acc.into_iter().collect();
+                def_vec.sort_by_key(|(k, _)| *k);
+                let def_key = SubsetKey(def_vec.clone());
                 let def_target = if let Some(id) = subset_to_d_id.get(&def_key) {
                     *id
                 } else {
@@ -1698,9 +1698,9 @@ impl NWA {
                     pb.set_length(subset_to_d_id.len() as u64);
                     nid
                 };
-                // Edge weight = union of weights in def_sorted
+                // Edge weight = union of weights in def_vec
                 let mut def_w_opt: Option<Weight> = None;
-                for (_, w) in def_sorted.iter() {
+                for (_, w) in def_vec.iter() {
                     if let Some(ref mut acc) = def_w_opt { *acc |= w; } else { def_w_opt = Some(w.clone()); }
                 }
                 if let Some(def_w) = def_w_opt {
@@ -1708,93 +1708,50 @@ impl NWA {
                     def_edge_target = Some(def_target);
                     def_edge_weight = Some(def_w);
                 }
+                def_target_subset_vec = Some(def_vec);
             }
 
-            // Build label -> indices of subset_vec entries that have an explicit transition on that label.
-            // This allows per-label aggregation over only the states that differ from default.
-            let mut label_to_indices: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-            for (idx, (sid, _)) in subset_vec.iter().enumerate() {
-                for lbl in self.states[*sid].transitions.keys() {
-                    label_to_indices.entry(*lbl).or_default().push(idx);
-                }
+            // Collect local labels present in this subset (avoid global scanning)
+            let mut local_labels: BTreeSet<i16> = BTreeSet::new();
+            for (sid, _) in subset_vec.iter() {
+                local_labels.extend(self.states[*sid].transitions.keys());
             }
 
-            // For each label that appears explicitly in at least one state, compute delta over default.
-            for (lbl, idxs) in label_to_indices {
-                // Aggregate explicit contributions only from the states that have an explicit transition on lbl.
-                let mut ex_acc: HashMap<NWAStateID, Weight> = HashMap::new();
-                for idx in idxs {
-                    let (sid, w_in) = &subset_vec[idx];
-                    if let Some(step) = get_ex_step(*sid, lbl, &self.states, &fut, &mut eps_cache, &mut ex_step_cache) {
+            for lbl in local_labels {
+                // Accumulate contributions using explicit lbl edges where present, else default step.
+                let mut acc: HashMap<NWAStateID, Weight> = HashMap::new();
+                for (sid, w_in) in subset_vec.iter() {
+                    let step_opt = if let Some(m) = get_ex_step(*sid, lbl, &self.states, &fut, &mut eps_cache, &mut ex_step_cache) {
+                        Some(m)
+                    } else {
+                        get_def_step(*sid, &self.states, &fut, &mut eps_cache, &mut def_step_cache)
+                    };
+                    if let Some(step) = step_opt {
                         for (t, wstep) in step.iter() {
                             let w = w_in & wstep;
                             if w.is_empty() { continue; }
-                            if let Some(old) = ex_acc.get_mut(t) { *old |= &w; } else { ex_acc.insert(*t, w); }
+                            if let Some(old) = acc.get_mut(t) { *old |= &w; } else { acc.insert(*t, w); }
                         }
                     }
                 }
-                if ex_acc.is_empty() {
-                    // No explicit contribution => behavior equals default, skip.
-                    continue;
-                }
+                if acc.is_empty() { continue; }
 
-                // Early skip: If ex_acc is pointwise subset of def_acc, the aggregate equals default.
-                let mut adds_new = false;
-                'check_subset: for (t, w_ex) in &ex_acc {
-                    if let Some(w_def) = def_acc.get(t) {
-                        if (w_ex & w_def) != *w_ex {
-                            adds_new = true;
-                            break 'check_subset;
-                        }
-                    } else {
-                        // New target not present in default aggregate; definitely changes behavior.
-                        adds_new = true;
-                        break 'check_subset;
-                    }
-                }
-                if !adds_new {
-                    continue;
-                }
-
-                // Build combined target vector by merging def_sorted and ex_acc (sorted).
-                let mut ex_vec: Vec<(NWAStateID, Weight)> = ex_acc.into_iter().collect();
-                ex_vec.sort_by_key(|(k, _)| *k);
-                let mut i = 0usize;
-                let mut j = 0usize;
-                let mut combined_vec: Vec<(NWAStateID, Weight)> =
-                    Vec::with_capacity(def_sorted.len().saturating_add(ex_vec.len()));
-                while i < def_sorted.len() || j < ex_vec.len() {
-                    if i < def_sorted.len() && (j >= ex_vec.len() || def_sorted[i].0 < ex_vec[j].0) {
-                        combined_vec.push((def_sorted[i].0, def_sorted[i].1.clone()));
-                        i += 1;
-                    } else if j < ex_vec.len() && (i >= def_sorted.len() || ex_vec[j].0 < def_sorted[i].0) {
-                        combined_vec.push((ex_vec[j].0, ex_vec[j].1.clone()));
-                        j += 1;
-                    } else {
-                        // Same target, union weights
-                        let tid = def_sorted[i].0;
-                        let mut w = def_sorted[i].1.clone();
-                        w |= &ex_vec[j].1;
-                        combined_vec.push((tid, w));
-                        i += 1;
-                        j += 1;
-                    }
-                }
-
-                let target_key = SubsetKey(combined_vec.clone());
+                let mut target_vec: Vec<(NWAStateID, Weight)> = acc.into_iter().collect();
+                target_vec.sort_by_key(|(k, _)| *k);
+                let target_key = SubsetKey(target_vec.clone());
                 let target_d_id = if let Some(id) = subset_to_d_id.get(&target_key) {
                     *id
                 } else {
                     let nid = dwa.states.add_state();
                     subset_to_d_id.insert(target_key.clone(), nid);
-                    worklist.push_back(target_key);
+                    worklist.push_back(target_key.clone());
                     pb.set_length(subset_to_d_id.len() as u64);
                     nid
                 };
 
-                // Edge weight = union(default edge weight, union of ex_vec weights)
-                let mut edge_w_opt: Option<Weight> = def_edge_weight.clone();
-                for (_, w) in ex_vec.iter() {
+                // Edge weight = union of all weights in accumulated target_vec
+                let mut edge_w_opt: Option<Weight> = None;
+                for (_, w) in target_vec.iter() {
                     if let Some(ref mut acc_w) = edge_w_opt {
                         *acc_w |= w;
                     } else {
@@ -1802,6 +1759,13 @@ impl NWA {
                     }
                 }
                 if let Some(edge_w) = edge_w_opt {
+                    // If identical to default (target and weight), skip creating an exception.
+                    if let (Some(def_t), Some(ref def_w)) = (def_edge_target, def_edge_weight.as_ref()) {
+                        if def_t == target_d_id && **def_w == edge_w {
+                            continue;
+                        }
+                    }
+                    // Add exception for lbl
                     dwa.add_transition(d_id, lbl, target_d_id, edge_w).expect("DWA insertion should not fail");
                 }
             }
