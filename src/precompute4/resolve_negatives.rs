@@ -22,6 +22,7 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(3, "Initial DWA: {}", dwa);
     let mut nwa = NWA::from_dwa(dwa);
     loop {
+        let mut previous_dwa: Option<DWA> = None;
         let mut changed_in_pass = false;
 
         let n = nwa.states.len();
@@ -39,6 +40,12 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         // Determinize to DWA then back to NWA to normalize the graph, which helps subsequent passes.
         let mut tmp_dwa = nwa.determinize_to_dwa();
         tmp_dwa.simplify();
+
+        if previous_dwa.as_ref() == Some(&tmp_dwa) {
+            break; // Fixed point reached, break loop.
+        }
+        previous_dwa = Some(tmp_dwa.clone());
+
         crate::debug!(3, "Intermediate DWA: {}", tmp_dwa);
         nwa = NWA::from_dwa(&tmp_dwa);
     }
@@ -314,6 +321,39 @@ mod tests {
         expected.add_transition(expected.body.start_state, 4, exp_s3, Weight::all()).unwrap();
         expected.set_default_transition(exp_s3, exp_s_after_4, Weight::all()).unwrap();
         expected.add_transition(exp_s_after_4, 7, exp_s_final, Weight::all()).unwrap();
+
+        assert_dwa_equivalent(d, expected);
+    }
+
+    #[test]
+    fn test_resolve_negatives_minimal_loop_with_default() {
+        let mut d = DWA::new();
+        let s1 = d.add_state();
+        let s2 = d.add_state();
+
+        let neg_code1 = i16::MIN + 1;
+
+        // 0 --neg(1)--> 1
+        d.add_transition(d.body.start_state, neg_code1, s1, Weight::all()).unwrap();
+        // 1 --*--> 2 (default)
+        d.set_default_transition(s1, s2, Weight::all()).unwrap();
+        // 2 is final
+        d.set_final_weight(s2, Weight::all()).unwrap();
+
+        // With the bug, this function would not terminate.
+        // With the fix, it terminates, producing a stable DWA.
+        resolve_negative_codes_in_dwa(&mut d);
+
+        // The stable result of the flawed-but-terminating algorithm is an automaton
+        // where the start state has become final due to cancellation, and it has a
+        // neg(1) transition to a state with a default transition to another final state.
+        let mut expected = DWA::new();
+        let exp_s1 = expected.add_state();
+        let exp_s2 = expected.add_state();
+        expected.set_final_weight(expected.body.start_state, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, neg_code1, exp_s1, Weight::all()).unwrap();
+        expected.set_default_transition(exp_s1, exp_s2, Weight::all()).unwrap();
+        expected.set_final_weight(exp_s2, Weight::all()).unwrap();
 
         assert_dwa_equivalent(d, expected);
     }
