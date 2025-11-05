@@ -1527,8 +1527,10 @@ fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::err
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
     let llm_semicolons = LLMTokenID(0);
-    llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
-    let max_original_llm_token_id = 0;
+    let llm_empty_string_semicolon = LLMTokenID(1);
+    llm_token_map.insert(b";;".to_vec(), llm_semicolons);
+    llm_token_map.insert(b"X;".to_vec(), llm_empty_string_semicolon);
+    let max_original_llm_token_id = 1;
 
     // 4. Create the GrammarConstraint
     let constraint = GrammarConstraint::new_from_grammar_definition(
@@ -1549,7 +1551,7 @@ fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::err
     let mask2 = state.get_mask();
 
     assert!(state.is_active(), "State should be active after committing 'X'");
-    let expected_mask2 = HybridBitset::from_iter(vec![]);
+    let expected_mask2 = HybridBitset::from_iter(vec![llm_empty_string_semicolon.0]);
     assert_eq!(
         mask2,
         expected_mask2,
