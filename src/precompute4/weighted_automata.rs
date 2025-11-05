@@ -682,6 +682,11 @@ impl DWA {
         while let Some(u) = worklist.pop_front() {
             let mut u_new_fw = states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
 
+            // Include state entry weight to possible future gating
+            if let Some(sw) = &states[u].state_weight {
+                u_new_fw |= sw;
+            }
+
             let u_state = &states[u];
 
             // Default transition
@@ -700,11 +705,6 @@ impl DWA {
                         u_new_fw |= &(edge_w & &future_weights[v]);
                     }
                 }
-            }
-
-            // A state's own weight constrains all paths originating from it.
-            if let Some(sw) = &states[u].state_weight {
-                u_new_fw &= sw;
             }
 
             if u_new_fw != future_weights[u] {
