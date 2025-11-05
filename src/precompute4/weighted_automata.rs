@@ -216,7 +216,6 @@ impl Display for DWABuildError {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWAState {
     pub transitions: I16Map<StateID>,
-    pub weight: Weight,
     pub final_weight: Option<Weight>,
     pub trans_weight_default: Option<Weight>,
     pub trans_weights_exceptions: BTreeMap<i16, Weight>,
@@ -229,8 +228,6 @@ impl DWAState {
 
     /// Intersects all weights in this state with the given weight.
     pub fn apply_weight(&mut self, weight: &Weight) {
-        self.weight &= weight;
-
         if let Some(fw) = &mut self.final_weight {
             *fw &= weight;
             if fw.is_empty() {
@@ -312,8 +309,7 @@ impl DWAStates {
 
         println!("Unioning state {} into state {}:\n{:?}\n{:?}", s_from_id, s_into_id, s_from, s_into_orig);
 
-        // Union weights
-        let new_weight = &s_into_orig.weight | &s_from.weight;
+        // Union final weights
         let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
         let fw_into = s_into_orig.final_weight.clone().unwrap_or_else(Weight::zeros);
         let new_final_weight = fw_from | fw_into;
@@ -376,7 +372,6 @@ impl DWAStates {
 
         // Commit changes
         let s_into = &mut self.0[s_into_id];
-        s_into.weight = new_weight;
         s_into.final_weight = if new_final_weight.is_empty() { None } else { Some(new_final_weight) };
         s_into.transitions = new_transitions;
         s_into.trans_weight_default = new_trans_weight_default;
@@ -419,11 +414,11 @@ impl DWA {
         self.states.add_state()
     }
 
-    pub fn set_state_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
+    pub fn set_state_weight(&mut self, state: StateID, _weight: Weight) -> Result<(), DWABuildError> {
         if state >= self.states.len() {
             return Err(DWABuildError::StateOutOfBounds { state });
         }
-        self.states[state].weight = weight;
+        // weight field removed; this is now a no-op kept for API compatibility.
         Ok(())
     }
 
@@ -572,12 +567,6 @@ impl DWA {
         // Now apply constraints
         let mut changed = false;
         for i in 0..n {
-            let old_weight = states[i].weight.clone();
-            states[i].weight &= &reachable_weights[i];
-            if states[i].weight != old_weight {
-                changed = true;
-            }
-
             let old_fw = states[i].final_weight.clone();
             if let Some(fw) = states[i].final_weight.as_mut() {
                 *fw &= &reachable_weights[i];
@@ -617,9 +606,9 @@ impl DWA {
 
         // Initial partition by outputs (weight, final_weight).
         let mut part: Vec<usize> = vec![0; n];
-        let mut canon0: HashMap<(Weight, Option<Weight>), usize> = HashMap::new();
+        let mut canon0: HashMap<Option<Weight>, usize> = HashMap::new();
         for i in 0..n {
-            let key = (states[i].weight.clone(), states[i].final_weight.clone());
+            let key = states[i].final_weight.clone();
             let next_id = canon0.len();
             part[i] = *canon0.entry(key).or_insert(next_id);
         }
@@ -631,7 +620,7 @@ impl DWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: HashMap<(Weight, Option<Weight>, usize, Vec<(i16, usize)>), usize> = HashMap::new();
+            let mut sig2pid: HashMap<(Option<Weight>, usize, Vec<(i16, usize)>), usize> = HashMap::new();
 
             for i in 0..n {
                 let st = &states[i];
@@ -643,7 +632,7 @@ impl DWA {
                         ex.push((*ch, cls));
                     }
                 }
-                let sig = (st.weight.clone(), st.final_weight.clone(), def_cls, ex);
+                let sig = (st.final_weight.clone(), def_cls, ex);
                 let next_pid = sig2pid.len();
                 next_part[i] = *sig2pid.entry(sig).or_insert(next_pid);
             }
@@ -671,7 +660,6 @@ impl DWA {
             let def_cls = rep_state.transitions.default.map(|d| part[d]).unwrap_or(sink_pid);
 
             let mut st = DWAState::default();
-            st.weight = rep_state.weight.clone();
             st.final_weight = rep_state.final_weight.clone();
             st.transitions.default = if def_cls == sink_pid { None } else { Some(0) };
             for (ch, tgt) in &rep_state.transitions.exceptions {
@@ -872,10 +860,6 @@ impl DWA {
 
             let new_state = &mut new_dwa.states[new_id];
 
-            let w0 = s0.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
-            let w1 = s1.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
-            new_state.weight = w0 | w1;
-
             let fw0 = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
             let fw1 = s1.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
             let final_w = fw0 | fw1;
@@ -991,14 +975,6 @@ impl DWA {
 
             let new_state = &mut new_dwa.states[new_id];
 
-            // Aggregate weights
-            let mut agg_weight = s0.map(|s| &s.weight).cloned().unwrap_or_else(Weight::zeros);
-            for &id1 in &ids1 {
-                if id1 != sink1 {
-                    agg_weight |= &other.states[id1].weight;
-                }
-            }
-
             let agg_final_weight = if right_accepts_epsilon {
                 s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
             } else {
@@ -1013,7 +989,6 @@ impl DWA {
                 fw
             };
 
-            new_state.weight = agg_weight;
             if !agg_final_weight.is_empty() {
                 new_state.final_weight = Some(agg_final_weight);
             }
@@ -1127,7 +1102,6 @@ impl Display for DWA {
         writeln!(f, "DWA (start: {})", self.body.start_state)?;
         for (id, state) in self.states.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
-            writeln!(f, "    weight: {}", state.weight)?;
             if let Some(w) = &state.final_weight {
                 writeln!(f, "    final_weight: {}", w)?;
             }
@@ -1212,7 +1186,6 @@ impl JSONConvertible for DWAState {
     fn to_json(&self) -> JSONNode {
         let mut obj = BTreeMap::new();
         obj.insert("transitions".to_string(), self.transitions.to_json());
-        obj.insert("weight".to_string(), self.weight.to_json());
         obj.insert("final_weight".to_string(), self.final_weight.to_json());
         obj.insert("trans_weight_default".to_string(), self.trans_weight_default.to_json());
         obj.insert("trans_weights_exceptions".to_string(), self.trans_weights_exceptions.to_json());
@@ -1222,7 +1195,6 @@ impl JSONConvertible for DWAState {
         let mut obj = node.into_object()?;
         let transitions =
             I16Map::<StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
-        let weight = Weight::from_json(obj.remove("weight").ok_or("Missing 'weight' field")?)?;
         let final_weight =
             Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing 'final_weight' field")?)?;
         let trans_weight_default = Option::<Weight>::from_json(
@@ -1231,7 +1203,7 @@ impl JSONConvertible for DWAState {
         let trans_weights_exceptions = BTreeMap::<i16, Weight>::from_json(
             obj.remove("trans_weights_exceptions").ok_or("Missing 'trans_weights_exceptions' field")?,
         )?;
-        Ok(DWAState { transitions, weight, final_weight, trans_weight_default, trans_weights_exceptions })
+        Ok(DWAState { transitions, final_weight, trans_weight_default, trans_weights_exceptions })
     }
 }
 
@@ -1306,13 +1278,6 @@ pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
     while let Some((ia, ib)) = q.pop_front() {
         let sa = &a.states[ia];
         let sb = &b.states[ib];
-
-        // Compare state weights (outputs).
-        assert_eq!(
-            sa.weight, sb.weight,
-            "State weight mismatch at (a:{}, b:{}): a.weight={} vs b.weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-            ia, ib, sa.weight, sb.weight, a, b
-        );
 
         // Compare default transition weights (None considered zeros).
         let dwa = opt_w_to_w(&sa.trans_weight_default);
@@ -1465,10 +1430,8 @@ mod tests {
         assert_eq!(s1, 1);
         assert_eq!(dwa.states.len(), 2);
 
-        dwa.set_state_weight(0, SimpleBitset::from_item(10)).unwrap();
         dwa.set_final_weight(1, SimpleBitset::from_item(20)).unwrap();
 
-        assert_eq!(dwa.states[0].weight, SimpleBitset::from_item(10));
         assert_eq!(dwa.states[1].final_weight, Some(SimpleBitset::from_item(20)));
 
         dwa.add_transition(0, b'a' as i16, 1, SimpleBitset::from_item(30)).unwrap();
@@ -1553,7 +1516,6 @@ mod tests {
         d.add_transition(s2, 'y' as i16, s4, Weight::all()).unwrap();
         d.add_transition(s3, 'y' as i16, s4, Weight::all()).unwrap(); // Same behavior as s2
         d.set_final_weight(s4, Weight::from_item(1)).unwrap();
-        d.set_state_weight(s5, Weight::from_item(99)).unwrap();
 
         assert_eq!(d.states.len(), 6);
         d.simplify();
@@ -1612,7 +1574,6 @@ mod tests {
     fn test_apply_weight() {
         let mut d = DWA::new();
         let s1 = d.add_state();
-        d.set_state_weight(0, Weight::from_iter(vec![10, 11])).unwrap();
         d.set_final_weight(0, Weight::from_iter(vec![5, 6])).unwrap();
         d.add_transition(0, 'a' as i16, s1, Weight::from_iter(vec![100, 101])).unwrap();
         d.set_default_transition(0, 0, Weight::from_iter(vec![200, 201])).unwrap();
@@ -1622,7 +1583,6 @@ mod tests {
 
         assert_eq!(d.body.start_state, new_start);
         let new_start_state = &d.states[new_start];
-        assert_eq!(new_start_state.weight, Weight::from_item(11));
         assert_eq!(new_start_state.final_weight, Some(Weight::from_item(6)));
         assert_eq!(new_start_state.trans_weights_exceptions.get(&('a' as i16)), Some(&Weight::from_item(101)));
         assert_eq!(new_start_state.trans_weight_default, Some(Weight::from_item(201)));
@@ -1660,7 +1620,6 @@ mod tests {
         let mut d = DWA::new();
         let s1 = d.add_state();
         // Different state weight to avoid accidental merging
-        d.set_state_weight(s1, Weight::from_item(99)).unwrap();
         d.set_final_weight(s1, Weight::from_item(1)).unwrap();
         // Default goes to s1
         d.set_default_transition(d.body.start_state, s1, Weight::from_item(50)).unwrap();
@@ -1691,7 +1650,6 @@ mod tests {
         let s2 = d.add_state();
         let s3 = d.add_state();
         let sF = d.add_state();
-        d.set_state_weight(sF, Weight::from_item(999)).unwrap(); // make sF distinct
         d.set_final_weight(sF, Weight::from_item(1)).unwrap();
 
         // Reachability
@@ -1752,33 +1710,10 @@ mod tests {
     }
 
     #[test]
-    fn test_concatenate_weight_aggregation() {
-        // Left automaton with weight {10} on start; mark it final so right is activated immediately.
-        let mut left = DWA::new();
-        left.set_state_weight(left.body.start_state, Weight::from_item(10)).unwrap();
-        left.set_final_weight(left.body.start_state, Weight::from_item(1)).unwrap();
-
-        // Right automaton with two states having weights {20} and {30}
-        let mut right = DWA::new();
-        right
-            .set_state_weight(right.body.start_state, Weight::from_item(20))
-            .unwrap();
-        let r2 = right.add_state();
-        right.set_state_weight(r2, Weight::from_item(30)).unwrap();
-
-        let c = left.concatenate(&right);
-
-        // The composed start state's weight should be the union of left.start and right.start weights.
-        let w_start = &c.states[c.body.start_state].weight;
-        assert_eq!(*w_start, Weight::from_iter(vec![10, 20]));
-    }
-
-    #[test]
     fn test_json_roundtrip_complex() {
         use crate::json_serialization::JSONConvertible;
 
         let mut d = DWA::new();
-        d.set_state_weight(d.body.start_state, Weight::all()).unwrap();
         let s1 = d.add_state();
         let s2 = d.add_state();
         d.set_default_transition(d.body.start_state, s1, Weight::from_iter(vec![1, 2, 3]))
