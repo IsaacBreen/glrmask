@@ -1137,12 +1137,19 @@ impl DWA {
     /// A transition exists if it exists in at least one of the original DWAs.
     /// If a transition exists in one but not the other, the other is treated as going to a non-final sink state.
     pub fn union(&self, other: &DWA) -> DWA {
+        // Simplify both automata first. This is crucial for correctness. The `propagate_and_constrain_weights`
+        // pass within `simplify` ensures that path weights are correctly reflected in the final weights
+        // before the product construction combines them. Without this, weights from a non-accepting path
+        // in one automaton can "leak" into the result if the corresponding path in the other is accepting.
+        let mut self_simplified = self.clone();
+        self_simplified.simplify();
+        let mut other_simplified = other.clone();
+        other_simplified.simplify();
+
         let mut new_dwa = DWA::default();
         let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
         let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
 
-        let sink0 = self.states.len();
-        let sink1 = other.states.len();
 
         let mut get_or_create = |
             pair: (StateID, StateID),
@@ -1160,30 +1167,25 @@ impl DWA {
             new_id
         };
 
-        if self.states.is_empty() && other.states.is_empty() {
+        if self_simplified.states.is_empty() && other_simplified.states.is_empty() {
             return new_dwa;
         }
 
-        let start_pair = (self.body.start_state, other.body.start_state);
+        let sink0 = self_simplified.states.len();
+        let sink1 = other_simplified.states.len();
+
+        let start_pair = (self_simplified.body.start_state, other_simplified.body.start_state);
         new_dwa.body.start_state = get_or_create(start_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
 
         while let Some((id0, id1)) = worklist.pop_front() {
             let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
-            let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
-            let s1 = if id1 == sink1 { None } else { Some(&other.states[id1]) };
+            let s0 = if id0 == sink0 { None } else { Some(&self_simplified.states[id0]) };
+            let s1 = if id1 == sink1 { None } else { Some(&other_simplified.states[id1]) };
 
             let new_state = &mut new_dwa.states[new_id];
 
-            let fw0 = if id0 < sink0 && future_weights0[id0].is_empty() {
-                Weight::zeros()
-            } else {
-                s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
-            };
-            let fw1 = if id1 < sink1 && future_weights1[id1].is_empty() {
-                Weight::zeros()
-            } else {
-                s1.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
-            };
+            let fw0 = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+            let fw1 = s1.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
             let final_w = fw0 | fw1;
             if !final_w.is_empty() {
                 new_state.final_weight = Some(final_w);
