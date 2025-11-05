@@ -36,8 +36,7 @@ fn resolve_negative_codes_in_dwa_internal(
     let mut changed = false;
 
     // We need to collect the negative transitions first because we'll be modifying the state's transitions.
-    let state_a_clone = states[state_id].clone();
-    let negative_transitions: Vec<(i16, StateID)> = state_a_clone
+    let negative_transitions: Vec<(i16, StateID)> = states[state_id]
         .transitions
         .exceptions
         .iter()
@@ -47,7 +46,7 @@ fn resolve_negative_codes_in_dwa_internal(
 
     for (neg_code, b_orig_id) in negative_transitions {
         let p = neg_code.wrapping_sub(i16::MIN);
-        let w_neg = state_a_clone.trans_weights_exceptions.get(&neg_code).unwrap().clone();
+        let w_neg = states[state_id].trans_weights_exceptions.get(&neg_code).unwrap().clone();
 
         // Step 1: Copy B
         let b_copy_id = states.copy_state(b_orig_id);
@@ -86,6 +85,8 @@ fn resolve_negative_codes_in_dwa_internal(
         if b_copy_state != &b_orig_state_clone {
             changed = true;
             states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
+        } else {
+            states.remove_state(b_copy_id);
         }
     }
 

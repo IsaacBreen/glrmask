@@ -288,6 +288,10 @@ impl DWAStates {
         self.add_existing_state(state)
     }
 
+    pub fn remove_state(&mut self, state_id: StateID) -> DWAState {
+        self.0.remove(state_id)
+    }
+
     pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
         assert!(state_id < self.len(), "state_id out of bounds");
         self[state_id].apply_weight(weight);
