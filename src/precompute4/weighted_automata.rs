@@ -2532,9 +2532,30 @@ mod tests {
 
         // --- Build LEFT DWA (A) ---
         let mut left = DWA::new();
+        left.set_final_weight(0, Weight::from_item(0)).unwrap();
+
+        // --- Build RIGHT DWA (B) ---
+        let mut right = DWA::new();
+        let s1b = right.add_state();
+        right.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
+        right.set_final_weight(s1b, Weight::all()).unwrap();
+
+        let u = left.union(&right);
+        DWA::stochastic_validate_union(&left, &right, &u);
+    }
+
+    #[test]
+    fn test_union_from_debug_log_simplified2() {
+        // This test isolates two simple paths with different initial edge weights.
+        // A: path [0, 1] with weight [0]
+        // B: path [0, 1, 2] with weight [1]
+        // The union should correctly handle both.
+
+        // --- Build LEFT DWA (A) ---
+        let mut left = DWA::new();
         let s1a = left.add_state();
         left.add_transition(0, 0, s1a, Weight::from_item(0)).unwrap();
-        left.set_final_weight(s2a, Weight::all()).unwrap();
+        left.set_final_weight(s1a, Weight::all()).unwrap();
 
         // --- Build RIGHT DWA (B) ---
         let mut right = DWA::new();
@@ -2549,7 +2570,7 @@ mod tests {
     }
 
     #[test]
-    fn test_union_from_debug_log_simplified2() {
+    fn test_union_from_debug_log_simplified3() {
         // This test isolates two simple paths with different initial edge weights.
         // A: path [0, 1] with weight [0]
         // B: path [0, 1, 2] with weight [1]
