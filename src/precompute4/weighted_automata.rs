@@ -1384,8 +1384,9 @@ impl DWA {
                     w.extend_from_slice(&wb_word);
                     let wc = c.eval_word_weight(&w);
                     let expected_simple = &wa & &wb;
-                    assert!(!expected_simple.is_empty(), "Expected non-empty weight for concatenated accepted paths, but got empty.\nword_a: {}\nword_b: {}\nA(word_a): {}\nB(word_b): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), wa, wb, a, b, c);
-                    assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword_a: {}\nword_b: {}\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wa, wb, wc, expected_simple, a, b, c);
+                    if !expected_simple.is_empty() {
+                        assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword_a: {}\nword_b: {}\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wa, wb, wc, expected_simple, a, b, c);
+                    }
                     // Also verify full expected across all splits equals C's result
                     let expected_all = DWA::expected_concat_weight(a, b, &w);
                     assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword_a: {}\nword_b: {}\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wc, expected_all, a, b, c);
@@ -2729,5 +2730,54 @@ mod tests {
 
         // The union of two identical automata should be equivalent to the original.
         assert_dwa_equivalent(u, d1);
+    }
+
+    #[test]
+    fn test_concatenate_disjoint_weights() {
+        fn neg(x: i16) -> i16 {
+            i16::MIN + x
+        }
+
+        let word_a = vec![10, 5, 3, neg(3), neg(0), neg(9)];
+        let mut dwa_a = DWA::new();
+        let mut current = dwa_a.body.start_state;
+        for &ch in &word_a {
+            let next = dwa_a.add_state();
+            dwa_a.add_transition(current, ch, next, Weight::all()).unwrap();
+            current = next;
+        }
+        dwa_a.set_final_weight(current, Weight::from_item(1)).unwrap();
+
+        let word_b = vec![9, 3, neg(3), neg(5), neg(10), 9, 7, neg(7), neg(5), neg(10)];
+        let mut dwa_b = DWA::new();
+        current = dwa_b.body.start_state;
+        for &ch in &word_b {
+            let next = dwa_b.add_state();
+            dwa_b.add_transition(current, ch, next, Weight::all()).unwrap();
+            current = next;
+        }
+        dwa_b.set_final_weight(current, Weight::from_item(0)).unwrap();
+
+        let c = dwa_a.concatenate(&dwa_b);
+
+        let mut combined_word = word_a.clone();
+        combined_word.extend_from_slice(&word_b);
+
+        // The weight for this specific split should be empty.
+        let wa = dwa_a.eval_word_weight(&word_a);
+        let wb = dwa_b.eval_word_weight(&word_b);
+        assert_eq!(wa, Weight::from_item(1));
+        assert_eq!(wb, Weight::from_item(0));
+        assert!((&wa & &wb).is_empty());
+
+        // The concatenated DWA should not accept the combined word, because there are no other
+        // accepting paths/splits.
+        let wc = c.eval_word_weight(&combined_word);
+        assert!(wc.is_empty());
+
+        // The expected weight over all splits should also be empty.
+        let expected = DWA::expected_concat_weight(&dwa_a, &dwa_b, &combined_word);
+        assert!(expected.is_empty());
+        assert_eq!(wc, expected);
     }
 }
