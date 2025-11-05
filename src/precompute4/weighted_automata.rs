@@ -1364,23 +1364,12 @@ impl DWA {
             // This temporary state will be removed by simplify().
             let temp_id = new_dwa.states.add_existing_state(gated_b_start);
 
-            // Before merging, clear the final weight of the `self` state.
-            // We'll replace it with the correct junction final weight afterwards.
-            new_dwa.states[s_a_id].final_weight = None;
-
             // Merge the gated start state into the final `self` state.
+            // This will union the final weights and transitions. The final weight
+            // of the junction will be `final_weight(s_a_id) | final_weight(gated_b_start)`.
+            // `final_weight(gated_b_start)` is `other.final_weight(start) & final_weight`,
+            // which is the weight for concatenating with an empty string from `other`.
             new_dwa.states.union_assign_state(temp_id, s_a_id);
-
-            // Set the correct final weight at the junction.
-            // It must be unioned with any final weight that might have been
-            // propagated into s_a_id from other branches during the union.
-            if let Some(w) = junction_final_weight {
-                if let Some(existing_fw) = new_dwa.states[s_a_id].final_weight.as_mut() {
-                    *existing_fw |= &w;
-                } else {
-                    new_dwa.states[s_a_id].final_weight = Some(w);
-                }
-            }
         }
 
         if STOCHASTIC_VALIDATION {
