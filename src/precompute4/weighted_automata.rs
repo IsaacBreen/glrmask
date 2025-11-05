@@ -1291,6 +1291,18 @@ pub struct NWAState {
 #[derive(Clone, Debug, Default)]
 pub struct NWAStates(pub Vec<NWAState>);
 
+impl NWAState {
+    pub fn get_transition(&self, on: i16) -> Option<&(NWAStateID, Weight)> {
+        self.transitions.get(&on).or_else(|| {
+            if let Some(result) = &self.default {
+                Some(result)
+            } else {
+                None
+            }
+        })
+    }
+}
+
 impl NWAStates {
     pub fn len(&self) -> usize { self.0.len() }
 

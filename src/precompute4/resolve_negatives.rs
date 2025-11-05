@@ -88,7 +88,7 @@ fn resolve_negative_codes_in_nwa_internal(
         }
 
         // Handle cancellation if B has a positive edge on p
-        if let Some((c_orig_id, w_b_c)) = states[b_orig_id].transitions.get(&p).cloned() {
+        if let Some((c_orig_id, w_b_c)) = states[b_orig_id].get_transition(p).cloned() {
             let w = &w_neg & &w_b_c;
             if !w.is_empty() {
                 states.add_epsilon(state_id, c_orig_id, w);
