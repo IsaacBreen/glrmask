@@ -173,25 +173,14 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     use std::cell::RefCell;
     crate::debug!(2, "Starting precompute4...");
     // 1. Build template DWAs for all terminals.
-    let mut template_dwas = match build_template_dwas(parser) {
+    let template_dwas = match build_template_dwas(parser) {
         Ok(m) => m,
         Err(e) => panic!("Failed to build template DWAs: {:?}", e),
     };
     let ignore_dwa = build_ignore_terminal_dwa();
 
-    // 2. Set up shared state arena and copy all template DWAs into it.
+    // 2. Set up shared state arena.
     let states_arena = RefCell::new(DWAStates::default());
-    let mut template_bodies = BTreeMap::new();
-    for (term, dwa) in std::mem::take(&mut template_dwas) {
-        let mut states = states_arena.borrow_mut();
-        let (new_start, _) = states.copy_subgraph_from(&dwa.states, dwa.body.start_state);
-        template_bodies.insert(term, DWABody { start_state: new_start });
-    }
-    let ignore_body = {
-        let mut states = states_arena.borrow_mut();
-        let (new_start, _) = states.copy_subgraph_from(&ignore_dwa.states, ignore_dwa.body.start_state);
-        DWABody { start_state: new_start }
-    };
 
     // 3. Reverse the precompute1 trie.
     let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
@@ -226,19 +215,23 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         initial_values,
         // step function
         |current_dwa_body, edge_terminal_opt, dest_map| {
-            let template_body: &DWABody = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+            let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
                 let terminal_id = edge_terminal_opt.unwrap();
-                template_bodies.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
+                template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
             } else {
-                &ignore_body
+                &ignore_dwa
             };
 
             let mut results: Vec<(PrecomputeNode1Index, DWABody)> = Vec::new();
             for (dest_idx, llm_token_bv) in dest_map.iter() {
                 let mut states = states_arena.borrow_mut();
 
+                // Copy template into arena
+                let (template_start_in_arena, _) = states.copy_subgraph_from(&template_dwa.states, template_dwa.body.start_state);
+                let template_body_in_arena = DWABody { start_state: template_start_in_arena };
+
                 // Gate left by weight (LLM token filter)
-                let (gated_template_start, _) = states.copy_subgraph(template_body.start_state);
+                let (gated_template_start, _) = states.copy_subgraph(template_body_in_arena.start_state);
                 let mut gated_body = DWABody { start_state: gated_template_start };
                 let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
                 let new_gated_start = DWA::apply_weight_components(&mut states, &mut gated_body, &weight);
