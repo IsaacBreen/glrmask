@@ -122,6 +122,8 @@ fn build_template_dwa_from_characterization(
         }
     }
 
+    dwa.simplify();
+
     Ok(dwa)
 }
 
