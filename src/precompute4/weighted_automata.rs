@@ -1751,7 +1751,7 @@ impl NWA {
             fut: &'a [Weight],
             eps_cache: &'a mut HashMap<NWAStateID, Vec<(NWAStateID, Weight)>>,
             def_cache: &'a mut HashMap<NWAStateID, Option<StepVec>>,
-            intern: &'a mut HashMap<Vec<(NWAStateID, Weight)>, StepVec>,
+            intern: &'a mut HashMap<StepKeyArc, StepVec>,
         ) -> Option<&'a StepVec> {
             if !def_cache.contains_key(&sid) {
                 let res = if let Some((to, wdef)) = &states[sid].default {
