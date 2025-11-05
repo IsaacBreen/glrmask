@@ -233,12 +233,16 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 let mut template_body_in_arena = DWABody { start_state: template_start_in_arena };
 
                 // Gate left by weight (LLM token filter)
+                crate::debug!(5, "Starting DWA::apply_weight_components for gating...");
                 let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
                 let new_gated_start = DWA::apply_weight_components(&mut states, &mut template_body_in_arena, &weight);
+                crate::debug!(5, "DWA::apply_weight_components finished. New start state: {}.", new_gated_start);
                 let gated_template_body = DWABody { start_state: new_gated_start };
 
                 // Concatenate: left then current (right)
+                crate::debug!(5, "Starting DWA::concatenate_components: left_start={} right_start={}...", gated_template_body.start_state, current_dwa_body.start_state);
                 let composed_body = DWA::concatenate_components(&mut states, &gated_template_body, current_dwa_body);
+                crate::debug!(5, "DWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
                 results.push((*dest_idx, composed_body));
             }
             results
@@ -246,7 +250,9 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         // merge function: union them
         |dwa1_body, dwa2_body| {
             let mut states = states_arena.borrow_mut();
+            crate::debug!(5, "Starting DWA::union_components: body1_start={} body2_start={}...", dwa1_body.start_state, dwa2_body.start_state);
             *dwa1_body = DWA::union_components(&mut states, dwa1_body, &dwa2_body);
+            crate::debug!(5, "DWA::union_components finished. New start state: {}.", dwa1_body.start_state);
         },
         // process function: capture at original roots
         |_node_data, node_idx, dwa_body| {
@@ -262,13 +268,18 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     for (tok_id, body) in final_bodies {
         let mut new_dwa = DWA::new();
         new_dwa.states.0.clear();
+        crate::debug!(5, "Copying final DWA subgraph for tokenizer state {} from arena (start: {})...", tok_id, body.start_state);
         let (new_start, _) = new_dwa.states.copy_subgraph_from(&final_states, body.start_state);
         new_dwa.body.start_state = new_start;
+        crate::debug!(5, "Final DWA subgraph copied. Starting simplification ({} states)...", new_dwa.states.len());
         new_dwa.simplify();
+        crate::debug!(5, "Simplification finished ({} states).", new_dwa.states.len());
         final_dwas.insert(tok_id, new_dwa);
     }
 
+    crate::debug!(5, "Starting resolve_negative_codes_for_all...");
     resolve_negative_codes_for_all(&mut final_dwas);
+    crate::debug!(5, "resolve_negative_codes_for_all finished.");
 
     final_dwas
 }
