@@ -6,8 +6,8 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
-use std::iter::FromIterator;
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut};
+use std::iter::{self, FromIterator};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // --- Part 1: SimpleBitset ---
@@ -168,6 +168,13 @@ impl FromIterator<usize> for SimpleBitset {
 impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
     fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
         SimpleBitset(RangeSetBlaze::from_iter(iter))
+    }
+}
+
+impl Not for &SimpleBitset {
+    type Output = SimpleBitset;
+    fn not(self) -> Self::Output {
+        SimpleBitset(!&self.0)
     }
 }
 
@@ -590,6 +597,9 @@ impl DWA {
             if Self::propagate_and_constrain_weights(states, body) {
                 changed_any = true;
             }
+            if Self::relax_weights_bwd(states) {
+                changed_any = true;
+            }
             if Self::minimize_partition_refinement(states, body) {
                 changed_any = true;
             }
@@ -671,6 +681,81 @@ impl DWA {
             }
         }
         changed
+    }
+
+    pub fn relax_weights_bwd(states: &mut DWAStates) -> bool {
+        let n = states.len();
+        if n == 0 {
+            return false;
+        }
+
+        let mut future_weights = vec![Weight::zeros(); n];
+        for i in 0..n {
+            if let Some(fw) = &states[i].final_weight {
+                future_weights[i] = fw.clone();
+            }
+        }
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            // Iterate backwards for faster convergence on acyclic/mostly-acyclic parts
+            for i in (0..n).rev() {
+                let mut computed_weight =
+                    states[i].final_weight.clone().unwrap_or_else(Weight::zeros);
+
+                let state = &states[i];
+                if let Some(def_tgt) = state.transitions.default {
+                    if def_tgt < n {
+                        if let Some(edge_w) = state.trans_weight_default.as_ref() {
+                            computed_weight |= &(edge_w & &future_weights[def_tgt]);
+                        }
+                    }
+                }
+
+                for (&ch, &tgt) in &state.transitions.exceptions {
+                    if tgt < n {
+                        if let Some(edge_w) = state.trans_weights_exceptions.get(&ch) {
+                            computed_weight |= &(edge_w & &future_weights[tgt]);
+                        }
+                    }
+                }
+
+                if computed_weight != future_weights[i] {
+                    future_weights[i] = computed_weight;
+                    changed = true;
+                }
+            }
+        }
+
+        // Now, relax edge weights to be as unconstrained as possible given future weights
+        let mut relaxed_changed = false;
+        for i in 0..n {
+            let state = &mut states[i];
+            if let Some(def_tgt) = state.transitions.default {
+                if def_tgt < n {
+                    if let Some(w) = state.trans_weight_default.as_mut() {
+                        let new_w = w.clone() | !&future_weights[def_tgt];
+                        if *w != new_w {
+                            *w = new_w;
+                            relaxed_changed = true;
+                        }
+                    }
+                }
+            }
+            for (&ch, &tgt) in &state.transitions.exceptions {
+                if tgt < n {
+                    if let Some(w) = state.trans_weights_exceptions.get_mut(&ch) {
+                        let new_w = w.clone() | !&future_weights[tgt];
+                        if *w != new_w {
+                            *w = new_w;
+                            relaxed_changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        relaxed_changed
     }
 
     pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
