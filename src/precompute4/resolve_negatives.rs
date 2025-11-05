@@ -55,7 +55,7 @@ fn resolve_negative_codes_in_nwa_internal(
 ) -> bool {
     let mut changed = false;
 
-    // Collect negative transitions first to avoid borrow issues
+    // Collect negative transitions first to avoid borrow issues with `states`.
     let negatives: Vec<(i16, NWAStateID, Weight)> = {
         let st = &states[state_id];
         st.transitions.iter()
@@ -64,10 +64,18 @@ fn resolve_negative_codes_in_nwa_internal(
             .collect()
     };
 
+    if negatives.is_empty() {
+        return false;
+    }
+
     for (neg_code, b_orig_id, w_neg) in negatives {
+        // The corresponding positive code for the negative transition `neg(p)`.
         let p = neg_code.wrapping_sub(i16::MIN);
 
-        // Step 1: Propagate final weight from B into A
+        // --- Step 1: Propagate finality backwards ---
+        // If a path ends at B after a neg(p) transition, it's equivalent to the empty
+        // string being accepted at A, but only if the path doesn't continue with a 'p'.
+        // So, we pull B's final weight into A.
         if let Some(b_final) = states[b_orig_id].final_weight.clone() {
             let new_a_final = &w_neg & &b_final;
             if !new_a_final.is_empty() {
@@ -83,7 +91,10 @@ fn resolve_negative_codes_in_nwa_internal(
             }
         }
 
-        // Handle cancellation if B has a positive edge on p
+        // --- Step 2: Handle direct cancellation ---
+        // If there's a path A --neg(p)--> B --p--> C, it cancels out,
+        // creating a direct epsilon transition A --eps--> C.
+        // The `get_transition` method correctly considers B's default transition.
         if let Some((c_orig_id, w_b_c)) = states[b_orig_id].get_transition(p).cloned() {
             let w = &w_neg & &w_b_c;
             if !w.is_empty() {
@@ -92,27 +103,39 @@ fn resolve_negative_codes_in_nwa_internal(
             }
         }
 
-        // Check if B needs to be split. B needs splitting if it has "positive" behavior
-        // (a final weight or a positive-code transition) that should not be triggered
-        // by the negative path.
+        // --- Step 3: Isolate positive behavior by splitting state B ---
+        // We must prevent the neg(p) path from enabling any "positive" behavior in B
+        // that isn't the direct cancellation with 'p'. Positive behavior includes:
+        //  - B being a final state.
+        //  - B having any explicit positive-code transitions.
+        //  - B having a default transition (which covers infinite positive codes).
         let b_needs_splitting = {
             let b_orig = &states[b_orig_id];
-            b_orig.final_weight.is_some() || b_orig.transitions.keys().any(|k| *k >= 0)
+            b_orig.final_weight.is_some()
+                || b_orig.transitions.keys().any(|k| *k >= 0)
+                || b_orig.default.is_some() // <-- FIX: Treat default as positive behavior.
         };
 
         if b_needs_splitting {
-            // Step 2: Copy B and strip positive transitions; also clear final weight in the copy.
+            // Create B_copy, which will only contain the "negative-only" behavior of B.
             let b_copy_id = states.copy_state(b_orig_id);
             {
                 let b_copy = &mut states[b_copy_id];
+                // Strip all positive behavior from the copy.
                 b_copy.final_weight = None;
                 b_copy.transitions.retain(|k, _| *k < 0);
+                b_copy.default = None; // <-- FIX: Also remove the default transition.
             }
 
-            // Step 3: Replace edge A -(neg)-> B with A -(neg)-> B_copy
-            let (ref mut tgt, _) = states[state_id].transitions.get_mut(&neg_code).unwrap();
-            *tgt = b_copy_id;
-            changed = true;
+            // Replace the original edge A --neg(p)--> B with A --neg(p)--> B_copy.
+            // This ensures the negative path can only lead to other negative transitions,
+            // not to any of B's original positive behaviors.
+            if let Some((tgt, _)) = states[state_id].transitions.get_mut(&neg_code) {
+                if *tgt != b_copy_id {
+                    *tgt = b_copy_id;
+                    changed = true;
+                }
+            }
         }
     }
 
