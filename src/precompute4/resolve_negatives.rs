@@ -39,6 +39,7 @@ fn resolve_negative_codes_in_dwa_internal(
 ) -> bool {
     let mut changed = false;
     let mut memo = HashMap::new();
+    let mut gating_memo = HashMap::new();
 
     // We need to collect the negative transitions first because we'll be modifying the state's transitions.
     let negative_transitions: Vec<(i16, StateID)> = states[state_id]
@@ -95,7 +96,7 @@ fn resolve_negative_codes_in_dwa_internal(
             let w = w_neg & w_b_c;
             states.apply_weight(c_copy_id, &w);
             // Merge into A
-            states.union_assign_state(c_copy_id, state_id, &mut memo);
+            states.union_assign_state(c_copy_id, state_id, &mut memo, &mut gating_memo);
         }
     }
 
