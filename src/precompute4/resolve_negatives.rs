@@ -1,6 +1,7 @@
 use crate::precompute4::full_dwa::Precomputed4;
 use crate::precompute4::weighted_automata::{DWA, DWAStates, StateID, Weight};
-use std::collections::{BTreeMap, HashMap};
+use crate::precompute4::nwa::{NWA, NWAStates, NWAStateID, NWABody};
+use std::collections::{BTreeMap};
 
 pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
     for (_sid, dwa) in precomputed4.iter_mut() {
@@ -8,15 +9,25 @@ pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
     }
 }
 
+/// High-level strategy:
+/// - Convert DWA -> NWA (default transitions become epsilons).
+/// - Iteratively perform local rewrites to resolve negative codes:
+///   For each A -neg(x)-> B:
+///     1) Propagate B's final weight gated by the neg-edge weight into A's final.
+///     2) Replace the edge target with a copy B' that has only negative-labeled transitions (and no epsilons), and with its final weight cleared.
+///     3) If B has a positive edge 'x' to C (cancellation), add epsilon A --eps--> C with weight (w_neg & w_BxC).
+/// - Repeat until a pass makes no change; determinize back to DWA and simplify.
+/// This is correctness-first; performance will be improved later.
 fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-    dwa.simplify();
-    crate::debug!(6, "Initial DWA:\n{}", dwa);
+    // Convert to NWA
+    let mut nwa = NWA::from_dwa(dwa);
     loop {
         let mut changed_in_pass = false;
 
-        for state_id in 0..dwa.states.len() {
+        let n = nwa.states.len();
+        for state_id in 0..n {
             let changed =
-                resolve_negative_codes_in_dwa_internal(state_id, &mut dwa.states);
+                resolve_negative_codes_in_nwa_internal(state_id, &mut nwa.states);
             if changed {
                 changed_in_pass = true;
             }
@@ -25,78 +36,92 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         if !changed_in_pass {
             break;
         }
-        // crate::debug!(6, "Before simplification pass:\n{}", dwa);
-        dwa.simplify();
-        crate::debug!(6, "After simplification pass:\n{}", dwa);
+        // Determinize to DWA then back to NWA to normalize the graph, which helps subsequent passes.
+        let mut tmp_dwa = nwa.determinize_to_dwa();
+        tmp_dwa.simplify();
+        nwa = NWA::from_dwa(&tmp_dwa);
     }
-    dwa.simplify();
-    crate::debug!(6, "Resolved DWA:\n{}", dwa);
+    // Final determinization to DWA
+    let mut result = nwa.determinize_to_dwa();
+    result.simplify();
+    *dwa = result;
 }
 
-fn resolve_negative_codes_in_dwa_internal(
-    state_id: StateID,
-    states: &mut DWAStates,
+fn resolve_negative_codes_in_nwa_internal(
+    state_id: NWAStateID,
+    states: &mut NWAStates,
 ) -> bool {
     let mut changed = false;
-    let mut memo = HashMap::new();
-    let mut gating_memo = HashMap::new();
 
-    // We need to collect the negative transitions first because we'll be modifying the state's transitions.
-    let negative_transitions: Vec<(i16, StateID)> = states[state_id]
-        .transitions
-        .exceptions
-        .iter()
-        .filter(|(k, _)| **k < 0)
-        .map(|(k, v)| (*k, *v))
-        .collect();
+    if state_id >= states.len() {
+        return false;
+    }
 
-    for (neg_code, b_orig_id) in negative_transitions {
+    // Collect negative transitions first to avoid borrow issues
+    let negatives: Vec<(i16, NWAStateID, Weight)> = {
+        let st = &states[state_id];
+        st.transitions.iter()
+            .filter(|(k, _)| **k < 0)
+            .map(|(k, (t, w))| (*k, *t, w.clone()))
+            .collect()
+    };
+
+    for (neg_code, b_orig_id, w_neg) in negatives {
         let p = neg_code.wrapping_sub(i16::MIN);
-        let w_neg = states[state_id].get_weight(neg_code).unwrap().clone();
 
-        // Step 1: Copy B
-        let b_copy_id = states.copy_state(b_orig_id);
-
-        // Step 2: Handle final weight from B
-        if let Some(b_final_weight) = states[b_copy_id].final_weight.take() {
-            changed = true;
-            let new_a_final_weight = b_final_weight & &w_neg;
-            if !new_a_final_weight.is_empty() {
-                let a_state = &mut states[state_id];
-                if let Some(a_fw) = a_state.final_weight.as_mut() {
-                    *a_fw |= &new_a_final_weight;
+        // Step 1: Propagate final weight from B into A
+        if let Some(b_final) = states[b_orig_id].final_weight.clone() {
+            let new_a_final = &w_neg & &b_final;
+            if !new_a_final.is_empty() {
+                changed = true;
+                if let Some(a_fw) = states[state_id].final_weight.as_mut() {
+                    *a_fw |= &new_a_final;
                 } else {
-                    a_state.final_weight = Some(new_a_final_weight);
+                    states[state_id].final_weight = Some(new_a_final);
                 }
             }
         }
 
-        // Step 3: Discard all positive edges from B_copy
-        let b_orig_state_clone = states[b_orig_id].clone();
-        let b_copy_state = &mut states[b_copy_id];
-        b_copy_state.transitions.exceptions.retain(|k, _| *k < 0);
-        b_copy_state.trans_weights_exceptions.retain(|k, _| *k < 0);
-        b_copy_state.transitions.default = None;
-        b_copy_state.trans_weight_default = None;
-
-        // Step 4: Replace A -> B with A -> B_copy
-        if b_copy_state != &b_orig_state_clone {
-            changed = true;
-            states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
-        } else {
-            assert_eq!(states.len(), b_copy_id + 1);
-            states.0.pop();
+        // Step 2: Copy B and strip positive and epsilon transitions; also clear final weight in the copy.
+        let b_copy_id = states.copy_state(b_orig_id);
+        {
+            let b_copy = &mut states[b_copy_id];
+            // Clear final (as we propagated)
+            if b_copy.final_weight.is_some() {
+                b_copy.final_weight = None;
+                changed = true;
+            }
+            // Remove epsilons
+            if !b_copy.epsilons.is_empty() {
+                b_copy.epsilons.clear();
+                changed = true;
+            }
+            // Retain only negative-labeled transitions
+            let old_len = b_copy.transitions.len();
+            b_copy.transitions.retain(|k, _| *k < 0);
+            if b_copy.transitions.len() != old_len {
+                changed = true;
+            }
         }
 
-        // Step 5: Handle matching positive edge (cancellation)
-        if let Some(&c_orig_id) = b_orig_state_clone.transitions.get(p) {
-            changed = true;
-            let c_copy_id = states.copy_state(c_orig_id);
-            let w_b_c = b_orig_state_clone.get_weight(p).unwrap();
-            let w = w_neg & w_b_c;
-            states.apply_weight(c_copy_id, &w);
-            // Merge into A
-            states.union_assign_state(c_copy_id, state_id, &mut memo, &mut gating_memo);
+        // Step 3: Replace edge A -(neg)-> B with A -(neg)-> B_copy (keep original weight)
+        {
+            let st = &mut states[state_id];
+            if let Some((ref mut tgt, _)) = st.transitions.get_mut(&neg_code) {
+                if *tgt != b_copy_id {
+                    *tgt = b_copy_id;
+                    changed = true;
+                }
+            }
+        }
+
+        // Step 4: Handle cancellation if B has a positive edge on p
+        if let Some((c_orig_id, w_b_c)) = states[b_orig_id].transitions.get(&p).cloned() {
+            let w = &w_neg & &w_b_c;
+            if !w.is_empty() {
+                states.add_epsilon(state_id, c_orig_id, w);
+                changed = true;
+            }
         }
     }
 
