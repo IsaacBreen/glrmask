@@ -72,6 +72,7 @@ fn resolve_negative_codes_in_dwa_internal(
         // Step 3: Handle matching positive edge (cancellation)
         let b_orig_state_clone = states[b_orig_id].clone();
         if let Some(&c_orig_id) = b_orig_state_clone.transitions.get(p) {
+            changed = true;
             let c_copy_id = states.copy_state(c_orig_id);
             let w_b_c = b_orig_state_clone.get_weight(p).unwrap();
             let w = w_neg & w_b_c;
