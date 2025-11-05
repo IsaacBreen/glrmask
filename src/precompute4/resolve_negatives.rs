@@ -16,7 +16,7 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
 
         for state_id in 0..dwa.states.len() {
             let (new_state, changed) =
-                resolve_negative_codes_in_dwa_internal(state_id, &dwa.states);
+                resolve_negative_codes_in_dwa_internal(state_id, &mut dwa.states);
             if changed {
                 changed_in_pass = true;
             }
@@ -35,7 +35,7 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
 
 fn resolve_negative_codes_in_dwa_internal(
     state_id: StateID,
-    states: &DWAStates,
+    states: &mut DWAStates,
 ) -> (DWAState, bool) {
     let orig = &states[state_id];
 
@@ -116,7 +116,7 @@ fn resolve_negative_codes_in_dwa_internal(
 
             // Merge C's behavior into the current state's new version.
             // This union preserves determinism as long as targets align; otherwise it will panic.
-            new_state.merge_union(&c_copy);
+            DWA::union_into_state(states, &mut new_state, &c_copy);
             // Negative edge resolved -> do not re-add it.
         } else {
             // No positive match. Keep the negative edge only if B is not final.
