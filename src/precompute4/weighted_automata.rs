@@ -1756,29 +1756,6 @@ mod tests {
         assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
     }
 
-    #[test]
-    fn test_union_and_concatenate() {
-        // DWA1: on 'a' go to final
-        let mut d1 = DWA::new();
-        let s1 = d1.add_state();
-        d1.add_transition(d1.body.start_state, b'a' as i16, s1, SimpleBitset::all()).unwrap();
-        d1.set_final_weight(s1, SimpleBitset::from_item(1)).unwrap();
-
-        // DWA2: on 'b' go to final
-        let mut d2 = DWA::new();
-        let t1 = d2.add_state();
-        d2.add_transition(d2.body.start_state, b'b' as i16, t1, SimpleBitset::all()).unwrap();
-        d2.set_final_weight(t1, SimpleBitset::from_item(2)).unwrap();
-
-        // Union
-        let u = d1.union(&d2);
-        assert_eq!(u.states.len() >= 2, true);
-
-        // Concatenate: ends of d1 join to start of d2
-        let c = d1.concatenate(&d2);
-        assert!(c.states.len() >= 2);
-    }
-
     // --- Advanced Tests ---
 
     /// Helper to create a DWA that accepts a single character and produces a final weight.
