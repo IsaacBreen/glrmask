@@ -605,6 +605,84 @@ impl DWAStates {
 
         new_id
     }
+
+    pub fn copy_subgraph(&mut self, start_id: StateID) -> (StateID, HashMap<StateID, StateID>) {
+        let mut remap = HashMap::new();
+        let mut q = VecDeque::new();
+
+        if start_id >= self.len() {
+            let new_start_id = self.add_state();
+            return (new_start_id, remap);
+        }
+
+        let new_start_id = self.add_existing_state(self[start_id].clone());
+        remap.insert(start_id, new_start_id);
+        q.push_back((start_id, new_start_id));
+
+        while let Some((old_id, new_id)) = q.pop_front() {
+            let old_state_clone = self[old_id].clone();
+
+            // Remap default transition
+            if let Some(old_target) = old_state_clone.transitions.default {
+                let new_target_id = *remap.entry(old_target).or_insert_with(|| {
+                    let new_id = self.add_existing_state(self[old_target].clone());
+                    q.push_back((old_target, new_id));
+                    new_id
+                });
+                self[new_id].transitions.default = Some(new_target_id);
+            }
+
+            // Remap exception transitions
+            let mut new_exceptions = BTreeMap::new();
+            for (ch, &old_target) in &old_state_clone.transitions.exceptions {
+                let new_target_id = *remap.entry(old_target).or_insert_with(|| {
+                    let new_id = self.add_existing_state(self[old_target].clone());
+                    q.push_back((old_target, new_id));
+                    new_id
+                });
+                new_exceptions.insert(*ch, new_target_id);
+            }
+            self[new_id].transitions.exceptions = new_exceptions;
+        }
+        (new_start_id, remap)
+    }
+
+    pub fn copy_subgraph_from(&mut self, other_states: &DWAStates, start_id: StateID) -> (StateID, HashMap<StateID, StateID>) {
+        let mut remap = HashMap::new();
+        let mut q = VecDeque::new();
+
+        if start_id >= other_states.len() {
+            let new_start_id = self.add_state();
+            return (new_start_id, remap);
+        }
+
+        let new_start_id = self.add_existing_state(other_states[start_id].clone());
+        remap.insert(start_id, new_start_id);
+        q.push_back((start_id, new_start_id));
+
+        while let Some((old_id, new_id)) = q.pop_front() {
+            let old_state_clone = other_states[old_id].clone();
+
+            if let Some(old_target) = old_state_clone.transitions.default {
+                let new_target_id = *remap.entry(old_target).or_insert_with(|| {
+                    let new_id = self.add_existing_state(other_states[old_target].clone());
+                    q.push_back((old_target, new_id));
+                    new_id
+                });
+                self[new_id].transitions.default = Some(new_target_id);
+            }
+
+            self[new_id].transitions.exceptions = old_state_clone.transitions.exceptions.iter().map(|(ch, &old_target)| {
+                let new_target_id = *remap.entry(old_target).or_insert_with(|| {
+                    let new_id = self.add_existing_state(other_states[old_target].clone());
+                    q.push_back((old_target, new_id));
+                    new_id
+                });
+                (*ch, new_target_id)
+            }).collect();
+        }
+        (new_start_id, remap)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1482,6 +1560,69 @@ impl DWA {
         }
 
         new_dwa
+    }
+
+    /// Component-based union. Operates on a shared DWAStates arena.
+    pub fn union_components(states: &mut DWAStates, body1: &DWABody, body2: &DWABody) -> DWABody {
+        let mut memo = HashMap::new();
+        let mut gating_memo = HashMap::new();
+        let new_start = states.union_state(body1.start_state, body2.start_state, &mut memo, &mut gating_memo);
+        DWABody { start_state: new_start }
+    }
+
+    /// Component-based concatenation. Operates on a shared DWAStates arena.
+    pub fn concatenate_components(states: &mut DWAStates, body1: &DWABody, body2: &DWABody) -> DWABody {
+        // 1. Copy left subgraph to not modify shared states.
+        let (new_start_a, remap_a) = states.copy_subgraph(body1.start_state);
+
+        // 2. Find final states in the copied left automaton.
+        let final_a_states: Vec<(StateID, Weight)> = remap_a.values()
+            .filter_map(|&new_id| states[new_id].final_weight.clone().map(|w| (new_id, w)))
+            .collect();
+
+        let mut memo = HashMap::new();
+        let mut gating_memo = HashMap::new();
+
+        for (s_a_id, final_weight) in final_a_states {
+            // Create a temporary, gated version of B's start state.
+            // Note: B's states are NOT copied. We refer to them directly.
+            // union_assign_state will copy them as needed.
+            let mut gated_b_start = states[body2.start_state].clone();
+            gated_b_start.apply_weight(&final_weight);
+            let junction_final_weight = gated_b_start.final_weight.clone();
+            let temp_id = states.add_existing_state(gated_b_start);
+
+            states[s_a_id].final_weight = None;
+            states.union_assign_state(temp_id, s_a_id, &mut memo, &mut gating_memo);
+
+            if let Some(w) = junction_final_weight {
+                if let Some(existing_fw) = states[s_a_id].final_weight.as_mut() {
+                    *existing_fw |= &w;
+                } else {
+                    states[s_a_id].final_weight = Some(w);
+                }
+            }
+        }
+
+        // If start of A was final, the new start state must also be combined with B's start.
+        if let Some(start_a_final_weight) = states[body1.start_state].final_weight.clone() {
+            let mut gated_b_start = states[body2.start_state].clone();
+            gated_b_start.apply_weight(&start_a_final_weight);
+            let new_start_final_weight = gated_b_start.final_weight.clone();
+            let temp_id = states.add_existing_state(gated_b_start);
+
+            states.union_assign_state(temp_id, new_start_a, &mut memo, &mut gating_memo);
+
+            if let Some(w) = new_start_final_weight {
+                if let Some(existing_fw) = states[new_start_a].final_weight.as_mut() {
+                    *existing_fw |= &w;
+                } else {
+                    states[new_start_a].final_weight = Some(w);
+                }
+            }
+        }
+
+        DWABody { start_state: new_start_a }
     }
 
     /// Apply a weight gate to the DWA by introducing a new start state that forwards to the

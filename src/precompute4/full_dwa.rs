@@ -1,12 +1,13 @@
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
-use crate::precompute4::weighted_automata::{DWAState, DWAStates, StateID, Weight, DWA};
+use crate::precompute4::weighted_automata::{DWABody, DWAState, DWAStates, StateID, Weight, DWA};
 use std::collections::{BTreeMap, BTreeSet};
 use crate::datastructures::trie::Trie;
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
+use std::cell::RefCell;
 use range_set_blaze::RangeSetBlaze;
 use crate::precompute4::utils;
 
@@ -169,15 +170,30 @@ fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<
 
 // Public API: precompute4 using DWA-only approach.
 pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
+    use std::cell::RefCell;
     crate::debug!(2, "Starting precompute4...");
     // 1. Build template DWAs for all terminals.
-    let template_dwas = match build_template_dwas(parser) {
+    let mut template_dwas = match build_template_dwas(parser) {
         Ok(m) => m,
         Err(e) => panic!("Failed to build template DWAs: {:?}", e),
     };
     let ignore_dwa = build_ignore_terminal_dwa();
 
-    // 2. Reverse the precompute1 trie.
+    // 2. Set up shared state arena and copy all template DWAs into it.
+    let states_arena = RefCell::new(DWAStates::default());
+    let mut template_bodies = BTreeMap::new();
+    for (term, dwa) in std::mem::take(&mut template_dwas) {
+        let mut states = states_arena.borrow_mut();
+        let (new_start, _) = states.copy_subgraph_from(&dwa.states, dwa.body.start_state);
+        template_bodies.insert(term, DWABody { start_state: new_start });
+    }
+    let ignore_body = {
+        let mut states = states_arena.borrow_mut();
+        let (new_start, _) = states.copy_subgraph_from(&ignore_dwa.states, ignore_dwa.body.start_state);
+        DWABody { start_state: new_start }
+    };
+
+    // 3. Reverse the precompute1 trie.
     let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
 
@@ -188,65 +204,76 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
     let reversed_trie_root = leaf_node;
 
-    // 3. Traverse the reversed trie:
+    // 4. Traverse the reversed trie:
     // - step: concatenate left (template gated by weight) with current (right)
     // - merge: union
     // - process: capture
-    let initial_dwa = {
-        let mut d = DWA::new();
-        // Make start final so concatenation with first template works via join_map
-        d.states[d.body.start_state].final_weight = Some(Weight::all());
-        d
+    let initial_dwa_body = {
+        let mut states = states_arena.borrow_mut();
+        let start = states.add_state();
+        states[start].final_weight = Some(Weight::all());
+        DWABody { start_state: start }
     };
-    let initial_values = vec![(reversed_trie_root, initial_dwa)];
+    let initial_values = vec![(reversed_trie_root, initial_dwa_body)];
     let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
     let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
 
-    let mut final_dwas: BTreeMap<TokenizerStateID, DWA> = BTreeMap::new();
+    let mut final_bodies: BTreeMap<TokenizerStateID, DWABody> = BTreeMap::new();
 
     Trie::special_map_grouped(
         &reversed_trie1_god,
         &traversal_data,
         initial_values,
         // step function
-        |current_dwa, edge_terminal_opt, dest_map| {
-            let template: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+        |current_dwa_body, edge_terminal_opt, dest_map| {
+            let template_body: &DWABody = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
                 let terminal_id = edge_terminal_opt.unwrap();
-                template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
+                template_bodies.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
             } else {
-                &ignore_dwa
+                &ignore_body
             };
 
-            let mut results: Vec<(PrecomputeNode1Index, DWA)> = Vec::new();
+            let mut results: Vec<(PrecomputeNode1Index, DWABody)> = Vec::new();
             for (dest_idx, llm_token_bv) in dest_map.iter() {
-                let mut left = template.clone();
+                let mut states = states_arena.borrow_mut();
 
                 // Gate left by weight (LLM token filter)
+                let (gated_template_start, _) = states.copy_subgraph(template_body.start_state);
+                let mut gated_body = DWABody { start_state: gated_template_start };
                 let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                left.apply_weight(&weight);
+                let new_gated_start = DWA::apply_weight_components(&mut states, &mut gated_body, &weight);
+                let gated_template_body = DWABody { start_state: new_gated_start };
 
                 // Concatenate: left then current (right)
-                crate::debug!(6, "Concatenating DWAs:\nLEFT:\n{}\nRIGHT:\n{}", left, current_dwa);
-                let mut composed = left.concatenate(&current_dwa);
-                crate::debug!(6, "Resulting composed DWA:\n{}", composed);
-                results.push((*dest_idx, composed));
+                let composed_body = DWA::concatenate_components(&mut states, &gated_template_body, current_dwa_body);
+                results.push((*dest_idx, composed_body));
             }
             results
         },
         // merge function: union them
-        |dwa1, dwa2| {
-            crate::debug!(6, "Unioning DWAs:\nLEFT:\n{}\nRIGHT:\n{}", dwa1, dwa2);
-            *dwa1 = dwa1.union(&dwa2);
-            crate::debug!(6, "Resulting unioned DWA:\n{}", dwa1);
+        |dwa1_body, dwa2_body| {
+            let mut states = states_arena.borrow_mut();
+            *dwa1_body = DWA::union_components(&mut states, dwa1_body, &dwa2_body);
         },
         // process function: capture at original roots
-        |_node_data, node_idx, mut dwa| {
+        |_node_data, node_idx, dwa_body| {
             if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                final_dwas.insert(*tokenizer_state_id, dwa.clone());
+                final_bodies.insert(*tokenizer_state_id, dwa_body.clone());
             }
-            Some(dwa) // continue traversal
+            Some(dwa_body) // continue traversal
         },
     );
+
+    let final_states = states_arena.into_inner();
+    let mut final_dwas = BTreeMap::new();
+    for (tok_id, body) in final_bodies {
+        let mut new_dwa = DWA::new();
+        new_dwa.states.0.clear();
+        let (new_start, _) = new_dwa.states.copy_subgraph_from(&final_states, body.start_state);
+        new_dwa.body.start_state = new_start;
+        new_dwa.simplify();
+        final_dwas.insert(tok_id, new_dwa);
+    }
 
     resolve_negative_codes_for_all(&mut final_dwas);
 
