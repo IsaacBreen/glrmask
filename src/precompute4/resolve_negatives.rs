@@ -37,10 +37,9 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
             break;
         }
         // Determinize to DWA then back to NWA to normalize the graph, which helps subsequent passes.
-        println!("{}", nwa);
         let mut tmp_dwa = nwa.determinize_to_dwa();
-        // tmp_dwa.simplify();
-        crate::debug!(3, "Intermediate DWA: {}", tmp_dwa);
+        tmp_dwa.simplify();
+        // crate::debug!(3, "Intermediate DWA: {}", tmp_dwa);
         nwa = NWA::from_dwa(&tmp_dwa);
     }
     // Final determinization to DWA
@@ -75,49 +74,48 @@ fn resolve_negative_codes_in_nwa_internal(
         if let Some(b_final) = states[b_orig_id].final_weight.clone() {
             let new_a_final = &w_neg & &b_final;
             if !new_a_final.is_empty() {
-                changed = true;
+                let a_fw_before = states[state_id].final_weight.clone();
                 if let Some(a_fw) = states[state_id].final_weight.as_mut() {
                     *a_fw |= &new_a_final;
                 } else {
                     states[state_id].final_weight = Some(new_a_final);
                 }
+                if states[state_id].final_weight != a_fw_before {
+                    changed = true;
+                }
             }
         }
 
-        // Step 2: Copy B and strip positive transitions; also clear final weight in the copy.
-        let b_copy_id = states.copy_state(b_orig_id);
-        {
-            let b_copy = &mut states[b_copy_id];
-            // Clear final (as we propagated)
-            if b_copy.final_weight.is_some() {
-                b_copy.final_weight = None;
-                changed = true;
-            }
-            // Retain only negative-labeled transitions
-            let old_len = b_copy.transitions.len();
-            b_copy.transitions.retain(|k, _| *k < 0);
-            if b_copy.transitions.len() != old_len {
-                changed = true;
-            }
-        }
-
-        // Step 3: Replace edge A -(neg)-> B with A -(neg)-> B_copy (keep original weight)
-        {
-            let st = &mut states[state_id];
-            let (ref mut tgt, _) = &mut st.transitions.get_mut(&neg_code).unwrap();
-            if *tgt != b_copy_id {
-                *tgt = b_copy_id;
-                changed = true;
-            }
-        }
-
-        // Step 4: Handle cancellation if B has a positive edge on p
+        // Handle cancellation if B has a positive edge on p
         if let Some((c_orig_id, w_b_c)) = states[b_orig_id].transitions.get(&p).cloned() {
             let w = &w_neg & &w_b_c;
             if !w.is_empty() {
                 states.add_epsilon(state_id, c_orig_id, w);
                 changed = true;
             }
+        }
+
+        // Check if B needs to be split. B needs splitting if it has "positive" behavior
+        // (a final weight or a positive-code transition) that should not be triggered
+        // by the negative path.
+        let b_needs_splitting = {
+            let b_orig = &states[b_orig_id];
+            b_orig.final_weight.is_some() || b_orig.transitions.keys().any(|k| *k >= 0)
+        };
+
+        if b_needs_splitting {
+            // Step 2: Copy B and strip positive transitions; also clear final weight in the copy.
+            let b_copy_id = states.copy_state(b_orig_id);
+            {
+                let b_copy = &mut states[b_copy_id];
+                b_copy.final_weight = None;
+                b_copy.transitions.retain(|k, _| *k < 0);
+            }
+
+            // Step 3: Replace edge A -(neg)-> B with A -(neg)-> B_copy
+            let (ref mut tgt, _) = states[state_id].transitions.get_mut(&neg_code).unwrap();
+            *tgt = b_copy_id;
+            changed = true;
         }
     }
 
