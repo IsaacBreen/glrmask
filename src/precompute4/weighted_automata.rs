@@ -1251,6 +1251,10 @@ pub type NWAStateID = usize;
 /// - Each transition carries a weight (Weight), which is intersected along the path; final states
 ///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// - Non-epsilon transitions: unique target per input symbol.
+/// - Each transition carries a weight (Weight), which is intersected along the path; final states
+///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NWAState {
     pub final_weight: Option<Weight>,
     /// Non-epsilon transitions: unique target per input symbol.
@@ -1258,6 +1262,9 @@ pub struct NWAState {
     pub transitions: BTreeMap<i16, (NWAStateID, Weight)>,
     /// Epsilon transitions: list of (target, weight).
     pub epsilons: Vec<(NWAStateID, Weight)>,
+    /// Default transition: used when a labeled transition for a symbol is absent.
+    /// Semantics: for any symbol not present as a labeled transition, this edge applies.
+    pub default: Option<(NWAStateID, Weight)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1336,6 +1343,18 @@ impl NWAStates {
                 });
                 self.0[new].transitions.insert(lbl, (to_new, w.clone()));
             }
+            // Default edge
+            let def_old = other.0[old].default.clone();
+            self.0[new].default = None;
+            if let Some((to_old, w)) = def_old {
+                let to_new = *remap.entry(to_old).or_insert_with(|| {
+                    let n = self.add_state();
+                    self.0[n] = other.0[to_old].clone();
+                    q.push_back((to_old, n));
+                    n
+                });
+                self.0[new].default = Some((to_new, w));
+            }
         }
 
         (new_start, remap)
@@ -1370,7 +1389,7 @@ impl NWA {
 
     /// Convert a DWA to a NWA:
     /// - DWA labeled transitions -> NWA labeled transitions (same label, same weight)
-    /// - DWA default transitions -> NWA epsilon transitions (weight of default)
+    /// - DWA default transitions -> NWA default transitions (weight of default)
     /// - Final weights preserved
     pub fn from_dwa(dwa: &DWA) -> Self {
         let mut nwa = NWA::new();
@@ -1380,12 +1399,10 @@ impl NWA {
 
         for (i, st) in dwa.states.0.iter().enumerate() {
             nwa.states[i].final_weight = st.final_weight.clone();
-            // Default -> epsilon
+            // Default -> NWA default
             if let Some(to) = st.transitions.default {
                 if let Some(w) = &st.trans_weight_default {
-                    nwa.states.add_epsilon(i, to, w.clone());
-                } else {
-                    // If there's a default target but missing weight, treat as zeros (no-op)
+                    nwa.states.0[i].default = Some((to, w.clone()));
                 }
             }
             // Labeled
@@ -1441,6 +1458,12 @@ impl NWA {
             result
         }
 
+        // Collect all explicit labels present anywhere in the NWA.
+        let mut global_labels: BTreeSet<i16> = BTreeSet::new();
+        for st in &self.states.0 {
+            global_labels.extend(st.transitions.keys());
+        }
+
         // Canonicalization key type
         #[derive(Clone, Debug, PartialEq, Eq, Hash)]
         struct SubsetKey(Vec<(NWAStateID, Weight)>);
@@ -1489,18 +1512,59 @@ impl NWA {
             }
             dwa.states[d_id].final_weight = d_final;
 
-            // Collect labels present in this subset
-            let mut labels: BTreeSet<i16> = BTreeSet::new();
-            for (sid, _) in &subset_map {
-                labels.extend(self.states[*sid].transitions.keys());
+            // Compute default (rest-of-alphabet) transition by following only default edges.
+            let mut def_t0: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+            for (sid, w_in) in &subset_map {
+                if let Some((to, w_def)) = &self.states[*sid].default {
+                    let contrib = w_in & w_def;
+                    if !contrib.is_empty() {
+                        if let Some(old) = def_t0.get_mut(to) {
+                            *old |= &contrib;
+                        } else {
+                            def_t0.insert(*to, contrib);
+                        }
+                    }
+                }
+            }
+            if !def_t0.is_empty() {
+                let def_cl = epsilon_closure(&self.states, &def_t0);
+                if !def_cl.is_empty() {
+                    let def_key = make_key(&def_cl);
+                    let def_target = if let Some(id) = subset_to_d_id.get(&def_key) {
+                        *id
+                    } else {
+                        let nid = dwa.states.add_state();
+                        subset_to_d_id.insert(def_key.clone(), nid);
+                        worklist.push_back(def_key);
+                        nid
+                    };
+                    let mut def_w_opt: Option<Weight> = None;
+                    for (_, w) in &def_cl {
+                        if let Some(ref mut acc) = def_w_opt { *acc |= w; } else { def_w_opt = Some(w.clone()); }
+                    }
+                    if let Some(def_w) = def_w_opt {
+                        dwa.set_default_transition(d_id, def_target, def_w).expect("DWA default insertion should not fail");
+                    }
+                }
             }
 
-            for lbl in labels {
+            // Collect labels present in this subset
+            let labels = &global_labels;
+
+            for &lbl in labels {
                 // Build T0
                 let mut t0: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
                 for (sid, w_in) in &subset_map {
                     if let Some((to, w_edge)) = self.states[*sid].transitions.get(&lbl) {
                         let contrib = w_in & w_edge;
+                        if contrib.is_empty() { continue; }
+                        if let Some(old) = t0.get_mut(to) {
+                            *old |= &contrib;
+                        } else {
+                            t0.insert(*to, contrib);
+                        }
+                    } else if let Some((to, w_def)) = &self.states[*sid].default {
+                        let contrib = w_in & w_def;
                         if contrib.is_empty() { continue; }
                         if let Some(old) = t0.get_mut(to) {
                             *old |= &contrib;
@@ -1614,6 +1678,9 @@ impl Display for NWA {
             writeln!(f, "  State {}:", id)?;
             if let Some(w) = &state.final_weight {
                 writeln!(f, "    final_weight: {}", w)?;
+            }
+            if let Some((to, w)) = &state.default {
+                writeln!(f, "    * -> {} (weight: {})", to, w)?;
             }
             for (on, (to, w)) in &state.transitions {
                 let char_repr = format_i16_char(*on);
