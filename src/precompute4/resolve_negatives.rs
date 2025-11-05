@@ -78,7 +78,7 @@ fn resolve_negative_codes_in_dwa_internal(
             let w = w_neg & w_b_c;
             states.apply_weight(c_copy_id, &w);
             // Merge into A
-            states.union_assign_state(state_id, c_copy_id);
+            states.union_assign_state(c_copy_id, state_id);
         }
 
         // Step 4: Discard all positive edges from B_copy
