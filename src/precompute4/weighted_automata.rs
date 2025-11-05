@@ -1981,11 +1981,14 @@ mod tests {
         right.set_final_weight(41, Weight::all()).unwrap();
         right.set_final_weight(42, Weight::all()).unwrap();
 
-        todo!();
+        // Test commutativity and idempotence
+        assert_dwa_equivalent(left.union(&right), right.union(&left));
+        assert_dwa_equivalent(left.clone(), left.union(&left));
+        assert_dwa_equivalent(right.clone(), right.union(&right));
     }
 
     #[test]
-    fn test_union_complex_from_attachment_simpified() {
+    fn test_union_complex_from_attachment_simplified() {
         fn neg(val: i16) -> i16 {
             val.wrapping_add(i16::MIN)
         }
@@ -2120,6 +2123,9 @@ mod tests {
         // State 22
         right.set_final_weight(22, Weight::from_item(0)).unwrap();
 
-        todo!();
+        // Test commutativity and idempotence
+        assert_dwa_equivalent(left.union(&right), right.union(&left));
+        assert_dwa_equivalent(left.clone(), left.union(&left));
+        assert_dwa_equivalent(right.clone(), right.union(&right));
     }
 }
