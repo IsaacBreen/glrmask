@@ -1245,12 +1245,6 @@ impl JSONConvertible for DWA {
 
 pub type NWAStateID = usize;
 
-/// A slightly restricted NWA:
-/// - Epsilon transitions are allowed; there may be any number of epsilons out of a state.
-/// - Non-epsilon transitions: for each (state, symbol) there is at most one outgoing transition.
-/// - Each transition carries a weight (Weight), which is intersected along the path; final states
-///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
 /// - Non-epsilon transitions: unique target per input symbol.
 /// - Each transition carries a weight (Weight), which is intersected along the path; final states
 ///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
