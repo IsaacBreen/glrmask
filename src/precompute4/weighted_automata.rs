@@ -450,6 +450,17 @@ impl DWAStates {
         if weight.is_empty() {
             return state_id;
         }
+
+        // Check if any weight in the state will be affected. If not, we don't need to copy.
+        let state = &self[state_id];
+        let needs_change = state.final_weight.as_ref().map_or(false, |w| !(&*w & weight).is_empty())
+            || state.trans_weight_default.as_ref().map_or(false, |w| !(&*w & weight).is_empty())
+            || state.trans_weights_exceptions.values().any(|w| !(&*w & weight).is_empty());
+
+        if !needs_change {
+            return state_id;
+        }
+
         let new_id = self.copy_state(state_id);
         self[new_id].exclude_weight(weight);
         new_id
