@@ -1981,9 +1981,7 @@ mod tests {
         right.set_final_weight(41, Weight::all()).unwrap();
         right.set_final_weight(42, Weight::all()).unwrap();
 
-        let u1 = left.union(&right);
-        let u2 = right.union(&left);
-        assert_dwa_equivalent(u1, u2);
+        todo!();
     }
 
     #[test]
@@ -2122,8 +2120,6 @@ mod tests {
         // State 22
         right.set_final_weight(22, Weight::from_item(0)).unwrap();
 
-        // Perform union and simplify. The test passes if it doesn't panic.
-        let mut u = left.union(&right);
-        u.simplify();
+        todo!();
     }
 }
