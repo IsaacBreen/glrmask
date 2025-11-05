@@ -337,6 +337,215 @@ impl DWAStates {
         self.add_existing_state(state)
     }
 
+    pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
+        assert!(state_id < self.len(), "state_id out of bounds");
+        self[state_id].apply_weight(weight);
+    }
+
+    pub fn exclude_weight_from_state(
+        &mut self,
+        state_id: StateID,
+        weight: &Weight,
+        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+    ) -> StateID {
+        assert!(state_id < self.len(), "state_id out of bounds");
+        if weight.is_empty() {
+            return state_id;
+        }
+
+        let key = (state_id, weight.clone());
+        if let Some(&id) = gating_memo.get(&key) { return id; }
+
+        // Check if any weight in the state will be affected. If not, we don't need to copy.
+        let state = &self[state_id];
+        let needs_change = state.final_weight.as_ref().map_or(false, |w| !(&*w & weight).is_empty())
+            || state.trans_weight_default.as_ref().map_or(false, |w| !(&*w & weight).is_empty())
+            || state.trans_weights_exceptions.values().any(|w| !(&*w & weight).is_empty());
+
+        if !needs_change {
+            gating_memo.insert(key, state_id);
+            return state_id;
+        }
+
+        let new_id = self.copy_state(state_id);
+        self[new_id].exclude_weight(weight);
+        gating_memo.insert(key, new_id);
+        new_id
+    }
+
+    pub fn union_assign_state(
+        &mut self,
+        s_from_id: StateID,
+        s_into_id: StateID,
+        memo: &mut HashMap<(StateID, StateID), StateID>,
+        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+    ) {
+        assert!(s_from_id < self.len(), "s_from_id out of bounds");
+        assert!(s_into_id < self.len(), "s_into_id out of bounds");
+        if s_from_id == s_into_id {
+            return;
+        }
+        // crate::debug!(2, "Unioning state {} into state {}", s_from_id, s_into_id);
+
+        let s_from = self.0[s_from_id].clone();
+        let s_into_orig = self.0[s_into_id].clone();
+
+        // Union final weights
+        let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
+        let fw_into = s_into_orig.final_weight.clone().unwrap_or_else(Weight::zeros);
+        let new_final_weight = fw_from | fw_into;
+
+        // --- Transitions ---
+        let mut new_transitions = I16Map::new();
+        let mut new_trans_weights_exceptions = BTreeMap::new();
+        let new_trans_weight_default;
+
+        let critical_points: BTreeSet<i16> = s_from.transitions.exceptions.keys()
+            .chain(s_into_orig.transitions.exceptions.keys())
+            .cloned()
+            .collect();
+
+        let get_target = |s: &DWAState, ch: i16| -> Option<StateID> {
+            s.transitions.exceptions.get(&ch).copied().or(s.transitions.default)
+        };
+
+        let get_weight = |s: &DWAState, ch: i16| -> Weight {
+            s.trans_weights_exceptions.get(&ch)
+                .or(s.trans_weight_default.as_ref())
+                .cloned().unwrap_or_else(Weight::zeros)
+        };
+
+        // Default transition
+        let def_tgt_from = s_from.transitions.default;
+        let def_tgt_into = s_into_orig.transitions.default;
+        let w_def_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+        let w_def_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+        let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
+            (Some(t1), Some(t2)) => if t1 == t2 {
+                Some(t1)
+            } else {
+                let to_exclude_from_t2 = &w_def_from - &w_def_into;
+                let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
+                let to_exclude_from_t1 = &w_def_into - &w_def_from;
+                let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
+                Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
+            },
+            (Some(t), None) | (None, Some(t)) => Some(t),
+            (None, None) => None,
+        };
+        new_transitions.default = new_def_tgt_id;
+        new_trans_weight_default = if new_def_tgt_id.is_some() {
+            Some(w_def_from | w_def_into)
+        } else {
+            None
+        };
+
+        // Exception transitions
+        for &ch in &critical_points {
+            let tgt_from = get_target(&s_from, ch);
+            let tgt_into = get_target(&s_into_orig, ch);
+            let w_from = get_weight(&s_from, ch);
+            let w_into = get_weight(&s_into_orig, ch);
+
+            let new_exc_tgt_id = match (tgt_from, tgt_into) {
+                (Some(t1), Some(t2)) => if t1 == t2 {
+                    Some(t1)
+                } else {
+                    let to_exclude_from_t2 = &w_from - &w_into;
+                    let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
+                    let to_exclude_from_t1 = &w_into - &w_from;
+                    let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
+                    Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
+                },
+                (Some(t), None) | (None, Some(t)) => Some(t),
+                (None, None) => None,
+            };
+
+            if new_exc_tgt_id != new_def_tgt_id {
+                if let Some(tgt_id) = new_exc_tgt_id {
+                    new_transitions.exceptions.insert(ch, tgt_id);
+                    new_trans_weights_exceptions.insert(ch, w_from | w_into);
+                }
+            }
+        }
+
+        // Commit changes
+        let s_into = &mut self.0[s_into_id];
+        s_into.final_weight = if new_final_weight.is_empty() { None } else { Some(new_final_weight) };
+        s_into.transitions = new_transitions;
+        s_into.trans_weight_default = new_trans_weight_default;
+        s_into.trans_weights_exceptions = new_trans_weights_exceptions;
+        // crate::debug!(2, "Done unioning state {} into state {}", s_from_id, s_into_id);
+    }
+
+    pub fn union_state(
+        &mut self,
+        s1_id: StateID,
+        s2_id: StateID,
+        memo: &mut HashMap<(StateID, StateID), StateID>,
+        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+    ) -> StateID {
+        assert!(s1_id < self.len(), "s1_id out of bounds");
+        assert!(s2_id < self.len(), "s2_id out of bounds");
+
+        let key = (s1_id.min(s2_id), s1_id.max(s2_id));
+        if let Some(&id) = memo.get(&key) {
+            return id;
+        }
+
+        // Create a new state by copying s1
+        let new_id = self.copy_state(s1_id);
+
+        // Crucial: insert into memo *before* recursive calls to handle cycles.
+        memo.insert(key, new_id);
+
+        // Merge s2 into the new state
+        self.union_assign_state(s2_id, new_id, memo, gating_memo);
+
+        new_id
+    }
+
+    pub fn copy_subgraph(&mut self, start_id: StateID) -> (StateID, HashMap<StateID, StateID>) {
+        let mut remap = HashMap::new();
+        let mut q = VecDeque::new();
+
+        if start_id >= self.len() {
+            let new_start_id = self.add_state();
+            return (new_start_id, remap);
+        }
+
+        let new_start_id = self.add_existing_state(self[start_id].clone());
+        remap.insert(start_id, new_start_id);
+        q.push_back((start_id, new_start_id));
+
+        while let Some((old_id, new_id)) = q.pop_front() {
+            let old_state_clone = self[old_id].clone();
+
+            // Remap default transition
+            if let Some(old_target) = old_state_clone.transitions.default {
+                let new_target_id = *remap.entry(old_target).or_insert_with(|| {
+                    let new_id = self.add_existing_state(self[old_target].clone());
+                    q.push_back((old_target, new_id));
+                    new_id
+                });
+                self[new_id].transitions.default = Some(new_target_id);
+            }
+
+            // Remap exception transitions
+            let mut new_exceptions = BTreeMap::new();
+            for (ch, &old_target) in &old_state_clone.transitions.exceptions {
+                let new_target_id = *remap.entry(old_target).or_insert_with(|| {
+                    let new_id = self.add_existing_state(self[old_target].clone());
+                    q.push_back((old_target, new_id));
+                    new_id
+                });
+                new_exceptions.insert(*ch, new_target_id);
+            }
+            self[new_id].transitions.exceptions = new_exceptions;
+        }
+        (new_start_id, remap)
+    }
+
     pub fn copy_subgraph_from(&mut self, other_states: &DWAStates, start_id: StateID) -> (StateID, HashMap<StateID, StateID>) {
         let mut remap = HashMap::new();
         let mut q = VecDeque::new();
@@ -911,6 +1120,44 @@ impl DWA {
         true
     }
 
+    /// Union of two DWAs via product construction.
+    /// The states of the new DWA correspond to pairs of states from the input DWAs.
+    /// A state is final if either of the original states is final.
+    /// A transition exists if it exists in at least one of the original DWAs.
+    /// If a transition exists in one but not the other, the other is treated as going to a non-final sink state.
+    pub fn union(&self, other: &DWA) -> DWA {
+        if self.states.0.is_empty() {
+            return other.clone();
+        }
+        if other.states.0.is_empty() {
+            return self.clone();
+        }
+
+        let mut new_dwa = self.clone();
+        let offset = new_dwa.states.len();
+
+        for other_state in &other.states.0 {
+            let mut new_state = other_state.clone();
+            if let Some(d) = new_state.transitions.default.as_mut() {
+                *d += offset;
+            }
+            for target in new_state.transitions.exceptions.values_mut() {
+                *target += offset;
+            }
+            new_dwa.states.add_existing_state(new_state);
+        }
+
+        let other_start_remapped = other.body.start_state + offset;
+        let self_start = new_dwa.body.start_state;
+
+        let mut memo = HashMap::new();
+        let mut gating_memo = HashMap::new();
+        let new_start = new_dwa.states.union_state(self_start, other_start_remapped, &mut memo, &mut gating_memo);
+        new_dwa.body.start_state = new_start;
+
+        new_dwa
+    }
+
     // --- Evaluation and sampling helpers ---
     /// Evaluate a word's weight in this DWA by intersecting per-edge weights and the final state's weight.
     /// Returns zeros if the word is not accepted or any transition is missing.
@@ -949,6 +1196,179 @@ impl DWA {
             }
             None => Weight::zeros(),
         }
+    }
+
+    /// Concatenation-like operation on two DWAs.
+    /// "Join all ends to all starts": whenever the left component reaches a final state,
+    /// we also (lazily) activate the right automaton's start state. If the left start is final,
+
+    /// Concatenation-like operation on two DWAs.
+    /// "Join all ends to all starts": whenever the left component reaches a final state,
+    /// we also (lazily) activate the right automaton's start state. If the left start is final,
+    /// the composition starts with the right start already active.
+    ///
+    /// This is implemented via a product-like construction where states in the new DWA
+    /// are compositions of a state from `self` and a set of states from `other`.
+    ///
+    /// Returns the new DWA.
+    pub fn concatenate(&self, other: &DWA) -> DWA {
+        // If either automaton is empty (accepts no strings), the concatenation is empty.
+        if self.states.0.is_empty() || other.states.0.is_empty() {
+            return DWA::new();
+        }
+
+        let mut new_dwa = self.clone();
+        let offset = new_dwa.states.len();
+
+        let mut memo = HashMap::new();
+        let mut gating_memo = HashMap::new();
+
+        // Add all of other's states to the new DWA, remapping their transition targets.
+        for other_state in &other.states.0 {
+            let mut new_state = other_state.clone();
+            if let Some(d) = new_state.transitions.default.as_mut() {
+                *d += offset;
+            }
+            for target in new_state.transitions.exceptions.values_mut() {
+                *target += offset;
+            }
+            new_dwa.states.add_existing_state(new_state);
+        }
+
+        let other_start_remapped = other.body.start_state + offset;
+
+        // Identify all states in the `self` part that were final.
+        let final_self_states: Vec<(StateID, Weight)> = new_dwa.states.0[..offset]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.final_weight.clone().map(|w| (i, w)))
+            .collect();
+
+        // For each final state from `self`, graft on a gated version of `other`.
+        for (s_a_id, final_weight) in final_self_states {
+            // Create a copy of `other`'s start state, gated by `final_weight`.
+            let mut gated_b_start = new_dwa.states[other_start_remapped].clone();
+            gated_b_start.apply_weight(&final_weight);
+
+            // The new final weight at the junction point is determined by whether `other`
+            // could accept an empty string, gated by `final_weight`.
+            let junction_final_weight = gated_b_start.final_weight.clone();
+
+            // Add the gated state to the DWA to get an ID for union_assign_state.
+            // This temporary state will be removed by simplify().
+            let temp_id = new_dwa.states.add_existing_state(gated_b_start);
+
+            // Before merging, clear the final weight of the `self` state.
+            // We'll replace it with the correct junction final weight afterwards.
+            new_dwa.states[s_a_id].final_weight = None;
+
+            // Merge the gated start state into the final `self` state.
+            new_dwa.states.union_assign_state(temp_id, s_a_id, &mut memo, &mut gating_memo);
+
+            // Set the correct final weight at the junction.
+            // It must be unioned with any final weight that might have been
+            // propagated into s_a_id from other branches during the union.
+            if let Some(w) = junction_final_weight {
+                if let Some(existing_fw) = new_dwa.states[s_a_id].final_weight.as_mut() {
+                    *existing_fw |= &w;
+                } else {
+                    new_dwa.states[s_a_id].final_weight = Some(w);
+                }
+            }
+        }
+
+        new_dwa
+    }
+
+    /// Component-based union. Operates on a shared DWAStates arena.
+    pub fn union_components(states: &mut DWAStates, body1: &DWABody, body2: &DWABody) -> DWABody {
+        let mut memo = HashMap::new();
+        let mut gating_memo = HashMap::new();
+        let new_start = states.union_state(body1.start_state, body2.start_state, &mut memo, &mut gating_memo);
+        DWABody { start_state: new_start }
+    }
+
+    /// Component-based concatenation. Operates on a shared DWAStates arena.
+    pub fn concatenate_components(states: &mut DWAStates, body1: &DWABody, body2: &DWABody) -> DWABody {
+        // 1. Copy left subgraph to not modify shared states.
+        let (new_start_a, remap_a) = states.copy_subgraph(body1.start_state);
+
+        // 2. Find final states in the copied left automaton.
+        let final_a_states: Vec<(StateID, Weight)> = remap_a.values()
+            .filter_map(|&new_id| states[new_id].final_weight.clone().map(|w| (new_id, w)))
+            .collect();
+
+        let mut memo = HashMap::new();
+        let mut gating_memo = HashMap::new();
+
+        for (s_a_id, final_weight) in final_a_states {
+            // Create a temporary, gated version of B's start state.
+            // Note: B's states are NOT copied. We refer to them directly.
+            // union_assign_state will copy them as needed.
+            let mut gated_b_start = states[body2.start_state].clone();
+            gated_b_start.apply_weight(&final_weight);
+            let junction_final_weight = gated_b_start.final_weight.clone();
+            let temp_id = states.add_existing_state(gated_b_start);
+
+            states[s_a_id].final_weight = None;
+            states.union_assign_state(temp_id, s_a_id, &mut memo, &mut gating_memo);
+
+            if let Some(w) = junction_final_weight {
+                if let Some(existing_fw) = states[s_a_id].final_weight.as_mut() {
+                    *existing_fw |= &w;
+                } else {
+                    states[s_a_id].final_weight = Some(w);
+                }
+            }
+        }
+
+        // If start of A was final, the new start state must also be combined with B's start.
+        if let Some(start_a_final_weight) = states[body1.start_state].final_weight.clone() {
+            let mut gated_b_start = states[body2.start_state].clone();
+            gated_b_start.apply_weight(&start_a_final_weight);
+            let new_start_final_weight = gated_b_start.final_weight.clone();
+            let temp_id = states.add_existing_state(gated_b_start);
+
+            states.union_assign_state(temp_id, new_start_a, &mut memo, &mut gating_memo);
+
+            if let Some(w) = new_start_final_weight {
+                if let Some(existing_fw) = states[new_start_a].final_weight.as_mut() {
+                    *existing_fw |= &w;
+                } else {
+                    states[new_start_a].final_weight = Some(w);
+                }
+            }
+        }
+
+        DWABody { start_state: new_start_a }
+    }
+
+    /// Apply a weight gate to the DWA by introducing a new start state that forwards to the
+    /// original start with all outgoing edge weights intersected by `weight`. The new state's
+    /// own weight and final_weight are intersected as well.
+    /// Returns the ID of the newly created start state.
+    pub fn apply_weight(&mut self, weight: &Weight) -> StateID {
+        Self::apply_weight_components(&mut self.states, &mut self.body, weight)
+    }
+
+    /// Component-level variant: mutate only the shared `states` arena and this `body`.
+    /// Builds a fresh start that mirrors the original start's transitions but with
+    /// per-edge weights intersected by `weight`. Other states remain unchanged.
+    pub fn apply_weight_components(
+        states: &mut DWAStates,
+        body: &mut DWABody,
+        weight: &Weight,
+    ) -> StateID {
+        let old_start = body.start_state;
+        let new_id = states.add_state();
+
+        // Snapshot the old start state's data, then apply the weight gate.
+        let mut new_state = states[old_start].clone();
+        new_state.apply_weight(weight);
+
+        states[new_id] = new_state;
+        body.start_state = new_id;
+        new_id
     }
 }
 
