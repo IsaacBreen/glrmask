@@ -6,8 +6,8 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
-use std::iter::{self, FromIterator};
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not};
+use std::iter::FromIterator;
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // --- Part 1: SimpleBitset ---
@@ -168,13 +168,6 @@ impl FromIterator<usize> for SimpleBitset {
 impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
     fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
         SimpleBitset(RangeSetBlaze::from_iter(iter))
-    }
-}
-
-impl Not for &SimpleBitset {
-    type Output = SimpleBitset;
-    fn not(self) -> Self::Output {
-        SimpleBitset(!&self.0)
     }
 }
 
@@ -597,9 +590,6 @@ impl DWA {
             if Self::propagate_and_constrain_weights(states, body) {
                 changed_any = true;
             }
-            if Self::relax_weights_bwd(states) {
-                changed_any = true;
-            }
             if Self::minimize_partition_refinement(states, body) {
                 changed_any = true;
             }
@@ -681,81 +671,6 @@ impl DWA {
             }
         }
         changed
-    }
-
-    pub fn relax_weights_bwd(states: &mut DWAStates) -> bool {
-        let n = states.len();
-        if n == 0 {
-            return false;
-        }
-
-        let mut future_weights = vec![Weight::zeros(); n];
-        for i in 0..n {
-            if let Some(fw) = &states[i].final_weight {
-                future_weights[i] = fw.clone();
-            }
-        }
-
-        let mut changed = true;
-        while changed {
-            changed = false;
-            // Iterate backwards for faster convergence on acyclic/mostly-acyclic parts
-            for i in (0..n).rev() {
-                let mut computed_weight =
-                    states[i].final_weight.clone().unwrap_or_else(Weight::zeros);
-
-                let state = &states[i];
-                if let Some(def_tgt) = state.transitions.default {
-                    if def_tgt < n {
-                        if let Some(edge_w) = state.trans_weight_default.as_ref() {
-                            computed_weight |= &(edge_w & &future_weights[def_tgt]);
-                        }
-                    }
-                }
-
-                for (&ch, &tgt) in &state.transitions.exceptions {
-                    if tgt < n {
-                        if let Some(edge_w) = state.trans_weights_exceptions.get(&ch) {
-                            computed_weight |= &(edge_w & &future_weights[tgt]);
-                        }
-                    }
-                }
-
-                if computed_weight != future_weights[i] {
-                    future_weights[i] = computed_weight;
-                    changed = true;
-                }
-            }
-        }
-
-        // Now, relax edge weights to be as unconstrained as possible given future weights
-        let mut relaxed_changed = false;
-        for i in 0..n {
-            let state = &mut states[i];
-            if let Some(def_tgt) = state.transitions.default {
-                if def_tgt < n {
-                    if let Some(w) = state.trans_weight_default.as_mut() {
-                        let new_w = w.clone() | !&future_weights[def_tgt];
-                        if *w != new_w {
-                            *w = new_w;
-                            relaxed_changed = true;
-                        }
-                    }
-                }
-            }
-            for (&ch, &tgt) in &state.transitions.exceptions {
-                if tgt < n {
-                    if let Some(w) = state.trans_weights_exceptions.get_mut(&ch) {
-                        let new_w = w.clone() | !&future_weights[tgt];
-                        if *w != new_w {
-                            *w = new_w;
-                            relaxed_changed = true;
-                        }
-                    }
-                }
-            }
-        }
-        relaxed_changed
     }
 
     pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
@@ -1372,9 +1287,7 @@ impl DWA {
             let new_state = &mut new_dwa.states[new_id];
 
             let agg_final_weight = if right_accepts_epsilon {
-                let fw0 = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-                let fw1_eps = other.states[right_start].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                fw0 & fw1_eps
+                s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
             } else {
                 let mut fw = Weight::zeros();
                 for &id1 in &ids1 {
@@ -1425,20 +1338,12 @@ impl DWA {
                     get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
                 new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
 
-                let w_d1_trans = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-                let mut w_d2_trans = Weight::zeros();
+                let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
                 for &id1 in &ids1 {
                     if id1 != sink1 {
-                        if let Some(w) = other.states[id1].trans_weight_default.as_ref() {
-                            w_d2_trans |= w;
-                        }
+                        tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
                     }
                 }
-                let tw_def = if let Some(w_d1_final) = s0.and_then(|s| s.final_weight.as_ref()) {
-                    w_d1_trans | (w_d1_final.clone() & w_d2_trans)
-                } else {
-                    w_d1_trans | w_d2_trans
-                };
                 new_dwa.states[new_id].trans_weight_default = Some(tw_def);
             }
 
@@ -1459,20 +1364,12 @@ impl DWA {
                         get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
                     new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
 
-                    let w_d1_trans = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
-                    let mut w_d2_trans = Weight::zeros();
+                    let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
                     for &id1 in &ids1 {
                         if id1 != sink1 {
-                            if let Some(w) = other.states[id1].get_weight(ch) {
-                                w_d2_trans |= w;
-                            }
+                            tw_exc |= &other.states[id1].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
                         }
                     }
-                    let tw_exc = if let Some(w_d1_final) = s0.and_then(|s| s.final_weight.as_ref()) {
-                        w_d1_trans | (w_d1_final.clone() & w_d2_trans)
-                    } else {
-                        w_d1_trans | w_d2_trans
-                    };
                     new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
                 }
             }
