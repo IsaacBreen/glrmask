@@ -1,3 +1,87 @@
+#![cfg(test)]
+
+use crate::precompute4::weighted_automata::{DWA, Weight};
+use rand::prelude::*;
+
+fn generate_random_word(dwa: &DWA, rng: &mut impl Rng, max_len: usize) -> Option<Vec<i16>> {
+    if dwa.states.is_empty() {
+        return None;
+    }
+    let mut word = Vec::new();
+    let mut current_state = dwa.body.start_state;
+
+    for _ in 0..max_len {
+        if current_state >= dwa.states.len() {
+            return Some(word); // Dead end
+        }
+        let state = &dwa.states[current_state];
+
+        // Collect all possible transitions
+        let mut transitions = Vec::new();
+        if let Some(target) = state.transitions.default {
+            // We can't really sample from "all other characters".
+            // For testing, we can pick a random character that is not an exception.
+            // Let's pick one from a small range, e.g., 0..256
+            let mut potential_char = rng.gen_range(0..256i16);
+            while state.transitions.exceptions.contains_key(&potential_char) {
+                potential_char = rng.gen_range(0..256i16);
+            }
+            transitions.push((potential_char, target));
+        }
+        for (&ch, &target) in &state.transitions.exceptions {
+            transitions.push((ch, target));
+        }
+
+        if transitions.is_empty() {
+            break; // No way out
+        }
+
+        // Randomly decide to stop if current state is final
+        if state.final_weight.is_some() && rng.gen_bool(0.2) {
+            break;
+        }
+
+        // Pick a random transition
+        let (ch, next_state) = transitions[rng.gen_range(0..transitions.len())];
+        word.push(ch);
+        current_state = next_state;
+    }
+
+    Some(word)
+}
+
+pub fn assert_dwa_equivalent(mut d1: DWA, mut d2: DWA) {
+    // Simplify both to get them into a canonical form, which helps but isn't guaranteed to make them identical.
+    d1.simplify();
+    d2.simplify();
+
+    let mut rng = StdRng::seed_from_u64(12345);
+    const NUM_SAMPLES: usize = 100;
+    const MAX_LEN: usize = 20;
+
+    // Check empty word
+    let w1_empty = d1.eval_word_weight(&[]);
+    let w2_empty = d2.eval_word_weight(&[]);
+    assert_eq!(w1_empty, w2_empty, "Mismatch on empty word.\ndwa1: {}\ndwa2: {}", d1, d2);
+
+    // Sample from d1 and test on both
+    for i in 0..NUM_SAMPLES {
+        if let Some(word) = generate_random_word(&d1, &mut rng, MAX_LEN) {
+            let w1 = d1.eval_word_weight(&word);
+            let w2 = d2.eval_word_weight(&word);
+            assert_eq!(w1, w2, "Mismatch on word {:?} (sample {} from d1).\ndwa1 weight: {}, dwa2 weight: {}\ndwa1:\n{}\ndwa2:\n{}", crate::precompute4::weighted_automata::format_word(&word), i, w1, w2, d1, d2);
+        }
+    }
+
+    // Sample from d2 and test on both
+    for i in 0..NUM_SAMPLES {
+        if let Some(word) = generate_random_word(&d2, &mut rng, MAX_LEN) {
+            let w1 = d1.eval_word_weight(&word);
+            let w2 = d2.eval_word_weight(&word);
+            assert_eq!(w1, w2, "Mismatch on word {:?} (sample {} from d2).\ndwa1 weight: {}, dwa2 weight: {}\ndwa1:\n{}\ndwa2:\n{}", crate::precompute4::weighted_automata::format_word(&word), i, w1, w2, d1, d2);
+        }
+    }
+}
 use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, Weight, format_word};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1161,7 +1245,6 @@ fn test_concatenate_complex_from_attachment() {
     left.add_transition(25, 8, 12, w_01.clone()).unwrap();
     left.add_transition(25, 9, 4, w_01.clone()).unwrap();
     left.add_transition(25, 10, 5, w_01.clone()).unwrap();
-    left.simplify();
 
     // --- Build RIGHT DWA ---
     let mut right = DWA::new();
