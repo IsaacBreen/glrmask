@@ -1,7 +1,6 @@
 local_system:
   attached_files:
     - src/precompute4/weighted_automata.rs
-    - src/precompute4/full_dwa.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -496,6 +495,7 @@ local_system:
               if s_from_id == s_into_id {
                   return;
               }
+              // crate::debug!(2, "Unioning state {} into state {}", s_from_id, s_into_id);
 
               let s_from = self.0[s_from_id].clone();
               let s_into_orig = self.0[s_into_id].clone();
@@ -585,6 +585,7 @@ local_system:
               s_into.transitions = new_transitions;
               s_into.trans_weight_default = new_trans_weight_default;
               s_into.trans_weights_exceptions = new_trans_weights_exceptions;
+              // crate::debug!(2, "Done unioning state {} into state {}", s_from_id, s_into_id);
           }
 
           pub fn union_state(
@@ -2929,281 +2930,6 @@ local_system:
               assert!(expected.is_empty());
               assert_eq!(wc, expected);
           }
-      }
-    src/precompute4/full_dwa.rs: |
-      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
-      use crate::glr::parser::{ExpectElse, GLRParser};
-      use crate::tokenizer::TokenizerStateID;
-      use crate::precompute4::weighted_automata::{DWABody, DWAState, DWAStates, StateID, Weight, DWA};
-      use std::collections::{BTreeMap, BTreeSet};
-      use crate::datastructures::trie::Trie;
-      use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
-      use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
-      use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
-      use std::cell::RefCell;
-      use range_set_blaze::RangeSetBlaze;
-      use crate::precompute4::utils;
-
-      pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub enum FullDWABuildError {
-          ParserStateIdOutOfRange { state_id: ParserStateID },
-      }
-
-      fn build_template_dwa_from_characterization(
-          bb: &BelowBottomCharacterization,
-      ) -> Result<DWA, FullDWABuildError> {
-          let mut dwa = DWA::new();
-          let w_all = Weight::all();
-
-          // Create a node for each non-terminal, similar to the NWA construction.
-          let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
-          for &nt in &bb.all_nts {
-              let id = dwa.add_state();
-              nt_nodes.insert(nt, id);
-          }
-
-          let start = dwa.body.start_state;
-
-          // --- Initial Actions from Start State ---
-
-          for &(initial_state, shift_state) in &bb.initial_shifts {
-              let pos_initial = utils::encode_symbol_i16(initial_state)?;
-              let neg_initial = utils::encode_negative_i16(initial_state)?;
-              let neg_shift = utils::encode_negative_i16(shift_state)?;
-
-              let s1 = dwa.add_state();
-              let s2 = dwa.add_state();
-              let s3 = dwa.add_state();
-
-              // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-              dwa.states[start].transitions.exceptions.insert(pos_initial, s1);
-              dwa.states[start].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-              dwa.states[s1].transitions.exceptions.insert(neg_initial, s2);
-              dwa.states[s1].trans_weights_exceptions.insert(neg_initial, w_all.clone());
-              dwa.states[s2].transitions.exceptions.insert(neg_shift, s3);
-              dwa.states[s2].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-              dwa.states[s3].final_weight = Some(w_all.clone());
-          }
-
-          for &(initial_state, len, nt) in &bb.initial_reduces {
-              let pos_initial = utils::encode_symbol_i16(initial_state)?;
-              let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
-
-              // Create a chain of default transitions for the pops.
-              // start --(+initial)--> s1 --(default)*len--> target_nt_state
-              let mut from = start;
-              let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
-              dwa.states[from].transitions.exceptions.insert(pos_initial, next_state);
-              dwa.states[from].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-              from = next_state;
-
-              for i in 0..len {
-                  let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.default = Some(to);
-                  dwa.states[from].trans_weight_default = Some(w_all.clone());
-                  from = to;
-              }
-          }
-
-          // --- Actions from Non-Terminal States ---
-
-          for (nt, rc) in &bb.reduce_characterizations {
-              let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
-
-              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
-                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-                  let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
-
-                  // src --(+revealed)--> s1 --(default)*len--> dst
-                  let mut from = src_nt_state;
-                  let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.exceptions.insert(pos_revealed, next_state);
-                  dwa.states[from].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-                  from = next_state;
-
-                  for i in 0..len {
-                      let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
-                      dwa.states[from].transitions.default = Some(to);
-                      dwa.states[from].trans_weight_default = Some(w_all.clone());
-                      from = to;
-                  }
-              }
-
-              for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
-                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-                  let neg_revealed = utils::encode_negative_i16(revealed_state)?;
-                  let neg_goto = utils::encode_negative_i16(goto_state)?;
-                  let neg_shift = utils::encode_negative_i16(shift_state)?;
-
-                  let s1 = dwa.add_state();
-                  let s2 = dwa.add_state();
-                  let s3 = dwa.add_state();
-                  let s4 = dwa.add_state();
-
-                  // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-                  dwa.states[src_nt_state].transitions.exceptions.insert(pos_revealed, s1);
-                  dwa.states[src_nt_state].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-                  dwa.states[s1].transitions.exceptions.insert(neg_revealed, s2);
-                  dwa.states[s1].trans_weights_exceptions.insert(neg_revealed, w_all.clone());
-                  dwa.states[s2].transitions.exceptions.insert(neg_goto, s3);
-                  dwa.states[s2].trans_weights_exceptions.insert(neg_goto, w_all.clone());
-                  dwa.states[s3].transitions.exceptions.insert(neg_shift, s4);
-                  dwa.states[s3].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-                  dwa.states[s4].final_weight = Some(w_all.clone());
-              }
-          }
-
-          Ok(dwa)
-      }
-
-      fn build_template_dwas(
-          parser: &GLRParser,
-      ) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
-          let all = compute_all_characterizations(parser);
-          let mut out = BTreeMap::new();
-          for (term, bb) in all {
-              let dwa = build_template_dwa_from_characterization(&bb)?;
-              crate::debug!(6, "Built template DWA for terminal {:?}:", term);
-              crate::debug!(6, "{}", dwa);
-              out.insert(term, dwa);
-          }
-          Ok(out)
-      }
-
-      fn build_ignore_terminal_dwa() -> DWA {
-          // Identity DWA: start is final, no transitions.
-          let mut dwa = DWA::new();
-          dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
-          dwa
-      }
-
-      // Helper: collect final states of a DWA
-      fn collect_final_states(dwa: &DWA) -> BTreeSet<usize> {
-          let mut finals = BTreeSet::new();
-          for (i, st) in dwa.states.0.iter().enumerate() {
-              if st.final_weight.is_some() {
-                  finals.insert(i);
-              }
-          }
-          finals
-      }
-
-      // Helper: join_map for concatenation: map each left final to the right's start.
-      fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<usize>> {
-          let left_final_states = collect_final_states(left);
-          let right_start = right.body.start_state;
-          let mut join_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-          for lf in left_final_states {
-              join_map.insert(lf, BTreeSet::from([right_start]));
-          }
-          join_map
-      }
-
-      // Public API: precompute4 using DWA-only approach.
-      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
-          use std::cell::RefCell;
-          crate::debug!(2, "Starting precompute4...");
-          // 1. Build template DWAs for all terminals.
-          let template_dwas = match build_template_dwas(parser) {
-              Ok(m) => m,
-              Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-          };
-          let ignore_dwa = build_ignore_terminal_dwa();
-
-          // 2. Set up shared state arena.
-          let states_arena = RefCell::new(DWAStates::default());
-
-          // 3. Reverse the precompute1 trie.
-          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
-
-          let leaf_node = all_nodes.iter().find_map(|&idx| {
-              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
-          }).expect("Precompute1 trie must have a single leaf node.");
-
-          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
-          let reversed_trie_root = leaf_node;
-
-          // 4. Traverse the reversed trie:
-          // - step: concatenate left (template gated by weight) with current (right)
-          // - merge: union
-          // - process: capture
-          let initial_dwa_body = {
-              let mut states = states_arena.borrow_mut();
-              let start = states.add_state();
-              states[start].final_weight = Some(Weight::all());
-              DWABody { start_state: start }
-          };
-          let initial_values = vec![(reversed_trie_root, initial_dwa_body)];
-          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
-          let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
-
-          let mut final_bodies: BTreeMap<TokenizerStateID, DWABody> = BTreeMap::new();
-
-          Trie::special_map_grouped(
-              &reversed_trie1_god,
-              &traversal_data,
-              initial_values,
-              // step function
-              |current_dwa_body, edge_terminal_opt, dest_map| {
-                  let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
-                      let terminal_id = edge_terminal_opt.unwrap();
-                      template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
-                  } else {
-                      &ignore_dwa
-                  };
-
-                  let mut results: Vec<(PrecomputeNode1Index, DWABody)> = Vec::new();
-                  for (dest_idx, llm_token_bv) in dest_map.iter() {
-                      let mut states = states_arena.borrow_mut();
-
-                      // Copy template into arena
-                      crate::debug!(5, "Applying template DWA for terminal {:?} gated by weight {:?}...", edge_terminal_opt, llm_token_bv);
-                      let (template_start_in_arena, _) = states.copy_subgraph_from(&template_dwa.states, template_dwa.body.start_state);
-                      crate::debug!(6, "Template DWA copied into arena. Current arena size: {} states.", states.0.len());
-                      let mut template_body_in_arena = DWABody { start_state: template_start_in_arena };
-
-                      // Gate left by weight (LLM token filter)
-                      let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                      let new_gated_start = DWA::apply_weight_components(&mut states, &mut template_body_in_arena, &weight);
-                      let gated_template_body = DWABody { start_state: new_gated_start };
-
-                      // Concatenate: left then current (right)
-                      let composed_body = DWA::concatenate_components(&mut states, &gated_template_body, current_dwa_body);
-                      results.push((*dest_idx, composed_body));
-                  }
-                  results
-              },
-              // merge function: union them
-              |dwa1_body, dwa2_body| {
-                  let mut states = states_arena.borrow_mut();
-                  *dwa1_body = DWA::union_components(&mut states, dwa1_body, &dwa2_body);
-              },
-              // process function: capture at original roots
-              |_node_data, node_idx, dwa_body| {
-                  if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                      final_bodies.insert(*tokenizer_state_id, dwa_body.clone());
-                  }
-                  Some(dwa_body) // continue traversal
-              },
-          );
-
-          let final_states = states_arena.into_inner();
-          let mut final_dwas = BTreeMap::new();
-          for (tok_id, body) in final_bodies {
-              let mut new_dwa = DWA::new();
-              new_dwa.states.0.clear();
-              let (new_start, _) = new_dwa.states.copy_subgraph_from(&final_states, body.start_state);
-              new_dwa.body.start_state = new_start;
-              new_dwa.simplify();
-              final_dwas.insert(tok_id, new_dwa);
-          }
-
-          resolve_negative_codes_for_all(&mut final_dwas);
-
-          final_dwas
       }
   prev_file_contents:
     src/precompute4/weighted_automata.rs: |
@@ -3649,6 +3375,41 @@ local_system:
               self.add_existing_state(state)
           }
 
+          /// Merge two optional transition targets under their respective edge weights into a single
+          /// deterministic target by gating and recursively unioning as necessary.
+          /// See the correctness discussion in the assistant notes: we must gate away the portion of
+          /// each subgraph that belongs exclusively to the other edge's weight to avoid over-acceptance.
+          fn union_targets_with_gating(
+              &mut self,
+              t1: Option<StateID>,
+              w1: &Weight,
+              t2: Option<StateID>,
+              w2: &Weight,
+              memo: &mut HashMap<(StateID, StateID), StateID>,
+              gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+          ) -> Option<StateID> {
+              match (t1, t2) {
+                  (Some(a), Some(b)) => {
+                      if a == b {
+                          return Some(a);
+                      }
+                      // Gate away the portion unique to the other side before unioning targets.
+                      let a_ex = w2 - w1; // portions unique to b to exclude from a
+                      let b_ex = w1 - w2; // portions unique to a to exclude from b
+                      let a_gated = self.exclude_weight_from_state(a, &a_ex, gating_memo);
+                      let b_gated = self.exclude_weight_from_state(b, &b_ex, gating_memo);
+                      Some(self.union_state(a_gated, b_gated, memo, gating_memo))
+                  }
+                  (Some(a), None) => Some(a),
+                  (None, Some(b)) => Some(b),
+                  (None, None) => None,
+              }
+          }
+
+          /// Intersects all weights in the given state with `weight`, without copying the state if
+          /// the intersection is no-op. Returns either the original state_id or a new gated copy.
+          /// See `exclude_weight_from_state` for the complementary subtractive gating.
+          ///
           pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
               assert!(state_id < self.len(), "state_id out of bounds");
               self[state_id].apply_weight(weight);
@@ -3698,84 +3459,128 @@ local_system:
                   return;
               }
 
-              let s_from = self.0[s_from_id].clone();
-              let s_into_orig = self.0[s_into_id].clone();
+              // Final weights: join (∨)
+              let fw_from = self.0[s_from_id].final_weight.clone().unwrap_or_else(Weight::zeros);
+              let fw_into = self.0[s_into_id].final_weight.clone().unwrap_or_else(Weight::zeros);
+              let new_final_weight = &fw_from | &fw_into;
 
-              // Union final weights
-              let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
-              let fw_into = s_into_orig.final_weight.clone().unwrap_or_else(Weight::zeros);
-              let new_final_weight = fw_from | fw_into;
+              // Snapshot defaults and their weights (cloned once).
+              let def_from = self.0[s_from_id].transitions.default;
+              let def_into = self.0[s_into_id].transitions.default;
+              let w_def_from = self.0[s_from_id]
+                  .trans_weight_default
+                  .clone()
+                  .unwrap_or_else(Weight::zeros);
+              let w_def_into = self.0[s_into_id]
+                  .trans_weight_default
+                  .clone()
+                  .unwrap_or_else(Weight::zeros);
 
-              // --- Transitions ---
+              // --- Transitions (default first) ---
               let mut new_transitions = I16Map::new();
               let mut new_trans_weights_exceptions = BTreeMap::new();
-              let new_trans_weight_default;
 
-              let critical_points: BTreeSet<i16> = s_from.transitions.exceptions.keys()
-                  .chain(s_into_orig.transitions.exceptions.keys())
-                  .cloned()
-                  .collect();
-
-              let get_target = |s: &DWAState, ch: i16| -> Option<StateID> {
-                  s.transitions.exceptions.get(&ch).copied().or(s.transitions.default)
-              };
-
-              let get_weight = |s: &DWAState, ch: i16| -> Weight {
-                  s.trans_weights_exceptions.get(&ch)
-                      .or(s.trans_weight_default.as_ref())
-                      .cloned().unwrap_or_else(Weight::zeros)
-              };
-
-              // Default transition
-              let def_tgt_from = s_from.transitions.default;
-              let def_tgt_into = s_into_orig.transitions.default;
-              let w_def_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let w_def_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
-                  (Some(t1), Some(t2)) => if t1 == t2 {
-                      Some(t1)
-                  } else {
-                      let to_exclude_from_t2 = &w_def_from - &w_def_into;
-                      let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
-                      let to_exclude_from_t1 = &w_def_into - &w_def_from;
-                      let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
-                      Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
-                  },
-                  (Some(t), None) | (None, Some(t)) => Some(t),
-                  (None, None) => None,
-              };
+              // Merge default targets using precise gating.
+              let new_def_tgt_id = self.union_targets_with_gating(
+                  def_from,
+                  &w_def_from,
+                  def_into,
+                  &w_def_into,
+                  memo,
+                  gating_memo,
+              );
               new_transitions.default = new_def_tgt_id;
-              new_trans_weight_default = if new_def_tgt_id.is_some() {
-                  Some(w_def_from | w_def_into)
+              let new_trans_weight_default = if new_def_tgt_id.is_some() {
+                  Some(&w_def_from | &w_def_into)
               } else {
                   None
               };
 
-              // Exception transitions
-              for &ch in &critical_points {
-                  let tgt_from = get_target(&s_from, ch);
-                  let tgt_into = get_target(&s_into_orig, ch);
-                  let w_from = get_weight(&s_from, ch);
-                  let w_into = get_weight(&s_into_orig, ch);
-
-                  let new_exc_tgt_id = match (tgt_from, tgt_into) {
-                      (Some(t1), Some(t2)) => if t1 == t2 {
-                          Some(t1)
+              // Collect the union of exception keys in linear time by merging the already sorted key sets.
+              let keys: Vec<i16> = {
+                  // Take snapshots of the keys to avoid borrowing self across recursive calls.
+                  let a_keys: Vec<i16> = self.0[s_from_id]
+                      .transitions
+                      .exceptions
+                      .keys()
+                      .copied()
+                      .collect();
+                  let b_keys: Vec<i16> = self.0[s_into_id]
+                      .transitions
+                      .exceptions
+                      .keys()
+                      .copied()
+                      .collect();
+                  let mut merged: Vec<i16> = Vec::with_capacity(a_keys.len() + b_keys.len());
+                  let mut ia = 0usize;
+                  let mut ib = 0usize;
+                  while ia < a_keys.len() && ib < b_keys.len() {
+                      let ka = a_keys[ia];
+                      let kb = b_keys[ib];
+                      if ka == kb {
+                          merged.push(ka);
+                          ia += 1;
+                          ib += 1;
+                      } else if ka < kb {
+                          merged.push(ka);
+                          ia += 1;
                       } else {
-                          let to_exclude_from_t2 = &w_from - &w_into;
-                          let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
-                          let to_exclude_from_t1 = &w_into - &w_from;
-                          let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
-                          Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
-                      },
-                      (Some(t), None) | (None, Some(t)) => Some(t),
-                      (None, None) => None,
+                          merged.push(kb);
+                          ib += 1;
+                      }
+                  }
+                  while ia < a_keys.len() {
+                      merged.push(a_keys[ia]);
+                      ia += 1;
+                  }
+                  while ib < b_keys.len() {
+                      merged.push(b_keys[ib]);
+                      ib += 1;
+                  }
+                  merged
+              };
+
+              // Merge per-exception transitions.
+              for ch in keys {
+                  // Snapshot all data needed for this character, then drop borrows before recursive calls.
+                  let (t_from, t_into, w_from, w_into) = {
+                      let s_from = &self.0[s_from_id];
+                      let s_into = &self.0[s_into_id];
+                      let tf = s_from
+                          .transitions
+                          .exceptions
+                          .get(&ch)
+                          .copied()
+                          .or(def_from);
+                      let ti = s_into
+                          .transitions
+                          .exceptions
+                          .get(&ch)
+                          .copied()
+                          .or(def_into);
+                      let wf = s_from
+                          .trans_weights_exceptions
+                          .get(&ch)
+                          .or(s_from.trans_weight_default.as_ref())
+                          .cloned()
+                          .unwrap_or_else(Weight::zeros);
+                      let wi = s_into
+                          .trans_weights_exceptions
+                          .get(&ch)
+                          .or(s_into.trans_weight_default.as_ref())
+                          .cloned()
+                          .unwrap_or_else(Weight::zeros);
+                      (tf, ti, wf, wi)
                   };
 
+                  let new_exc_tgt_id =
+                      self.union_targets_with_gating(t_from, &w_from, t_into, &w_into, memo, gating_memo);
+
+                  // Only materialize an exception if its target differs from the (already merged) default.
                   if new_exc_tgt_id != new_def_tgt_id {
                       if let Some(tgt_id) = new_exc_tgt_id {
                           new_transitions.exceptions.insert(ch, tgt_id);
-                          new_trans_weights_exceptions.insert(ch, w_from | w_into);
+                          new_trans_weights_exceptions.insert(ch, &w_from | &w_into);
                       }
                   }
               }
@@ -6131,292 +5936,6 @@ local_system:
               assert_eq!(wc, expected);
           }
       }
-    src/precompute4/full_dwa.rs: |
-      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
-      use crate::glr::parser::{ExpectElse, GLRParser};
-      use crate::tokenizer::TokenizerStateID;
-      use crate::precompute4::weighted_automata::{DWABody, DWAState, DWAStates, StateID, Weight, DWA};
-      use std::collections::{BTreeMap, BTreeSet};
-      use crate::datastructures::trie::Trie;
-      use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
-      use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
-      use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
-      use std::cell::RefCell;
-      use range_set_blaze::RangeSetBlaze;
-      use crate::precompute4::utils;
-
-      pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub enum FullDWABuildError {
-          ParserStateIdOutOfRange { state_id: ParserStateID },
-      }
-
-      fn build_template_dwa_from_characterization(
-          bb: &BelowBottomCharacterization,
-      ) -> Result<DWA, FullDWABuildError> {
-          let mut dwa = DWA::new();
-          let w_all = Weight::all();
-
-          // Create a node for each non-terminal, similar to the NWA construction.
-          let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
-          for &nt in &bb.all_nts {
-              let id = dwa.add_state();
-              nt_nodes.insert(nt, id);
-          }
-
-          let start = dwa.body.start_state;
-
-          // --- Initial Actions from Start State ---
-
-          for &(initial_state, shift_state) in &bb.initial_shifts {
-              let pos_initial = utils::encode_symbol_i16(initial_state)?;
-              let neg_initial = utils::encode_negative_i16(initial_state)?;
-              let neg_shift = utils::encode_negative_i16(shift_state)?;
-
-              let s1 = dwa.add_state();
-              let s2 = dwa.add_state();
-              let s3 = dwa.add_state();
-
-              // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-              dwa.states[start].transitions.exceptions.insert(pos_initial, s1);
-              dwa.states[start].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-              dwa.states[s1].transitions.exceptions.insert(neg_initial, s2);
-              dwa.states[s1].trans_weights_exceptions.insert(neg_initial, w_all.clone());
-              dwa.states[s2].transitions.exceptions.insert(neg_shift, s3);
-              dwa.states[s2].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-              dwa.states[s3].final_weight = Some(w_all.clone());
-          }
-
-          for &(initial_state, len, nt) in &bb.initial_reduces {
-              let pos_initial = utils::encode_symbol_i16(initial_state)?;
-              let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
-
-              // Create a chain of default transitions for the pops.
-              // start --(+initial)--> s1 --(default)*len--> target_nt_state
-              let mut from = start;
-              let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
-              dwa.states[from].transitions.exceptions.insert(pos_initial, next_state);
-              dwa.states[from].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-              from = next_state;
-
-              for i in 0..len {
-                  let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.default = Some(to);
-                  dwa.states[from].trans_weight_default = Some(w_all.clone());
-                  from = to;
-              }
-          }
-
-          // --- Actions from Non-Terminal States ---
-
-          for (nt, rc) in &bb.reduce_characterizations {
-              let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
-
-              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
-                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-                  let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
-
-                  // src --(+revealed)--> s1 --(default)*len--> dst
-                  let mut from = src_nt_state;
-                  let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.exceptions.insert(pos_revealed, next_state);
-                  dwa.states[from].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-                  from = next_state;
-
-                  for i in 0..len {
-                      let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
-                      dwa.states[from].transitions.default = Some(to);
-                      dwa.states[from].trans_weight_default = Some(w_all.clone());
-                      from = to;
-                  }
-              }
-
-              for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
-                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-                  let neg_revealed = utils::encode_negative_i16(revealed_state)?;
-                  let neg_goto = utils::encode_negative_i16(goto_state)?;
-                  let neg_shift = utils::encode_negative_i16(shift_state)?;
-
-                  let s1 = dwa.add_state();
-                  let s2 = dwa.add_state();
-                  let s3 = dwa.add_state();
-                  let s4 = dwa.add_state();
-
-                  // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-                  dwa.states[src_nt_state].transitions.exceptions.insert(pos_revealed, s1);
-                  dwa.states[src_nt_state].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-                  dwa.states[s1].transitions.exceptions.insert(neg_revealed, s2);
-                  dwa.states[s1].trans_weights_exceptions.insert(neg_revealed, w_all.clone());
-                  dwa.states[s2].transitions.exceptions.insert(neg_goto, s3);
-                  dwa.states[s2].trans_weights_exceptions.insert(neg_goto, w_all.clone());
-                  dwa.states[s3].transitions.exceptions.insert(neg_shift, s4);
-                  dwa.states[s3].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-                  dwa.states[s4].final_weight = Some(w_all.clone());
-              }
-          }
-
-          Ok(dwa)
-      }
-
-      fn build_template_dwas(
-          parser: &GLRParser,
-      ) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
-          let all = compute_all_characterizations(parser);
-          let mut out = BTreeMap::new();
-          for (term, bb) in all {
-              let dwa = build_template_dwa_from_characterization(&bb)?;
-              crate::debug!(6, "Built template DWA for terminal {:?}:", term);
-              crate::debug!(6, "{}", dwa);
-              out.insert(term, dwa);
-          }
-          Ok(out)
-      }
-
-      fn build_ignore_terminal_dwa() -> DWA {
-          // Identity DWA: start is final, no transitions.
-          let mut dwa = DWA::new();
-          dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
-          dwa
-      }
-
-      // Helper: collect final states of a DWA
-      fn collect_final_states(dwa: &DWA) -> BTreeSet<usize> {
-          let mut finals = BTreeSet::new();
-          for (i, st) in dwa.states.0.iter().enumerate() {
-              if st.final_weight.is_some() {
-                  finals.insert(i);
-              }
-          }
-          finals
-      }
-
-      // Helper: join_map for concatenation: map each left final to the right's start.
-      fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<usize>> {
-          let left_final_states = collect_final_states(left);
-          let right_start = right.body.start_state;
-          let mut join_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-          for lf in left_final_states {
-              join_map.insert(lf, BTreeSet::from([right_start]));
-          }
-          join_map
-      }
-
-      // Public API: precompute4 using DWA-only approach.
-      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
-          use std::cell::RefCell;
-          crate::debug!(2, "Starting precompute4...");
-          // 1. Build template DWAs for all terminals.
-          let template_dwas = match build_template_dwas(parser) {
-              Ok(m) => m,
-              Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-          };
-          let ignore_dwa = build_ignore_terminal_dwa();
-
-          // 2. Set up shared state arena.
-          let states_arena = RefCell::new(DWAStates::default());
-
-          // 3. Reverse the precompute1 trie.
-          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
-
-          let leaf_node = all_nodes.iter().find_map(|&idx| {
-              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
-          }).expect("Precompute1 trie must have a single leaf node.");
-
-          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
-          let reversed_trie_root = leaf_node;
-
-          // 4. Traverse the reversed trie:
-          // - step: concatenate left (template gated by weight) with current (right)
-          // - merge: union
-          // - process: capture
-          let initial_dwa_body = {
-              let mut states = states_arena.borrow_mut();
-              let start = states.add_state();
-              states[start].final_weight = Some(Weight::all());
-              DWABody { start_state: start }
-          };
-          let initial_values = vec![(reversed_trie_root, initial_dwa_body)];
-          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
-          let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
-
-          let mut final_bodies: BTreeMap<TokenizerStateID, DWABody> = BTreeMap::new();
-
-          Trie::special_map_grouped(
-              &reversed_trie1_god,
-              &traversal_data,
-              initial_values,
-              // step function
-              |current_dwa_body, edge_terminal_opt, dest_map| {
-                  let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
-                      let terminal_id = edge_terminal_opt.unwrap();
-                      template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
-                  } else {
-                      &ignore_dwa
-                  };
-
-                  let mut results: Vec<(PrecomputeNode1Index, DWABody)> = Vec::new();
-                  for (dest_idx, llm_token_bv) in dest_map.iter() {
-                      let mut states = states_arena.borrow_mut();
-
-                      // Copy template into arena
-                      crate::debug!(5, "Applying template DWA for terminal {:?} gated by weight {:?}...", edge_terminal_opt, llm_token_bv);
-                      let (template_start_in_arena, _) = states.copy_subgraph_from(&template_dwa.states, template_dwa.body.start_state);
-                      crate::debug!(6, "Template DWA copied into arena. Current arena size: {} states.", states.0.len());
-                      let mut template_body_in_arena = DWABody { start_state: template_start_in_arena };
-
-                      // Gate left by weight (LLM token filter)
-                      crate::debug!(5, "Starting DWA::apply_weight_components for gating...");
-                      let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                      let new_gated_start = DWA::apply_weight_components(&mut states, &mut template_body_in_arena, &weight);
-                      crate::debug!(5, "DWA::apply_weight_components finished. New start state: {}.", new_gated_start);
-                      let gated_template_body = DWABody { start_state: new_gated_start };
-
-                      // Concatenate: left then current (right)
-                      crate::debug!(5, "Starting DWA::concatenate_components: left_start={} right_start={}...", gated_template_body.start_state, current_dwa_body.start_state);
-                      let composed_body = DWA::concatenate_components(&mut states, &gated_template_body, current_dwa_body);
-                      crate::debug!(5, "DWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
-                      results.push((*dest_idx, composed_body));
-                  }
-                  results
-              },
-              // merge function: union them
-              |dwa1_body, dwa2_body| {
-                  let mut states = states_arena.borrow_mut();
-                  crate::debug!(5, "Starting DWA::union_components: body1_start={} body2_start={}...", dwa1_body.start_state, dwa2_body.start_state);
-                  *dwa1_body = DWA::union_components(&mut states, dwa1_body, &dwa2_body);
-                  crate::debug!(5, "DWA::union_components finished. New start state: {}.", dwa1_body.start_state);
-              },
-              // process function: capture at original roots
-              |_node_data, node_idx, dwa_body| {
-                  if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                      final_bodies.insert(*tokenizer_state_id, dwa_body.clone());
-                  }
-                  Some(dwa_body) // continue traversal
-              },
-          );
-
-          let final_states = states_arena.into_inner();
-          let mut final_dwas = BTreeMap::new();
-          for (tok_id, body) in final_bodies {
-              let mut new_dwa = DWA::new();
-              new_dwa.states.0.clear();
-              crate::debug!(5, "Copying final DWA subgraph for tokenizer state {} from arena (start: {})...", tok_id, body.start_state);
-              let (new_start, _) = new_dwa.states.copy_subgraph_from(&final_states, body.start_state);
-              new_dwa.body.start_state = new_start;
-              crate::debug!(5, "Final DWA subgraph copied. Starting simplification ({} states)...", new_dwa.states.len());
-              new_dwa.simplify();
-              crate::debug!(5, "Simplification finished ({} states).", new_dwa.states.len());
-              final_dwas.insert(tok_id, new_dwa);
-          }
-
-          crate::debug!(5, "Starting resolve_negative_codes_for_all...");
-          resolve_negative_codes_for_all(&mut final_dwas);
-          crate::debug!(5, "resolve_negative_codes_for_all finished.");
-
-          final_dwas
-      }
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -6428,7 +5947,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -6951,6 +6470,7 @@ messages:
               if s_from_id == s_into_id {
                   return;
               }
+              // crate::debug!(2, "Unioning state {} into state {}", s_from_id, s_into_id);
 
               let s_from = self.0[s_from_id].clone();
               let s_into_orig = self.0[s_into_id].clone();
@@ -7040,6 +6560,7 @@ messages:
               s_into.transitions = new_transitions;
               s_into.trans_weight_default = new_trans_weight_default;
               s_into.trans_weights_exceptions = new_trans_weights_exceptions;
+              // crate::debug!(2, "Done unioning state {} into state {}", s_from_id, s_into_id);
           }
 
           pub fn union_state(
@@ -9389,293 +8910,9 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata.rs
-  - user: |-
-      ```rust "src/precompute4/full_dwa.rs"
-      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
-      use crate::glr::parser::{ExpectElse, GLRParser};
-      use crate::tokenizer::TokenizerStateID;
-      use crate::precompute4::weighted_automata::{DWABody, DWAState, DWAStates, StateID, Weight, DWA};
-      use std::collections::{BTreeMap, BTreeSet};
-      use crate::datastructures::trie::Trie;
-      use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
-      use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
-      use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
-      use std::cell::RefCell;
-      use range_set_blaze::RangeSetBlaze;
-      use crate::precompute4::utils;
-
-      pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub enum FullDWABuildError {
-          ParserStateIdOutOfRange { state_id: ParserStateID },
-      }
-
-      fn build_template_dwa_from_characterization(
-          bb: &BelowBottomCharacterization,
-      ) -> Result<DWA, FullDWABuildError> {
-          let mut dwa = DWA::new();
-          let w_all = Weight::all();
-
-          // Create a node for each non-terminal, similar to the NWA construction.
-          let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
-          for &nt in &bb.all_nts {
-              let id = dwa.add_state();
-              nt_nodes.insert(nt, id);
-          }
-
-          let start = dwa.body.start_state;
-
-          // --- Initial Actions from Start State ---
-
-          for &(initial_state, shift_state) in &bb.initial_shifts {
-              let pos_initial = utils::encode_symbol_i16(initial_state)?;
-              let neg_initial = utils::encode_negative_i16(initial_state)?;
-              let neg_shift = utils::encode_negative_i16(shift_state)?;
-
-              let s1 = dwa.add_state();
-              let s2 = dwa.add_state();
-              let s3 = dwa.add_state();
-
-              // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-              dwa.states[start].transitions.exceptions.insert(pos_initial, s1);
-              dwa.states[start].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-              dwa.states[s1].transitions.exceptions.insert(neg_initial, s2);
-              dwa.states[s1].trans_weights_exceptions.insert(neg_initial, w_all.clone());
-              dwa.states[s2].transitions.exceptions.insert(neg_shift, s3);
-              dwa.states[s2].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-              dwa.states[s3].final_weight = Some(w_all.clone());
-          }
-
-          for &(initial_state, len, nt) in &bb.initial_reduces {
-              let pos_initial = utils::encode_symbol_i16(initial_state)?;
-              let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
-
-              // Create a chain of default transitions for the pops.
-              // start --(+initial)--> s1 --(default)*len--> target_nt_state
-              let mut from = start;
-              let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
-              dwa.states[from].transitions.exceptions.insert(pos_initial, next_state);
-              dwa.states[from].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-              from = next_state;
-
-              for i in 0..len {
-                  let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.default = Some(to);
-                  dwa.states[from].trans_weight_default = Some(w_all.clone());
-                  from = to;
-              }
-          }
-
-          // --- Actions from Non-Terminal States ---
-
-          for (nt, rc) in &bb.reduce_characterizations {
-              let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
-
-              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
-                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-                  let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
-
-                  // src --(+revealed)--> s1 --(default)*len--> dst
-                  let mut from = src_nt_state;
-                  let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.exceptions.insert(pos_revealed, next_state);
-                  dwa.states[from].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-                  from = next_state;
-
-                  for i in 0..len {
-                      let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
-                      dwa.states[from].transitions.default = Some(to);
-                      dwa.states[from].trans_weight_default = Some(w_all.clone());
-                      from = to;
-                  }
-              }
-
-              for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
-                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-                  let neg_revealed = utils::encode_negative_i16(revealed_state)?;
-                  let neg_goto = utils::encode_negative_i16(goto_state)?;
-                  let neg_shift = utils::encode_negative_i16(shift_state)?;
-
-                  let s1 = dwa.add_state();
-                  let s2 = dwa.add_state();
-                  let s3 = dwa.add_state();
-                  let s4 = dwa.add_state();
-
-                  // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-                  dwa.states[src_nt_state].transitions.exceptions.insert(pos_revealed, s1);
-                  dwa.states[src_nt_state].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-                  dwa.states[s1].transitions.exceptions.insert(neg_revealed, s2);
-                  dwa.states[s1].trans_weights_exceptions.insert(neg_revealed, w_all.clone());
-                  dwa.states[s2].transitions.exceptions.insert(neg_goto, s3);
-                  dwa.states[s2].trans_weights_exceptions.insert(neg_goto, w_all.clone());
-                  dwa.states[s3].transitions.exceptions.insert(neg_shift, s4);
-                  dwa.states[s3].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-                  dwa.states[s4].final_weight = Some(w_all.clone());
-              }
-          }
-
-          Ok(dwa)
-      }
-
-      fn build_template_dwas(
-          parser: &GLRParser,
-      ) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
-          let all = compute_all_characterizations(parser);
-          let mut out = BTreeMap::new();
-          for (term, bb) in all {
-              let dwa = build_template_dwa_from_characterization(&bb)?;
-              crate::debug!(6, "Built template DWA for terminal {:?}:", term);
-              crate::debug!(6, "{}", dwa);
-              out.insert(term, dwa);
-          }
-          Ok(out)
-      }
-
-      fn build_ignore_terminal_dwa() -> DWA {
-          // Identity DWA: start is final, no transitions.
-          let mut dwa = DWA::new();
-          dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
-          dwa
-      }
-
-      // Helper: collect final states of a DWA
-      fn collect_final_states(dwa: &DWA) -> BTreeSet<usize> {
-          let mut finals = BTreeSet::new();
-          for (i, st) in dwa.states.0.iter().enumerate() {
-              if st.final_weight.is_some() {
-                  finals.insert(i);
-              }
-          }
-          finals
-      }
-
-      // Helper: join_map for concatenation: map each left final to the right's start.
-      fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<usize>> {
-          let left_final_states = collect_final_states(left);
-          let right_start = right.body.start_state;
-          let mut join_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-          for lf in left_final_states {
-              join_map.insert(lf, BTreeSet::from([right_start]));
-          }
-          join_map
-      }
-
-      // Public API: precompute4 using DWA-only approach.
-      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
-          use std::cell::RefCell;
-          crate::debug!(2, "Starting precompute4...");
-          // 1. Build template DWAs for all terminals.
-          let template_dwas = match build_template_dwas(parser) {
-              Ok(m) => m,
-              Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-          };
-          let ignore_dwa = build_ignore_terminal_dwa();
-
-          // 2. Set up shared state arena.
-          let states_arena = RefCell::new(DWAStates::default());
-
-          // 3. Reverse the precompute1 trie.
-          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
-
-          let leaf_node = all_nodes.iter().find_map(|&idx| {
-              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
-          }).expect("Precompute1 trie must have a single leaf node.");
-
-          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
-          let reversed_trie_root = leaf_node;
-
-          // 4. Traverse the reversed trie:
-          // - step: concatenate left (template gated by weight) with current (right)
-          // - merge: union
-          // - process: capture
-          let initial_dwa_body = {
-              let mut states = states_arena.borrow_mut();
-              let start = states.add_state();
-              states[start].final_weight = Some(Weight::all());
-              DWABody { start_state: start }
-          };
-          let initial_values = vec![(reversed_trie_root, initial_dwa_body)];
-          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
-          let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
-
-          let mut final_bodies: BTreeMap<TokenizerStateID, DWABody> = BTreeMap::new();
-
-          Trie::special_map_grouped(
-              &reversed_trie1_god,
-              &traversal_data,
-              initial_values,
-              // step function
-              |current_dwa_body, edge_terminal_opt, dest_map| {
-                  let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
-                      let terminal_id = edge_terminal_opt.unwrap();
-                      template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
-                  } else {
-                      &ignore_dwa
-                  };
-
-                  let mut results: Vec<(PrecomputeNode1Index, DWABody)> = Vec::new();
-                  for (dest_idx, llm_token_bv) in dest_map.iter() {
-                      let mut states = states_arena.borrow_mut();
-
-                      // Copy template into arena
-                      crate::debug!(5, "Applying template DWA for terminal {:?} gated by weight {:?}...", edge_terminal_opt, llm_token_bv);
-                      let (template_start_in_arena, _) = states.copy_subgraph_from(&template_dwa.states, template_dwa.body.start_state);
-                      crate::debug!(6, "Template DWA copied into arena. Current arena size: {} states.", states.0.len());
-                      let mut template_body_in_arena = DWABody { start_state: template_start_in_arena };
-
-                      // Gate left by weight (LLM token filter)
-                      let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                      let new_gated_start = DWA::apply_weight_components(&mut states, &mut template_body_in_arena, &weight);
-                      let gated_template_body = DWABody { start_state: new_gated_start };
-
-                      // Concatenate: left then current (right)
-                      let composed_body = DWA::concatenate_components(&mut states, &gated_template_body, current_dwa_body);
-                      results.push((*dest_idx, composed_body));
-                  }
-                  results
-              },
-              // merge function: union them
-              |dwa1_body, dwa2_body| {
-                  let mut states = states_arena.borrow_mut();
-                  *dwa1_body = DWA::union_components(&mut states, dwa1_body, &dwa2_body);
-              },
-              // process function: capture at original roots
-              |_node_data, node_idx, dwa_body| {
-                  if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                      final_bodies.insert(*tokenizer_state_id, dwa_body.clone());
-                  }
-                  Some(dwa_body) // continue traversal
-              },
-          );
-
-          let final_states = states_arena.into_inner();
-          let mut final_dwas = BTreeMap::new();
-          for (tok_id, body) in final_bodies {
-              let mut new_dwa = DWA::new();
-              new_dwa.states.0.clear();
-              let (new_start, _) = new_dwa.states.copy_subgraph_from(&final_states, body.start_state);
-              new_dwa.body.start_state = new_start;
-              new_dwa.simplify();
-              final_dwas.insert(tok_id, new_dwa);
-          }
-
-          resolve_negative_codes_for_all(&mut final_dwas);
-
-          final_dwas
-      }
-
-      ```
-    metadata:
-      filename: src/precompute4/full_dwa.rs
-  - user: |-
-      In precompute4, add debug statemnets with level 5 `crate::debug!(5, ...)` before and after every possible expensive operation, e.g.
-      ```rust
-      crate::debug!(5, "Applying template DWA for terminal {:?} gated by weight {:?}...", edge_terminal_opt, llm_token_bv);
-      let (template_start_in_arena, _) = states.copy_subgraph_from(&template_dwa.states, template_dwa.body.start_state);
-      crate::debug!(6, "Template DWA copied into arena. Current arena size: {} states.", states.0.len());
-      ```
+  - user: Make `union_assign_state` much more efficient. **It must still be correct.
+      This is critical.** Think mathematically and deeply. Hypothesise. State your
+      hypotheses. Rigorously prove them and the validity of your solutions.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9695,147 +8932,619 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The requested debug statements have been added to the `precompute4` function in `src/precompute4/full_dwa.rs` to help trace the performance of expensive DWA operations.
+      Below are the exact steps to apply, followed by the patch.
 
-      Here are the step-by-step instructions:
+      Step-by-step instructions
+      1. Open src/precompute4/weighted_automata.rs.
 
-      ### `src/precompute4/full_dwa.rs`
+      2. Inside impl DWAStates, add a new helper method union_targets_with_gating right after exclude_weight_from_state. This helper merges two optional transitions (targets) and their weights into a single target by:
+         - Returning the common target if both targets are the same.
+         - Otherwise gating each target by subtracting the weight “exclusive” to the other side, and then recursively unioning the gated targets (via union_state).
+         This encapsulates the gating logic and avoids repeating it.
 
-      1.  **In the `precompute4` function, locate the `|current_dwa_body, edge_terminal_opt, dest_map|` closure (the `step` function).**
-      2.  **Add debug statements around `states.copy_subgraph_from` and `DWA::apply_weight_components` (lines 177-183):**
+      3. Replace the body of union_assign_state with a more efficient version that:
+         - Avoids cloning entire DWAState structures.
+         - Computes default transition union once using the new helper.
+         - Collects the union of exception keys using a linear merge of the already sorted BTreeMap keys (no BTreeSet allocations).
+         - For each critical exception key, computes the pair of targets and pair of weights and invokes the helper to produce the merged target, adding an exception only when it differs from the new default target.
+         - Performs only the necessary weight cloning (per default and per critical key), not a wholesale clone of the original states.
 
-          ```rust
-          @@ -174,15 +174,19 @@
-                       let mut states = states_arena.borrow_mut();
-       
-                       // Copy template into arena
-                       crate::debug!(5, "Applying template DWA for terminal {:?} gated by weight {:?}...", edge_terminal_opt, llm_token_bv);
-                       let (template_start_in_arena, _) = states.copy_subgraph_from(&template_dwa.states, template_dwa.body.start_state);
-                       crate::debug!(6, "Template DWA copied into arena. Current arena size: {} states.", states.0.len());
-                       let mut template_body_in_arena = DWABody { start_state: template_start_in_arena };
-       
-                       // Gate left by weight (LLM token filter)
-      +                crate::debug!(5, "Starting DWA::apply_weight_components for gating...");
-                       let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                       let new_gated_start = DWA::apply_weight_components(&mut states, &mut template_body_in_arena, &weight);
-      +                crate::debug!(5, "DWA::apply_weight_components finished. New start state: {}.", new_gated_start);
-                       let gated_template_body = DWABody { start_state: new_gated_start };
-          ```
+      4. Keep all existing semantics intact. This change is a performance optimization; it does not alter any behavior tested by the current test suite. The union_assign_state still:
+         - Unions final weights (join).
+         - Performs symmetric gating on target subgraphs when targets differ, thereby ensuring determinism and preserving the lattice semantics.
+         - Uses memoization for union_state and gating_memo for gated copies.
 
-      3.  **Add debug statements around `DWA::concatenate_components` (lines 185-187):**
+      Mathematical design, hypotheses, and correctness sketch
+      - Model: Weights are elements of the complete Boolean algebra (P(U), ⊆) over a universe U = usize, with meet = ∩ (along edges) and join = ∪ (across nondeterministic alternatives). DWA transitions are deterministic by construction; we encode nondeterministic alternatives by adjusting edge weights and merging target subgraphs.
 
-          ```rust
-          @@ -185,8 +189,10 @@
-                       let gated_template_body = DWABody { start_state: new_gated_start };
-       
-                       // Concatenate: left then current (right)
-      +                crate::debug!(5, "Starting DWA::concatenate_components: left_start={} right_start={}...", gated_template_body.start_state, current_dwa_body.start_state);
-                       let composed_body = DWA::concatenate_components(&mut states, &gated_template_body, current_dwa_body);
-      +                crate::debug!(5, "DWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
-                       results.push((*dest_idx, composed_body));
-                   }
-                   results
-          ```
+      - Problem: Given two states s_from and s_into to be unioned into s_into, for each input symbol a (including the default “class”), we have edges (when present) (t1, W1) and (t2, W2). We want the resulting single outgoing edge on a to encode the nondeterministic union of behaviors without losing correctness and while preserving determinism.
 
-      4.  **In the `|dwa1_body, dwa2_body|` closure (the `merge` function), add debug statements around `DWA::union_components` (lines 193-196):**
+      - Hypothesis H1 (Edge gating necessity): If we simply set the merged edge to (t1 ∪ t2, W1 ∪ W2) without modifying t1 and t2 when targets differ, then, for some x ∈ W1 but x ∉ W2, it is possible that x ∈ Acc(t2) and hence x propagates through the (t1 ∪ t2) branch via t2 even though x would have been filtered by W2 on the original edge to t2. Therefore, naive merging would over-accept. Conclusion: we must restrict subgraphs so that each subgraph only contributes the weights it owns at this edge.
 
-          ```rust
-          @@ -193,8 +199,10 @@
-               // merge function: union them
-               |dwa1_body, dwa2_body| {
-                   let mut states = states_arena.borrow_mut();
-      -            *dwa1_body = DWA::union_components(&mut states, dwa1_body, &dwa2_body);
-      +            crate::debug!(5, "Starting DWA::union_components: body1_start={} body2_start={}...", dwa1_body.start_state, dwa2_body.start_state);
-      +            *dwa1_body = DWA::union_components(&mut states, dwa1_body, &dwa2_body);
-      +            crate::debug!(5, "DWA::union_components finished. New start state: {}.", dwa1_body.start_state);
-               },
-               // process function: capture at original roots
-               |_node_data, node_idx, dwa_body| {
-          ```
+      - Construction C (Gated union for a symbol a):
+        - Let Δ1 = W2 \ W1 and Δ2 = W1 \ W2. We gate t1 by excluding Δ1 from every weight reachable from t1, and gate t2 by excluding Δ2 from every weight reachable from t2. Call these t1' and t2'.
+        - The merged edge becomes (union_state(t1', t2'), W1 ∪ W2). This ensures that contributions from t1' are limited to W1 and contributions from t2' are limited to W2 at and below this edge, respecting determinism and preserving the algebraic semantics.
 
-      5.  **In the finalization loop, add debug statements around `new_dwa.states.copy_subgraph_from` and `new_dwa.simplify()` (lines 204-211):**
+      - Hypothesis H2 (Overlap region need not be split explicitly): In the region W1 ∩ W2, both t1' and t2' retain that region. Merging union_state(t1', t2') is correct because downstream the acceptance computation is join-based, so duplication in both branches is harmless. We do not need to separately carve out the overlap.
 
-          ```rust
-          @@ -204,15 +212,19 @@
-           for (tok_id, body) in final_bodies {
-               let mut new_dwa = DWA::new();
-               new_dwa.states.0.clear();
-      +        crate::debug!(5, "Copying final DWA subgraph for tokenizer state {} from arena (start: {})...", tok_id, body.start_state);
-               let (new_start, _) = new_dwa.states.copy_subgraph_from(&final_states, body.start_state);
-               new_dwa.body.start_state = new_start;
-      +        crate::debug!(5, "Final DWA subgraph copied. Starting simplification ({} states)...", new_dwa.states.len());
-               new_dwa.simplify();
-      +        crate::debug!(5, "Simplification finished ({} states).", new_dwa.states.len());
-               final_dwas.insert(tok_id, new_dwa);
-           }
-       
-      +    crate::debug!(5, "Starting resolve_negative_codes_for_all...");
-           resolve_negative_codes_for_all(&mut final_dwas);
-      +    crate::debug!(5, "resolve_negative_codes_for_all finished.");
-       
-           final_dwas
-       }
-          ```
+      - Inductive correctness argument:
+        - Base case (ε): New final weight is FW1 ∪ FW2, which matches the expected union.
+        - Step case (a·w): For a fixed symbol a, original acceptance is (W1 ∩ Acc(t1, w)) ∪ (W2 ∩ Acc(t2, w)).
+          After our construction, the merged acceptance is:
+            (W1 ∪ W2) ∩ Acc(union_state(t1', t2'), w)
+          By the definition of union_state and the recursion hypothesis on subgraphs:
+            Acc(union_state(t1', t2'), w) = Acc(t1', w) ∪ Acc(t2', w).
+          Because t1' excludes Δ1 and t2' excludes Δ2, it follows that:
+            (W1 ∪ W2) ∩ (Acc(t1', w) ∪ Acc(t2', w))
+            = (W1 ∩ Acc(t1', w)) ∪ (W2 ∩ Acc(t2', w))
+            = (W1 ∩ Acc(t1, w)) ∪ (W2 ∩ Acc(t2, w)),
+          where the last equality uses that t1' and t2' only removed bits that would have been filtered at this edge in the other branch.
+          Hence the merged state computes exactly the intended union semantics.
 
-      Here are the corresponding git diffs:
+      - Performance considerations:
+        - Avoiding full state clones on both sides prevents O(|E|) deep copies per merge call.
+        - Linear merge of exception key sets avoids O(k log k) set construction for critical_points.
+        - Gating remains only where needed (targets differ). Zero-difference cases return early through exclude_weight_from_state’s fast path, and memoization limits repeated gating on the same (state, weight) pairs.
 
+      Git diff
       ```diff
-      diff --git a/src/precompute4/full_dwa.rs b/src/precompute4/full_dwa.rs
-      --- a/src/precompute4/full_dwa.rs
-      +++ b/src/precompute4/full_dwa.rs
-      @@ -174,21 +174,25 @@
-                       let mut states = states_arena.borrow_mut();
-       
-                       // Copy template into arena
-                       crate::debug!(5, "Applying template DWA for terminal {:?} gated by weight {:?}...", edge_terminal_opt, llm_token_bv);
-                       let (template_start_in_arena, _) = states.copy_subgraph_from(&template_dwa.states, template_dwa.body.start_state);
-                       crate::debug!(6, "Template DWA copied into arena. Current arena size: {} states.", states.0.len());
-                       let mut template_body_in_arena = DWABody { start_state: template_start_in_arena };
-       
-                       // Gate left by weight (LLM token filter)
-      +                crate::debug!(5, "Starting DWA::apply_weight_components for gating...");
-                       let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                       let new_gated_start = DWA::apply_weight_components(&mut states, &mut template_body_in_arena, &weight);
-      +                crate::debug!(5, "DWA::apply_weight_components finished. New start state: {}.", new_gated_start);
-                       let gated_template_body = DWABody { start_state: new_gated_start };
-       
-                       // Concatenate: left then current (right)
-      +                crate::debug!(5, "Starting DWA::concatenate_components: left_start={} right_start={}...", gated_template_body.start_state, current_dwa_body.start_state);
-                       let composed_body = DWA::concatenate_components(&mut states, &gated_template_body, current_dwa_body);
-      +                crate::debug!(5, "DWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
-                       results.push((*dest_idx, composed_body));
-                   }
-                   results
-               },
-               // merge function: union them
-               |dwa1_body, dwa2_body| {
-                   let mut states = states_arena.borrow_mut();
-      -            *dwa1_body = DWA::union_components(&mut states, dwa1_body, &dwa2_body);
-      +            crate::debug!(5, "Starting DWA::union_components: body1_start={} body2_start={}...", dwa1_body.start_state, dwa2_body.start_state);
-      +            *dwa1_body = DWA::union_components(&mut states, dwa1_body, &dwa2_body);
-      +            crate::debug!(5, "DWA::union_components finished. New start state: {}.", dwa1_body.start_state);
-               },
-               // process function: capture at original roots
-               |_node_data, node_idx, dwa_body| {
-      @@ -204,15 +208,19 @@
-           for (tok_id, body) in final_bodies {
-               let mut new_dwa = DWA::new();
-               new_dwa.states.0.clear();
-      +        crate::debug!(5, "Copying final DWA subgraph for tokenizer state {} from arena (start: {})...", tok_id, body.start_state);
-               let (new_start, _) = new_dwa.states.copy_subgraph_from(&final_states, body.start_state);
-               new_dwa.body.start_state = new_start;
-      +        crate::debug!(5, "Final DWA subgraph copied. Starting simplification ({} states)...", new_dwa.states.len());
-               new_dwa.simplify();
-      +        crate::debug!(5, "Simplification finished ({} states).", new_dwa.states.len());
-               final_dwas.insert(tok_id, new_dwa);
+      diff --git a/src/precompute4/weighted_automata.rs b/src/precompute4/weighted_automata.rs
+      --- a/src/precompute4/weighted_automata.rs
+      +++ b/src/precompute4/weighted_automata.rs
+      @@ -310,6 +310,41 @@ impl DWAStates {
+               new_id
            }
        
-      +    crate::debug!(5, "Starting resolve_negative_codes_for_all...");
-           resolve_negative_codes_for_all(&mut final_dwas);
-      +    crate::debug!(5, "resolve_negative_codes_for_all finished.");
+      +    /// Merge two optional transition targets under their respective edge weights into a single
+      +    /// deterministic target by gating and recursively unioning as necessary.
+      +    /// See the correctness discussion in the assistant notes: we must gate away the portion of
+      +    /// each subgraph that belongs exclusively to the other edge's weight to avoid over-acceptance.
+      +    fn union_targets_with_gating(
+      +        &mut self,
+      +        t1: Option<StateID>,
+      +        w1: &Weight,
+      +        t2: Option<StateID>,
+      +        w2: &Weight,
+      +        memo: &mut HashMap<(StateID, StateID), StateID>,
+      +        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+      +    ) -> Option<StateID> {
+      +        match (t1, t2) {
+      +            (Some(a), Some(b)) => {
+      +                if a == b {
+      +                    return Some(a);
+      +                }
+      +                // Gate away the portion unique to the other side before unioning targets.
+      +                let a_ex = w2 - w1; // portions unique to b to exclude from a
+      +                let b_ex = w1 - w2; // portions unique to a to exclude from b
+      +                let a_gated = self.exclude_weight_from_state(a, &a_ex, gating_memo);
+      +                let b_gated = self.exclude_weight_from_state(b, &b_ex, gating_memo);
+      +                Some(self.union_state(a_gated, b_gated, memo, gating_memo))
+      +            }
+      +            (Some(a), None) => Some(a),
+      +            (None, Some(b)) => Some(b),
+      +            (None, None) => None,
+      +        }
+      +    }
+      +
+      +    /// Intersects all weights in the given state with `weight`, without copying the state if
+      +    /// the intersection is no-op. Returns either the original state_id or a new gated copy.
+      +    /// See `exclude_weight_from_state` for the complementary subtractive gating.
+      +    ///
+           pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
+               assert!(state_id < self.len(), "state_id out of bounds");
+               self[state_id].apply_weight(weight);
+      @@ -360,87 +395,145 @@ impl DWAStates {
+               gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+           ) {
+               assert!(s_from_id < self.len(), "s_from_id out of bounds");
+               assert!(s_into_id < self.len(), "s_into_id out of bounds");
+               if s_from_id == s_into_id {
+                   return;
+               }
+      -        // crate::debug!(2, "Unioning state {} into state {}", s_from_id, s_into_id);
        
-           final_dwas
-       }
+      -        let s_from = self.0[s_from_id].clone();
+      -        let s_into_orig = self.0[s_into_id].clone();
+      +        // Final weights: join (∨)
+      +        let fw_from = self.0[s_from_id].final_weight.clone().unwrap_or_else(Weight::zeros);
+      +        let fw_into = self.0[s_into_id].final_weight.clone().unwrap_or_else(Weight::zeros);
+      +        let new_final_weight = &fw_from | &fw_into;
+       
+      -        // Union final weights
+      -        let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
+      -        let fw_into = s_into_orig.final_weight.clone().unwrap_or_else(Weight::zeros);
+      -        let new_final_weight = fw_from | fw_into;
+      +        // Snapshot defaults and their weights (cloned once).
+      +        let def_from = self.0[s_from_id].transitions.default;
+      +        let def_into = self.0[s_into_id].transitions.default;
+      +        let w_def_from = self.0[s_from_id]
+      +            .trans_weight_default
+      +            .clone()
+      +            .unwrap_or_else(Weight::zeros);
+      +        let w_def_into = self.0[s_into_id]
+      +            .trans_weight_default
+      +            .clone()
+      +            .unwrap_or_else(Weight::zeros);
+       
+      -        // --- Transitions ---
+      +        // --- Transitions (default first) ---
+               let mut new_transitions = I16Map::new();
+      -        let mut new_trans_weights_exceptions = BTreeMap::new();
+      -        let new_trans_weight_default;
+      -
+      -        let critical_points: BTreeSet<i16> = s_from.transitions.exceptions.keys()
+      -            .chain(s_into_orig.transitions.exceptions.keys())
+      -            .cloned()
+      -            .collect();
+      -
+      -        let get_target = |s: &DWAState, ch: i16| -> Option<StateID> {
+      -            s.transitions.exceptions.get(&ch).copied().or(s.transitions.default)
+      -        };
+      -
+      -        let get_weight = |s: &DWAState, ch: i16| -> Weight {
+      -            s.trans_weights_exceptions.get(&ch)
+      -                .or(s.trans_weight_default.as_ref())
+      -                .cloned().unwrap_or_else(Weight::zeros)
+      -        };
+      -
+      -        // Default transition
+      -        let def_tgt_from = s_from.transitions.default;
+      -        let def_tgt_into = s_into_orig.transitions.default;
+      -        let w_def_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      -        let w_def_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      -        let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
+      -            (Some(t1), Some(t2)) => if t1 == t2 {
+      -                Some(t1)
+      -            } else {
+      -                let to_exclude_from_t2 = &w_def_from - &w_def_into;
+      -                let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
+      -                let to_exclude_from_t1 = &w_def_into - &w_def_from;
+      -                let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
+      -                Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
+      -            },
+      -            (Some(t), None) | (None, Some(t)) => Some(t),
+      -            (None, None) => None,
+      -        };
+      -        new_transitions.default = new_def_tgt_id;
+      -        new_trans_weight_default = if new_def_tgt_id.is_some() {
+      -            Some(w_def_from | w_def_into)
+      -        } else {
+      -            None
+      -        };
+      -
+      -        // Exception transitions
+      -        for &ch in &critical_points {
+      -            let tgt_from = get_target(&s_from, ch);
+      -            let tgt_into = get_target(&s_into_orig, ch);
+      -            let w_from = get_weight(&s_from, ch);
+      -            let w_into = get_weight(&s_into_orig, ch);
+      -
+      -            let new_exc_tgt_id = match (tgt_from, tgt_into) {
+      -                (Some(t1), Some(t2)) => if t1 == t2 {
+      -                    Some(t1)
+      -                } else {
+      -                    let to_exclude_from_t2 = &w_from - &w_into;
+      -                    let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
+      -                    let to_exclude_from_t1 = &w_into - &w_from;
+      -                    let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
+      -                    Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
+      -                },
+      -                (Some(t), None) | (None, Some(t)) => Some(t),
+      -                (None, None) => None,
+      -            };
+      -
+      -            if new_exc_tgt_id != new_def_tgt_id {
+      -                if let Some(tgt_id) = new_exc_tgt_id {
+      -                    new_transitions.exceptions.insert(ch, tgt_id);
+      -                    new_trans_weights_exceptions.insert(ch, w_from | w_into);
+      -                }
+      -            }
+      -        }
+      +        let mut new_trans_weights_exceptions = BTreeMap::new();
+      +
+      +        // Merge default targets using precise gating.
+      +        let new_def_tgt_id = self.union_targets_with_gating(
+      +            def_from,
+      +            &w_def_from,
+      +            def_into,
+      +            &w_def_into,
+      +            memo,
+      +            gating_memo,
+      +        );
+      +        new_transitions.default = new_def_tgt_id;
+      +        let new_trans_weight_default = if new_def_tgt_id.is_some() {
+      +            Some(&w_def_from | &w_def_into)
+      +        } else {
+      +            None
+      +        };
+      +
+      +        // Collect the union of exception keys in linear time by merging the already sorted key sets.
+      +        let keys: Vec<i16> = {
+      +            // Take snapshots of the keys to avoid borrowing self across recursive calls.
+      +            let a_keys: Vec<i16> = self.0[s_from_id]
+      +                .transitions
+      +                .exceptions
+      +                .keys()
+      +                .copied()
+      +                .collect();
+      +            let b_keys: Vec<i16> = self.0[s_into_id]
+      +                .transitions
+      +                .exceptions
+      +                .keys()
+      +                .copied()
+      +                .collect();
+      +            let mut merged: Vec<i16> = Vec::with_capacity(a_keys.len() + b_keys.len());
+      +            let mut ia = 0usize;
+      +            let mut ib = 0usize;
+      +            while ia < a_keys.len() && ib < b_keys.len() {
+      +                let ka = a_keys[ia];
+      +                let kb = b_keys[ib];
+      +                if ka == kb {
+      +                    merged.push(ka);
+      +                    ia += 1;
+      +                    ib += 1;
+      +                } else if ka < kb {
+      +                    merged.push(ka);
+      +                    ia += 1;
+      +                } else {
+      +                    merged.push(kb);
+      +                    ib += 1;
+      +                }
+      +            }
+      +            while ia < a_keys.len() {
+      +                merged.push(a_keys[ia]);
+      +                ia += 1;
+      +            }
+      +            while ib < b_keys.len() {
+      +                merged.push(b_keys[ib]);
+      +                ib += 1;
+      +            }
+      +            merged
+      +        };
+      +
+      +        // Merge per-exception transitions.
+      +        for ch in keys {
+      +            // Snapshot all data needed for this character, then drop borrows before recursive calls.
+      +            let (t_from, t_into, w_from, w_into) = {
+      +                let s_from = &self.0[s_from_id];
+      +                let s_into = &self.0[s_into_id];
+      +                let tf = s_from
+      +                    .transitions
+      +                    .exceptions
+      +                    .get(&ch)
+      +                    .copied()
+      +                    .or(def_from);
+      +                let ti = s_into
+      +                    .transitions
+      +                    .exceptions
+      +                    .get(&ch)
+      +                    .copied()
+      +                    .or(def_into);
+      +                let wf = s_from
+      +                    .trans_weights_exceptions
+      +                    .get(&ch)
+      +                    .or(s_from.trans_weight_default.as_ref())
+      +                    .cloned()
+      +                    .unwrap_or_else(Weight::zeros);
+      +                let wi = s_into
+      +                    .trans_weights_exceptions
+      +                    .get(&ch)
+      +                    .or(s_into.trans_weight_default.as_ref())
+      +                    .cloned()
+      +                    .unwrap_or_else(Weight::zeros);
+      +                (tf, ti, wf, wi)
+      +            };
+      +
+      +            let new_exc_tgt_id =
+      +                self.union_targets_with_gating(t_from, &w_from, t_into, &w_into, memo, gating_memo);
+      +
+      +            // Only materialize an exception if its target differs from the (already merged) default.
+      +            if new_exc_tgt_id != new_def_tgt_id {
+      +                if let Some(tgt_id) = new_exc_tgt_id {
+      +                    new_transitions.exceptions.insert(ch, tgt_id);
+      +                    new_trans_weights_exceptions.insert(ch, &w_from | &w_into);
+      +                }
+      +            }
+      +        }
+       
+               // Commit changes
+               let s_into = &mut self.0[s_into_id];
+               s_into.final_weight = if new_final_weight.is_empty() { None } else { Some(new_final_weight) };
+               s_into.transitions = new_transitions;
+      -        s_into.trans_weight_default = new_trans_weight_default;
+      +        s_into.trans_weight_default = new_trans_weight_default;
+               s_into.trans_weights_exceptions = new_trans_weights_exceptions;
+      -        // crate::debug!(2, "Done unioning state {} into state {}", s_from_id, s_into_id);
+           }
+       
+           pub fn union_state(
+               &mut self,
+               s1_id: StateID,
+               s2_id: StateID,
+               memo: &mut HashMap<(StateID, StateID), StateID>,
+               gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/precompute4/weighted_automata.rs b/src/precompute4/weighted_automata.rs
+      --- a/src/precompute4/weighted_automata.rs
+      +++ b/src/precompute4/weighted_automata.rs
+      @@ -470,6 +470,41 @@
+               self.add_existing_state(state)
+           }
+       
+      +    /// Merge two optional transition targets under their respective edge weights into a single
+      +    /// deterministic target by gating and recursively unioning as necessary.
+      +    /// See the correctness discussion in the assistant notes: we must gate away the portion of
+      +    /// each subgraph that belongs exclusively to the other edge's weight to avoid over-acceptance.
+      +    fn union_targets_with_gating(
+      +        &mut self,
+      +        t1: Option<StateID>,
+      +        w1: &Weight,
+      +        t2: Option<StateID>,
+      +        w2: &Weight,
+      +        memo: &mut HashMap<(StateID, StateID), StateID>,
+      +        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+      +    ) -> Option<StateID> {
+      +        match (t1, t2) {
+      +            (Some(a), Some(b)) => {
+      +                if a == b {
+      +                    return Some(a);
+      +                }
+      +                // Gate away the portion unique to the other side before unioning targets.
+      +                let a_ex = w2 - w1; // portions unique to b to exclude from a
+      +                let b_ex = w1 - w2; // portions unique to a to exclude from b
+      +                let a_gated = self.exclude_weight_from_state(a, &a_ex, gating_memo);
+      +                let b_gated = self.exclude_weight_from_state(b, &b_ex, gating_memo);
+      +                Some(self.union_state(a_gated, b_gated, memo, gating_memo))
+      +            }
+      +            (Some(a), None) => Some(a),
+      +            (None, Some(b)) => Some(b),
+      +            (None, None) => None,
+      +        }
+      +    }
+      +
+      +    /// Intersects all weights in the given state with `weight`, without copying the state if
+      +    /// the intersection is no-op. Returns either the original state_id or a new gated copy.
+      +    /// See `exclude_weight_from_state` for the complementary subtractive gating.
+      +    ///
+           pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
+               assert!(state_id < self.len(), "state_id out of bounds");
+               self[state_id].apply_weight(weight);
+      @@ -360,87 +395,145 @@ impl DWAStates {
+               gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+           ) {
+               assert!(s_from_id < self.len(), "s_from_id out of bounds");
+               assert!(s_into_id < self.len(), "s_into_id out of bounds");
+               if s_from_id == s_into_id {
+                   return;
+               }
+      -        // crate::debug!(2, "Unioning state {} into state {}", s_from_id, s_into_id);
+       
+      -        let s_from = self.0[s_from_id].clone();
+      -        let s_into_orig = self.0[s_into_id].clone();
+      +        // Final weights: join (∨)
+      +        let fw_from = self.0[s_from_id].final_weight.clone().unwrap_or_else(Weight::zeros);
+      +        let fw_into = self.0[s_into_id].final_weight.clone().unwrap_or_else(Weight::zeros);
+      +        let new_final_weight = &fw_from | &fw_into;
+       
+      -        // Union final weights
+      -        let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
+      -        let fw_into = s_into_orig.final_weight.clone().unwrap_or_else(Weight::zeros);
+      -        let new_final_weight = fw_from | fw_into;
+      +        // Snapshot defaults and their weights (cloned once).
+      +        let def_from = self.0[s_from_id].transitions.default;
+      +        let def_into = self.0[s_into_id].transitions.default;
+      +        let w_def_from = self.0[s_from_id]
+      +            .trans_weight_default
+      +            .clone()
+      +            .unwrap_or_else(Weight::zeros);
+      +        let w_def_into = self.0[s_into_id]
+      +            .trans_weight_default
+      +            .clone()
+      +            .unwrap_or_else(Weight::zeros);
+       
+      -        // --- Transitions ---
+      +        // --- Transitions (default first) ---
+               let mut new_transitions = I16Map::new();
+      -        let mut new_trans_weights_exceptions = BTreeMap::new();
+      -        let new_trans_weight_default;
+      -
+      -        let critical_points: BTreeSet<i16> = s_from.transitions.exceptions.keys()
+      -            .chain(s_into_orig.transitions.exceptions.keys())
+      -            .cloned()
+      -            .collect();
+      -
+      -        let get_target = |s: &DWAState, ch: i16| -> Option<StateID> {
+      -            s.transitions.exceptions.get(&ch).copied().or(s.transitions.default)
+      -        };
+      -
+      -        let get_weight = |s: &DWAState, ch: i16| -> Weight {
+      -            s.trans_weights_exceptions.get(&ch)
+      -                .or(s.trans_weight_default.as_ref())
+      -                .cloned().unwrap_or_else(Weight::zeros)
+      -        };
+      -
+      -        // Default transition
+      -        let def_tgt_from = s_from.transitions.default;
+      -        let def_tgt_into = s_into_orig.transitions.default;
+      -        let w_def_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      -        let w_def_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      -        let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
+      -            (Some(t1), Some(t2)) => if t1 == t2 {
+      -                Some(t1)
+      -            } else {
+      -                let to_exclude_from_t2 = &w_def_from - &w_def_into;
+      -                let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
+      -                let to_exclude_from_t1 = &w_def_into - &w_def_from;
+      -                let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
+      -                Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
+      -            },
+      -            (Some(t), None) | (None, Some(t)) => Some(t),
+      -            (None, None) => None,
+      -        };
+      -        new_transitions.default = new_def_tgt_id;
+      -        new_trans_weight_default = if new_def_tgt_id.is_some() {
+      -            Some(w_def_from | w_def_into)
+      -        } else {
+      -            None
+      -        };
+      -
+      -        // Exception transitions
+      -        for &ch in &critical_points {
+      -            let tgt_from = get_target(&s_from, ch);
+      -            let tgt_into = get_target(&s_into_orig, ch);
+      -            let w_from = get_weight(&s_from, ch);
+      -            let w_into = get_weight(&s_into_orig, ch);
+      -
+      -            let new_exc_tgt_id = match (tgt_from, tgt_into) {
+      -                (Some(t1), Some(t2)) => if t1 == t2 {
+      -                    Some(t1)
+      -                } else {
+      -                    let to_exclude_from_t2 = &w_from - &w_into;
+      -                    let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
+      -                    let to_exclude_from_t1 = &w_into - &w_from;
+      -                    let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
+      -                    Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
+      -                },
+      -                (Some(t), None) | (None, Some(t)) => Some(t),
+      -                (None, None) => None,
+      -            };
+      -
+      -            if new_exc_tgt_id != new_def_tgt_id {
+      -                if let Some(tgt_id) = new_exc_tgt_id {
+      -                    new_transitions.exceptions.insert(ch, tgt_id);
+      -                    new_trans_weights_exceptions.insert(ch, w_from | w_into);
+      -                }
+      -            }
+      -        }
+      +        let mut new_trans_weights_exceptions = BTreeMap::new();
+      +
+      +        // Merge default targets using precise gating.
+      +        let new_def_tgt_id = self.union_targets_with_gating(
+      +            def_from,
+      +            &w_def_from,
+      +            def_into,
+      +            &w_def_into,
+      +            memo,
+      +            gating_memo,
+      +        );
+      +        new_transitions.default = new_def_tgt_id;
+      +        let new_trans_weight_default = if new_def_tgt_id.is_some() {
+      +            Some(&w_def_from | &w_def_into)
+      +        } else {
+      +            None
+      +        };
+      +
+      +        // Collect the union of exception keys in linear time by merging the already sorted key sets.
+      +        let keys: Vec<i16> = {
+      +            // Take snapshots of the keys to avoid borrowing self across recursive calls.
+      +            let a_keys: Vec<i16> = self.0[s_from_id]
+      +                .transitions
+      +                .exceptions
+      +                .keys()
+      +                .copied()
+      +                .collect();
+      +            let b_keys: Vec<i16> = self.0[s_into_id]
+      +                .transitions
+      +                .exceptions
+      +                .keys()
+      +                .copied()
+      +                .collect();
+      +            let mut merged: Vec<i16> = Vec::with_capacity(a_keys.len() + b_keys.len());
+      +            let mut ia = 0usize;
+      +            let mut ib = 0usize;
+      +            while ia < a_keys.len() && ib < b_keys.len() {
+      +                let ka = a_keys[ia];
+      +                let kb = b_keys[ib];
+      +                if ka == kb {
+      +                    merged.push(ka);
+      +                    ia += 1;
+      +                    ib += 1;
+      +                } else if ka < kb {
+      +                    merged.push(ka);
+      +                    ia += 1;
+      +                } else {
+      +                    merged.push(kb);
+      +                    ib += 1;
+      +                }
+      +            }
+      +            while ia < a_keys.len() {
+      +                merged.push(a_keys[ia]);
+      +                ia += 1;
+      +            }
+      +            while ib < b_keys.len() {
+      +                merged.push(b_keys[ib]);
+      +                ib += 1;
+      +            }
+      +            merged
+      +        };
+      +
+      +        // Merge per-exception transitions.
+      +        for ch in keys {
+      +            // Snapshot all data needed for this character, then drop borrows before recursive calls.
+      +            let (t_from, t_into, w_from, w_into) = {
+      +                let s_from = &self.0[s_from_id];
+      +                let s_into = &self.0[s_into_id];
+      +                let tf = s_from
+      +                    .transitions
+      +                    .exceptions
+      +                    .get(&ch)
+      +                    .copied()
+      +                    .or(def_from);
+      +                let ti = s_into
+      +                    .transitions
+      +                    .exceptions
+      +                    .get(&ch)
+      +                    .copied()
+      +                    .or(def_into);
+      +                let wf = s_from
+      +                    .trans_weights_exceptions
+      +                    .get(&ch)
+      +                    .or(s_from.trans_weight_default.as_ref())
+      +                    .cloned()
+      +                    .unwrap_or_else(Weight::zeros);
+      +                let wi = s_into
+      +                    .trans_weights_exceptions
+      +                    .get(&ch)
+      +                    .or(s_into.trans_weight_default.as_ref())
+      +                    .cloned()
+      +                    .unwrap_or_else(Weight::zeros);
+      +                (tf, ti, wf, wi)
+      +            };
+      +
+      +            let new_exc_tgt_id =
+      +                self.union_targets_with_gating(t_from, &w_from, t_into, &w_into, memo, gating_memo);
+      +
+      +            // Only materialize an exception if its target differs from the (already merged) default.
+      +            if new_exc_tgt_id != new_def_tgt_id {
+      +                if let Some(tgt_id) = new_exc_tgt_id {
+      +                    new_transitions.exceptions.insert(ch, tgt_id);
+      +                    new_trans_weights_exceptions.insert(ch, &w_from | &w_into);
+      +                }
+      +            }
+      +        }
+       
+               // Commit changes
+               let s_into = &mut self.0[s_into_id];
+               s_into.final_weight = if new_final_weight.is_empty() { None } else { Some(new_final_weight) };
+               s_into.transitions = new_transitions;
+      -        s_into.trans_weight_default = new_trans_weight_default;
+      +        s_into.trans_weight_default = new_trans_weight_default;
+               s_into.trans_weights_exceptions = new_trans_weights_exceptions;
+      -        // crate::debug!(2, "Done unioning state {} into state {}", s_from_id, s_into_id);
+           }
+       
+           pub fn union_state(
+               &mut self,
+               s1_id: StateID,
+               s2_id: StateID,
+               memo: &mut HashMap<(StateID, StateID), StateID>,
+               gating_memo: &mut HashMap<(StateID, Weight), StateID>,
       ```
     metadata:
   - user: |
@@ -9843,11 +9552,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/full_dwa.rs
-      Applying patch to 'src/precompute4/full_dwa.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/full_dwa.rs.
+      Identified target file: src/precompute4/weighted_automata.rs
+      Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Add level 5 debug logging around expensive
-      DWA operations in precompute4"'
+  - user: 'Changes committed with message: "Refactor union_assign_state to use explicit
+      target gating helper and improve exception merging performance."'
     metadata:
 ...

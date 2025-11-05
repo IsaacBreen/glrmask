@@ -440,6 +440,41 @@ impl DWAStates {
         self.add_existing_state(state)
     }
 
+    /// Merge two optional transition targets under their respective edge weights into a single
+    /// deterministic target by gating and recursively unioning as necessary.
+    /// See the correctness discussion in the assistant notes: we must gate away the portion of
+    /// each subgraph that belongs exclusively to the other edge's weight to avoid over-acceptance.
+    fn union_targets_with_gating(
+        &mut self,
+        t1: Option<StateID>,
+        w1: &Weight,
+        t2: Option<StateID>,
+        w2: &Weight,
+        memo: &mut HashMap<(StateID, StateID), StateID>,
+        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+    ) -> Option<StateID> {
+        match (t1, t2) {
+            (Some(a), Some(b)) => {
+                if a == b {
+                    return Some(a);
+                }
+                // Gate away the portion unique to the other side before unioning targets.
+                let a_ex = w2 - w1; // portions unique to b to exclude from a
+                let b_ex = w1 - w2; // portions unique to a to exclude from b
+                let a_gated = self.exclude_weight_from_state(a, &a_ex, gating_memo);
+                let b_gated = self.exclude_weight_from_state(b, &b_ex, gating_memo);
+                Some(self.union_state(a_gated, b_gated, memo, gating_memo))
+            }
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
+    /// Intersects all weights in the given state with `weight`, without copying the state if
+    /// the intersection is no-op. Returns either the original state_id or a new gated copy.
+    /// See `exclude_weight_from_state` for the complementary subtractive gating.
+    ///
     pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
         assert!(state_id < self.len(), "state_id out of bounds");
         self[state_id].apply_weight(weight);
@@ -488,86 +523,129 @@ impl DWAStates {
         if s_from_id == s_into_id {
             return;
         }
-        // crate::debug!(2, "Unioning state {} into state {}", s_from_id, s_into_id);
 
-        let s_from = self.0[s_from_id].clone();
-        let s_into_orig = self.0[s_into_id].clone();
+        // Final weights: join (∨)
+        let fw_from = self.0[s_from_id].final_weight.clone().unwrap_or_else(Weight::zeros);
+        let fw_into = self.0[s_into_id].final_weight.clone().unwrap_or_else(Weight::zeros);
+        let new_final_weight = &fw_from | &fw_into;
 
-        // Union final weights
-        let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
-        let fw_into = s_into_orig.final_weight.clone().unwrap_or_else(Weight::zeros);
-        let new_final_weight = fw_from | fw_into;
+        // Snapshot defaults and their weights (cloned once).
+        let def_from = self.0[s_from_id].transitions.default;
+        let def_into = self.0[s_into_id].transitions.default;
+        let w_def_from = self.0[s_from_id]
+            .trans_weight_default
+            .clone()
+            .unwrap_or_else(Weight::zeros);
+        let w_def_into = self.0[s_into_id]
+            .trans_weight_default
+            .clone()
+            .unwrap_or_else(Weight::zeros);
 
-        // --- Transitions ---
+        // --- Transitions (default first) ---
         let mut new_transitions = I16Map::new();
         let mut new_trans_weights_exceptions = BTreeMap::new();
-        let new_trans_weight_default;
 
-        let critical_points: BTreeSet<i16> = s_from.transitions.exceptions.keys()
-            .chain(s_into_orig.transitions.exceptions.keys())
-            .cloned()
-            .collect();
-
-        let get_target = |s: &DWAState, ch: i16| -> Option<StateID> {
-            s.transitions.exceptions.get(&ch).copied().or(s.transitions.default)
-        };
-
-        let get_weight = |s: &DWAState, ch: i16| -> Weight {
-            s.trans_weights_exceptions.get(&ch)
-                .or(s.trans_weight_default.as_ref())
-                .cloned().unwrap_or_else(Weight::zeros)
-        };
-
-        // Default transition
-        let def_tgt_from = s_from.transitions.default;
-        let def_tgt_into = s_into_orig.transitions.default;
-        let w_def_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-        let w_def_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-        let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
-            (Some(t1), Some(t2)) => if t1 == t2 {
-                Some(t1)
-            } else {
-                let to_exclude_from_t2 = &w_def_from - &w_def_into;
-                let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
-                let to_exclude_from_t1 = &w_def_into - &w_def_from;
-                let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
-                Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
-            },
-            (Some(t), None) | (None, Some(t)) => Some(t),
-            (None, None) => None,
-        };
+        // Merge default targets using precise gating.
+        let new_def_tgt_id = self.union_targets_with_gating(
+            def_from,
+            &w_def_from,
+            def_into,
+            &w_def_into,
+            memo,
+            gating_memo,
+        );
         new_transitions.default = new_def_tgt_id;
-        new_trans_weight_default = if new_def_tgt_id.is_some() {
-            Some(w_def_from | w_def_into)
+        let new_trans_weight_default = if new_def_tgt_id.is_some() {
+            Some(&w_def_from | &w_def_into)
         } else {
             None
         };
 
-        // Exception transitions
-        for &ch in &critical_points {
-            let tgt_from = get_target(&s_from, ch);
-            let tgt_into = get_target(&s_into_orig, ch);
-            let w_from = get_weight(&s_from, ch);
-            let w_into = get_weight(&s_into_orig, ch);
-
-            let new_exc_tgt_id = match (tgt_from, tgt_into) {
-                (Some(t1), Some(t2)) => if t1 == t2 {
-                    Some(t1)
+        // Collect the union of exception keys in linear time by merging the already sorted key sets.
+        let keys: Vec<i16> = {
+            // Take snapshots of the keys to avoid borrowing self across recursive calls.
+            let a_keys: Vec<i16> = self.0[s_from_id]
+                .transitions
+                .exceptions
+                .keys()
+                .copied()
+                .collect();
+            let b_keys: Vec<i16> = self.0[s_into_id]
+                .transitions
+                .exceptions
+                .keys()
+                .copied()
+                .collect();
+            let mut merged: Vec<i16> = Vec::with_capacity(a_keys.len() + b_keys.len());
+            let mut ia = 0usize;
+            let mut ib = 0usize;
+            while ia < a_keys.len() && ib < b_keys.len() {
+                let ka = a_keys[ia];
+                let kb = b_keys[ib];
+                if ka == kb {
+                    merged.push(ka);
+                    ia += 1;
+                    ib += 1;
+                } else if ka < kb {
+                    merged.push(ka);
+                    ia += 1;
                 } else {
-                    let to_exclude_from_t2 = &w_from - &w_into;
-                    let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
-                    let to_exclude_from_t1 = &w_into - &w_from;
-                    let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
-                    Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
-                },
-                (Some(t), None) | (None, Some(t)) => Some(t),
-                (None, None) => None,
+                    merged.push(kb);
+                    ib += 1;
+                }
+            }
+            while ia < a_keys.len() {
+                merged.push(a_keys[ia]);
+                ia += 1;
+            }
+            while ib < b_keys.len() {
+                merged.push(b_keys[ib]);
+                ib += 1;
+            }
+            merged
+        };
+
+        // Merge per-exception transitions.
+        for ch in keys {
+            // Snapshot all data needed for this character, then drop borrows before recursive calls.
+            let (t_from, t_into, w_from, w_into) = {
+                let s_from = &self.0[s_from_id];
+                let s_into = &self.0[s_into_id];
+                let tf = s_from
+                    .transitions
+                    .exceptions
+                    .get(&ch)
+                    .copied()
+                    .or(def_from);
+                let ti = s_into
+                    .transitions
+                    .exceptions
+                    .get(&ch)
+                    .copied()
+                    .or(def_into);
+                let wf = s_from
+                    .trans_weights_exceptions
+                    .get(&ch)
+                    .or(s_from.trans_weight_default.as_ref())
+                    .cloned()
+                    .unwrap_or_else(Weight::zeros);
+                let wi = s_into
+                    .trans_weights_exceptions
+                    .get(&ch)
+                    .or(s_into.trans_weight_default.as_ref())
+                    .cloned()
+                    .unwrap_or_else(Weight::zeros);
+                (tf, ti, wf, wi)
             };
 
+            let new_exc_tgt_id =
+                self.union_targets_with_gating(t_from, &w_from, t_into, &w_into, memo, gating_memo);
+
+            // Only materialize an exception if its target differs from the (already merged) default.
             if new_exc_tgt_id != new_def_tgt_id {
                 if let Some(tgt_id) = new_exc_tgt_id {
                     new_transitions.exceptions.insert(ch, tgt_id);
-                    new_trans_weights_exceptions.insert(ch, w_from | w_into);
+                    new_trans_weights_exceptions.insert(ch, &w_from | &w_into);
                 }
             }
         }
@@ -578,7 +656,6 @@ impl DWAStates {
         s_into.transitions = new_transitions;
         s_into.trans_weight_default = new_trans_weight_default;
         s_into.trans_weights_exceptions = new_trans_weights_exceptions;
-        // crate::debug!(2, "Done unioning state {} into state {}", s_from_id, s_into_id);
     }
 
     pub fn union_state(
