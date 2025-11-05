@@ -1066,89 +1066,34 @@ impl DWA {
     /// A transition exists if it exists in at least one of the original DWAs.
     /// If a transition exists in one but not the other, the other is treated as going to a non-final sink state.
     pub fn union(&self, other: &DWA) -> DWA {
-        let mut new_dwa = DWA::default();
-        let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
-        let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
-
-        let sink0 = self.states.len();
-        let sink1 = other.states.len();
-
-        let mut get_or_create = |
-            pair: (StateID, StateID),
-            new_dwa: &mut DWA,
-            pair_to_new_id: &mut BTreeMap<(StateID, StateID), StateID>,
-            worklist: &mut VecDeque<(StateID, StateID)>
-        | -> StateID {
-            if let Some(&id) = pair_to_new_id.get(&pair) {
-                return id;
-            }
-            let new_id = new_dwa.states.0.len();
-            new_dwa.states.0.push(DWAState::default());
-            pair_to_new_id.insert(pair, new_id);
-            worklist.push_back(pair);
-            new_id
-        };
-
-        if self.states.is_empty() && other.states.is_empty() {
-            return new_dwa;
+        if self.states.0.is_empty() {
+            return other.clone();
+        }
+        if other.states.0.is_empty() {
+            return self.clone();
         }
 
-        let start_pair = (self.body.start_state, other.body.start_state);
-        new_dwa.body.start_state = get_or_create(start_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
+        let mut new_dwa = self.clone();
+        let offset = new_dwa.states.len();
 
-        while let Some((id0, id1)) = worklist.pop_front() {
-            let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
-            let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
-            let s1 = if id1 == sink1 { None } else { Some(&other.states[id1]) };
-
-            let new_state = &mut new_dwa.states[new_id];
-
-            let fw0 = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-            let fw1 = s1.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-            let final_w = fw0 | fw1;
-            if !final_w.is_empty() {
-                new_state.final_weight = Some(final_w);
+        for other_state in &other.states.0 {
+            let mut new_state = other_state.clone();
+            if let Some(d) = new_state.transitions.default.as_mut() {
+                *d += offset;
             }
-
-            let mut critical_points = BTreeSet::new();
-            if let Some(s) = s0 { critical_points.extend(s.transitions.exceptions.keys()); }
-            if let Some(s) = s1 { critical_points.extend(s.transitions.exceptions.keys()); }
-
-            let get_target = |s: Option<&DWAState>, sink: StateID, ch: i16| -> StateID {
-                s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
-            };
-
-            let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
-            let s1_has_default = s1.map_or(false, |s| s.transitions.default.is_some());
-
-            // Default transition
-            let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
-            let def_tgt1 = s1.and_then(|s| s.transitions.default).unwrap_or(sink1);
-            let def_pair = (def_tgt0, def_tgt1);
-            if s0_has_default || s1_has_default {
-                let new_def_tgt = get_or_create(def_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
-                new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
-
-                let tw_def0 = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-                let tw_def1 = s1.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-                new_dwa.states[new_id].trans_weight_default = Some(tw_def0 | tw_def1);
+            for target in new_state.transitions.exceptions.values_mut() {
+                *target += offset;
             }
-            // Exception transitions
-            for &ch in &critical_points {
-                let tgt0 = get_target(s0, sink0, ch);
-                let tgt1 = get_target(s1, sink1, ch);
-                let exc_pair = (tgt0, tgt1);
-
-                if exc_pair != def_pair {
-                    let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
-                    new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
-
-                    let tw_exc0 = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
-                    let tw_exc1 = s1.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
-                    new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc0 | tw_exc1);
-                }
-            }
+            new_dwa.states.add_existing_state(new_state);
         }
+
+        let other_start_remapped = other.body.start_state + offset;
+        let self_start = new_dwa.body.start_state;
+
+        let new_start = new_dwa.states.union_state(self_start, other_start_remapped);
+        new_dwa.body.start_state = new_start;
+
+        new_dwa.simplify();
 
         if STOCHASTIC_VALIDATION {
             // Validate C against A and B via stochastic sampling.
