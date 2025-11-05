@@ -115,47 +115,9 @@ fn resolve_negative_codes_in_dwa_internal(
             c_copy.apply_weight(&gate);
 
             // Merge C's behavior into the current state's new version.
-            // Shallow merge (preserving previous determinism assumption). If targets conflict,
-            // we assert as before. The non-panicking, conflict-resolving merge lives in
-            // DWA::union_into_state, which requires a mutable states arena.
-            //
-            // 1) Union state and final weights
-            new_state.weight |= &c_copy.weight;
-            if let Some(rfw) = &c_copy.final_weight {
-                if let Some(lfw) = &mut new_state.final_weight {
-                    *lfw |= rfw;
-                } else {
-                    new_state.final_weight = Some(rfw.clone());
-                }
-            }
-            // 2) Merge default transitions and weights
-            if let Some(rd) = c_copy.transitions.default {
-                if let Some(ld) = new_state.transitions.default {
-                    assert!(
-                        ld == rd,
-                        "Cannot merge negative-resolution results with conflicting default transitions"
-                    );
-                } else {
-                    new_state.transitions.default = Some(rd);
-                }
-            }
-            if let Some(rdw) = &c_copy.trans_weight_default {
-                if let Some(ldw) = &mut new_state.trans_weight_default {
-                    *ldw |= rdw;
-                } else {
-                    new_state.trans_weight_default = Some(rdw.clone());
-                }
-            }
-            // 3) Merge exception transitions and weights
-            for (&ch, &rt) in c_copy.transitions.exceptions.iter() {
-                if let Some(&lt) = new_state.transitions.exceptions.get(&ch) {
-                    assert!(lt == rt, "Cannot merge negative-resolution results with conflicting exception transitions on char {}", ch);
-                } else {
-                    new_state.transitions.exceptions.insert(ch, rt);
-                }
-                let rw = c_copy.trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
-                new_state.trans_weights_exceptions.entry(ch).and_modify(|w| *w |= &rw).or_insert(rw);
-            }
+            // This union preserves determinism as long as targets align; otherwise it will panic.
+            new_state.merge_union(&c_copy);
+            // Negative edge resolved -> do not re-add it.
         } else {
             // No positive match. Keep the negative edge only if B is not final.
             let b_is_final = b_state
