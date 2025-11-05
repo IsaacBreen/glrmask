@@ -1805,4 +1805,145 @@ mod tests {
 
         assert_dwa_equivalent(c, expected);
     }
+
+    #[test]
+    fn test_union_complex_from_attachment() {
+        fn neg(val: i16) -> i16 {
+            val.wrapping_add(i16::MIN)
+        }
+
+        // Build left DWA
+        let mut left = DWA::new();
+        for _ in 0..20 {
+            left.add_state();
+        }
+        assert_eq!(left.states.len(), 21);
+
+        // State 0
+        left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+        left.add_transition(0, 3, 2, Weight::from_item(1)).unwrap();
+        left.add_transition(0, 5, 3, Weight::from_item(1)).unwrap();
+        left.add_transition(0, 6, 4, Weight::from_item(1)).unwrap();
+        left.add_transition(0, 7, 5, Weight::from_item(1)).unwrap();
+        left.add_transition(0, 8, 4, Weight::from_item(1)).unwrap();
+        left.add_transition(0, 9, 3, Weight::from_item(1)).unwrap();
+        left.add_transition(0, 10, 6, Weight::from_item(1)).unwrap();
+        // State 1
+        left.add_transition(1, neg(0), 7, Weight::all()).unwrap();
+        // State 2
+        left.add_transition(2, neg(3), 7, Weight::all()).unwrap();
+        // State 3
+        left.add_transition(3, 3, 8, Weight::all()).unwrap();
+        left.add_transition(3, 7, 3, Weight::all()).unwrap();
+        // State 4
+        left.set_default_transition(4, 3, Weight::all()).unwrap();
+        // State 5
+        left.add_transition(5, neg(7), 7, Weight::all()).unwrap();
+        // State 6
+        left.add_transition(6, 5, 3, Weight::all()).unwrap();
+        // State 7
+        left.add_transition(7, neg(9), 9, Weight::all()).unwrap();
+        // State 8
+        left.add_transition(8, neg(3), 1, Weight::all()).unwrap();
+        // State 9
+        left.add_transition(9, 5, 10, Weight::from_iter(0..=1)).unwrap();
+        left.add_transition(9, 6, 11, Weight::from_iter(0..=1)).unwrap();
+        left.add_transition(9, 8, 12, Weight::from_iter(0..=1)).unwrap();
+        left.add_transition(9, 9, 13, Weight::from_iter(0..=1)).unwrap();
+        left.add_transition(9, 10, 14, Weight::from_iter(0..=1)).unwrap();
+        // State 10
+        left.add_transition(10, 7, 13, Weight::all()).unwrap();
+        // State 11
+        left.set_default_transition(11, 10, Weight::all()).unwrap();
+        // State 12
+        left.set_default_transition(12, 13, Weight::all()).unwrap();
+        // State 13
+        left.add_transition(13, 0, 15, Weight::all()).unwrap();
+        left.add_transition(13, 3, 16, Weight::all()).unwrap();
+        left.add_transition(13, 7, 17, Weight::all()).unwrap();
+        // State 14
+        left.add_transition(14, 5, 10, Weight::all()).unwrap();
+        // State 15
+        left.add_transition(15, neg(0), 18, Weight::all()).unwrap();
+        // State 16
+        left.add_transition(16, neg(3), 18, Weight::all()).unwrap();
+        // State 17
+        left.add_transition(17, neg(7), 18, Weight::all()).unwrap();
+        // State 18
+        left.add_transition(18, neg(5), 19, Weight::all()).unwrap();
+        // State 19
+        left.add_transition(19, neg(10), 20, Weight::all()).unwrap();
+        // State 20
+        left.set_final_weight(20, Weight::from_item(1)).unwrap();
+
+        // Build right DWA
+        let mut right = DWA::new();
+        for _ in 0..22 {
+            right.add_state();
+        }
+        assert_eq!(right.states.len(), 23);
+
+        // State 0
+        right.add_transition(0, 5, 1, Weight::from_item(0)).unwrap();
+        right.add_transition(0, 6, 2, Weight::from_item(0)).unwrap();
+        right.add_transition(0, 8, 3, Weight::from_item(0)).unwrap();
+        right.add_transition(0, 9, 4, Weight::from_item(0)).unwrap();
+        right.add_transition(0, 10, 5, Weight::from_item(0)).unwrap();
+        // State 1
+        right.add_transition(1, 7, 4, Weight::all()).unwrap();
+        // State 2
+        right.set_default_transition(2, 1, Weight::all()).unwrap();
+        // State 3
+        right.set_default_transition(3, 4, Weight::all()).unwrap();
+        // State 4
+        right.add_transition(4, 0, 6, Weight::all()).unwrap();
+        right.add_transition(4, 3, 7, Weight::all()).unwrap();
+        right.add_transition(4, 7, 8, Weight::all()).unwrap();
+        // State 5
+        right.add_transition(5, 5, 1, Weight::all()).unwrap();
+        // State 6
+        right.add_transition(6, neg(0), 9, Weight::all()).unwrap();
+        // State 7
+        right.add_transition(7, neg(3), 9, Weight::all()).unwrap();
+        // State 8
+        right.add_transition(8, neg(7), 9, Weight::all()).unwrap();
+        // State 9
+        right.add_transition(9, neg(5), 10, Weight::all()).unwrap();
+        // State 10
+        right.add_transition(10, neg(10), 11, Weight::all()).unwrap();
+        // State 11
+        right.add_transition(11, 5, 12, Weight::from_iter(0..=1)).unwrap();
+        right.add_transition(11, 6, 13, Weight::from_iter(0..=1)).unwrap();
+        right.add_transition(11, 8, 14, Weight::from_iter(0..=1)).unwrap();
+        right.add_transition(11, 9, 15, Weight::from_iter(0..=1)).unwrap();
+        right.add_transition(11, 10, 16, Weight::from_iter(0..=1)).unwrap();
+        // State 12
+        right.add_transition(12, 7, 15, Weight::all()).unwrap();
+        // State 13
+        right.set_default_transition(13, 12, Weight::all()).unwrap();
+        // State 14
+        right.set_default_transition(14, 15, Weight::all()).unwrap();
+        // State 15
+        right.add_transition(15, 0, 17, Weight::all()).unwrap();
+        right.add_transition(15, 3, 18, Weight::all()).unwrap();
+        right.add_transition(15, 7, 19, Weight::all()).unwrap();
+        // State 16
+        right.add_transition(16, 5, 12, Weight::all()).unwrap();
+        // State 17
+        right.add_transition(17, neg(0), 20, Weight::all()).unwrap();
+        // State 18
+        right.add_transition(18, neg(3), 20, Weight::all()).unwrap();
+        // State 19
+        right.add_transition(19, neg(7), 20, Weight::all()).unwrap();
+        // State 20
+        right.add_transition(20, neg(5), 21, Weight::all()).unwrap();
+        // State 21
+        right.add_transition(21, neg(10), 22, Weight::all()).unwrap();
+        // State 22
+        right.set_final_weight(22, Weight::from_item(0)).unwrap();
+
+        // Perform union and simplify. The test passes if it doesn't panic.
+        let mut u = left.union(&right);
+        u.simplify();
+    }
 }
