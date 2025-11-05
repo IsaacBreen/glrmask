@@ -863,19 +863,28 @@ impl DWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: HashMap<(Option<Weight>, usize, Vec<(i16, usize)>), usize> = HashMap::new();
+            let mut sig2pid: HashMap<(Option<Weight>, usize, Option<Weight>, Vec<(i16, usize, Weight)>), usize> =
+                HashMap::new();
 
             for i in 0..n {
                 let st = &states[i];
                 let def_cls = st.transitions.default.map(|d| part[d]).unwrap_or(sink_pid);
-                let mut ex: Vec<(i16, usize)> = Vec::with_capacity(st.transitions.exceptions.len());
-                for (ch, tgt) in &st.transitions.exceptions {
-                    let cls = part[*tgt];
-                    if cls != def_cls {
-                        ex.push((*ch, cls));
-                    }
-                }
-                let sig = (st.final_weight.clone(), def_cls, ex);
+
+                let mut ex: Vec<(i16, usize, Weight)> = st
+                    .transitions
+                    .exceptions
+                    .iter()
+                    .map(|(ch, tgt)| {
+                        (
+                            *ch,
+                            part[*tgt],
+                            st.trans_weights_exceptions.get(ch).unwrap().clone(),
+                        )
+                    })
+                    .collect();
+                ex.sort_by_key(|k| k.0);
+
+                let sig = (st.final_weight.clone(), def_cls, st.trans_weight_default.clone(), ex);
                 let next_pid = sig2pid.len();
                 next_part[i] = *sig2pid.entry(sig).or_insert(next_pid);
             }
