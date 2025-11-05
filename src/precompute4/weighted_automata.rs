@@ -1068,47 +1068,6 @@ impl DWA {
     }
 
     pub fn concatenate(&self, other: &DWA) -> DWA {
-        // Fast-path: if `other` accepts only epsilon (no outgoing transitions from its start),
-        // then A ∘ B is exactly A with its final weights intersected by B's epsilon-weight.
-        if other.body.start_state < other.states.len() {
-            let s = other.body.start_state;
-            let s_state = &other.states[s];
-            let has_out_edges =
-                s_state.transitions.default.is_some() || !s_state.transitions.exceptions.is_empty();
-            if !has_out_edges {
-                // Compute epsilon-weight at B's start: state_weight ∩ final_weight
-                let mut eps_w = Weight::all();
-                if let Some(sw) = &s_state.state_weight {
-                    eps_w &= sw;
-                }
-                let eps_w = match &s_state.final_weight {
-                    Some(fw) => &eps_w & fw,
-                    None => Weight::zeros(),
-                };
-
-                // If eps_w is empty, concatenation recognizes nothing.
-                // Otherwise, clone A and gate all final weights by eps_w.
-                let mut res = self.clone();
-                if eps_w.is_empty() {
-                    for st in &mut res.states.0 {
-                        st.final_weight = None;
-                    }
-                } else {
-                    for st in &mut res.states.0 {
-                        if let Some(fw) = &mut st.final_weight {
-                            *fw &= &eps_w;
-                            if fw.is_empty() {
-                                st.final_weight = None;
-                            }
-                        }
-                    }
-                }
-                res.simplify();
-                return res;
-            }
-        }
-
-        // General case via NWA determinization (fallback)
         let nwa1 = NWA::from_dwa(self);
         let nwa2 = NWA::from_dwa(other);
 
@@ -1120,8 +1079,7 @@ impl DWA {
         let body2 = NWABody { start_state: start2 };
 
         // Concatenate with an ALL weight epsilon transition
-        let concat_body =
-            NWA::concatenate_components(&mut combined_states, &body1, &body2, &Weight::all());
+        let concat_body = NWA::concatenate_components(&mut combined_states, &body1, &body2, &Weight::all());
 
         let concat_nwa = NWA { states: combined_states, body: concat_body };
         let mut result_dwa = concat_nwa.determinize_to_dwa();
