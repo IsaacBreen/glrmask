@@ -488,6 +488,7 @@ impl DWAStates {
         if s_from_id == s_into_id {
             return;
         }
+        crate::debug!(2, "Unioning state {} into state {}", s_from_id, s_into_id);
 
         let s_from = self.0[s_from_id].clone();
         let s_into_orig = self.0[s_into_id].clone();
@@ -577,6 +578,7 @@ impl DWAStates {
         s_into.transitions = new_transitions;
         s_into.trans_weight_default = new_trans_weight_default;
         s_into.trans_weights_exceptions = new_trans_weights_exceptions;
+        crate::debug!(2, "Done unioning state {} into state {}", s_from_id, s_into_id);
     }
 
     pub fn union_state(
