@@ -1385,19 +1385,22 @@ impl DWA {
         &self,
         other: &DWA,
     ) -> DWA {
+        // New construction: right component carries per-branch gate weights.
+        type RightFrontier = BTreeMap<StateID, Weight>;
+
         let mut new_dwa = DWA::new();
         new_dwa.states.0.clear(); // start with no states
 
-        let mut composition_to_new_id: BTreeMap<(StateID, BTreeSet<StateID>), StateID> = BTreeMap::new();
-        let mut worklist: VecDeque<(StateID, BTreeSet<StateID>)> = VecDeque::new();
+        let mut composition_to_new_id: BTreeMap<(StateID, RightFrontier), StateID> = BTreeMap::new();
+        let mut worklist: VecDeque<(StateID, RightFrontier)> = VecDeque::new();
 
         let sink0 = self.states.len();
         let sink1 = other.states.len();
 
-        let mut get_or_create = |comp: (StateID, BTreeSet<StateID>),
+        let mut get_or_create = |comp: (StateID, RightFrontier),
                                  new_dwa: &mut DWA,
-                                 comp_to_new_id: &mut BTreeMap<(StateID, BTreeSet<StateID>), StateID>,
-                                 worklist: &mut VecDeque<(StateID, BTreeSet<StateID>)>|
+                                 comp_to_new_id: &mut BTreeMap<(StateID, RightFrontier), StateID>,
+                                 worklist: &mut VecDeque<(StateID, RightFrontier)>|
          -> StateID {
             if let Some(&id) = comp_to_new_id.get(&comp) {
                 return id;
@@ -1406,7 +1409,6 @@ impl DWA {
             new_dwa.states.0.push(DWAState::default());
             comp_to_new_id.insert(comp.clone(), new_id);
             worklist.push_back(comp.clone());
-
             new_id
         };
 
@@ -1414,114 +1416,179 @@ impl DWA {
             return DWA::new();
         }
 
+        // Initial composition: if left start is final, immediately spawn right start with gate = left.final.
         let start0 = self.body.start_state;
-        let mut start1_set: BTreeSet<StateID> = BTreeSet::new();
-        if self.states[start0].final_weight.as_ref().map_or(false, |w| !w.is_empty()) {
-            start1_set.insert(other.body.start_state);
+        let mut start_rf: RightFrontier = RightFrontier::new();
+        if let Some(fw) = &self.states[start0].final_weight {
+            if !fw.is_empty() {
+                start_rf.insert(other.body.start_state, fw.clone());
+            }
         }
-        let start_comp = (start0, start1_set);
+        let start_comp = (start0, start_rf);
         new_dwa.body.start_state =
             get_or_create(start_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
 
-        let right_start = other.body.start_state;
-        let right_accepts_epsilon =
-            other.states[right_start].final_weight.as_ref().map_or(false, |w| !w.is_empty());
-
-        let is_final_left = |i: StateID| -> bool {
-            i != sink0 && self.states[i].final_weight.as_ref().map_or(false, |w| !w.is_empty())
-        };
-
-        while let Some((id0, ids1)) = worklist.pop_front() {
-            let new_id = *composition_to_new_id.get(&(id0, ids1.clone())).unwrap();
+        while let Some((id0, rf)) = worklist.pop_front() {
+            let new_id = *composition_to_new_id.get(&(id0, rf.clone())).unwrap();
             let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
 
             let new_state = &mut new_dwa.states[new_id];
 
-            let agg_final_weight = if right_accepts_epsilon {
-                s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
-            } else {
-                let mut fw = Weight::zeros();
-                for &id1 in &ids1 {
-                    if id1 != sink1 {
-                        if let Some(w) = &other.states[id1].final_weight {
-                            fw |= w;
+            // Aggregate final weight: union over active right branches of (gate ∧ right.final).
+            let mut agg_final = Weight::zeros();
+            for (&id1, gate) in &rf {
+                if id1 == sink1 {
+                    continue;
+                }
+                if let Some(wf) = &other.states[id1].final_weight {
+                    let contrib = gate & wf;
+                    if !contrib.is_empty() {
+                        agg_final |= &contrib;
+                    }
+                }
+            }
+            if !agg_final.is_empty() {
+                new_state.final_weight = Some(agg_final);
+            }
+
+            // Collect critical points (characters with exceptions) from left and all active right states.
+            let mut critical_points = BTreeSet::new();
+            if let Some(s) = s0 {
+                critical_points.extend(s.transitions.exceptions.keys().copied());
+            }
+            for (&id1, _) in &rf {
+                if id1 != sink1 {
+                    critical_points.extend(other.states[id1].transitions.exceptions.keys().copied());
+                }
+            }
+
+            // Default transition components
+            let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
+            let mut any_s1_has_default = false;
+            for (&id1, _) in &rf {
+                if id1 != sink1 && other.states[id1].transitions.default.is_some() {
+                    any_s1_has_default = true;
+                    break;
+                }
+            }
+
+            let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
+            let tw_left_def = s0
+                .and_then(|s| s.trans_weight_default.as_ref())
+                .cloned()
+                .unwrap_or_else(Weight::zeros);
+
+            // Advance right frontier on default and compute right contribution to edge weight.
+            let mut next_rf_def: RightFrontier = RightFrontier::new();
+            let mut right_def_weight_sum = Weight::zeros();
+            for (&id1, gate) in &rf {
+                if id1 == sink1 {
+                    continue;
+                }
+                let s1 = &other.states[id1];
+                if let Some(t1) = s1.transitions.default {
+                    if let Some(w) = s1.trans_weight_default.as_ref() {
+                        let contrib = gate & w;
+                        if !contrib.is_empty() {
+                            right_def_weight_sum |= &contrib;
+                            if t1 != sink1 {
+                                if let Some(curr) = next_rf_def.get_mut(&t1) {
+                                    *curr |= &contrib;
+                                } else {
+                                    next_rf_def.insert(t1, contrib);
+                                }
+                            }
                         }
                     }
                 }
-                fw
-            };
-
-            if !agg_final_weight.is_empty() {
-                new_state.final_weight = Some(agg_final_weight);
             }
-
-            // Collect critical points
-            let mut critical_points = BTreeSet::new();
-            if let Some(s) = s0 {
-                critical_points.extend(s.transitions.exceptions.keys());
-            }
-            for &id1 in &ids1 {
-                if id1 != sink1 {
-                    critical_points.extend(other.states[id1].transitions.exceptions.keys());
+            // Spawn new right-start if the left default target is final (after consuming this char class).
+            if def_tgt0 != sink0 {
+                if let Some(fw) = &self.states[def_tgt0].final_weight {
+                    if !fw.is_empty() {
+                        let rs = other.body.start_state;
+                        if let Some(curr) = next_rf_def.get_mut(&rs) {
+                            *curr |= fw;
+                        } else {
+                            next_rf_def.insert(rs, fw.clone());
+                        }
+                    }
                 }
             }
 
-            let get_target = |s: Option<&DWAState>, sink: StateID, ch: i16| -> StateID {
-                s.and_then(|s| s.transitions.get(ch).copied()).unwrap_or(sink)
-            };
-
-            let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
-            let any_s1_has_default =
-                ids1.iter().any(|&id1| id1 != sink1 && other.states[id1].transitions.default.is_some());
-
-            // Default transition
-            let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
-            let mut def_tgts1: BTreeSet<StateID> =
-                ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| other.states[id1].transitions.default.unwrap_or(sink1)).collect();
-            def_tgts1.remove(&sink1);
-            if is_final_left(def_tgt0) {
-                def_tgts1.insert(right_start);
-            }
-
-            let def_comp = (def_tgt0, def_tgts1);
+            let edge_w_def = &tw_left_def | &right_def_weight_sum;
+            let def_comp = (def_tgt0, next_rf_def.clone());
             if s0_has_default || any_s1_has_default {
                 let new_def_tgt =
                     get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                new_dwa.states[new_id].transitions.default = Some(new_def_tgt);
-
-                let mut tw_def = s0.and_then(|s| s.trans_weight_default.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-                for &id1 in &ids1 {
-                    if id1 != sink1 {
-                        tw_def |= &other.states[id1].trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                    }
-                }
-                new_dwa.states[new_id].trans_weight_default = Some(tw_def);
+                new_state.transitions.default = Some(new_def_tgt);
+                new_state.trans_weight_default = Some(edge_w_def);
             }
 
-            // Exception transitions
+            // Exception transitions: per critical character
             for &ch in &critical_points {
-                let tgt0 = get_target(s0, sink0, ch);
-                let mut tgts1: BTreeSet<StateID> =
-                    ids1.iter().filter(|&&id1| id1 != sink1).map(|&id1| get_target(Some(&other.states[id1]), sink1, ch)).collect();
-                tgts1.remove(&sink1);
-                if is_final_left(tgt0) {
-                    tgts1.insert(right_start);
+                // Left target and weight for this char
+                let tgt0_exc = s0
+                    .and_then(|s| s.transitions.get(ch).copied())
+                    .unwrap_or(sink0);
+                let tw_left_exc = s0
+                    .and_then(|s| s.get_weight(ch))
+                    .cloned()
+                    .unwrap_or_else(Weight::zeros);
+
+                // Advance right frontier on this char and compute right contribution to edge weight.
+                let mut next_rf_exc: RightFrontier = RightFrontier::new();
+                let mut right_exc_weight_sum = Weight::zeros();
+                for (&id1, gate) in &rf {
+                    if id1 == sink1 {
+                        continue;
+                    }
+                    let s1 = &other.states[id1];
+                    let (maybe_tgt, w_opt): (Option<StateID>, Option<&Weight>) =
+                        if let Some(&tv) = s1.transitions.exceptions.get(&ch) {
+                            (Some(tv), s1.trans_weights_exceptions.get(&ch))
+                        } else if s1.transitions.default.is_some() {
+                            (s1.transitions.default, s1.trans_weight_default.as_ref())
+                        } else {
+                            (None, None)
+                        };
+                    if let Some(t1) = maybe_tgt {
+                        if let Some(w) = w_opt {
+                            let contrib = gate & w;
+                            if !contrib.is_empty() {
+                                right_exc_weight_sum |= &contrib;
+                                if t1 != sink1 {
+                                    if let Some(curr) = next_rf_exc.get_mut(&t1) {
+                                        *curr |= &contrib;
+                                    } else {
+                                        next_rf_exc.insert(t1, contrib);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Spawn new right-start if the left target for this char is final.
+                if tgt0_exc != sink0 {
+                    if let Some(fw) = &self.states[tgt0_exc].final_weight {
+                        if !fw.is_empty() {
+                            let rs = other.body.start_state;
+                            if let Some(curr) = next_rf_exc.get_mut(&rs) {
+                                *curr |= fw;
+                            } else {
+                                next_rf_exc.insert(rs, fw.clone());
+                            }
+                        }
+                    }
                 }
 
-                let exc_comp = (tgt0, tgts1);
-
+                let exc_comp = (tgt0_exc, next_rf_exc.clone());
                 if exc_comp != def_comp {
                     let new_exc_tgt =
                         get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                    new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
-
-                    let mut tw_exc = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
-                    for &id1 in &ids1 {
-                        if id1 != sink1 {
-                            tw_exc |= &other.states[id1].trans_weights_exceptions.get(&ch).cloned().unwrap_or_else(Weight::zeros);
-                        }
-                    }
-                    new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc);
+                    new_state.transitions.exceptions.insert(ch, new_exc_tgt);
+                    let edge_w_exc = &tw_left_exc | &right_exc_weight_sum;
+                    new_state.trans_weights_exceptions.insert(ch, edge_w_exc);
                 }
             }
         }
