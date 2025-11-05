@@ -48,7 +48,6 @@ fn resolve_negative_codes_in_dwa_internal(
         return false;
     }
 
-
     for (neg_code, b_orig_id) in negative_transitions {
         let p = neg_code.wrapping_sub(i16::MIN);
         let w_neg = state_a_clone.trans_weights_exceptions.get(&neg_code).unwrap().clone();
