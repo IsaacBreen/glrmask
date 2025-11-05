@@ -1143,8 +1143,8 @@ impl DWA {
                     let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
                     new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
 
-                    let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
-                    let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+                    let tw_exc0 = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+                    let tw_exc1 = s1.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
                     new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc0 | tw_exc1);
                 }
             }

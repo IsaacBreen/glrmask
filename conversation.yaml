@@ -1461,8 +1461,6 @@ local_system:
                   let new_id = *composition_to_new_id.get(&(id0, rf.clone())).unwrap();
                   let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
 
-                  let new_state = &mut new_dwa.states[new_id];
-
                   // Aggregate final weight: union over active right branches of (gate ∧ right.final).
                   let mut agg_final = Weight::zeros();
                   for (&id1, gate) in &rf {
@@ -1476,9 +1474,11 @@ local_system:
                           }
                       }
                   }
-                  if !agg_final.is_empty() {
-                      new_state.final_weight = Some(agg_final);
-                  }
+                  let final_weight = if !agg_final.is_empty() {
+                      Some(agg_final)
+                  } else {
+                      None
+                  };
 
                   // Collect critical points (characters with exceptions) from left and all active right states.
                   let mut critical_points = BTreeSet::new();
@@ -1547,14 +1547,17 @@ local_system:
 
                   let edge_w_def = &tw_left_def | &right_def_weight_sum;
                   let def_comp = (def_tgt0, next_rf_def.clone());
-                  if s0_has_default || any_s1_has_default {
+                  let (new_def_tgt, new_def_weight) = if s0_has_default || any_s1_has_default {
                       let new_def_tgt =
                           get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                      new_state.transitions.default = Some(new_def_tgt);
-                      new_state.trans_weight_default = Some(edge_w_def);
-                  }
+                      (Some(new_def_tgt), Some(edge_w_def))
+                  } else {
+                      (None, None)
+                  };
 
                   // Exception transitions: per critical character
+                  let mut new_exceptions = BTreeMap::new();
+                  let mut new_exception_weights = BTreeMap::new();
                   for &ch in &critical_points {
                       // Left target and weight for this char
                       let tgt0_exc = s0
@@ -1615,11 +1618,19 @@ local_system:
                       if exc_comp != def_comp {
                           let new_exc_tgt =
                               get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                          new_state.transitions.exceptions.insert(ch, new_exc_tgt);
+                          new_exceptions.insert(ch, new_exc_tgt);
                           let edge_w_exc = &tw_left_exc | &right_exc_weight_sum;
-                          new_state.trans_weights_exceptions.insert(ch, edge_w_exc);
+                          new_exception_weights.insert(ch, edge_w_exc);
                       }
                   }
+
+                  // Commit all computed values to the new state.
+                  let new_state = &mut new_dwa.states[new_id];
+                  new_state.final_weight = final_weight;
+                  new_state.transitions.default = new_def_tgt;
+                  new_state.trans_weight_default = new_def_weight;
+                  new_state.transitions.exceptions = new_exceptions;
+                  new_state.trans_weights_exceptions = new_exception_weights;
               }
 
               if STOCHASTIC_VALIDATION {
@@ -3930,8 +3941,8 @@ local_system:
                           let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
                           new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
 
-                          let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
-                          let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+                          let tw_exc0 = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+                          let tw_exc1 = s1.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
                           new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc0 | tw_exc1);
                       }
                   }
@@ -7034,8 +7045,6 @@ messages:
                   let new_id = *composition_to_new_id.get(&(id0, rf.clone())).unwrap();
                   let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
 
-                  let new_state = &mut new_dwa.states[new_id];
-
                   // Aggregate final weight: union over active right branches of (gate ∧ right.final).
                   let mut agg_final = Weight::zeros();
                   for (&id1, gate) in &rf {
@@ -7049,9 +7058,11 @@ messages:
                           }
                       }
                   }
-                  if !agg_final.is_empty() {
-                      new_state.final_weight = Some(agg_final);
-                  }
+                  let final_weight = if !agg_final.is_empty() {
+                      Some(agg_final)
+                  } else {
+                      None
+                  };
 
                   // Collect critical points (characters with exceptions) from left and all active right states.
                   let mut critical_points = BTreeSet::new();
@@ -7120,14 +7131,17 @@ messages:
 
                   let edge_w_def = &tw_left_def | &right_def_weight_sum;
                   let def_comp = (def_tgt0, next_rf_def.clone());
-                  if s0_has_default || any_s1_has_default {
+                  let (new_def_tgt, new_def_weight) = if s0_has_default || any_s1_has_default {
                       let new_def_tgt =
                           get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                      new_state.transitions.default = Some(new_def_tgt);
-                      new_state.trans_weight_default = Some(edge_w_def);
-                  }
+                      (Some(new_def_tgt), Some(edge_w_def))
+                  } else {
+                      (None, None)
+                  };
 
                   // Exception transitions: per critical character
+                  let mut new_exceptions = BTreeMap::new();
+                  let mut new_exception_weights = BTreeMap::new();
                   for &ch in &critical_points {
                       // Left target and weight for this char
                       let tgt0_exc = s0
@@ -7188,11 +7202,19 @@ messages:
                       if exc_comp != def_comp {
                           let new_exc_tgt =
                               get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                          new_state.transitions.exceptions.insert(ch, new_exc_tgt);
+                          new_exceptions.insert(ch, new_exc_tgt);
                           let edge_w_exc = &tw_left_exc | &right_exc_weight_sum;
-                          new_state.trans_weights_exceptions.insert(ch, edge_w_exc);
+                          new_exception_weights.insert(ch, edge_w_exc);
                       }
                   }
+
+                  // Commit all computed values to the new state.
+                  let new_state = &mut new_dwa.states[new_id];
+                  new_state.final_weight = final_weight;
+                  new_state.transitions.default = new_def_tgt;
+                  new_state.trans_weight_default = new_def_weight;
+                  new_state.transitions.exceptions = new_exceptions;
+                  new_state.trans_weights_exceptions = new_exception_weights;
               }
 
               if STOCHASTIC_VALIDATION {
@@ -8339,34 +8361,134 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata.rs
-  - user: |
-      /Users/isaacbreen/.cargo/bin/cargo test --color=always --message-format=json-diagnostic-rendered-ansi --no-run --package sep1 --lib test_constraint_basic --profile test
-         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-      error[E0499]: cannot borrow `new_dwa` as mutable more than once at a time
-          --> src/precompute4/weighted_automata.rs:1523:53
-           |
-      1435 |             let new_state = &mut new_dwa.states[new_id];
-           |                                  -------------- first mutable borrow occurs here
-      ...
-      1523 |                     get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-           |                                                     ^^^^^^^^^^^^ second mutable borrow occurs here
-      1524 |                 new_state.transitions.default = Some(new_def_tgt);
-           |                 ------------------------------------------------- first borrow later used here
+  - user: |2+
 
-      error[E0499]: cannot borrow `new_dwa` as mutable more than once at a time
-          --> src/precompute4/weighted_automata.rs:1588:49
-           |
-      1435 |             let new_state = &mut new_dwa.states[new_id];
-           |                                  -------------- first mutable borrow occurs here
-      ...
-      1588 |                         get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-           |                                                 ^^^^^^^^^^^^ second mutable borrow occurs here
-      1589 |                     new_state.transitions.exceptions.insert(ch, new_exc_tgt);
-           |                     -------------------------------- first borrow later used here
+      thread 'precompute4::weighted_automata::tests::test_union_from_debug_log' (2736404) panicked at src/precompute4/weighted_automata.rs:1329:17:
+      assertion `left == right` failed: Union weight mismatch vs expected A∪B.
+      word: [2, neg(2), neg(0)]
+      A(w): [0]
+      B(w): []
+      U(w): [0, 3]
+      Expected: [0]
 
-      For more information about this error, try `rustc --explain E0499`.
-      error: could not compile `sep1` (lib test) due to 2 previous errors
-      Process finished with exit code 101
+      DWA A:
+      DWA (start: 0)
+        State 0:
+          final_weight: [2]
+          0 -> 1 (trans_weight: [1])
+          1 -> 2 (trans_weight: [0..=1])
+          2 -> 3 (trans_weight: [0])
+          3 -> 4 (trans_weight: [0..=1])
+        State 1:
+          neg(0) -> 5 (trans_weight: ALL)
+        State 2:
+          * -> 6 (trans_weight: ALL)
+        State 3:
+          neg(2) -> 7 (trans_weight: ALL)
+        State 4:
+        State 5:
+          neg(1) -> 8 (trans_weight: ALL)
+        State 6:
+        State 7:
+          neg(0) -> 9 (trans_weight: ALL)
+        State 8:
+          final_weight: ALL
+        State 9:
+          final_weight: ALL
+
+
+      DWA B:
+      DWA (start: 0)
+        State 0:
+          1 -> 1 (trans_weight: [3])
+          2 -> 2 (trans_weight: [3])
+          3 -> 3 (trans_weight: [3])
+        State 1:
+          * -> 4 (trans_weight: ALL)
+        State 2:
+          neg(2) -> 5 (trans_weight: ALL)
+        State 3:
+        State 4:
+        State 5:
+          neg(0) -> 6 (trans_weight: ALL)
+        State 6:
+          0 -> 7 (trans_weight: [3])
+          1 -> 8 (trans_weight: [3])
+          3 -> 9 (trans_weight: [3])
+        State 7:
+          neg(0) -> 10 (trans_weight: ALL)
+        State 8:
+          * -> 11 (trans_weight: ALL)
+        State 9:
+        State 10:
+          neg(1) -> 12 (trans_weight: ALL)
+        State 11:
+        State 12:
+          final_weight: ALL
+
+
+      DWA U:
+      DWA (start: 0)
+        State 0:
+          final_weight: [2]
+          0 -> 1 (trans_weight: [1])
+          1 -> 2 (trans_weight: [0..=1, 3])
+          2 -> 3 (trans_weight: [0, 3])
+          3 -> 4 (trans_weight: [0..=1, 3])
+        State 1:
+          neg(0) -> 5 (trans_weight: ALL)
+        State 2:
+          * -> 6 (trans_weight: ALL)
+        State 3:
+          neg(2) -> 7 (trans_weight: ALL)
+        State 4:
+        State 5:
+          neg(1) -> 8 (trans_weight: ALL)
+        State 6:
+        State 7:
+          neg(0) -> 9 (trans_weight: ALL)
+        State 8:
+          final_weight: ALL
+        State 9:
+          final_weight: ALL
+          0 -> 10 (trans_weight: [3])
+          1 -> 11 (trans_weight: [3])
+          3 -> 12 (trans_weight: [3])
+        State 10:
+          neg(0) -> 13 (trans_weight: ALL)
+        State 11:
+          * -> 14 (trans_weight: ALL)
+        State 12:
+        State 13:
+          neg(1) -> 15 (trans_weight: ALL)
+        State 14:
+        State 15:
+          final_weight: ALL
+
+        left: 0..=0, 3..=3
+       right: 0..=0
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::weighted_automata::DWA::stochastic_validate_union
+                   at ./src/precompute4/weighted_automata.rs:1329:17
+         5: sep1::precompute4::weighted_automata::DWA::union
+                   at ./src/precompute4/weighted_automata.rs:1155:13
+         6: sep1::precompute4::weighted_automata::tests::test_union_from_debug_log
+                   at ./src/precompute4/weighted_automata.rs:2743:22
+         7: sep1::precompute4::weighted_automata::tests::test_union_from_debug_log::{{closure}}
+                   at ./src/precompute4/weighted_automata.rs:2686:35
+         8: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         9: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8386,169 +8508,50 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the compilation errors you're facing. The issue is a classic borrow checker problem in Rust where a mutable reference is held for too long, conflicting with another mutable borrow. Specifically, in the `DWA::concatenate` method, a mutable reference to a state (`new_state`) is held while a helper function (`get_or_create`) is called, which also needs to mutably borrow the entire automaton (`new_dwa`).
+      I've identified a bug in the `DWA::union` method that could lead to incorrect weight calculations, which is the likely cause of the test failure you're seeing. Here are the steps to fix it.
 
-      To resolve this, we'll refactor the loop to first compute all the necessary information for the new state (final weights, default transitions, and exception transitions) and store it in local variables. Only after all computations are complete and all calls to `get_or_create` are finished will we take a short-lived mutable reference to the state to apply all the changes at once.
+      ### Instructions
 
-      Here are the step-by-step instructions to fix the code:
+      The issue is in `src/precompute4/weighted_automata.rs`, within the `DWA::union` function. When calculating the transition weights for exception characters, the code only checks for exception weights and doesn't correctly fall back to the default transition's weight if an exception isn't defined for that character in one of the automata.
 
-      ### Step-by-step Instructions
+      The fix is to use the `get_weight` helper method, which correctly checks for an exception weight first and then falls back to the default weight.
 
-      File to edit: `src/precompute4/weighted_automata.rs`
+      1.  **Open `src/precompute4/weighted_automata.rs`**.
+      2.  **Navigate to the `DWA::union` method**, specifically to the loop over `critical_points`.
+      3.  **Locate these two lines** around line 1148:
 
-      1.  **Navigate to the `DWA::concatenate` method.** Inside this method, locate the main `while let Some((id0, rf)) = worklist.pop_front()` loop.
-
-      2.  **Remove the early mutable borrow.** Delete the following line from the beginning of the loop body:
           ```rust
-          let new_state = &mut new_dwa.states[new_id];
+                              let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+                              let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
           ```
 
-      3.  **Buffer the final weight.** Modify the final weight calculation to store its result in a local variable `final_weight` instead of assigning it directly.
-          -   **Change this:**
-              ```rust
-              if !agg_final.is_empty() {
-                  new_state.final_weight = Some(agg_final);
-              }
-              ```
-          -   **To this:**
-              ```rust
-              let final_weight = if !agg_final.is_empty() {
-                  Some(agg_final)
-              } else {
-                  None
-              };
-              ```
+      4.  **Replace them** with the following lines that use `get_weight`:
 
-      4.  **Buffer the default transition.** Adjust the default transition logic to store the target and weight in local variables `new_def_tgt` and `new_def_weight`.
-          -   **Change this:**
-              ```rust
-              if s0_has_default || any_s1_has_default {
-                  let new_def_tgt =
-                      get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                  new_state.transitions.default = Some(new_def_tgt);
-                  new_state.trans_weight_default = Some(edge_w_def);
-              }
-              ```
-          -   **To this:**
-              ```rust
-              let (new_def_tgt, new_def_weight) = if s0_has_default || any_s1_has_default {
-                  let new_def_tgt =
-                      get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                  (Some(new_def_tgt), Some(edge_w_def))
-              } else {
-                  (None, None)
-              };
-              ```
-
-      5.  **Buffer exception transitions.** Before the `for &ch in &critical_points` loop, declare two new `BTreeMap`s to collect exception data. Then, modify the loop to populate these maps.
-          -   **Add before the loop:**
-              ```rust
-              let mut new_exceptions = BTreeMap::new();
-              let mut new_exception_weights = BTreeMap::new();
-              ```
-          -   **Inside the loop, change this:**
-              ```rust
-              new_state.transitions.exceptions.insert(ch, new_exc_tgt);
-              let edge_w_exc = &tw_left_exc | &right_exc_weight_sum;
-              new_state.trans_weights_exceptions.insert(ch, edge_w_exc);
-              ```
-          -   **To this:**
-              ```rust
-              new_exceptions.insert(ch, new_exc_tgt);
-              let edge_w_exc = &tw_left_exc | &right_exc_weight_sum;
-              new_exception_weights.insert(ch, edge_w_exc);
-              ```
-
-      6.  **Commit all changes at the end of the loop.** Add the following block of code just before the closing brace `}` of the `while` loop. This will get a new, short-lived mutable reference to the state and apply all the buffered changes.
           ```rust
-          // Commit all computed values to the new state.
-          let new_state = &mut new_dwa.states[new_id];
-          new_state.final_weight = final_weight;
-          new_state.transitions.default = new_def_tgt;
-          new_state.trans_weight_default = new_def_weight;
-          new_state.transitions.exceptions = new_exceptions;
-          new_state.trans_weights_exceptions = new_exception_weights;
+                              let tw_exc0 = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+                              let tw_exc1 = s1.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
           ```
 
-      After applying these changes, the borrow checker errors should be resolved.
+      This change ensures that when combining automata, the weights for transitions that fall through to a default case are correctly retrieved and included in the union automaton.
 
       ### Git Diff
 
-      Here is the git diff for the changes described above.
+      Here is the patch for the change described above.
 
       ```diff
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -1432,8 +1432,6 @@
-                   let new_id = *composition_to_new_id.get(&(id0, rf.clone())).unwrap();
-                   let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
+      @@ -1145,8 +1145,8 @@
+                           let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
+                           new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
        
-      -            let new_state = &mut new_dwa.states[new_id];
-      -
-                   // Aggregate final weight: union over active right branches of (gate ∧ right.final).
-                   let mut agg_final = Weight::zeros();
-                   for (&id1, gate) in &rf {
-      @@ -1447,9 +1445,11 @@
-                           }
+      -                    let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+      -                    let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+      +                    let tw_exc0 = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+      +                    let tw_exc1 = s1.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+                           new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc0 | tw_exc1);
                        }
                    }
-      -            if !agg_final.is_empty() {
-      -                new_state.final_weight = Some(agg_final);
-      -            }
-      +            let final_weight = if !agg_final.is_empty() {
-      +                Some(agg_final)
-      +            } else {
-      +                None
-      +            };
-       
-                   // Collect critical points (characters with exceptions) from left and all active right states.
-                   let mut critical_points = BTreeSet::new();
-      @@ -1516,15 +1516,18 @@
-       
-                   let edge_w_def = &tw_left_def | &right_def_weight_sum;
-                   let def_comp = (def_tgt0, next_rf_def.clone());
-      -            if s0_has_default || any_s1_has_default {
-      +            let (new_def_tgt, new_def_weight) = if s0_has_default || any_s1_has_default {
-                       let new_def_tgt =
-                           get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-      -                new_state.transitions.default = Some(new_def_tgt);
-      -                new_state.trans_weight_default = Some(edge_w_def);
-      -            }
-      +                (Some(new_def_tgt), Some(edge_w_def))
-      +            } else {
-      +                (None, None)
-      +            };
-       
-                   // Exception transitions: per critical character
-      +            let mut new_exceptions = BTreeMap::new();
-      +            let mut new_exception_weights = BTreeMap::new();
-                   for &ch in &critical_points {
-                       // Left target and weight for this char
-                       let tgt0_exc = s0
-      @@ -1589,12 +1592,21 @@
-                       if exc_comp != def_comp {
-                           let new_exc_tgt =
-                               get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-      -                    new_state.transitions.exceptions.insert(ch, new_exc_tgt);
-      +                    new_exceptions.insert(ch, new_exc_tgt);
-                           let edge_w_exc = &tw_left_exc | &right_exc_weight_sum;
-      -                    new_state.trans_weights_exceptions.insert(ch, edge_w_exc);
-      -                }
-      -            }
-      +                    new_exception_weights.insert(ch, edge_w_exc);
-      +                }
-      +            }
-      +
-      +            // Commit all computed values to the new state.
-      +            let new_state = &mut new_dwa.states[new_id];
-      +            new_state.final_weight = final_weight;
-      +            new_state.transitions.default = new_def_tgt;
-      +            new_state.trans_weight_default = new_def_weight;
-      +            new_state.transitions.exceptions = new_exceptions;
-      +            new_state.trans_weights_exceptions = new_exception_weights;
-               }
-       
-               if STOCHASTIC_VALIDATION {
 
       ```
     metadata:
@@ -8561,7 +8564,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor DWA::concatenate to buffer state
-      updates and resolve E0499 borrow checker errors"'
+  - user: 'Changes committed with message: "Fix: Use get_weight in DWA union for exception
+      transition weights"'
     metadata:
 ...
