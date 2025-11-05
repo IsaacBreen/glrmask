@@ -1,4 +1,4 @@
-use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, Weight};
+use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, Weight, format_word};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -78,30 +78,6 @@ fn pick_default_char_for_state(st: &DWAState, rng: &mut SimpleRng) -> i16 {
 
 fn weight_subset(sub: &Weight, sup: &Weight) -> bool {
     (sub & sup) == sub.clone()
-}
-
-fn format_pos_code(code: i16) -> String {
-    let u = code as u16;
-    if let Some(c) = char::from_u32(u as u32) {
-        if c.is_ascii_graphic() || c == ' ' {
-            format!("'{}'", c)
-        } else {
-            format!("{}", u)
-        }
-    } else {
-        format!("{}", u)
-    }
-}
-fn format_i16_char(code: i16) -> String {
-    if code >= 0 {
-        format_pos_code(code)
-    } else {
-        format!("neg({})", code.wrapping_sub(i16::MIN))
-    }
-}
-fn format_word(word: &[i16]) -> String {
-    let parts: Vec<String> = word.iter().map(|&c| format_i16_char(c)).collect();
-    format!("[{}]", parts.join(", "))
 }
 
 impl DWA {
@@ -275,7 +251,7 @@ impl DWA {
     }
 }
 
-fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
+pub fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
     // Strategy:
     // 1) Simplify both automata to obtain canonical, minimized, and normalized forms
     //    (unreachable pruned, sink-like states collapsed, redundant exceptions removed),

@@ -105,8 +105,9 @@ fn resolve_negative_codes_in_dwa_internal(
 
 #[cfg(test)]
 mod tests {
+    use crate::precompute4::test_weighted_automata::assert_dwa_equivalent;
     use super::*;
-    use crate::precompute4::weighted_automata::{assert_dwa_equivalent, DWA, Weight};
+    use crate::precompute4::weighted_automata::{DWA, Weight};
 
     #[test]
     fn test_resolve_negatives_simple_cancellation() {

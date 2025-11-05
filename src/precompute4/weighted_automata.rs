@@ -1193,6 +1193,8 @@ impl DWA {
             Some(fw) => {
                 let res = &acc & fw;
                 if res.is_empty() { Weight::zeros() } else { res }
+            }
+            None => Weight::zeros(),
         }
     }
 
@@ -1371,6 +1373,29 @@ impl DWA {
 }
 
 // --- Display Implementations for Debugging ---
+pub fn format_pos_code(code: i16) -> String {
+    let u = code as u16;
+    if let Some(c) = char::from_u32(u as u32) {
+        if c.is_ascii_graphic() || c == ' ' {
+            format!("'{}'", c)
+        } else {
+            format!("{}", u)
+        }
+    } else {
+        format!("{}", u)
+    }
+}
+pub fn format_i16_char(code: i16) -> String {
+    if code >= 0 {
+        format_pos_code(code)
+    } else {
+        format!("neg({})", code.wrapping_sub(i16::MIN))
+    }
+}
+pub fn format_word(word: &[i16]) -> String {
+    let parts: Vec<String> = word.iter().map(|&c| format_i16_char(c)).collect();
+    format!("[{}]", parts.join(", "))
+}
 impl Display for DWA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "DWA (start: {})", self.body.start_state)?;
