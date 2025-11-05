@@ -431,7 +431,7 @@ impl DWAStates {
         self[state_id].apply_weight(weight);
     }
 
-    pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID) {
+    pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID, future_weights: &[Weight]) {
         assert!(s_from_id < self.len(), "s_from_id out of bounds");
         assert!(s_into_id < self.len(), "s_into_id out of bounds");
         if s_from_id == s_into_id {
@@ -456,48 +456,63 @@ impl DWAStates {
             .cloned()
             .collect();
 
-        let get_target = |s: &DWAState, ch: i16| -> Option<StateID> {
-            s.transitions.exceptions.get(&ch).copied().or(s.transitions.default)
-        };
-
-        let get_weight = |s: &DWAState, ch: i16| -> Weight {
-            s.trans_weights_exceptions.get(&ch)
-                .or(s.trans_weight_default.as_ref())
-                .cloned().unwrap_or_else(Weight::zeros)
-        };
-
         // Default transition
         let def_tgt_from = s_from.transitions.default;
         let def_tgt_into = s_into_orig.transitions.default;
         let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
-            (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+            (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2, future_weights)) },
             (Some(t), None) | (None, Some(t)) => Some(t),
             (None, None) => None,
         };
         new_transitions.default = new_def_tgt_id;
+
+        let w_from_def = s_from.trans_weight_default.as_ref();
+        let w_into_def = s_into_orig.trans_weight_default.as_ref();
+        let future_from_def = def_tgt_from.map(|t| &future_weights[t]);
+        let future_into_def = def_tgt_into.map(|t| &future_weights[t]);
+
+        let path_w_from_def = w_from_def.map_or(Weight::zeros(), |w| w & future_from_def.unwrap());
+        let path_w_into_def = w_into_def.map_or(Weight::zeros(), |w| w & future_into_def.unwrap());
+
         new_trans_weight_default = if new_def_tgt_id.is_some() {
-            let w_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-            let w_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-            Some(w_from | w_into)
+            let rhs = path_w_from_def | path_w_into_def;
+            let future_union = future_from_def.cloned().unwrap_or_else(Weight::zeros)
+                | future_into_def.cloned().unwrap_or_else(Weight::zeros);
+            Some(rhs | !future_union)
         } else {
             None
         };
 
         // Exception transitions
         for &ch in &critical_points {
-            let tgt_from = get_target(&s_from, ch);
-            let tgt_into = get_target(&s_into_orig, ch);
+            let (tgt_from, w_from) = s_from.transitions.exceptions.get(&ch)
+                .map(|&t| (Some(t), s_from.trans_weights_exceptions.get(&ch)))
+                .unwrap_or((s_from.transitions.default, s_from.trans_weight_default.as_ref()));
+            let (tgt_into, w_into) = s_into_orig.transitions.exceptions.get(&ch)
+                .map(|&t| (Some(t), s_into_orig.trans_weights_exceptions.get(&ch)))
+                .unwrap_or((s_into_orig.transitions.default, s_into_orig.trans_weight_default.as_ref()));
 
             let new_exc_tgt_id = match (tgt_from, tgt_into) {
-                (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+                (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2, future_weights)) },
                 (Some(t), None) | (None, Some(t)) => Some(t),
                 (None, None) => None,
             };
 
             if new_exc_tgt_id != new_def_tgt_id {
                 if let Some(tgt_id) = new_exc_tgt_id {
+                    let future_from = tgt_from.map(|t| &future_weights[t]);
+                    let future_into = tgt_into.map(|t| &future_weights[t]);
+
+                    let path_w_from = w_from.map_or(Weight::zeros(), |w| w & future_from.unwrap());
+                    let path_w_into = w_into.map_or(Weight::zeros(), |w| w & future_into.unwrap());
+
+                    let rhs = path_w_from | path_w_into;
+                    let future_union = future_from.cloned().unwrap_or_else(Weight::zeros)
+                        | future_into.cloned().unwrap_or_else(Weight::zeros);
+                    let new_w = rhs | !future_union;
+
                     new_transitions.exceptions.insert(ch, tgt_id);
-                    new_trans_weights_exceptions.insert(ch, get_weight(&s_from, ch) | get_weight(&s_into_orig, ch));
+                    new_trans_weights_exceptions.insert(ch, new_w);
                 }
             }
         }
@@ -510,7 +525,7 @@ impl DWAStates {
         s_into.trans_weights_exceptions = new_trans_weights_exceptions;
     }
 
-    pub fn union_state(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
+    pub fn union_state(&mut self, s1_id: StateID, s2_id: StateID, future_weights: &[Weight]) -> StateID {
         assert!(s1_id < self.len(), "s1_id out of bounds");
         assert!(s2_id < self.len(), "s2_id out of bounds");
 
@@ -518,7 +533,7 @@ impl DWAStates {
         let new_id = self.copy_state(s1_id);
 
         // Merge s2 into the new state
-        self.union_assign_state(s2_id, new_id);
+        self.union_assign_state(s2_id, new_id, future_weights);
 
         new_id
     }
@@ -716,10 +731,10 @@ impl DWA {
         changed
     }
 
-    pub fn propagate_future_weights(states: &mut DWAStates) -> bool {
+    fn compute_future_weights(states: &DWAStates) -> Vec<Weight> {
         let n = states.len();
         if n == 0 {
-            return false;
+            return vec![];
         }
 
         // 1. Compute future weights via backward analysis.
@@ -784,6 +799,17 @@ impl DWA {
                 }
             }
         }
+        future_weights
+    }
+
+    pub fn propagate_future_weights(states: &mut DWAStates) -> bool {
+        let n = states.len();
+        if n == 0 {
+            return false;
+        }
+
+        // 1. Compute future weights via backward analysis.
+        let future_weights = Self::compute_future_weights(states);
 
         // 2. Update edge weights. An edge weight W can be relaxed to W | !future_weight(target)
         // because any bits not in future_weight(target) would be filtered out anyway.
@@ -1087,10 +1113,12 @@ impl DWA {
             new_dwa.states.add_existing_state(new_state);
         }
 
+        let future_weights = DWA::compute_future_weights(&new_dwa.states);
+
         let other_start_remapped = other.body.start_state + offset;
         let self_start = new_dwa.body.start_state;
 
-        let new_start = new_dwa.states.union_state(self_start, other_start_remapped);
+        let new_start = new_dwa.states.union_state(self_start, other_start_remapped, &future_weights);
         new_dwa.body.start_state = new_start;
 
         if STOCHASTIC_VALIDATION {
