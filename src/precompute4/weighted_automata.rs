@@ -445,11 +445,19 @@ impl DWAStates {
         self[state_id].apply_weight(weight);
     }
 
-    pub fn exclude_weight_from_state(&mut self, state_id: StateID, weight: &Weight) -> StateID {
+    pub fn exclude_weight_from_state(
+        &mut self,
+        state_id: StateID,
+        weight: &Weight,
+        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
+    ) -> StateID {
         assert!(state_id < self.len(), "state_id out of bounds");
         if weight.is_empty() {
             return state_id;
         }
+
+        let key = (state_id, weight.clone());
+        if let Some(&id) = gating_memo.get(&key) { return id; }
 
         // Check if any weight in the state will be affected. If not, we don't need to copy.
         let state = &self[state_id];
@@ -458,11 +466,13 @@ impl DWAStates {
             || state.trans_weights_exceptions.values().any(|w| !(&*w & weight).is_empty());
 
         if !needs_change {
+            gating_memo.insert(key, state_id);
             return state_id;
         }
 
         let new_id = self.copy_state(state_id);
         self[new_id].exclude_weight(weight);
+        gating_memo.insert(key, new_id);
         new_id
     }
 
@@ -471,6 +481,7 @@ impl DWAStates {
         s_from_id: StateID,
         s_into_id: StateID,
         memo: &mut HashMap<(StateID, StateID), StateID>,
+        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
     ) {
         assert!(s_from_id < self.len(), "s_from_id out of bounds");
         assert!(s_into_id < self.len(), "s_into_id out of bounds");
@@ -516,10 +527,10 @@ impl DWAStates {
                 Some(t1)
             } else {
                 let to_exclude_from_t2 = &w_def_from - &w_def_into;
-                let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2);
+                let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
                 let to_exclude_from_t1 = &w_def_into - &w_def_from;
-                let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1);
-                Some(self.union_state(t1_gated, t2_gated, memo))
+                let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
+                Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
             },
             (Some(t), None) | (None, Some(t)) => Some(t),
             (None, None) => None,
@@ -543,10 +554,10 @@ impl DWAStates {
                     Some(t1)
                 } else {
                     let to_exclude_from_t2 = &w_from - &w_into;
-                    let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2);
+                    let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
                     let to_exclude_from_t1 = &w_into - &w_from;
-                    let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1);
-                    Some(self.union_state(t1_gated, t2_gated, memo))
+                    let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
+                    Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
                 },
                 (Some(t), None) | (None, Some(t)) => Some(t),
                 (None, None) => None,
@@ -573,6 +584,7 @@ impl DWAStates {
         s1_id: StateID,
         s2_id: StateID,
         memo: &mut HashMap<(StateID, StateID), StateID>,
+        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
     ) -> StateID {
         assert!(s1_id < self.len(), "s1_id out of bounds");
         assert!(s2_id < self.len(), "s2_id out of bounds");
@@ -589,7 +601,7 @@ impl DWAStates {
         memo.insert(key, new_id);
 
         // Merge s2 into the new state
-        self.union_assign_state(s2_id, new_id, memo);
+        self.union_assign_state(s2_id, new_id, memo, gating_memo);
 
         new_id
     }
@@ -1162,7 +1174,8 @@ impl DWA {
         let self_start = new_dwa.body.start_state;
 
         let mut memo = HashMap::new();
-        let new_start = new_dwa.states.union_state(self_start, other_start_remapped, &mut memo);
+        let mut gating_memo = HashMap::new();
+        let new_start = new_dwa.states.union_state(self_start, other_start_remapped, &mut memo, &mut gating_memo);
         new_dwa.body.start_state = new_start;
 
         if STOCHASTIC_VALIDATION {
@@ -1406,6 +1419,7 @@ impl DWA {
         let offset = new_dwa.states.len();
 
         let mut memo = HashMap::new();
+        let mut gating_memo = HashMap::new();
 
         // Add all of other's states to the new DWA, remapping their transition targets.
         for other_state in &other.states.0 {
@@ -1447,7 +1461,7 @@ impl DWA {
             new_dwa.states[s_a_id].final_weight = None;
 
             // Merge the gated start state into the final `self` state.
-            new_dwa.states.union_assign_state(temp_id, s_a_id, &mut memo);
+            new_dwa.states.union_assign_state(temp_id, s_a_id, &mut memo, &mut gating_memo);
 
             // Set the correct final weight at the junction.
             // It must be unioned with any final weight that might have been
