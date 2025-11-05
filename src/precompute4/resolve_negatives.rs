@@ -39,7 +39,7 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         // Determinize to DWA then back to NWA to normalize the graph, which helps subsequent passes.
         println!("{}", nwa);
         let mut tmp_dwa = nwa.determinize_to_dwa();
-        tmp_dwa.simplify();
+        // tmp_dwa.simplify();
         crate::debug!(3, "Intermediate DWA: {}", tmp_dwa);
         nwa = NWA::from_dwa(&tmp_dwa);
     }
@@ -84,18 +84,13 @@ fn resolve_negative_codes_in_nwa_internal(
             }
         }
 
-        // Step 2: Copy B and strip positive and epsilon transitions; also clear final weight in the copy.
+        // Step 2: Copy B and strip positive transitions; also clear final weight in the copy.
         let b_copy_id = states.copy_state(b_orig_id);
         {
             let b_copy = &mut states[b_copy_id];
             // Clear final (as we propagated)
             if b_copy.final_weight.is_some() {
                 b_copy.final_weight = None;
-                changed = true;
-            }
-            // Remove epsilons
-            if !b_copy.epsilons.is_empty() {
-                b_copy.epsilons.clear();
                 changed = true;
             }
             // Retain only negative-labeled transitions
