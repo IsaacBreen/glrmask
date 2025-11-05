@@ -227,22 +227,22 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 let mut states = states_arena.borrow_mut();
 
                 // Copy template into arena
-                crate::debug!(5, "Applying template DWA for terminal {:?} gated by weight {:?}...", edge_terminal_opt, llm_token_bv);
+                crate::debug!(2, "Applying template DWA for terminal {:?} gated by weight {:?}...", edge_terminal_opt, llm_token_bv);
                 let (template_start_in_arena, _) = states.copy_subgraph_from(&template_dwa.states, template_dwa.body.start_state);
-                crate::debug!(6, "Template DWA copied into arena. Current arena size: {} states.", states.0.len());
+                crate::debug!(2, "Template DWA copied into arena. Current arena size: {} states.", states.0.len());
                 let mut template_body_in_arena = DWABody { start_state: template_start_in_arena };
 
                 // Gate left by weight (LLM token filter)
-                crate::debug!(5, "Starting DWA::apply_weight_components for gating...");
+                crate::debug!(2, "Starting DWA::apply_weight_components for gating...");
                 let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
                 let new_gated_start = DWA::apply_weight_components(&mut states, &mut template_body_in_arena, &weight);
-                crate::debug!(5, "DWA::apply_weight_components finished. New start state: {}.", new_gated_start);
+                crate::debug!(2, "DWA::apply_weight_components finished. New start state: {}.", new_gated_start);
                 let gated_template_body = DWABody { start_state: new_gated_start };
 
                 // Concatenate: left then current (right)
-                crate::debug!(5, "Starting DWA::concatenate_components: left_start={} right_start={}...", gated_template_body.start_state, current_dwa_body.start_state);
+                crate::debug!(2, "Starting DWA::concatenate_components: left_start={} right_start={}...", gated_template_body.start_state, current_dwa_body.start_state);
                 let composed_body = DWA::concatenate_components(&mut states, &gated_template_body, current_dwa_body);
-                crate::debug!(5, "DWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
+                crate::debug!(2, "DWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
                 results.push((*dest_idx, composed_body));
             }
             results
