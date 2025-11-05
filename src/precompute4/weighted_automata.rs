@@ -1093,8 +1093,6 @@ impl DWA {
         let new_start = new_dwa.states.union_state(self_start, other_start_remapped);
         new_dwa.body.start_state = new_start;
 
-        new_dwa.simplify();
-
         if STOCHASTIC_VALIDATION {
             // Validate C against A and B via stochastic sampling.
             DWA::stochastic_validate_union(self, other, &new_dwa);
@@ -1388,8 +1386,6 @@ impl DWA {
                 }
             }
         }
-
-        new_dwa.simplify();
 
         if STOCHASTIC_VALIDATION {
             // Validate C against A and B via stochastic sampling.
