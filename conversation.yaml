@@ -1172,8 +1172,8 @@ local_system:
                           let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
                           new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
 
-                          let tw_exc0 = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
-                          let tw_exc1 = s1.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+                          let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+                          let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
                           new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc0 | tw_exc1);
                       }
                   }
@@ -3858,96 +3858,18 @@ local_system:
               true
           }
 
-          fn compute_future_weights(states: &DWAStates) -> Vec<Weight> {
-              let n = states.len();
-              if n == 0 {
-                  return vec![];
-              }
-
-              // 1. Compute future weights via backward analysis.
-              // future_weights[i] = union of weights of all accepting paths starting from i.
-              let mut rev_adj: Vec<Vec<StateID>> = vec![vec![]; n];
-              for i in 0..n {
-                  if let Some(d) = states[i].transitions.default {
-                      if d < n {
-                          rev_adj[d].push(i);
-                      }
-                  }
-                  for &v in states[i].transitions.exceptions.values() {
-                      if v < n {
-                          rev_adj[v].push(i);
-                      }
-                  }
-              }
-              for preds in rev_adj.iter_mut() {
-                  preds.sort_unstable();
-                  preds.dedup();
-              }
-
-              let mut future_weights = vec![Weight::zeros(); n];
-              let mut worklist = VecDeque::new();
-              for i in 0..n {
-                  if let Some(fw) = &states[i].final_weight {
-                      if !fw.is_empty() {
-                          future_weights[i] = fw.clone();
-                          for &pred in &rev_adj[i] {
-                              worklist.push_back(pred);
-                          }
-                      }
-                  }
-              }
-
-              while let Some(u) = worklist.pop_front() {
-                  let mut u_new_fw = states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
-                  let u_state = &states[u];
-
-                  // Default transition
-                  if let Some(v) = u_state.transitions.default {
-                      if v < n {
-                          if let Some(edge_w) = u_state.trans_weight_default.as_ref() {
-                              u_new_fw |= &(edge_w & &future_weights[v]);
-                          }
-                      }
-                  }
-
-                  // Exception transitions
-                  for (&ch, &v) in &u_state.transitions.exceptions {
-                      if v < n {
-                          if let Some(edge_w) = u_state.trans_weights_exceptions.get(&ch) {
-                              u_new_fw |= &(edge_w & &future_weights[v]);
-                          }
-                      }
-                  }
-
-                  if u_new_fw != future_weights[u] {
-                      future_weights[u] = u_new_fw;
-                      for &pred in &rev_adj[u] {
-                          worklist.push_back(pred);
-                      }
-                  }
-              }
-              future_weights
-          }
-
           /// Union of two DWAs via product construction.
           /// The states of the new DWA correspond to pairs of states from the input DWAs.
           /// A state is final if either of the original states is final.
           /// A transition exists if it exists in at least one of the original DWAs.
           /// If a transition exists in one but not the other, the other is treated as going to a non-final sink state.
           pub fn union(&self, other: &DWA) -> DWA {
-              // Simplify both automata first. This is crucial for correctness. The `propagate_and_constrain_weights`
-              // pass within `simplify` ensures that path weights are correctly reflected in the final weights
-              // before the product construction combines them. Without this, weights from a non-accepting path
-              // in one automaton can "leak" into the result if the corresponding path in the other is accepting.
-              let mut self_simplified = self.clone();
-              self_simplified.simplify();
-              let mut other_simplified = other.clone();
-              other_simplified.simplify();
-
               let mut new_dwa = DWA::default();
               let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
               let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
 
+              let sink0 = self.states.len();
+              let sink1 = other.states.len();
 
               let mut get_or_create = |
                   pair: (StateID, StateID),
@@ -3965,20 +3887,17 @@ local_system:
                   new_id
               };
 
-              if self_simplified.states.is_empty() && other_simplified.states.is_empty() {
+              if self.states.is_empty() && other.states.is_empty() {
                   return new_dwa;
               }
 
-              let sink0 = self_simplified.states.len();
-              let sink1 = other_simplified.states.len();
-
-              let start_pair = (self_simplified.body.start_state, other_simplified.body.start_state);
+              let start_pair = (self.body.start_state, other.body.start_state);
               new_dwa.body.start_state = get_or_create(start_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
 
               while let Some((id0, id1)) = worklist.pop_front() {
                   let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
-                  let s0 = if id0 == sink0 { None } else { Some(&self_simplified.states[id0]) };
-                  let s1 = if id1 == sink1 { None } else { Some(&other_simplified.states[id1]) };
+                  let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
+                  let s1 = if id1 == sink1 { None } else { Some(&other.states[id1]) };
 
                   let new_state = &mut new_dwa.states[new_id];
 
@@ -6837,8 +6756,8 @@ messages:
                           let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
                           new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
 
-                          let tw_exc0 = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
-                          let tw_exc1 = s1.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+                          let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+                          let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
                           new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc0 | tw_exc1);
                       }
                   }
@@ -8444,7 +8363,7 @@ messages:
       filename: src/precompute4/weighted_automata.rs
   - user: |2+
 
-      thread 'precompute4::weighted_automata::tests::test_union_from_debug_log' (2741992) panicked at src/precompute4/weighted_automata.rs:1329:17:
+      thread 'precompute4::weighted_automata::tests::test_union_from_debug_log' (2736404) panicked at src/precompute4/weighted_automata.rs:1329:17:
       assertion `left == right` failed: Union weight mismatch vs expected A∪B.
       word: [2, neg(2), neg(0)]
       A(w): [0]
@@ -8589,90 +8508,50 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. My apologies, it seems my previous response was incomplete. I have analyzed the panic again and found a more robust solution to the underlying issue in the `DWA::union` function.
+      I've identified a bug in the `DWA::union` method that could lead to incorrect weight calculations, which is the likely cause of the test failure you're seeing. Here are the steps to fix it.
 
-      The problem is that the product construction used for the union operation incorrectly combines weights. It unions edge weights at each step, which can cause weights from a non-accepting path in one automaton to "leak" into the accumulated weight and be "rescued" by an accepting path in the other automaton. This leads to a final weight that is larger than the correct union of the two individual path weights.
+      ### Instructions
 
-      The solution is to pre-process both automata before performing the union. By running the `simplify` method on clones of both automata, we trigger a series of weight propagation and constraint passes. Specifically, `propagate_and_constrain_weights` ensures that the `final_weight` of any state is intersected with the weights of all possible paths that can reach it. This effectively bakes the path constraints into the final weights. When the product construction later unions these pre-constrained final weights, the result is correct.
+      The issue is in `src/precompute4/weighted_automata.rs`, within the `DWA::union` function. When calculating the transition weights for exception characters, the code only checks for exception weights and doesn't correctly fall back to the default transition's weight if an exception isn't defined for that character in one of the automata.
 
-      Here are the steps to apply the fix:
+      The fix is to use the `get_weight` helper method, which correctly checks for an exception weight first and then falls back to the default weight.
 
-      ### Step-by-step Instructions
+      1.  **Open `src/precompute4/weighted_automata.rs`**.
+      2.  **Navigate to the `DWA::union` method**, specifically to the loop over `critical_points`.
+      3.  **Locate these two lines** around line 1148:
 
-      1.  **File:** `src/precompute4/weighted_automata.rs`
-      2.  **Function:** `pub fn union(&self, other: &DWA) -> DWA`
-      3.  **Action:** At the beginning of the `union` function, create simplified clones of `self` and `other`. Then, use these simplified versions for the rest of the product construction logic. This involves replacing all subsequent uses of `self` with the simplified clone, and all uses of `other` with its simplified clone.
+          ```rust
+                              let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+                              let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+          ```
 
-          -   Add the following lines at the start of the function:
-              ```rust
-              let mut self_simplified = self.clone();
-              self_simplified.simplify();
-              let mut other_simplified = other.clone();
-              other_simplified.simplify();
-              ```
-          -   Replace `self.states.len()` with `self_simplified.states.len()`.
-          -   Replace `other.states.len()` with `other_simplified.states.len()`.
-          -   Replace `self.body.start_state` with `self_simplified.body.start_state`.
-          -   Replace `other.body.start_state` with `other_simplified.body.start_state`.
-          -   Inside the `while` loop, replace `self.states[id0]` with `self_simplified.states[id0]` and `other.states[id1]` with `other_simplified.states[id1]`.
-          -   Update the stochastic validation call at the end to use the original `self` and `other` automata for comparison against the newly created union.
+      4.  **Replace them** with the following lines that use `get_weight`:
+
+          ```rust
+                              let tw_exc0 = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+                              let tw_exc1 = s1.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+          ```
+
+      This change ensures that when combining automata, the weights for transitions that fall through to a default case are correctly retrieved and included in the union automaton.
 
       ### Git Diff
 
-      Here is the corresponding git diff for the change:
+      Here is the patch for the change described above.
 
       ```diff
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -1174,12 +1174,18 @@
-           /// A transition exists if it exists in at least one of the original DWAs.
-           /// If a transition exists in one but not the other, the other is treated as going to a non-final sink state.
-           pub fn union(&self, other: &DWA) -> DWA {
-      +        // Simplify both automata first. This is crucial for correctness. The `propagate_and_constrain_weights`
-      +        // pass within `simplify` ensures that path weights are correctly reflected in the final weights
-      +        // before the product construction combines them. Without this, weights from a non-accepting path
-      +        // in one automaton can "leak" into the result if the corresponding path in the other is accepting.
-      +        let mut self_simplified = self.clone();
-      +        self_simplified.simplify();
-      +        let mut other_simplified = other.clone();
-      +        other_simplified.simplify();
-      +
-               let mut new_dwa = DWA::default();
-               let mut pair_to_new_id: BTreeMap<(StateID, StateID), StateID> = BTreeMap::new();
-               let mut worklist: VecDeque<(StateID, StateID)> = VecDeque::new();
+      @@ -1145,8 +1145,8 @@
+                           let new_exc_tgt = get_or_create(exc_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
+                           new_dwa.states[new_id].transitions.exceptions.insert(ch, new_exc_tgt);
        
-      -        let sink0 = self.states.len();
-      -        let sink1 = other.states.len();
-       
-               let mut get_or_create = |
-                   pair: (StateID, StateID),
-      @@ -1196,20 +1202,23 @@
-                   new_id
-               };
-       
-      -        if self.states.is_empty() && other.states.is_empty() {
-      +        if self_simplified.states.is_empty() && other_simplified.states.is_empty() {
-                   return new_dwa;
-               }
-       
-      -        let start_pair = (self.body.start_state, other.body.start_state);
-      +        let sink0 = self_simplified.states.len();
-      +        let sink1 = other_simplified.states.len();
-      +
-      +        let start_pair = (self_simplified.body.start_state, other_simplified.body.start_state);
-               new_dwa.body.start_state = get_or_create(start_pair, &mut new_dwa, &mut pair_to_new_id, &mut worklist);
-       
-               while let Some((id0, id1)) = worklist.pop_front() {
-                   let new_id = *pair_to_new_id.get(&(id0, id1)).unwrap();
-      -            let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
-      -            let s1 = if id1 == sink1 { None } else { Some(&other.states[id1]) };
-      +            let s0 = if id0 == sink0 { None } else { Some(&self_simplified.states[id0]) };
-      +            let s1 = if id1 == sink1 { None } else { Some(&other_simplified.states[id1]) };
-       
-                   let new_state = &mut new_dwa.states[new_id];
-       
-                   let fw0 = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
-                   let fw1 = s1.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+      -                    let tw_exc0 = s0.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+      -                    let tw_exc1 = s1.and_then(|s| s.trans_weights_exceptions.get(&ch)).cloned().unwrap_or_else(Weight::zeros);
+      +                    let tw_exc0 = s0.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+      +                    let tw_exc1 = s1.and_then(|s| s.get_weight(ch)).cloned().unwrap_or_else(Weight::zeros);
+                           new_dwa.states[new_id].trans_weights_exceptions.insert(ch, tw_exc0 | tw_exc1);
+                       }
+                   }
 
       ```
     metadata:
@@ -8685,7 +8564,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Ensure correct weight union by simplifying
-      DWAs prior to product construction"'
+  - user: 'Changes committed with message: "Fix: Use get_weight in DWA union for exception
+      transition weights"'
     metadata:
 ...
