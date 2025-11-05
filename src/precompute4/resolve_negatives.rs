@@ -55,10 +55,6 @@ fn resolve_negative_codes_in_nwa_internal(
 ) -> bool {
     let mut changed = false;
 
-    if state_id >= states.len() {
-        return false;
-    }
-
     // Collect negative transitions first to avoid borrow issues
     let negatives: Vec<(i16, NWAStateID, Weight)> = {
         let st = &states[state_id];
