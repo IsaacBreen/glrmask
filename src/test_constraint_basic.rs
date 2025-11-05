@@ -282,8 +282,8 @@ fn test_constraint_expression() {
         &GrammarConstraintConfig::default(),
         None,
     );
-    // constraint.dump_precomputed1(); // Commented out dump for cleaner test output
-    // constraint.dump_precomputed2(); // Commented out dump for cleaner test output
+    constraint.dump_precomputed1();
+    // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
     constraint.dump_precomputed_special();
 

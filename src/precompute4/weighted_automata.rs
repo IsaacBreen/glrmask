@@ -26,7 +26,7 @@ pub struct SimpleBitset(pub RangeSetBlaze<usize>);
 
 // --- Stochastic validation controls and RNG ---
 // Toggle this to true to enable stochastic validation in union() and concatenate().
-const STOCHASTIC_VALIDATION: bool = false;
+const STOCHASTIC_VALIDATION: bool = true;
 const VALIDATION_SAMPLES: usize = 32;
 const VALIDATION_MAX_STEPS: usize = 12;
 const SAMPLING_TRIES: usize = 100;
