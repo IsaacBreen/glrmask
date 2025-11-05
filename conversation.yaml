@@ -2558,61 +2558,41 @@ local_system:
 
           #[test]
           fn test_union_from_debug_log_simplified() {
+              // This test isolates the paths:
+              // A: [2, neg(2), neg(0)] -> weight [0]
+              // B: [2, neg(2), neg(0), 0, neg(0), neg(1)] -> weight [3]
               fn neg(x: i16) -> i16 {
                   i16::MIN + x
               }
 
-              // --- Build LEFT DWA ---
+              // --- Build LEFT DWA (A) ---
               let mut left = DWA::new();
-              for _ in 0..9 {
+              // States: 0 (start), 1 (old 3), 2 (old 7), 3 (old 9)
+              for _ in 0..3 {
                   left.add_state();
               }
-              assert_eq!(left.states.len(), 10);
+              assert_eq!(left.states.len(), 4);
 
-              left.set_final_weight(0, Weight::from_item(2)).unwrap();
-              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 1, 2, Weight::from_iter(0..=1)).unwrap();
-              left.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
-              left.add_transition(0, 3, 4, Weight::from_iter(0..=1)).unwrap();
+              left.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
+              left.add_transition(1, neg(2), 2, Weight::all()).unwrap();
+              left.add_transition(2, neg(0), 3, Weight::all()).unwrap();
+              left.set_final_weight(3, Weight::all()).unwrap();
 
-              left.add_transition(1, neg(0), 5, Weight::all()).unwrap();
-              left.set_default_transition(2, 6, Weight::all()).unwrap();
-              left.add_transition(3, neg(2), 7, Weight::all()).unwrap();
-              // state 4 is sink
-              left.add_transition(5, neg(1), 8, Weight::all()).unwrap();
-              // state 6 is sink
-              left.add_transition(7, neg(0), 9, Weight::all()).unwrap();
-
-              left.set_final_weight(8, Weight::all()).unwrap();
-              left.set_final_weight(9, Weight::all()).unwrap();
-
-              // --- Build RIGHT DWA ---
+              // --- Build RIGHT DWA (B) ---
               let mut right = DWA::new();
-              for _ in 0..12 {
+              // States: 0 (start), 1 (old 2), 2 (old 5), 3 (old 6), 4 (old 7), 5 (old 10), 6 (old 12)
+              for _ in 0..6 {
                   right.add_state();
               }
-              assert_eq!(right.states.len(), 13);
+              assert_eq!(right.states.len(), 7);
 
-              right.add_transition(0, 1, 1, Weight::from_item(3)).unwrap();
-              right.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
-              right.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
-
-              right.set_default_transition(1, 4, Weight::all()).unwrap();
-              right.add_transition(2, neg(2), 5, Weight::all()).unwrap();
-              // state 3 is sink
-              // state 4 is sink
-              right.add_transition(5, neg(0), 6, Weight::all()).unwrap();
-
-              right.add_transition(6, 0, 7, Weight::from_item(3)).unwrap();
-              right.add_transition(6, 1, 8, Weight::from_item(3)).unwrap();
-              right.add_transition(6, 3, 9, Weight::from_item(3)).unwrap();
-
-              right.add_transition(7, neg(0), 10, Weight::all()).unwrap();
-              right.set_default_transition(8, 11, Weight::all()).unwrap();
-              // state 9 is sink
-              right.add_transition(10, neg(1), 12, Weight::all()).unwrap();
-              // state 11 is sink
-              right.set_final_weight(12, Weight::all()).unwrap();
+              right.add_transition(0, 2, 1, Weight::from_item(3)).unwrap();
+              right.add_transition(1, neg(2), 2, Weight::all()).unwrap();
+              right.add_transition(2, neg(0), 3, Weight::all()).unwrap();
+              right.add_transition(3, 0, 4, Weight::from_item(3)).unwrap();
+              right.add_transition(4, neg(0), 5, Weight::all()).unwrap();
+              right.add_transition(5, neg(1), 6, Weight::all()).unwrap();
+              right.set_final_weight(6, Weight::all()).unwrap();
 
               let u = left.union(&right);
               DWA::stochastic_validate_union(&left, &right, &u);
@@ -5172,41 +5152,28 @@ local_system:
 
           #[test]
           fn test_union_from_debug_log_simplified() {
-              // This test isolates the paths:
-              // A: [2, neg(2), neg(0)] -> weight [0]
-              // B: [2, neg(2), neg(0), 0, neg(0), neg(1)] -> weight [3]
-              fn neg(x: i16) -> i16 {
-                  i16::MIN + x
-              }
+              // This test isolates two simple paths with different initial edge weights.
+              // A: path [0, 1] with weight [0]
+              // B: path [0, 1, 2] with weight [1]
+              // The union should correctly handle both.
 
               // --- Build LEFT DWA (A) ---
               let mut left = DWA::new();
-              // States: 0 (start), 1 (old 3), 2 (old 7), 3 (old 9)
-              for _ in 0..3 {
-                  left.add_state();
-              }
-              assert_eq!(left.states.len(), 4);
-
-              left.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
-              left.add_transition(1, neg(2), 2, Weight::all()).unwrap();
-              left.add_transition(2, neg(0), 3, Weight::all()).unwrap();
-              left.set_final_weight(3, Weight::all()).unwrap();
+              let s1a = left.add_state();
+              let s2a = left.add_state();
+              left.add_transition(0, 0, s1a, Weight::from_item(0)).unwrap();
+              left.add_transition(s1a, 1, s2a, Weight::all()).unwrap();
+              left.set_final_weight(s2a, Weight::all()).unwrap();
 
               // --- Build RIGHT DWA (B) ---
               let mut right = DWA::new();
-              // States: 0 (start), 1 (old 2), 2 (old 5), 3 (old 6), 4 (old 7), 5 (old 10), 6 (old 12)
-              for _ in 0..6 {
-                  right.add_state();
-              }
-              assert_eq!(right.states.len(), 7);
-
-              right.add_transition(0, 2, 1, Weight::from_item(3)).unwrap();
-              right.add_transition(1, neg(2), 2, Weight::all()).unwrap();
-              right.add_transition(2, neg(0), 3, Weight::all()).unwrap();
-              right.add_transition(3, 0, 4, Weight::from_item(3)).unwrap();
-              right.add_transition(4, neg(0), 5, Weight::all()).unwrap();
-              right.add_transition(5, neg(1), 6, Weight::all()).unwrap();
-              right.set_final_weight(6, Weight::all()).unwrap();
+              let s1b = right.add_state();
+              let s2b = right.add_state();
+              let s3b = right.add_state();
+              right.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
+              right.add_transition(s1b, 1, s2b, Weight::all()).unwrap();
+              right.add_transition(s2b, 2, s3b, Weight::all()).unwrap();
+              right.set_final_weight(s3b, Weight::all()).unwrap();
 
               let u = left.union(&right);
               DWA::stochastic_validate_union(&left, &right, &u);
@@ -5223,7 +5190,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -7812,109 +7779,6 @@ messages:
 
           #[test]
           fn test_union_from_debug_log_simplified() {
-              fn neg(x: i16) -> i16 {
-                  i16::MIN + x
-              }
-
-              // --- Build LEFT DWA ---
-              let mut left = DWA::new();
-              for _ in 0..9 {
-                  left.add_state();
-              }
-              assert_eq!(left.states.len(), 10);
-
-              left.set_final_weight(0, Weight::from_item(2)).unwrap();
-              left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-              left.add_transition(0, 1, 2, Weight::from_iter(0..=1)).unwrap();
-              left.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
-              left.add_transition(0, 3, 4, Weight::from_iter(0..=1)).unwrap();
-
-              left.add_transition(1, neg(0), 5, Weight::all()).unwrap();
-              left.set_default_transition(2, 6, Weight::all()).unwrap();
-              left.add_transition(3, neg(2), 7, Weight::all()).unwrap();
-              // state 4 is sink
-              left.add_transition(5, neg(1), 8, Weight::all()).unwrap();
-              // state 6 is sink
-              left.add_transition(7, neg(0), 9, Weight::all()).unwrap();
-
-              left.set_final_weight(8, Weight::all()).unwrap();
-              left.set_final_weight(9, Weight::all()).unwrap();
-
-              // --- Build RIGHT DWA ---
-              let mut right = DWA::new();
-              for _ in 0..12 {
-                  right.add_state();
-              }
-              assert_eq!(right.states.len(), 13);
-
-              right.add_transition(0, 1, 1, Weight::from_item(3)).unwrap();
-              right.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
-              right.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
-
-              right.set_default_transition(1, 4, Weight::all()).unwrap();
-              right.add_transition(2, neg(2), 5, Weight::all()).unwrap();
-              // state 3 is sink
-              // state 4 is sink
-              right.add_transition(5, neg(0), 6, Weight::all()).unwrap();
-
-              right.add_transition(6, 0, 7, Weight::from_item(3)).unwrap();
-              right.add_transition(6, 1, 8, Weight::from_item(3)).unwrap();
-              right.add_transition(6, 3, 9, Weight::from_item(3)).unwrap();
-
-              right.add_transition(7, neg(0), 10, Weight::all()).unwrap();
-              right.set_default_transition(8, 11, Weight::all()).unwrap();
-              // state 9 is sink
-              right.add_transition(10, neg(1), 12, Weight::all()).unwrap();
-              // state 11 is sink
-              right.set_final_weight(12, Weight::all()).unwrap();
-
-              let u = left.union(&right);
-              DWA::stochastic_validate_union(&left, &right, &u);
-          }
-      }
-
-      ```
-    metadata:
-      filename: src/precompute4/weighted_automata.rs
-  - user: Simplify test_union_from_debug_log_simplified to isolate the path [2, neg(2),
-      neg(0)] in A and [2, neg(2), neg(0), 0, neg(0), neg(1)] in B
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
-                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      The `test_union_from_debug_log_simplified` test will be simplified to construct only the states and transitions necessary to cover the paths `[2, neg(2), neg(0)]` in DWA A and `[2, neg(2), neg(0), 0, neg(0), neg(1)]` in DWA B, ensuring the union logic is tested on this specific case.
-
-      Here are the step-by-step instructions:
-
-      In `src/precompute4/weighted_automata.rs`, modify the `test_union_from_debug_log_simplified` function:
-
-      1.  **Replace the entire body** of the `test_union_from_debug_log_simplified` function with the simplified DWA constructions.
-
-          *   DWA A (left) will be simplified to 4 states (0-3).
-          *   DWA B (right) will be simplified to 7 states (0-6).
-
-      ```rust
-      // src/precompute4/weighted_automata.rs
-
-      // ... (lines 1202-1205 remain the same)
-
-          #[test]
-          fn test_union_from_debug_log_simplified() {
               // This test isolates the paths:
               // A: [2, neg(2), neg(0)] -> weight [0]
               // B: [2, neg(2), neg(0), 0, neg(0), neg(1)] -> weight [3]
@@ -7955,99 +7819,140 @@ messages:
               DWA::stochastic_validate_union(&left, &right, &u);
           }
       }
+
       ```
+    metadata:
+      filename: src/precompute4/weighted_automata.rs
+  - user: Simplify `test_union_from_debug_log_simplified` so we just have the path
+      `[0, 1]` in A and `[0, 1, 2]` in B, and so the first transition on 0 in A has
+      weight `[0]` and in B it has weight `[1]`.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to simplify the test case, followed by the corresponding git diff.
+
+      ### Instructions
+
+      1.  **Open the file `src/precompute4/weighted_automata.rs`**.
+      2.  **Navigate to the test function `test_union_from_debug_log_simplified`**, which is located within the `#[cfg(test)] mod tests { ... }` block at the end of the file.
+      3.  **Replace the entire body of the function** with the new, simplified implementation below. This change replaces a complex test case with a much clearer one that isolates the behavior of `union` on two simple, distinct paths with different initial edge weights.
+
+      ```rust
+          #[test]
+          fn test_union_from_debug_log_simplified() {
+              // This test isolates two simple paths with different initial edge weights.
+              // A: path [0, 1] with weight [0]
+              // B: path [0, 1, 2] with weight [1]
+              // The union should correctly handle both.
+
+              // --- Build LEFT DWA (A) ---
+              let mut left = DWA::new();
+              let s1a = left.add_state();
+              let s2a = left.add_state();
+              left.add_transition(0, 0, s1a, Weight::from_item(0)).unwrap();
+              left.add_transition(s1a, 1, s2a, Weight::all()).unwrap();
+              left.set_final_weight(s2a, Weight::all()).unwrap();
+
+              // --- Build RIGHT DWA (B) ---
+              let mut right = DWA::new();
+              let s1b = right.add_state();
+              let s2b = right.add_state();
+              let s3b = right.add_state();
+              right.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
+              right.add_transition(s1b, 1, s2b, Weight::all()).unwrap();
+              right.add_transition(s2b, 2, s3b, Weight::all()).unwrap();
+              right.set_final_weight(s3b, Weight::all()).unwrap();
+
+              let u = left.union(&right);
+              DWA::stochastic_validate_union(&left, &right, &u);
+          }
+      ```
+
+      ### Git Diff
+
+      Here is the git diff to apply the changes:
 
       ```diff
       diff --git a/src/precompute4/weighted_automata.rs b/src/precompute4/weighted_automata.rs
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -1202,68 +1202,38 @@
+      @@ -1718,46 +1718,29 @@
        
            #[test]
            fn test_union_from_debug_log_simplified() {
-      +        // This test isolates the paths:
-      +        // A: [2, neg(2), neg(0)] -> weight [0]
-      +        // B: [2, neg(2), neg(0), 0, neg(0), neg(1)] -> weight [3]
-               fn neg(x: i16) -> i16 {
-                   i16::MIN + x
-               }
+      -        // This test isolates the paths:
+      -        // A: [2, neg(2), neg(0)] -> weight [0]
+      -        // B: [2, neg(2), neg(0), 0, neg(0), neg(1)] -> weight [3]
+      -        fn neg(x: i16) -> i16 {
+      -            i16::MIN + x
+      -        }
+      +        // This test isolates two simple paths with different initial edge weights.
+      +        // A: path [0, 1] with weight [0]
+      +        // B: path [0, 1, 2] with weight [1]
+      +        // The union should correctly handle both.
        
-      -        // --- Build LEFT DWA ---
-      +        // --- Build LEFT DWA (A) ---
+               // --- Build LEFT DWA (A) ---
                let mut left = DWA::new();
-      -        for _ in 0..9 {
-      +        // States: 0 (start), 1 (old 3), 2 (old 7), 3 (old 9)
-      +        for _ in 0..3 {
-                   left.add_state();
-               }
-      -        assert_eq!(left.states.len(), 10);
+      -        // States: 0 (start), 1 (old 3), 2 (old 7), 3 (old 9)
+      -        for _ in 0..3 {
+      -            left.add_state();
+      -        }
+      -        assert_eq!(left.states.len(), 4);
       -
-      -        left.set_final_weight(0, Weight::from_item(2)).unwrap();
-      -        left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-      -        left.add_transition(0, 1, 2, Weight::from_iter(0..=1)).unwrap();
-      -        left.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
-      -        left.add_transition(0, 3, 4, Weight::from_iter(0..=1)).unwrap();
-      -
-      -        left.add_transition(1, neg(0), 5, Weight::all()).unwrap();
-      -        left.set_default_transition(2, 6, Weight::all()).unwrap();
-      -        left.add_transition(3, neg(2), 7, Weight::all()).unwrap();
-      -        // state 4 is sink
-      -        left.add_transition(5, neg(1), 8, Weight::all()).unwrap();
-      -        // state 6 is sink
-      -        left.add_transition(7, neg(0), 9, Weight::all()).unwrap();
-      -
-      -        left.set_final_weight(8, Weight::all()).unwrap();
-      -        left.set_final_weight(9, Weight::all()).unwrap();
-      -
-      -        // --- Build RIGHT DWA ---
-      +        assert_eq!(left.states.len(), 4);
-      +
-      +        left.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
-      +        left.add_transition(1, neg(2), 2, Weight::all()).unwrap();
-      +        left.add_transition(2, neg(0), 3, Weight::all()).unwrap();
-      +        left.set_final_weight(3, Weight::all()).unwrap();
-      +
-      +        // --- Build RIGHT DWA (B) ---
+      -        left.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
+      -        left.add_transition(1, neg(2), 2, Weight::all()).unwrap();
+      -        left.add_transition(2, neg(0), 3, Weight::all()).unwrap();
+      -        left.set_final_weight(3, Weight::all()).unwrap();
+      +        let s1a = left.add_state();
+      +        let s2a = left.add_state();
+      +        left.add_transition(0, 0, s1a, Weight::from_item(0)).unwrap();
+      +        left.add_transition(s1a, 1, s2a, Weight::all()).unwrap();
+      +        left.set_final_weight(s2a, Weight::all()).unwrap();
+       
+               // --- Build RIGHT DWA (B) ---
                let mut right = DWA::new();
-      -        for _ in 0..12 {
-      +        // States: 0 (start), 1 (old 2), 2 (old 5), 3 (old 6), 4 (old 7), 5 (old 10), 6 (old 12)
-      +        for _ in 0..6 {
-                   right.add_state();
-               }
-      -        assert_eq!(right.states.len(), 13);
+      -        // States: 0 (start), 1 (old 2), 2 (old 5), 3 (old 6), 4 (old 7), 5 (old 10), 6 (old 12)
+      -        for _ in 0..6 {
+      -            right.add_state();
+      -        }
+      -        assert_eq!(right.states.len(), 7);
       -
-      -        right.add_transition(0, 1, 1, Weight::from_item(3)).unwrap();
-      -        right.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
-      -        right.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
-      -
-      -        right.set_default_transition(1, 4, Weight::all()).unwrap();
-      -        right.add_transition(2, neg(2), 5, Weight::all()).unwrap();
-      -        // state 3 is sink
-      -        // state 4 is sink
-      -        right.add_transition(5, neg(0), 6, Weight::all()).unwrap();
-      -
-      -        right.add_transition(6, 0, 7, Weight::from_item(3)).unwrap();
-      -        right.add_transition(6, 1, 8, Weight::from_item(3)).unwrap();
-      -        right.add_transition(6, 3, 9, Weight::from_item(3)).unwrap();
-      -
-      -        right.add_transition(7, neg(0), 10, Weight::all()).unwrap();
-      -        right.set_default_transition(8, 11, Weight::all()).unwrap();
-      -        // state 9 is sink
-      -        right.add_transition(10, neg(1), 12, Weight::all()).unwrap();
-      -        // state 11 is sink
-      -        right.set_final_weight(12, Weight::all()).unwrap();
-      +        assert_eq!(right.states.len(), 7);
-      +
-      +        right.add_transition(0, 2, 1, Weight::from_item(3)).unwrap();
-      +        right.add_transition(1, neg(2), 2, Weight::all()).unwrap();
-      +        right.add_transition(2, neg(0), 3, Weight::all()).unwrap();
-      +        right.add_transition(3, 0, 4, Weight::from_item(3)).unwrap();
-      +        right.add_transition(4, neg(0), 5, Weight::all()).unwrap();
-      +        right.add_transition(5, neg(1), 6, Weight::all()).unwrap();
-      +        right.set_final_weight(6, Weight::all()).unwrap();
+      -        right.add_transition(0, 2, 1, Weight::from_item(3)).unwrap();
+      -        right.add_transition(1, neg(2), 2, Weight::all()).unwrap();
+      -        right.add_transition(2, neg(0), 3, Weight::all()).unwrap();
+      -        right.add_transition(3, 0, 4, Weight::from_item(3)).unwrap();
+      -        right.add_transition(4, neg(0), 5, Weight::all()).unwrap();
+      -        right.add_transition(5, neg(1), 6, Weight::all()).unwrap();
+      -        right.set_final_weight(6, Weight::all()).unwrap();
+      +        let s1b = right.add_state();
+      +        let s2b = right.add_state();
+      +        let s3b = right.add_state();
+      +        right.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
+      +        right.add_transition(s1b, 1, s2b, Weight::all()).unwrap();
+      +        right.add_transition(s2b, 2, s3b, Weight::all()).unwrap();
+      +        right.set_final_weight(s3b, Weight::all()).unwrap();
        
                let u = left.union(&right);
                DWA::stochastic_validate_union(&left, &right, &u);
+           }
+       }
+
       ```
     metadata:
   - user: |
@@ -8060,6 +7965,6 @@ messages:
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
   - user: 'Changes committed with message: "Simplify test_union_from_debug_log_simplified
-      to isolate specific union paths"'
+      in weighted_automata to isolate union behavior"'
     metadata:
 ...
