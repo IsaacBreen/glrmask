@@ -1,6 +1,6 @@
 use crate::precompute4::full_dwa::Precomputed4;
-use crate::precompute4::weighted_automata::{DWA, DWAStates, StateID, Weight, NWA, NWAStates, NWAStateID, NWABody};
-use std::collections::{BTreeMap};
+use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, NWABody, StateID, Weight};
+use std::collections::BTreeMap;
 
 pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
     for (_sid, dwa) in precomputed4.iter_mut() {
@@ -26,8 +26,7 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
 
         let n = nwa.states.len();
         for state_id in 0..n {
-            let changed =
-                resolve_negative_codes_in_nwa_internal(state_id, &mut nwa.states);
+            let changed = resolve_negative_codes_in_nwa_internal(state_id, &mut nwa.states);
             if changed {
                 changed_in_pass = true;
             }
@@ -58,7 +57,8 @@ fn resolve_negative_codes_in_nwa_internal(
     // Collect negative transitions first to avoid borrow issues
     let negatives: Vec<(i16, NWAStateID, Weight)> = {
         let st = &states[state_id];
-        st.transitions.iter()
+        st.transitions
+            .iter()
             .filter(|(k, _)| **k < 0)
             .map(|(k, (t, w))| (*k, *t, w.clone()))
             .collect()
@@ -92,9 +92,7 @@ fn resolve_negative_codes_in_nwa_internal(
             }
         }
 
-        // Check if B needs to be split. B needs splitting if it has "positive" behavior
-        // (a final weight or a positive-code transition) that should not be triggered
-        // by the negative path.
+        // Check if B needs to be split: if it has positive behavior that should not be triggered by the neg path.
         let b_needs_splitting = {
             let b_orig = &states[b_orig_id];
             b_orig.final_weight.is_some()
@@ -122,11 +120,10 @@ fn resolve_negative_codes_in_nwa_internal(
     changed
 }
 
-
 #[cfg(test)]
 mod tests {
-    use crate::precompute4::test_weighted_automata::assert_dwa_equivalent;
     use super::*;
+    use crate::precompute4::test_weighted_automata::assert_dwa_equivalent;
     use crate::precompute4::weighted_automata::{DWA, Weight};
 
     #[test]
@@ -153,8 +150,6 @@ mod tests {
         let mut expected = DWA::new();
         let s_final = expected.add_state();
         expected.add_transition(expected.body.start_state, code_a, s_final, Weight::from_item(2)).unwrap();
-        // The final weight is the intersection of the edge weight (2) and the final weight (all),
-        // constrained by reachability during simplification.
         expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
 
         assert_dwa_equivalent(d, expected);
@@ -162,7 +157,6 @@ mod tests {
 
     #[test]
     fn test_resolve_negatives_long_cancellation_chain() {
-        // This test models a path from a real-world DWA that involves multiple cancellations.
         // The path is: 0 --7--> 5 --neg(7)--> 10 --neg(3)--> 13 --3--> 15 --7--> 22 --neg(7)--> 27 --neg(1)--> 29 --neg(2)--> 30(final)
         let mut d = DWA::new();
         let s5 = d.add_state();
@@ -195,8 +189,6 @@ mod tests {
 
         resolve_negative_codes_in_dwa(&mut d);
 
-        // After resolution and simplification, the chain of cancellations should result
-        // in an automaton that accepts the "7".
         let mut expected = DWA::new();
         let s_final = expected.add_state();
         expected.add_transition(expected.body.start_state, code7, s_final, Weight::all()).unwrap();
@@ -232,10 +224,6 @@ mod tests {
 
         resolve_negative_codes_in_dwa(&mut d);
 
-        // Expected: After resolution, finality is propagated backward.
-        // The path 0 -> 1 becomes final with weight [1].
-        // The path 2 -> 2 becomes final with weight [0].
-        // The dangling negative transitions are pruned by simplification.
         let mut expected = DWA::new();
         let s_final1 = expected.add_state();
         let s_final2 = expected.add_state();
@@ -332,16 +320,8 @@ mod tests {
         // 2 is final
         d.set_final_weight(s2, Weight::all()).unwrap();
 
-        // With the bug, this function would not terminate.
-        // With the fix, it terminates, producing a stable DWA.
         resolve_negative_codes_in_dwa(&mut d);
 
-        // The cancellation of `neg(1)` by a subsequent character matching the default
-        // transition (e.g., `1`) results in an epsilon path to a final state.
-        // This makes the start state final. The logic also splits the target of `neg(1)`
-        // and removes its default transition, effectively pruning paths that start with
-        // `neg(1)` but don't cancel. The result is an automaton that accepts only
-        // the empty string.
         let mut expected = DWA::new();
         expected.set_final_weight(expected.body.start_state, Weight::all()).unwrap();
 

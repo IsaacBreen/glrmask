@@ -1,19 +1,18 @@
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
-use crate::glr::parser::{ExpectElse, GLRParser};
-use crate::tokenizer::TokenizerStateID;
-use crate::precompute4::weighted_automata::{DWABody, DWAState, DWAStates, StateID, Weight, DWA};
-use std::collections::{BTreeMap, BTreeSet};
 use crate::datastructures::trie::{Trie, Trie2Index};
+use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
-use std::cell::RefCell;
-use range_set_blaze::RangeSetBlaze;
 use crate::precompute4::utils;
+use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWAStates, NWABody, StateID, Weight};
 use crate::constraint::LLMTokenBV;
-use crate::precompute4::weighted_automata::{NWA, NWAStates, NWABody};
+use range_set_blaze::RangeSetBlaze;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
+use crate::tokenizer::TokenizerStateID;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FullDWABuildError {
@@ -174,13 +173,12 @@ fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<
 
 // Public API: precompute4 using NWA-first approach, determinize at the end.
 pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
-    use std::cell::RefCell;
     crate::debug!(5, "Starting precompute4...");
     // 1. Build template DWAs for all terminals.
     let template_dwas = match build_template_dwas(parser) {
         Ok(m) => m,
         Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-    };
+        };
     let ignore_dwa = build_ignore_terminal_dwa();
 
     // 2. Set up shared NWA state arena.

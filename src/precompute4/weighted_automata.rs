@@ -4,19 +4,21 @@
 #![allow(clippy::needless_borrow)]
 
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use indicatif::{ProgressBar, ProgressStyle};
 use range_set_blaze::RangeSetBlaze;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::cell::Cell;
-use std::fmt::{Debug, Display, Formatter};
-use std::iter::FromIterator;
-use std::sync::Arc;
-use std::hash::{Hash, Hasher};
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
-use crate::precompute4::test_weighted_automata;
-use std::time::Instant;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::fmt::{Debug, Display, Formatter};
+use std::hash::{Hash, Hasher};
+use std::iter::FromIterator;
+use std::ops::{
+    BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign,
+};
+use std::sync::Arc;
+use crate::precompute4::test_weighted_automata;
 use crate::profiler::PROGRESS_BAR_ENABLED;
+use std::time::Instant;
 
 // --- Part 1: SimpleBitset ---
 
@@ -38,57 +40,67 @@ pub struct SimpleBitset {
 
 // Fingerprint utilities
 const FP_ZERO: u64 = 0x9E37_79B9_7F4A_7C15;
-const FP_ALL: u64  = 0xD6E8_FEB8_6659_FD93;
-const FP_K1: u64   = 0xC2B2_AE3D_27D4_EB4F;
-const FP_K2: u64   = 0x1656_67B1_F3E1_5A6D;
-const FP_K3: u64   = 0x9E37_79B1_1F37_9B97;
+const FP_ALL: u64 = 0xD6E8_FEB8_6659_FD93;
+const FP_K1: u64 = 0xC2B2_AE3D_27D4_EB4F;
+const FP_K2: u64 = 0x1656_67B1_F3E1_5A6D;
+const FP_K3: u64 = 0x9E37_79B1_1F37_9B97;
 
+#[inline]
 fn mix3(a: u64, b: u64, c: u64) -> u64 {
     let mut x = a ^ b.wrapping_mul(FP_K1);
     x = x.rotate_left(27) ^ c.wrapping_mul(FP_K2);
-    x = x ^ (x >> 33);
+    x ^= x >> 33;
     x = x.wrapping_mul(FP_K3);
     x ^ (x >> 29)
 }
 
+#[inline]
 fn calc_is_all_and_fp(rsb: &RangeSetBlaze<usize>) -> (bool, u64) {
-    // Quick detect ALL
     let mut it = rsb.ranges();
-    let mut is_all = false;
-    let mut fp = FP_ZERO;
     if let Some(first) = it.next() {
         if *first.start() == 0 && *first.end() == usize::MAX && it.next().is_none() {
-            // Exactly the universe
             return (true, FP_ALL);
         }
-        // Not ALL; compute fingerprint
-        fp = mix3(FP_ZERO, *first.start() as u64, (*first.end() as u64).wrapping_mul(FP_K1));
+        let mut fp = mix3(
+            FP_ZERO,
+            *first.start() as u64,
+            (*first.end() as u64).wrapping_mul(FP_K1),
+        );
         for r in it {
             let s = *r.start() as u64;
             let e = *r.end() as u64;
             fp = mix3(fp, s.wrapping_mul(FP_K2), e.wrapping_mul(FP_K3));
         }
+        (false, fp)
     } else {
-        // Empty set
-        fp = FP_ZERO;
+        (false, FP_ZERO)
     }
-    (is_all, fp)
+}
+
+#[inline]
+fn universe_rsb() -> RangeSetBlaze<usize> {
+    RangeSetBlaze::from_iter([0usize..=usize::MAX])
 }
 
 impl SimpleBitset {
+    #[inline]
     fn from_rsb_inner(rsb: RangeSetBlaze<usize>) -> Self {
         let (is_all, fp) = calc_is_all_and_fp(&rsb);
         SimpleBitset { rsb, fp, is_all }
     }
-}
 
+    #[inline]
+    fn update_cached(&mut self) {
+        let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
+        self.is_all = is_all;
+        self.fp = fp;
+    }
 
-impl SimpleBitset {
     pub fn zeros() -> Self {
         SimpleBitset { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false }
     }
     pub fn all() -> Self {
-        SimpleBitset { rsb: RangeSetBlaze::from_iter([0..=usize::MAX]), fp: FP_ALL, is_all: true }
+        SimpleBitset { rsb: universe_rsb(), fp: FP_ALL, is_all: true }
     }
     pub fn from_item(item: usize) -> Self {
         SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter([item]))
@@ -110,26 +122,26 @@ impl SimpleBitset {
         (&self.rsb & &RangeSetBlaze::from_iter([0..=max])).into_iter()
     }
     #[inline]
-    fn with_new_rsb_and_op(lhs: &SimpleBitset, rhs: &SimpleBitset, rsb: RangeSetBlaze<usize>, op_tag: u64) -> SimpleBitset {
-        let (is_all, fp_rsb) = calc_is_all_and_fp(&rsb);
-        // Combine fingerprints cheaply for operations to avoid scanning ranges again.
-        // We still recompute fp from rsb to keep it robust and collision-resistant.
-        let _ = op_tag; // reserved if we later switch to purely combinational fp
-        SimpleBitset { rsb, fp: fp_rsb, is_all }
+    fn with_new_rsb_and_op(_lhs: &SimpleBitset, _rhs: &SimpleBitset, rsb: RangeSetBlaze<usize>, _op_tag: u64) -> SimpleBitset {
+        let (is_all, fp) = calc_is_all_and_fp(&rsb);
+        SimpleBitset { rsb, fp, is_all }
     }
     #[inline]
-    fn with_new_rsb_unary(src: &SimpleBitset, rsb: RangeSetBlaze<usize>, op_tag: u64) -> SimpleBitset {
-        let (is_all, fp_rsb) = calc_is_all_and_fp(&rsb);
-        let _ = op_tag;
-        SimpleBitset { rsb, fp: fp_rsb, is_all }
+    fn with_new_rsb_unary(_src: &SimpleBitset, rsb: RangeSetBlaze<usize>, _op_tag: u64) -> SimpleBitset {
+        let (is_all, fp) = calc_is_all_and_fp(&rsb);
+        SimpleBitset { rsb, fp, is_all }
     }
     #[inline]
     fn is_all_fast(&self) -> bool { self.is_all }
+
+    #[inline]
+    pub fn is_subset_of(&self, rhs: &SimpleBitset) -> bool {
+        (self & rhs) == *self
+    }
 }
 
 impl Hash for SimpleBitset {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Use only the cached fingerprint for hashing; equality is still structural.
         state.write_u64(self.fp);
     }
 }
@@ -217,9 +229,7 @@ impl BitAndAssign<&SimpleBitset> for SimpleBitset {
             return;
         }
         self.rsb = &self.rsb & &rhs.rsb;
-        let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
-        self.is_all = is_all;
-        self.fp = fp;
+        self.update_cached();
     }
 }
 impl BitOrAssign<&SimpleBitset> for SimpleBitset {
@@ -234,9 +244,7 @@ impl BitOrAssign<&SimpleBitset> for SimpleBitset {
             return;
         }
         self.rsb |= &rhs.rsb;
-        let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
-        self.is_all = is_all;
-        self.fp = fp;
+        self.update_cached();
     }
 }
 
@@ -286,25 +294,20 @@ impl SubAssign<&SimpleBitset> for SimpleBitset {
             return;
         }
         self.rsb = &self.rsb - &rhs.rsb;
-        let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
-        self.is_all = is_all;
-        self.fp = fp;
+        self.update_cached();
     }
 }
-
 impl SubAssign<SimpleBitset> for SimpleBitset {
     fn sub_assign(&mut self, rhs: SimpleBitset) {
         *self -= &rhs
     }
 }
-
 impl Sub<SimpleBitset> for SimpleBitset {
     type Output = SimpleBitset;
     fn sub(self, rhs: SimpleBitset) -> Self::Output {
         (&self) - (&rhs)
     }
-    }
-
+}
 impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;
     fn sub(self, rhs: &'a SimpleBitset) -> Self::Output {
@@ -320,17 +323,16 @@ impl Not for SimpleBitset {
     fn not(self) -> Self::Output {
         if self.is_empty() { return SimpleBitset::all(); }
         if self.is_all_fast() { return SimpleBitset::zeros(); }
-        let rsb = &RangeSetBlaze::from_iter([0usize..=usize::MAX]) - &self.rsb;
+        let rsb = &universe_rsb() - &self.rsb;
         SimpleBitset::with_new_rsb_unary(&self, rsb, 0xD1)
     }
 }
-
 impl Not for &SimpleBitset {
     type Output = SimpleBitset;
     fn not(self) -> Self::Output {
         if self.is_empty() { return SimpleBitset::all(); }
         if self.is_all_fast() { return SimpleBitset::zeros(); }
-        let rsb = &RangeSetBlaze::from_iter([0usize..=usize::MAX]) - &self.rsb;
+        let rsb = &universe_rsb() - &self.rsb;
         SimpleBitset::with_new_rsb_unary(self, rsb, 0xD2)
     }
 }
@@ -396,7 +398,6 @@ pub struct DWAState {
     pub trans_weight_default: Option<Weight>,
     pub trans_weights_exceptions: BTreeMap<i16, Weight>,
     /// Optional state-entry weight (intersected upon entering the state).
-    /// Currently unused in determinization, but supported for future extensions.
     pub state_weight: Option<Weight>,
 }
 
@@ -453,6 +454,25 @@ impl DWAState {
         for w in self.trans_weights_exceptions.values_mut() {
             *w -= weight;
         }
+    }
+
+    /// Iterator over all outgoing edges:
+    /// - Default edge appears as (None, target, weight)
+    /// - Exception edges appear as (Some(label), target, weight)
+    #[inline]
+    pub fn iter_edges(&self) -> impl Iterator<Item = (Option<i16>, StateID, &Weight)> {
+        let def_iter = self
+            .transitions
+            .default
+            .and_then(|to| self.trans_weight_default.as_ref().map(move |w| (to, w)))
+            .into_iter()
+            .map(|(to, w)| (None, to, w));
+        let ex_iter = self
+            .transitions
+            .exceptions
+            .iter()
+            .filter_map(|(ch, to)| self.trans_weights_exceptions.get(ch).map(|w| (Some(*ch), *to, w)));
+        def_iter.chain(ex_iter)
     }
 }
 
@@ -672,7 +692,6 @@ impl DWA {
 
         if let Some(before) = before_simplify {
             IN_SIMPLIFY_CHECK.with(|c| c.set(true));
-            // Note: assert_dwa_equivalent simplifies both, so this checks language equivalence.
             test_weighted_automata::assert_dwa_equivalent(before, self.clone());
             IN_SIMPLIFY_CHECK.with(|c| c.set(false));
         }
@@ -725,7 +744,7 @@ impl DWA {
         let mut worklist = VecDeque::new();
 
         if body.start_state >= n {
-            return false; // No start state, nothing to do.
+            return false;
         }
         reachable_weights[body.start_state] = Weight::all();
         worklist.push_back(body.start_state);
@@ -744,35 +763,14 @@ impl DWA {
                 u_rw
             };
 
-            // Default transition
-            if let Some(v) = u_state.transitions.default {
-                if v < n {
-                    if let Some(edge_w) = u_state.trans_weight_default.as_ref() {
-                        let new_v_rw = &gated_u_rw & edge_w;
+            for (_lbl, v, edge_w) in u_state.iter_edges() {
+                if v >= n { continue; }
+                let new_v_rw = &gated_u_rw & edge_w;
+                let old_v_rw = &reachable_weights[v];
 
-                        let old_v_rw = &reachable_weights[v];
-                        if (&new_v_rw & old_v_rw) != new_v_rw {
-                            // if new_v_rw is not a subset of old_v_rw
-                            reachable_weights[v] |= &new_v_rw;
-                            worklist.push_back(v);
-                        }
-                    }
-                }
-            }
-
-            // Exception transitions
-            for (&ch, &v) in &u_state.transitions.exceptions {
-                if v < n {
-                    if let Some(edge_w) = u_state.trans_weights_exceptions.get(&ch) {
-                        let new_v_rw = &gated_u_rw & edge_w;
-
-                        let old_v_rw = &reachable_weights[v];
-                        if (&new_v_rw & old_v_rw) != new_v_rw {
-                            // if new_v_rw is not a subset of old_v_rw
-                            reachable_weights[v] |= &new_v_rw;
-                            worklist.push_back(v);
-                        }
-                    }
+                if !new_v_rw.is_subset_of(old_v_rw) {
+                    reachable_weights[v] |= &new_v_rw;
+                    worklist.push_back(v);
                 }
             }
         }
@@ -800,19 +798,11 @@ impl DWA {
             return false;
         }
 
-        // 1. Compute future weights via backward analysis.
-        // future_weights[i] = union of weights of all accepting paths starting from i.
+        // Reverse adjacency (unique preds)
         let mut rev_adj: Vec<Vec<StateID>> = vec![vec![]; n];
         for i in 0..n {
-            if let Some(d) = states[i].transitions.default {
-                if d < n {
-                    rev_adj[d].push(i);
-                }
-            }
-            for &v in states[i].transitions.exceptions.values() {
-                if v < n {
-                    rev_adj[v].push(i);
-                }
+            for (_lbl, v, _w) in states[i].iter_edges() {
+                if v < n { rev_adj[v].push(i); }
             }
         }
         for preds in rev_adj.iter_mut() {
@@ -836,28 +826,13 @@ impl DWA {
         while let Some(u) = worklist.pop_front() {
             let mut u_new_fw = states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
 
-            // Include state entry weight to possible future gating
             if let Some(sw) = &states[u].state_weight {
                 u_new_fw |= sw;
             }
 
-            let u_state = &states[u];
-
-            // Default transition
-            if let Some(v) = u_state.transitions.default {
+            for (_lbl, v, edge_w) in states[u].iter_edges() {
                 if v < n {
-                    if let Some(edge_w) = u_state.trans_weight_default.as_ref() {
-                        u_new_fw |= &(edge_w & &future_weights[v]);
-                    }
-                }
-            }
-
-            // Exception transitions
-            for (&ch, &v) in &u_state.transitions.exceptions {
-                if v < n {
-                    if let Some(edge_w) = u_state.trans_weights_exceptions.get(&ch) {
-                        u_new_fw |= &(edge_w & &future_weights[v]);
-                    }
+                    u_new_fw |= &(edge_w & &future_weights[v]);
                 }
             }
 
@@ -1075,8 +1050,11 @@ impl DWA {
                 live[i] = true;
                 q_live.push_back(i);
             }
-            if let Some(d) = states[i].transitions.default { if d < n { rev_adj[d].push(i); } }
-            for &v in states[i].transitions.exceptions.values() { if v < n { rev_adj[v].push(i); } }
+            for (_lbl, v, _w) in states[i].iter_edges() {
+                if v < n {
+                    rev_adj[v].push(i);
+                }
+            }
         }
         while let Some(u) = q_live.pop_front() {
             for &v in &rev_adj[u] {
@@ -1111,8 +1089,9 @@ impl DWA {
             q.push_back(body.start_state);
         }
         while let Some(u) = q.pop_front() {
-            if let Some(d) = states[u].transitions.default { if d < n && !visited[d] { visited[d] = true; q.push_back(d); } }
-            for &v in states[u].transitions.exceptions.values() { if v < n && !visited[v] { visited[v] = true; q.push_back(v); } }
+            for (_lbl, v, _w) in states[u].iter_edges() {
+                if v < n && !visited[v] { visited[v] = true; q.push_back(v); }
+            }
         }
 
         if visited.iter().all(|&b| b) && !changed {
@@ -1309,9 +1288,7 @@ impl Display for DWA {
                 writeln!(f, "    final_weight: {}", w)?;
             }
             for (on, to) in &state.transitions.exceptions {
-                // Represent positive codes as char if ASCII; negatives as '-char' or '-num'
                 let char_repr = if *on >= 0 {
-                    let u = *on as u16;
                     format_pos_code(*on)
                 } else {
                     let decoded_id = on.wrapping_sub(i16::MIN);
@@ -1565,15 +1542,12 @@ struct StepGroupKey {
 
 impl PartialEq for StepGroupKey {
     fn eq(&self, other: &Self) -> bool {
-        // Fast pointer check on mask; if masks differ, keys differ.
         if !Arc::ptr_eq(&self.mask, &other.mask) {
             return false;
         }
-        // Fast fingerprint mismatch => not equal.
         if self.fp != other.fp {
             return false;
         }
-        // Fall back to structural equality on the weight only if needed.
         self.w == other.w
     }
 }
@@ -1871,13 +1845,11 @@ impl NWA {
         type StepVec = Arc<Vec<(NWAStateID, Weight)>>;
         #[derive(Clone)]
         struct StepKeyArc {
-            // Interned vector of (state, weight) pairs representing a subset or mask
             entries: StepVec,
             fp: u64,
         }
         impl StepKeyArc {
             fn new(entries: StepVec) -> Self {
-                // Fingerprint from entries (id and weight.fingerprint)
                 let mut fp = FP_ZERO;
                 for (sid, w) in entries.iter() {
                     fp = mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2));
@@ -1887,15 +1859,9 @@ impl NWA {
         }
         impl PartialEq for StepKeyArc {
             fn eq(&self, other: &Self) -> bool {
-                // Fingerprint mismatch => definitely not equal; avoids costly structural compare.
                 if self.fp != other.fp {
                     return false;
                 }
-                // Pointer equality fast-path.
-                if Arc::ptr_eq(&self.entries, &other.entries) {
-                    return true;
-                }
-                // Fall back to full structural equality on entries.
                 Arc::ptr_eq(&self.entries, &other.entries) || *self.entries == *other.entries
             }
         }
@@ -1905,6 +1871,7 @@ impl NWA {
                 state.write_u64(self.fp);
             }
         }
+
         // Interner for any Vec<(sid, weight)> we build (epsilon masks, step vectors, subset vectors).
         let mut step_intern: HashMap<StepKeyArc, StepVec> = HashMap::new();
 
@@ -1925,11 +1892,7 @@ impl NWA {
         }
 
         // Cache for compiled group distributions:
-        // For a group key (mask, w), compile once the distribution to targets:
-        // compiled[t] = union over mask entries (m & w). Later, given a group
-        // weight gw, the contribution becomes compiled[t] & gw.
         let mut compiled_group_cache: HashMap<StepGroupKey, StepVec> = HashMap::new();
-
         // Cache for union-of-weights over a StepVec (used to compute edge weights quickly).
         let mut stepvec_union_cache: HashMap<StepKeyArc, Weight> = HashMap::new();
 
@@ -1944,9 +1907,7 @@ impl NWA {
             }
             // Accumulate base contributions: base[t] = ⋃ (m & w)
             let mut base: HashMap<NWAStateID, Weight> = HashMap::new();
-            let gw_all = false; // unused, but we mirror signature for clarity
             let w = &key.w;
-            // Iterate mask once; merge per-target
             for (t, m) in key.mask.iter() {
                 let mw = m & w;
                 if mw.is_empty() { continue; }
@@ -1957,7 +1918,6 @@ impl NWA {
                 }
             }
             if base.is_empty() {
-                // Intern an empty vec to keep pointer identity stable.
                 let arc = intern_step_vec(Vec::new(), intern);
                 cache.insert(key.clone(), arc.clone());
                 return arc;
@@ -1970,7 +1930,6 @@ impl NWA {
         }
 
         // Apply a compiled group to an accumulator with a group-weight gw:
-        // add compiled[t] & gw into acc[t].
         fn accumulate_compiled_group(
             compiled: &StepVec,
             gw: &Weight,
@@ -2305,13 +2264,11 @@ impl NWA {
 
                 // Edge weight = union of all weights in accumulated target_sv (cached)
                 let edge_w = union_weight_of_sv(&target_sv, &mut stepvec_union_cache);
-                // If identical to default (target and weight), skip creating an exception.
                 if let (Some(def_t), Some(ref def_w)) = (def_edge_target, def_edge_weight.as_ref()) {
                     if def_t == target_d_id && **def_w == edge_w {
                         continue;
                     }
                 }
-                // Add exception for lbl
                 dwa.add_transition(d_id, lbl, target_d_id, edge_w).expect("DWA insertion should not fail");
             }
         }
@@ -2481,7 +2438,6 @@ impl NWA {
                 if !w.is_empty() {
                     states.add_epsilon(sid, right.start_state, w);
                 }
-                // Reset final weight (standard concatenation)
                 states[sid].final_weight = None;
             }
         }
@@ -2518,4 +2474,3 @@ impl Display for NWA {
         Ok(())
     }
 }
-
