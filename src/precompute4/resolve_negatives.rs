@@ -70,8 +70,8 @@ fn resolve_negative_codes_in_dwa_internal(
         if let Some(&c_orig_id) = b_orig_state_clone.transitions.get(p) {
             let c_copy_id = states.copy_state(c_orig_id);
             states.apply_weight(c_copy_id, &w_neg);
-            // Merge
-            states.merge_state_into(b_copy_id, c_copy_id);
+            // Merge into A
+            states.merge_state_into(state_id, c_copy_id);
         }
 
         // Step 4: Discard all positive edges from B_copy
