@@ -174,7 +174,7 @@ fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<
 // Public API: precompute4 using NWA-first approach, determinize at the end.
 pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
     use std::cell::RefCell;
-    crate::debug!(2, "Starting precompute4...");
+    crate::debug!(5, "Starting precompute4...");
     // 1. Build template DWAs for all terminals.
     let template_dwas = match build_template_dwas(parser) {
         Ok(m) => m,
@@ -228,16 +228,16 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
                 // Convert template DWA to NWA and copy it into the arena
                 let template_nwa = NWA::from_dwa(template_dwa);
-                crate::debug!(2, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
+                crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
                 let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
-                crate::debug!(2, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
+                crate::debug!(5, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
                 let left_body = NWABody { start_state: template_start_in_arena };
 
                 // Concatenate: left then current (right) via epsilon with weight = llm_token_bv
-                crate::debug!(2, "Starting NWA::concatenate_components: left_start={} right_start={}...", left_body.start_state, current_nwa_body.start_state);
+                crate::debug!(5, "Starting NWA::concatenate_components: left_start={} right_start={}...", left_body.start_state, current_nwa_body.start_state);
                 let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
                 let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
-                crate::debug!(2, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
+                crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
 
                 results.push((*dest_idx, composed_body));
             }
