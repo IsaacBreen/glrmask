@@ -37,6 +37,7 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
             break;
         }
         // Determinize to DWA then back to NWA to normalize the graph, which helps subsequent passes.
+        println!("{}", nwa);
         let mut tmp_dwa = nwa.determinize_to_dwa();
         tmp_dwa.simplify();
         crate::debug!(3, "Intermediate DWA: {}", tmp_dwa);

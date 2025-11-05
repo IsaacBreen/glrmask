@@ -1,5 +1,7 @@
 use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, DWABody, Weight, StateID as DWAStateID};
 use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
+use std::fmt::{Display, Formatter};
+use crate::precompute4::weighted_automata::format_i16_char;
 
 pub type NWAStateID = usize;
 
@@ -362,5 +364,25 @@ impl NWA {
     pub fn determinize_components(states: &NWAStates, body: &NWABody) -> DWA {
         let tmp = NWA { states: states.clone(), body: body.clone() };
         tmp.determinize_to_dwa()
+    }
+}
+
+impl Display for NWA {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "NWA (start: {})", self.body.start_state)?;
+        for (id, state) in self.states.0.iter().enumerate() {
+            writeln!(f, "  State {}:", id)?;
+            if let Some(w) = &state.final_weight {
+                writeln!(f, "    final_weight: {}", w)?;
+            }
+            for (on, (to, w)) in &state.transitions {
+                let char_repr = format_i16_char(*on);
+                writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+            }
+            for (to, w) in &state.epsilons {
+                writeln!(f, "    ε -> {} (weight: {})", to, w)?;
+            }
+        }
+        Ok(())
     }
 }
