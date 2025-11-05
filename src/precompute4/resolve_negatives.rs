@@ -9,6 +9,7 @@ pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
 }
 
 fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
+    dwa.simplify();
     crate::debug!(5, "Initial DWA:\n{}", dwa);
     loop {
         let mut changed_in_pass = false;
