@@ -1516,9 +1516,6 @@ fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::err
     let ebnf_grammar = indoc! {r#"
         program ::= unary_expression unary_expression '$';
         unary_expression ::= ( '!' unary_expression | 'X' ) ';'?;
-
-        // program ::= unary_expression ';'? unary_expression ';'? '$';
-        // unary_expression ::= '!' unary_expression | 'X' ;
     "#};
 
     // 2. Parse and compile the grammar
@@ -1530,7 +1527,7 @@ fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::err
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
     let llm_semicolons = LLMTokenID(0);
-    llm_token_map.insert(b";".to_vec(), llm_semicolons);
+    llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
     let max_original_llm_token_id = 0;
 
     // 4. Create the GrammarConstraint
