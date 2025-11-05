@@ -320,7 +320,7 @@ impl DWAState {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWAStates(pub Vec<DWAState>);
 
 impl Index<usize> for DWAStates {
@@ -452,7 +452,7 @@ pub struct DWABody {
     pub start_state: StateID,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWA {
     pub states: DWAStates,
     pub body: DWABody,
