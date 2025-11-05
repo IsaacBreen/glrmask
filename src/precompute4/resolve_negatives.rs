@@ -33,7 +33,6 @@ fn resolve_negative_codes_in_dwa_internal(
     state_id: StateID,
     states: &mut DWAStates,
 ) -> bool {
-    let mut changed = false;
     // We need to collect the negative transitions first because we'll be modifying the state's transitions.
     let state_a_clone = states[state_id].clone();
     let negative_transitions: Vec<(i16, StateID)> = state_a_clone
@@ -44,12 +43,13 @@ fn resolve_negative_codes_in_dwa_internal(
         .map(|(k, v)| (*k, *v))
         .collect();
 
-    if negative_transitions.is_empty() {
+    // Look at any negative edges. Check whether their dest has a final weight. Check whether their dest has any positive edge (not necessarily just a matching one). If not, then no changes are possible.
+    if state_a_clone.final_weight.is_none() && !negative_transitions.iter().any(|(neg_code, b_orig_id)| states[*b_orig_id].transitions.default.is_some() || states[*b_orig_id].transitions.exceptions.iter().any(|(k, _)| *k >= 0)) {
         return false;
     }
 
+
     for (neg_code, b_orig_id) in negative_transitions {
-        changed = true;
         let p = neg_code.wrapping_sub(i16::MIN);
         let w_neg = state_a_clone.trans_weights_exceptions.get(&neg_code).unwrap().clone();
 
@@ -89,7 +89,7 @@ fn resolve_negative_codes_in_dwa_internal(
         states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
     }
 
-    changed
+    true
 }
 
 #[cfg(test)]
