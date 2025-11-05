@@ -1078,6 +1078,9 @@ fn test_union_complex_from_attachment_simpified() {
     // State 22
     right.set_final_weight(22, Weight::from_item(0)).unwrap();
 
+    left.simplify();
+    right.simplify();
+
     let u = left.union(&right);
     DWA::stochastic_validate_union(&left, &right, &u);
 }
@@ -1165,6 +1168,9 @@ fn test_concatenate_complex_from_attachment() {
     // --- Build RIGHT DWA ---
     let mut right = DWA::new();
     right.set_final_weight(0, Weight::all()).unwrap();
+
+    left.simplify();
+    right.simplify();
 
     let c = left.concatenate(&right);
     DWA::stochastic_validate_concatenate(&left, &right, &c);
