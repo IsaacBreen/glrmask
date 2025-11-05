@@ -1511,6 +1511,57 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Define the EBNF grammar
+    let ebnf_grammar = indoc! {r#"
+        program ::= unary_expression unary_expression '$';
+        unary_expression ::= ( '!' unary_expression | 'X' ) ';'?;
+
+        // program ::= unary_expression ';'? unary_expression ';'? '$';
+        // unary_expression ::= '!' unary_expression | 'X' ;
+    "#};
+
+    // 2. Parse and compile the grammar
+    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
+    println!("Grammar: {}", grammar_definition);
+    let _compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
+    println!("Parser: {}", _compiled_grammar.glr_parser);
+
+    // 3. Define the LLM vocabulary
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_semicolons = LLMTokenID(0);
+    llm_token_map.insert(b";".to_vec(), llm_semicolons);
+    let max_original_llm_token_id = 0;
+
+    // 4. Create the GrammarConstraint
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        max_original_llm_token_id,
+        &GrammarConstraintConfig::default(),
+        None,
+    );
+    constraint.dump_precomputed1();
+    constraint.dump_precomputed3();
+    constraint.dump_precomputed4();
+
+    // 5. Initialize state and get the initial mask
+    let mut state = constraint.init();
+    state.commit_bytes(b"X");
+    state.print_gss();
+    let mask2 = state.get_mask();
+
+    assert!(state.is_active(), "State should be active after committing 'X'");
+    let expected_mask2 = HybridBitset::from_iter(vec![]);
+    assert_eq!(
+        mask2,
+        expected_mask2,
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::error::Error>> {
     // This test checks the behavior of the #![ignore(...)] directive with
     // LLM tokens that are either fully ignored or partially ignored.
