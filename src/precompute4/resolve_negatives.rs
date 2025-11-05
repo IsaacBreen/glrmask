@@ -116,7 +116,7 @@ fn resolve_negative_codes_in_dwa_internal(
 
             // Merge C's behavior into the current state's new version.
             // This union preserves determinism as long as targets align; otherwise it will panic.
-            DWA::union_into_state(states, &mut new_state, &c_copy);
+            todo!();
             // Negative edge resolved -> do not re-add it.
         } else {
             // No positive match. Keep the negative edge only if B is not final.
