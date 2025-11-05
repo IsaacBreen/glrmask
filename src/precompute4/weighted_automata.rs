@@ -14,7 +14,7 @@ use std::time::Instant;
 
 // --- Part 1: SimpleBitset ---
 
-const STOCHASTIC_DEBUG: bool = false; // Set to false to avoid expensive stochastic validation in production
+const STOCHASTIC_DEBUG: bool = true; // Set to true to enable expensive stochastic validation
 
 thread_local! {
     static IN_SIMPLIFY_CHECK: Cell<bool> = Cell::new(false);
@@ -1413,50 +1413,6 @@ pub struct NWA {
     pub body: NWABody,
 }
 
-/// Interns Weight (SimpleBitset) values and allows cheap ID-based comparisons/merges.
-/// This drastically reduces cloning and hashing costs during determinization.
-#[derive(Default)]
-struct WeightInterner {
-    map: HashMap<Weight, usize>,
-    vec: Vec<Weight>,
-}
-
-impl WeightInterner {
-    fn new() -> Self {
-        Self { map: HashMap::new(), vec: Vec::new() }
-    }
-    /// Intern an owned weight, returning its stable ID.
-    fn intern(&mut self, w: Weight) -> usize {
-        if let Some(&id) = self.map.get(&w) {
-            return id;
-        }
-        let id = self.vec.len();
-        self.map.insert(w.clone(), id);
-        self.vec.push(w);
-        id
-    }
-    /// Intern a borrowed weight, cloning only on first insertion.
-    fn intern_ref(&mut self, w: &Weight) -> usize {
-        if let Some(&id) = self.map.get(w) {
-            return id;
-        }
-        let id = self.vec.len();
-        self.map.insert(w.clone(), id);
-        self.vec.push(w.clone());
-        id
-    }
-    /// Get a reference to a weight by ID.
-    fn get(&self, id: usize) -> &Weight {
-        &self.vec[id]
-    }
-    /// Union two interned weights, returning the interned ID of the result.
-    fn or_ids(&mut self, a: usize, b: usize) -> usize {
-        if a == b { return a; }
-        let merged = self.get(a) | self.get(b);
-        self.intern(merged)
-    }
-}
-
 impl NWA {
     pub fn new() -> Self {
         let mut states = NWAStates::default();
@@ -1492,110 +1448,69 @@ impl NWA {
         nwa
     }
 
-    /// Determinize the subgraph reachable from 'start' to a DWA via weighted subset construction,
-    /// with aggressive weight interning to avoid cloning large bitsets.
-    /// Semantics are unchanged; only representation is optimized.
+    /// Determinize the subgraph reachable from 'start' to a DWA via weighted subset construction.
+    /// Representation invariant:
+    /// - A D-state is a mapping M: NWAStateID -> Weight capturing epsilon-closure weights.
+    /// - For each label c, we compute T0 by distributing M over c-labeled edges, then epsilon-closure T.
+    /// - The deterministic edge weight is union of weights in T; the target D-state is canonicalized T.
+    /// - Final weight of the D-state is union over s in M of (M[s] & final_weight[s]).
     pub fn determinize_to_dwa(&self) -> DWA {
-        use std::collections::hash_map::Entry;
+        fn epsilon_closure(states: &NWAStates, initial: &BTreeMap<NWAStateID, Weight>) -> BTreeMap<NWAStateID, Weight> {
+            // Worklist algorithm: propagate union of weights along epsilons.
+            let mut result: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+            let mut queue: VecDeque<NWAStateID> = VecDeque::new();
 
-        // Weight interning: every distinct Weight gets a unique small ID.
-        let mut interner = WeightInterner::new();
-        let id_zero = interner.intern(Weight::zeros());
-        let id_all = interner.intern(Weight::all());
-
-        // Lazily cached epsilon-closure per source state with interned weights.
-        // For each u, cache a sorted Vec of (v, weight_id) where
-        // weight_id corresponds to union over epsilon paths u⇒v of intersection of edge weights along the path.
-        let n = self.states.len();
-        let mut eps_closure_cache: Vec<Option<Vec<(NWAStateID, usize)>>> = vec![None; n];
-
-        fn ensure_eps_closure(
-            sid: NWAStateID,
-            states: &NWAStates,
-            cache: &mut Vec<Option<Vec<(NWAStateID, usize)>>>,
-            interner: &mut WeightInterner,
-            id_zero: usize,
-            id_all: usize,
-        ) {
-            if cache[sid].is_some() {
-                return;
+            // Initialize
+            for (&sid, w) in initial {
+                if !w.is_empty() {
+                    result.insert(sid, w.clone());
+                    queue.push_back(sid);
+                }
             }
-            let mut res: HashMap<NWAStateID, usize> = HashMap::new();
-            let mut q: VecDeque<NWAStateID> = VecDeque::new();
 
-            // Identity (empty path) contributes ALL to (sid→sid).
-            res.insert(sid, id_all);
-            q.push_back(sid);
-
-            while let Some(u) = q.pop_front() {
-                let u_w_id = *res.get(&u).unwrap_or(&id_zero);
-                for &(v, ref e_w) in &states[u].epsilons {
-                    // prop = interner.get(u_w_id) & e_w
-                    let prop = interner.get(u_w_id) & e_w;
-                    if prop.is_empty() { continue; }
-                    let prop_id = interner.intern(prop);
-                    match res.entry(v) {
-                        Entry::Occupied(mut occ) => {
-                            let old_id = *occ.get();
-                            let merged_id = interner.or_ids(old_id, prop_id);
-                            if merged_id != old_id {
-                                *occ.get_mut() = merged_id;
-                                q.push_back(v);
-                            }
+            while let Some(u) = queue.pop_front() {
+                let u_weight = result.get(&u).cloned().unwrap_or_else(Weight::zeros);
+                for &(v, ref eps_w) in &states[u].epsilons {
+                    let propagated = &u_weight & eps_w;
+                    if propagated.is_empty() { continue; }
+                    if let Some(old) = result.get_mut(&v) {
+                        let new_union = &*old | &propagated;
+                        if &new_union != old {
+                            *old = new_union;
+                            queue.push_back(v);
                         }
-                        Entry::Vacant(vac) => {
-                            vac.insert(prop_id);
-                            q.push_back(v);
-                        }
+                    } else {
+                        result.insert(v, propagated);
+                        queue.push_back(v);
                     }
                 }
             }
 
-            let mut items: Vec<(NWAStateID, usize)> = res.into_iter().collect();
-            items.sort_unstable_by_key(|(id, _)| *id);
-            cache[sid] = Some(items);
+            // Drop zero weights mappings just in case.
+            result.retain(|_, w| !w.is_empty());
+            result
         }
 
-        fn apply_eps_closure(
-            pre: &BTreeMap<NWAStateID, usize>,
-            states: &NWAStates,
-            cache: &mut Vec<Option<Vec<(NWAStateID, usize)>>>,
-            interner: &mut WeightInterner,
-            id_zero: usize,
-        ) -> BTreeMap<NWAStateID, usize> {
-            let mut acc: HashMap<NWAStateID, usize> = HashMap::new();
-            for (&u, &w_in_id) in pre {
-                ensure_eps_closure(u, states, cache, interner, id_zero, id_zero); // id_all not used in this call
-                if let Some(vs) = &cache[u] {
-                    for (v, w_uv_id) in vs {
-                        let prop = interner.get(w_in_id) & interner.get(*w_uv_id);
-                        if prop.is_empty() { continue; }
-                        let prop_id = interner.intern(prop);
-                        if let Some(&old_id) = acc.get(v) {
-                            let merged_id = interner.or_ids(old_id, prop_id);
-                            if merged_id != old_id {
-                                acc.insert(*v, merged_id);
-                            }
-                        } else {
-                            acc.insert(*v, prop_id);
-                        }
-                    }
-                }
-            }
-            BTreeMap::from_iter(acc.into_iter())
+        // Collect all explicit labels present anywhere in the NWA.
+        let mut global_labels: BTreeSet<i16> = BTreeSet::new();
+        for st in &self.states.0 {
+            global_labels.extend(st.transitions.keys());
         }
 
         // Canonicalization key type
         #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-        struct SubsetKey(Vec<(NWAStateID, usize)>);
-        fn make_key(map: &BTreeMap<NWAStateID, usize>) -> SubsetKey {
-            SubsetKey(map.iter().map(|(k, w_id)| (*k, *w_id)).collect())
+        struct SubsetKey(Vec<(NWAStateID, Weight)>);
+
+        fn make_key(map: &BTreeMap<NWAStateID, Weight>) -> SubsetKey {
+            let mut v: Vec<(NWAStateID, Weight)> = map.iter().map(|(k, w)| (*k, w.clone())).collect();
+            // Already sorted by BTreeMap iteration order; ensure consistent
+            SubsetKey(v)
         }
 
         // Build initial subset: epsilon-closure from start with Weight::all
-        let mut init_pre: BTreeMap<NWAStateID, usize> = BTreeMap::new();
-        init_pre.insert(self.body.start_state, id_all);
-        let init_closure = apply_eps_closure(&init_pre, &self.states, &mut eps_closure_cache, &mut interner, id_zero);
+        let mut init_map: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+        init_map.insert(self.body.start_state, Weight::all());
+        let init_closure = epsilon_closure(&self.states, &init_map);
 
         let mut dwa = DWA::new();
         dwa.states.0.clear();
@@ -1609,53 +1524,43 @@ impl NWA {
         subset_to_d_id.insert(init_key.clone(), start_d_id);
         worklist.push_back(init_key);
 
-        // Determinize incrementally
+        // Ensure enough DWA states vector capacity as we go; transitions/weights filled dynamically
         while let Some(subset_key) = worklist.pop_front() {
             let d_id = *subset_to_d_id.get(&subset_key).unwrap();
-            let subset_map: BTreeMap<NWAStateID, usize> =
-                subset_key.0.iter().map(|(k, w_id)| (*k, *w_id)).collect();
+            let subset_map: BTreeMap<NWAStateID, Weight> = subset_key.0.iter().map(|(k,w)| (*k, w.clone())).collect();
 
-            // Final weight of D-state
-            let mut d_final_id: Option<usize> = None;
-            for (sid, &w_in_id) in &subset_map {
+            // Compute final weight
+            let mut d_final: Option<Weight> = None;
+            for (sid, w_in) in &subset_map {
                 if let Some(fw) = &self.states[*sid].final_weight {
-                    let contrib = interner.get(w_in_id) & fw;
+                    let contrib = w_in & fw;
                     if !contrib.is_empty() {
-                        let c_id = interner.intern(contrib);
-                        if let Some(acc_id) = d_final_id {
-                            d_final_id = Some(interner.or_ids(acc_id, c_id));
+                        if let Some(ref mut acc) = d_final {
+                            *acc |= &contrib;
                         } else {
-                            d_final_id = Some(c_id);
+                            d_final = Some(contrib);
                         }
                     }
                 }
             }
-            dwa.states[d_id].final_weight = d_final_id.map(|id| interner.get(id).clone());
+            dwa.states[d_id].final_weight = d_final;
 
-            // Collect labels actually present in this subset
-            let mut subset_labels: BTreeSet<i16> = BTreeSet::new();
-            for (sid, _) in &subset_map {
-                subset_labels.extend(self.states[*sid].transitions.keys());
-            }
-
-            // Compute default (rest-of-alphabet) transition using only defaults
-            let mut def_pre: HashMap<NWAStateID, usize> = HashMap::new();
-            for (sid, &w_in_id) in &subset_map {
+            // Compute default (rest-of-alphabet) transition by following only default edges.
+            let mut def_t0: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+            for (sid, w_in) in &subset_map {
                 if let Some((to, w_def)) = &self.states[*sid].default {
-                    let contrib = interner.get(w_in_id) & w_def;
-                    if contrib.is_empty() { continue; }
-                    let c_id = interner.intern(contrib);
-                    def_pre.entry(*to)
-                        .and_modify(|a_id| *a_id = interner.or_ids(*a_id, c_id))
-                        .or_insert(c_id);
+                    let contrib = w_in & w_def;
+                    if !contrib.is_empty() {
+                        if let Some(old) = def_t0.get_mut(to) {
+                            *old |= &contrib;
+                        } else {
+                            def_t0.insert(*to, contrib);
+                        }
+                    }
                 }
             }
-            let mut def_key_opt: Option<SubsetKey> = None;
-            let mut def_target_opt: Option<StateID> = None;
-            let mut def_w_id_opt: Option<usize> = None;
-            if !def_pre.is_empty() {
-                let def_pre_bt: BTreeMap<NWAStateID, usize> = BTreeMap::from_iter(def_pre.into_iter());
-                let def_cl = apply_eps_closure(&def_pre_bt, &self.states, &mut eps_closure_cache, &mut interner, id_zero);
+            if !def_t0.is_empty() {
+                let def_cl = epsilon_closure(&self.states, &def_t0);
                 if !def_cl.is_empty() {
                     let def_key = make_key(&def_cl);
                     let def_target = if let Some(id) = subset_to_d_id.get(&def_key) {
@@ -1663,84 +1568,72 @@ impl NWA {
                     } else {
                         let nid = dwa.states.add_state();
                         subset_to_d_id.insert(def_key.clone(), nid);
-                        worklist.push_back(def_key.clone());
+                        worklist.push_back(def_key);
                         nid
                     };
-                    let mut agg_id: Option<usize> = None;
-                    for (_, w_id) in &def_cl {
-                        if let Some(a_id) = agg_id {
-                            agg_id = Some(interner.or_ids(a_id, *w_id));
-                        } else {
-                            agg_id = Some(*w_id);
-                        }
+                    let mut def_w_opt: Option<Weight> = None;
+                    for (_, w) in &def_cl {
+                        if let Some(ref mut acc) = def_w_opt { *acc |= w; } else { def_w_opt = Some(w.clone()); }
                     }
-                    if let Some(def_w_id) = agg_id {
-                        dwa.set_default_transition(d_id, def_target, interner.get(def_w_id).clone())
-                            .expect("DWA default insertion should not fail");
-                        def_key_opt = Some(def_key);
-                        def_target_opt = Some(def_target);
-                        def_w_id_opt = Some(def_w_id);
+                    if let Some(def_w) = def_w_opt {
+                        dwa.set_default_transition(d_id, def_target, def_w).expect("DWA default insertion should not fail");
                     }
                 }
             }
 
-            // For each label present in this subset, compute labeled transition:
-            for lbl in subset_labels {
-                // Pre-closure distribution over one step on lbl or default
-                let mut pre: HashMap<NWAStateID, usize> = HashMap::new();
-                for (sid, &w_in_id) in &subset_map {
+            // Collect labels present in this subset
+            let labels = &global_labels;
+
+            for &lbl in labels {
+                // Build T0
+                let mut t0: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+                for (sid, w_in) in &subset_map {
                     if let Some((to, w_edge)) = self.states[*sid].transitions.get(&lbl) {
-                        let contrib = interner.get(w_in_id) & w_edge;
+                        let contrib = w_in & w_edge;
                         if contrib.is_empty() { continue; }
-                        let c_id = interner.intern(contrib);
-                        pre.entry(*to)
-                            .and_modify(|a_id| *a_id = interner.or_ids(*a_id, c_id))
-                            .or_insert(c_id);
+                        if let Some(old) = t0.get_mut(to) {
+                            *old |= &contrib;
+                        } else {
+                            t0.insert(*to, contrib);
+                        }
                     } else if let Some((to, w_def)) = &self.states[*sid].default {
-                        let contrib = interner.get(w_in_id) & w_def;
+                        let contrib = w_in & w_def;
                         if contrib.is_empty() { continue; }
-                        let c_id = interner.intern(contrib);
-                        pre.entry(*to)
-                            .and_modify(|a_id| *a_id = interner.or_ids(*a_id, c_id))
-                            .or_insert(c_id);
+                        if let Some(old) = t0.get_mut(to) {
+                            *old |= &contrib;
+                        } else {
+                            t0.insert(*to, contrib);
+                        }
                     }
                 }
-                if pre.is_empty() { continue; }
+                if t0.is_empty() { continue; }
 
-                let pre_bt: BTreeMap<NWAStateID, usize> = BTreeMap::from_iter(pre.into_iter());
-                let cl = apply_eps_closure(&pre_bt, &self.states, &mut eps_closure_cache, &mut interner, id_zero);
-                if cl.is_empty() { continue; }
+                // Epsilon-closure
+                let t_cl = epsilon_closure(&self.states, &t0);
+                if t_cl.is_empty() { continue; }
 
-                let key = make_key(&cl);
-                let target_d = if let Some(id) = subset_to_d_id.get(&key) {
+                let target_key = make_key(&t_cl);
+                let target_d_id = if let Some(id) = subset_to_d_id.get(&target_key) {
                     *id
                 } else {
                     let nid = dwa.states.add_state();
-                    subset_to_d_id.insert(key.clone(), nid);
-                    worklist.push_back(key.clone());
+                    subset_to_d_id.insert(target_key.clone(), nid);
+                    worklist.push_back(target_key.clone());
                     nid
                 };
 
-                // Edge weight is union across the closed distribution
-                let mut edge_w_id: Option<usize> = None;
-                for (_, w_id) in &cl {
-                    if let Some(a_id) = edge_w_id {
-                        edge_w_id = Some(interner.or_ids(a_id, *w_id));
+                // Edge weight = union of all weights in t_cl
+                let mut edge_w_opt: Option<Weight> = None;
+                for (_, w) in &t_cl {
+                    if let Some(ref mut acc) = edge_w_opt {
+                        *acc |= w;
                     } else {
-                        edge_w_id = Some(*w_id);
+                        edge_w_opt = Some(w.clone());
                     }
                 }
-                if let Some(w_id) = edge_w_id {
-                    // Skip exception if it is identical to default (target and weight)
-                    if let (Some(ref def_key), Some(def_target), Some(def_w_id)) =
-                        (&def_key_opt, def_target_opt, def_w_id_opt)
-                    {
-                        if *def_key == key && def_w_id == w_id {
-                            continue;
-                        }
-                    }
-                    dwa.add_transition(d_id, lbl, target_d, interner.get(w_id).clone())
-                        .expect("DWA insertion should not fail");
+                if let Some(edge_w) = edge_w_opt {
+                    // DWA supports one transition per label per state; add exception
+                    dwa.add_transition(d_id, lbl, target_d_id, edge_w).expect("DWA insertion should not fail");
                 }
             }
         }
