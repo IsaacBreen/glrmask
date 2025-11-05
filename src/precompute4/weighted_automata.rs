@@ -2529,61 +2529,41 @@ mod tests {
 
     #[test]
     fn test_union_from_debug_log_simplified() {
+        // This test isolates the paths:
+        // A: [2, neg(2), neg(0)] -> weight [0]
+        // B: [2, neg(2), neg(0), 0, neg(0), neg(1)] -> weight [3]
         fn neg(x: i16) -> i16 {
             i16::MIN + x
         }
 
-        // --- Build LEFT DWA ---
+        // --- Build LEFT DWA (A) ---
         let mut left = DWA::new();
-        for _ in 0..9 {
+        // States: 0 (start), 1 (old 3), 2 (old 7), 3 (old 9)
+        for _ in 0..3 {
             left.add_state();
         }
-        assert_eq!(left.states.len(), 10);
+        assert_eq!(left.states.len(), 4);
 
-        left.set_final_weight(0, Weight::from_item(2)).unwrap();
-        left.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-        left.add_transition(0, 1, 2, Weight::from_iter(0..=1)).unwrap();
-        left.add_transition(0, 2, 3, Weight::from_item(0)).unwrap();
-        left.add_transition(0, 3, 4, Weight::from_iter(0..=1)).unwrap();
+        left.add_transition(0, 2, 1, Weight::from_item(0)).unwrap();
+        left.add_transition(1, neg(2), 2, Weight::all()).unwrap();
+        left.add_transition(2, neg(0), 3, Weight::all()).unwrap();
+        left.set_final_weight(3, Weight::all()).unwrap();
 
-        left.add_transition(1, neg(0), 5, Weight::all()).unwrap();
-        left.set_default_transition(2, 6, Weight::all()).unwrap();
-        left.add_transition(3, neg(2), 7, Weight::all()).unwrap();
-        // state 4 is sink
-        left.add_transition(5, neg(1), 8, Weight::all()).unwrap();
-        // state 6 is sink
-        left.add_transition(7, neg(0), 9, Weight::all()).unwrap();
-
-        left.set_final_weight(8, Weight::all()).unwrap();
-        left.set_final_weight(9, Weight::all()).unwrap();
-
-        // --- Build RIGHT DWA ---
+        // --- Build RIGHT DWA (B) ---
         let mut right = DWA::new();
-        for _ in 0..12 {
+        // States: 0 (start), 1 (old 2), 2 (old 5), 3 (old 6), 4 (old 7), 5 (old 10), 6 (old 12)
+        for _ in 0..6 {
             right.add_state();
         }
-        assert_eq!(right.states.len(), 13);
+        assert_eq!(right.states.len(), 7);
 
-        right.add_transition(0, 1, 1, Weight::from_item(3)).unwrap();
-        right.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
-        right.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
-
-        right.set_default_transition(1, 4, Weight::all()).unwrap();
-        right.add_transition(2, neg(2), 5, Weight::all()).unwrap();
-        // state 3 is sink
-        // state 4 is sink
-        right.add_transition(5, neg(0), 6, Weight::all()).unwrap();
-
-        right.add_transition(6, 0, 7, Weight::from_item(3)).unwrap();
-        right.add_transition(6, 1, 8, Weight::from_item(3)).unwrap();
-        right.add_transition(6, 3, 9, Weight::from_item(3)).unwrap();
-
-        right.add_transition(7, neg(0), 10, Weight::all()).unwrap();
-        right.set_default_transition(8, 11, Weight::all()).unwrap();
-        // state 9 is sink
-        right.add_transition(10, neg(1), 12, Weight::all()).unwrap();
-        // state 11 is sink
-        right.set_final_weight(12, Weight::all()).unwrap();
+        right.add_transition(0, 2, 1, Weight::from_item(3)).unwrap();
+        right.add_transition(1, neg(2), 2, Weight::all()).unwrap();
+        right.add_transition(2, neg(0), 3, Weight::all()).unwrap();
+        right.add_transition(3, 0, 4, Weight::from_item(3)).unwrap();
+        right.add_transition(4, neg(0), 5, Weight::all()).unwrap();
+        right.add_transition(5, neg(1), 6, Weight::all()).unwrap();
+        right.set_final_weight(6, Weight::all()).unwrap();
 
         let u = left.union(&right);
         DWA::stochastic_validate_union(&left, &right, &u);
