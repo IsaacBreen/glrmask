@@ -585,7 +585,9 @@ pub fn optimize_trie1_size(
         prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
     }
 
-    // === Pass 2: Minimization and further cleanup ===
+    break_cycles_trie1(precomputed1, trie1_god);
+
+    // === Pass 4: Final Minimization and GC ===
     if config.minimize_by_signature {
         merge_nodes_trie1(precomputed1, trie1_god);
     }
@@ -1711,4 +1713,69 @@ fn flatten_all_none_edges_trie1(
     Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
 
     crate::debug!(2, "Done flattening None edges in Trie1.");
+}
+
+fn find_back_edges_recursive(
+    u_idx: PrecomputeNode1Index,
+    trie1_god: &Trie1GodWrapper,
+    visiting: &mut HashSet<PrecomputeNode1Index>,
+    visited: &mut HashSet<PrecomputeNode1Index>,
+    back_edges: &mut HashMap<(PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>), LLMTokenBV>,
+) {
+    visiting.insert(u_idx);
+
+    let children_to_visit = if let Some(guard) = u_idx.read(trie1_god) {
+        let mut children = Vec::new();
+        for (ek, dm) in guard.children() {
+            for (child_idx, ev) in dm {
+                children.push((*child_idx, ek.clone(), ev.clone()));
+            }
+        }
+        children
+    } else {
+        Vec::new()
+    };
+
+    for (v_idx, ek, ev) in children_to_visit {
+        if visiting.contains(&v_idx) {
+            // Found a back-edge
+            back_edges.insert((u_idx, v_idx, ek), ev);
+        } else if !visited.contains(&v_idx) {
+            find_back_edges_recursive(v_idx, trie1_god, visiting, visited, back_edges);
+        }
+    }
+
+    visiting.remove(&u_idx);
+    visited.insert(u_idx);
+}
+
+fn break_cycles_trie1(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+) {
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut back_edges = HashMap::new();
+
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+
+    for root in roots_vec {
+        if !visited.contains(&root) {
+            find_back_edges_recursive(root, trie1_god, &mut visiting, &mut visited, &mut back_edges);
+        }
+    }
+
+    if back_edges.is_empty() {
+        crate::debug!(2, "Trie1: No cycles found to break.");
+        return;
+    }
+
+    crate::debug!(2, "Trie1: Found {} back-edges to break cycles. Breaking them by duplicating subgraphs...", back_edges.len());
+
+    for ((u, v, ek), ev) in back_edges {
+        if trie1_god.remove_edge(u, v, &ek).is_none() { continue; }
+        let (new_roots, _old_to_new_map) = PrecomputeNode1::deep_copy_subtrees_into(trie1_god, trie1_god, &[v]);
+        let v_copy = new_roots[0];
+        trie1_god.insert_edge_simple(u, v_copy, ek, ev);
+    }
 }
