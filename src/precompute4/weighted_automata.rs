@@ -8,97 +8,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 // --- Part 1: SimpleBitset ---
 
-/// Weight is a finite (or cofinite) set of usize values.
-/// We model weights as elements of the complete Boolean algebra (P(usize), ⊆)
-/// with meet = set intersection (&), join = set union (|),
-/// bottom = ∅ (zeros), top = U (all).
-///
-/// Composition (along transitions) uses meet (∧ = ∩).
-/// Nondeterministic join (across alternative paths) uses join (∨ = ∪).
-/// This forms a distributive lattice; all fixpoint computations below are
-/// monotone and terminate because unions only ever add elements.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct SimpleBitset(pub RangeSetBlaze<usize>);
-
-// --- Stochastic validation controls and RNG ---
-// Toggle this to true to enable stochastic validation in union() and concatenate().
-const STOCHASTIC_VALIDATION: bool = false;
-const VALIDATION_SAMPLES: usize = 32;
-const VALIDATION_MAX_STEPS: usize = 12;
-const SAMPLING_TRIES: usize = 100;
-
-#[derive(Clone, Debug)]
-struct SimpleRng(u64);
-impl SimpleRng {
-    fn new(seed: u64) -> Self {
-        SimpleRng(seed)
-    }
-    fn from_time() -> Self {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-        let mixed = (now.as_nanos() as u128 ^ ((now.as_secs() as u128) << 64)) as u64;
-        SimpleRng::new(mixed)
-    }
-    fn next_u64(&mut self) -> u64 {
-        // LCG constants from Numerical Recipes
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
-        self.0
-    }
-    fn gen_usize(&mut self, upper: usize) -> usize {
-        if upper <= 1 {
-            0
-        } else {
-            (self.next_u64() as usize) % upper
-        }
-    }
-    fn gen_bool_ratio(&mut self, num: u32, den: u32) -> bool {
-        if den == 0 {
-            true
-        } else {
-            (self.next_u64() % (den as u64)) < (num as u64)
-        }
-    }
-}
-
-// Small fixed alphabet used for default-edge sampling and variety.
-// Includes ASCII letters/digits, some small integers, and negative-coded inputs used in tests.
-const BASE_ALPHABET: &[i16] = &[
-    b'a' as i16, b'b' as i16, b'c' as i16, b'd' as i16, b'e' as i16, b'f' as i16, b'g' as i16,
-    b'h' as i16, b'i' as i16, b'j' as i16, b'k' as i16, b'l' as i16, b'm' as i16, b'n' as i16,
-    b'o' as i16, b'p' as i16, b'q' as i16, b'r' as i16, b's' as i16, b't' as i16, b'u' as i16,
-    b'v' as i16, b'w' as i16, b'x' as i16, b'y' as i16, b'z' as i16, b' ' as i16,
-    b'0' as i16, b'1' as i16, b'2' as i16, b'3' as i16, b'4' as i16, b'5' as i16,
-    b'6' as i16, b'7' as i16, b'8' as i16, b'9' as i16,
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-    i16::MIN + 0, i16::MIN + 1, i16::MIN + 2, i16::MIN + 3, i16::MIN + 4,
-    i16::MIN + 5, i16::MIN + 6, i16::MIN + 7, i16::MIN + 8, i16::MIN + 9, i16::MIN + 10,
-];
-
-fn pick_default_char_for_state(st: &DWAState, rng: &mut SimpleRng) -> i16 {
-    let ex = &st.transitions.exceptions;
-    // Try random from base alphabet
-    if !BASE_ALPHABET.is_empty() {
-        let mut idx = rng.gen_usize(BASE_ALPHABET.len());
-        for _ in 0..BASE_ALPHABET.len() {
-            let ch = BASE_ALPHABET[idx % BASE_ALPHABET.len()];
-            if !ex.contains_key(&ch) {
-                return ch;
-            }
-            idx = idx.wrapping_add(1);
-        }
-    }
-    // Fallback: scan integers to find a non-exception char (always exists since exceptions are finite).
-    let mut probe: i16 = 0;
-    loop {
-        if !ex.contains_key(&probe) {
-            return probe;
-        }
-        probe = probe.wrapping_add(1);
-    }
-}
 
 impl SimpleBitset {
     pub fn zeros() -> Self {
@@ -301,24 +216,6 @@ impl<T> I16Map<T> {
     }
 }
 
-fn weight_subset(sub: &Weight, sup: &Weight) -> bool {
-    (sub & sup) == sub.clone()
-}
-
-fn format_pos_code(code: i16) -> String {
-    let u = code as u16;
-    if let Some(c) = char::from_u32(u as u32) {
-        if c.is_ascii_graphic() || c == ' ' {
-            format!("'{}'", c)
-        } else {
-            format!("{}", u)
-        }
-    } else {
-        format!("{}", u)
-    }
-}
-fn format_i16_char(code: i16) -> String { if code >= 0 { format_pos_code(code) } else { format!("neg({})", code.wrapping_sub(i16::MIN)) } }
-fn format_word(word: &[i16]) -> String { let parts: Vec<String> = word.iter().map(|&c| format_i16_char(c)).collect(); format!("[{}]", parts.join(", ")) }
 // --- Part 3: Automata Definitions (DWA only) ---
 
 pub type StateID = usize;
@@ -1258,11 +1155,6 @@ impl DWA {
         let new_start = new_dwa.states.union_state(self_start, other_start_remapped, &mut memo, &mut gating_memo);
         new_dwa.body.start_state = new_start;
 
-        if STOCHASTIC_VALIDATION {
-            // Validate C against A and B via stochastic sampling.
-            DWA::stochastic_validate_union(self, other, &new_dwa);
-        }
-
         new_dwa
     }
 
@@ -1301,185 +1193,12 @@ impl DWA {
             Some(fw) => {
                 let res = &acc & fw;
                 if res.is_empty() { Weight::zeros() } else { res }
-            }
-            None => Weight::zeros(),
         }
     }
 
-    /// Evaluate a word; None if rejected (weight empty).
-    pub fn eval_word(&self, word: &[i16]) -> Option<Weight> {
-        let w = self.eval_word_weight(word);
-        if w.is_empty() { None } else { Some(w) }
-    }
-
-    /// Sample an accepted path (word and weight) using a time-based seed.
-    /// Returns None if no accepted path was found within the attempt budget.
-    pub fn sample_accepted_path(&self, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
-        let mut rng = SimpleRng::from_time();
-        self.sample_accepted_path_with_rng(&mut rng, max_steps)
-    }
-
-    /// Sample an accepted path (word and weight) with a fixed seed (deterministic).
-    pub fn sample_accepted_path_with_seed(&self, seed: u64, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
-        let mut rng = SimpleRng::new(seed);
-        self.sample_accepted_path_with_rng(&mut rng, max_steps)
-    }
-
-    /// Core sampler with a provided RNG. Tries multiple attempts to find an accepted word.
-    pub fn sample_accepted_path_with_rng(&self, rng: &mut SimpleRng, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
-        if self.states.0.is_empty() {
-            return None;
-        }
-        for _attempt in 0..SAMPLING_TRIES {
-            let mut word: Vec<i16> = Vec::new();
-            let mut s = self.body.start_state;
-            let mut acc = Weight::all();
-
-            for step in 0..max_steps {
-                // Early stop with some probability if we can accept here.
-                if let Some(fw) = &self.states[s].final_weight {
-                    if rng.gen_bool_ratio(1, 3) || step == max_steps - 1 {
-                        let w = &acc & fw;
-                        if !w.is_empty() {
-                            return Some((word, w));
-                        }
-                    }
-                }
-
-                // Choose next character: one of the exception keys or a default-character if default exists.
-                let st = &self.states[s];
-                let mut choices: Vec<i16> = st.transitions.exceptions.keys().copied().collect();
-                let has_default = st.transitions.default.is_some();
-                let total = choices.len() + if has_default { 1 } else { 0 };
-                if total == 0 {
-                    // Dead-end; try to finalize or abort attempt.
-                    if let Some(fw) = &st.final_weight {
-                        let w = &acc & fw;
-                        if !w.is_empty() {
-                            return Some((word, w));
-                        }
-                    }
-                    break; // new attempt
-                }
-                let pick = rng.gen_usize(total);
-                let ch = if has_default && pick == choices.len() {
-                    pick_default_char_for_state(st, rng)
-                } else {
-                    choices[pick]
-                };
-
-                let next = st.transitions.get(ch).copied();
-                if next.is_none() {
-                    break;
-                }
-                let edge_w = st.get_weight(ch).cloned().unwrap_or_else(Weight::zeros);
-                if edge_w.is_empty() {
-                    break;
-                }
-                let new_acc = &acc & &edge_w;
-                if new_acc.is_empty() {
-                    break;
-                }
-                acc = new_acc;
-                s = next.unwrap();
-                word.push(ch);
-            }
-
-            // Finalize at end of attempt if possible:
-            if s < self.states.len() {
-                if let Some(fw) = &self.states[s].final_weight {
-                    let w = &acc & fw;
-                    if !w.is_empty() {
-                        return Some((word, w));
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn expected_union_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
-        let wa = a.eval_word_weight(word);
-        let wb = b.eval_word_weight(word);
-        &wa | &wb
-    }
-
-    /// Expected concatenation weight:
-    /// union over all split points i of (A(word[..i]) ∧ B(word[i..])).
-    fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
-        let mut acc = Weight::zeros();
-        for i in 0..=word.len() {
-            let wa = a.eval_word_weight(&word[..i]);
-            if wa.is_empty() {
-                continue;
-            }
-            let wb = b.eval_word_weight(&word[i..]);
-            if wb.is_empty() {
-                continue;
-            }
-            let both = &wa & &wb;
-            if !both.is_empty() {
-                acc |= &both;
-            }
-        }
-        acc
-    }
-
-    fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
-        let mut rng = SimpleRng::from_time();
-        for _ in 0..VALIDATION_SAMPLES {
-            // Sample a path from A -> must be in U, and U == A ∪ B for that word.
-            if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
-                let wu = u.eval_word_weight(&w);
-                assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, wu, a, b, u);
-                assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, wu, a, b, u);
-                let expected = DWA::expected_union_weight(a, b, &w);
-                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, b.eval_word_weight(&w), wu, expected, a, b, u);
-            }
-
-            // Sample a path from B -> must be in U, and U == A ∪ B for that word.
-            if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
-                let wu = u.eval_word_weight(&w);
-                assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wb, wu, a, b, u);
-                assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wb, wu, a, b, u);
-                let expected = DWA::expected_union_weight(a, b, &w);
-                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), a.eval_word_weight(&w), wb, wu, expected, a, b, u);
-            }
-
-            // Sample a path from U -> ensure it's in A ∪ B (equality check).
-            if let Some((w, wu)) = u.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
-                let expected = DWA::expected_union_weight(a, b, &w);
-                assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected, a, b, u);
-            }
-        }
-    }
-
-    fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
-        let mut rng = SimpleRng::from_time();
-        for _ in 0..VALIDATION_SAMPLES {
-            // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
-            if let Some((wa_word, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
-                if let Some((wb_word, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
-                    let mut w = wa_word.clone();
-                    w.extend_from_slice(&wb_word);
-                    let wc = c.eval_word_weight(&w);
-                    let expected_simple = &wa & &wb;
-                    if !expected_simple.is_empty() {
-                        assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword_a: {}\nword_b: {}\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wa, wb, wc, expected_simple, a, b, c);
-                    }
-                    // Also verify full expected across all splits equals C's result
-                    let expected_all = DWA::expected_concat_weight(a, b, &w);
-                    assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword_a: {}\nword_b: {}\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wc, expected_all, a, b, c);
-                }
-            }
-
-            // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
-            if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
-                let expected = DWA::expected_concat_weight(a, b, &w);
-                assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected, a, b, c);
-            }
-        }
-    }
+    /// Concatenation-like operation on two DWAs.
+    /// "Join all ends to all starts": whenever the left component reaches a final state,
+    /// we also (lazily) activate the right automaton's start state. If the left start is final,
 
     /// Concatenation-like operation on two DWAs.
     /// "Join all ends to all starts": whenever the left component reaches a final state,
@@ -1554,11 +1273,6 @@ impl DWA {
                     new_dwa.states[s_a_id].final_weight = Some(w);
                 }
             }
-        }
-
-        if STOCHASTIC_VALIDATION {
-            // Validate C against A and B via stochastic sampling.
-            DWA::stochastic_validate_concatenate(self, other, &new_dwa);
         }
 
         new_dwa
@@ -1662,9 +1376,6 @@ impl Display for DWA {
         writeln!(f, "DWA (start: {})", self.body.start_state)?;
         for (id, state) in self.states.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
-            if let Some(w) = &state.final_weight {
-                writeln!(f, "    final_weight: {}", w)?;
-            }
             if let Some(to) = &state.transitions.default {
                 if let Some(w) = &state.trans_weight_default {
                     writeln!(f, "    * -> {} (trans_weight: {})", to, w)?;
@@ -1672,9 +1383,13 @@ impl Display for DWA {
                     writeln!(f, "    * -> {}", to)?;
                 }
             }
+            if let Some(w) = &state.final_weight {
+                writeln!(f, "    final_weight: {}", w)?;
+            }
             for (on, to) in &state.transitions.exceptions {
                 // Represent positive codes as char if ASCII; negatives as '-char' or '-num'
                 let char_repr = if *on >= 0 {
+                    let u = *on as u16;
                     format_pos_code(*on)
                 } else {
                     let decoded_id = on.wrapping_sub(i16::MIN);
@@ -1767,182 +1482,4 @@ impl JSONConvertible for DWA {
         let start_state = StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
         Ok(DWA { states: DWAStates(states), body: DWABody { start_state } })
     }
-}
-
-// --- Test Helpers ---
-#[cfg(test)]
-pub(crate) fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
-    // Strategy:
-    // 1) Simplify both automata to obtain canonical, minimized, and normalized forms
-    //    (unreachable pruned, sink-like states collapsed, redundant exceptions removed),
-    //    while aggregating edge/default weights as unions across merged states.
-    // 2) Perform a BFS isomorphism test from the start states. For each matched pair:
-    //    - Compare state weights and final weights (None treated as zeros).
-    //    - Compare default transition weights (None treated as zeros).
-    //    - For each character in the union of exception keys, compare per-edge weights
-    //      (falling back to default if exception weight absent).
-    //    - Ensure default and per-exception targets correspond under the evolving bijection.
-    // 3) Verify that all states reachable in `b` are matched by some state of `a`.
-
-    a.simplify();
-    b.simplify();
-
-    // Helper: convert Option<Weight> to Weight (None => zeros).
-    fn opt_w_to_w(ow: &Option<Weight>) -> Weight {
-        ow.clone().unwrap_or_else(Weight::zeros)
-    }
-
-    use std::collections::{BTreeSet, HashSet};
-
-    // Map a-state -> b-state and its inverse to ensure a bijection.
-    let mut map_ab: HashMap<StateID, StateID> = HashMap::new();
-    let mut map_ba: HashMap<StateID, BTreeSet<StateID>> = HashMap::new();
-    let mut q: VecDeque<(StateID, StateID)> = VecDeque::new();
-
-    assert!(
-        !a.states.is_empty() && !b.states.is_empty(),
-        "Automata should have at least one state after simplification.\n\nDWA A:\n{}\n\nDWA B:\n{}",
-        a, b
-    );
-
-    let start_a = a.body.start_state;
-    let start_b = b.body.start_state;
-    map_ab.insert(start_a, start_b);
-    map_ba.entry(start_b).or_default().insert(start_a);
-    q.push_back((start_a, start_b));
-
-    // Lookup per-edge weight for a specific character in a given state:
-    // - If an exception weight is present, use it.
-    // - Else, use the default weight (or zeros if absent).
-    let edge_weight = |st: &DWAState, ch: i16| -> Weight {
-        if let Some(w) = st.trans_weights_exceptions.get(&ch) {
-            w.clone()
-        } else {
-            opt_w_to_w(&st.trans_weight_default)
-        }
-    };
-
-    while let Some((ia, ib)) = q.pop_front() {
-        let sa = &a.states[ia];
-        let sb = &b.states[ib];
-
-        // Compare default transition weights (None considered zeros).
-        let dwa = opt_w_to_w(&sa.trans_weight_default);
-        let dwb = opt_w_to_w(&sb.trans_weight_default);
-        assert_eq!(
-            dwa, dwb,
-            "Default transition weight mismatch at (a:{}, b:{}): a.def_weight={} vs b.def_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-            ia, ib, dwa, dwb, a, b
-        );
-
-        // Union of exception keys; after simplify(), both representations should be normalized,
-        // but we compute the union to be robust.
-        let keys_a: BTreeSet<i16> = sa.transitions.exceptions.keys().cloned().collect();
-        let keys_b: BTreeSet<i16> = sb.transitions.exceptions.keys().cloned().collect();
-        let all_keys: BTreeSet<i16> = keys_a.union(&keys_b).cloned().collect();
-
-        // Compare and enqueue per-exception transitions.
-        let def_a = sa.transitions.default;
-        let def_b = sb.transitions.default;
-
-        for ch in all_keys {
-            let ta = sa.transitions.exceptions.get(&ch).copied().or(def_a);
-            let tb = sb.transitions.exceptions.get(&ch).copied().or(def_b);
-
-            let wa = edge_weight(sa, ch);
-            let wb = edge_weight(sb, ch);
-            assert_eq!(
-                wa, wb,
-                "Per-edge weight mismatch on char {} at (a:{}, b:{}): a.edge_weight={} vs b.edge_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                ch, ia, ib, wa, wb, a, b
-            );
-
-            match (ta, tb) {
-                (Some(ta_id), Some(tb_id)) => {
-                    if let Some(&mapped) = map_ab.get(&ta_id) {
-                        assert_eq!(
-                            mapped, tb_id,
-                            "Transition mismatch on char {} from (a:{}, b:{}): a-target {} is already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                            ch, ia, ib, ta_id, mapped, tb_id, a, b
-                        );
-                    } else {
-                        map_ab.insert(ta_id, tb_id);
-                        map_ba.entry(tb_id).or_default().insert(ta_id);
-                        q.push_back((ta_id, tb_id));
-                    }
-                }
-                (None, None) => { /* Both lack transition for this char; fine. */ }
-                _ => {
-                    panic!(
-                        "Presence mismatch for transition on char {} at (a:{}, b:{}): a-target={:?}, b-target={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                        ch, ia, ib, ta, tb, a, b
-                    );
-                }
-            }
-        }
-
-        // Compare and enqueue default transitions.
-        match (def_a, def_b) {
-            (Some(ta_id), Some(tb_id)) => {
-                if let Some(&mapped) = map_ab.get(&ta_id) {
-                    assert_eq!(
-                        mapped, tb_id,
-                        "Default transition mismatch from (a:{}, b:{}): a-target {} already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                        ia, ib, ta_id, mapped, tb_id, a, b
-                    );
-                } else {
-                    map_ab.insert(ta_id, tb_id);
-                    map_ba.entry(tb_id).or_default().insert(ta_id);
-                    q.push_back((ta_id, tb_id));
-                }
-            }
-            (None, None) => { /* No default on either side; fine. */ }
-            _ => {
-                panic!(
-                    "Default transition presence mismatch at (a:{}, b:{}): a.default={:?}, b.default={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                    ia, ib, def_a, def_b, a, b
-                );
-            }
-        }
-    }
-
-    // After establishing the state mapping, verify that the union of final weights
-    // for all `a` states mapping to a given `b` state is equal to the final weight
-    // of that `b` state. This handles cases where `a` is an unminimized version of `b`.
-    for (ib, ias) in &map_ba {
-        let mut union_fa = Weight::zeros();
-        for &ia in ias {
-            union_fa |= &opt_w_to_w(&a.states[ia].final_weight);
-        }
-        let fb = opt_w_to_w(&b.states[*ib].final_weight);
-        assert_eq!(
-            union_fa, fb,
-            "Aggregated final weight mismatch for b-state {} (a-states: {:?}): union(a)={}, b={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-            ib, ias, union_fa, fb, a, b
-        );
-    }
-
-    // Ensure we've covered all states reachable from b.start.
-    let mut reachable_b: HashSet<StateID> = HashSet::new();
-    let mut qb: VecDeque<StateID> = VecDeque::new();
-    reachable_b.insert(b.body.start_state);
-    qb.push_back(b.body.start_state);
-    while let Some(u) = qb.pop_front() {
-        if let Some(d) = b.states[u].transitions.default {
-            if reachable_b.insert(d) {
-                qb.push_back(d);
-            }
-        }
-        for &v in b.states[u].transitions.exceptions.values() {
-            if reachable_b.insert(v) {
-                qb.push_back(v);
-            }
-        }
-    }
-    let mapped_b: HashSet<StateID> = map_ab.values().cloned().collect();
-    assert_eq!(
-        mapped_b, reachable_b,
-        "Reachable-state mismatch in `b`: matched set = {:?}, reachable set = {:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-        mapped_b, reachable_b, a, b
-    );
 }
