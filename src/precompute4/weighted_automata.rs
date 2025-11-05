@@ -34,11 +34,11 @@ const SAMPLING_TRIES: usize = 100;
 // Interns weights to compact keys for memoization (e.g., gating memo).
 // This drastically reduces hashing/comparison overhead for (StateID, Weight) pairs.
 #[derive(Default)]
-struct WeightInterner {
+pub struct WeightInterner {
     map: HashMap<Weight, usize>,
 }
 impl WeightInterner {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let mut wi = WeightInterner { map: HashMap::new() };
         // Pre-intern common weights for fast-path reuse.
         wi.intern(&Weight::zeros());
