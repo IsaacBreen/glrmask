@@ -26,38 +26,10 @@ pub struct SimpleBitset(pub RangeSetBlaze<usize>);
 
 // --- Stochastic validation controls and RNG ---
 // Toggle this to true to enable stochastic validation in union() and concatenate().
-const STOCHASTIC_VALIDATION: bool = true;
+const STOCHASTIC_VALIDATION: bool = false;
 const VALIDATION_SAMPLES: usize = 32;
 const VALIDATION_MAX_STEPS: usize = 12;
 const SAMPLING_TRIES: usize = 100;
-
-// Interns weights to compact keys for memoization (e.g., gating memo).
-// This drastically reduces hashing/comparison overhead for (StateID, Weight) pairs.
-#[derive(Default)]
-pub struct WeightInterner {
-    map: HashMap<Weight, usize>,
-}
-impl WeightInterner {
-    pub fn new() -> Self {
-        let mut wi = WeightInterner { map: HashMap::new() };
-        // Pre-intern common weights for fast-path reuse.
-        wi.intern(&Weight::zeros());
-        wi.intern(&Weight::all());
-        wi
-    }
-    fn intern(&mut self, w: &Weight) -> usize {
-        if let Some(&id) = self.map.get(w) {
-            id
-        } else {
-            let id = self.map.len();
-            self.map.insert(w.clone(), id);
-            id
-        }
-    }
-}
-
-// Memo for "exclude weight" gated copies: (original state, interned weight-id) -> gated-copy state
-type GatingMemo = HashMap<(StateID, usize), StateID>;
 
 #[derive(Clone, Debug)]
 struct SimpleRng(u64);
@@ -468,42 +440,6 @@ impl DWAStates {
         self.add_existing_state(state)
     }
 
-    /// Merge two optional transition targets under their respective edge weights into a single
-    /// deterministic target by gating and recursively unioning as necessary.
-    /// See the correctness discussion in the assistant notes: we must gate away the portion of
-    /// each subgraph that belongs exclusively to the other edge's weight to avoid over-acceptance.
-    fn union_targets_with_gating(
-        &mut self,
-        t1: Option<StateID>,
-        w1: &Weight,
-        t2: Option<StateID>,
-        w2: &Weight,
-        memo: &mut HashMap<(StateID, StateID), StateID>,
-        gating_memo: &mut GatingMemo,
-        interner: &mut WeightInterner,
-    ) -> Option<StateID> {
-        match (t1, t2) {
-            (Some(a), Some(b)) => {
-                if a == b {
-                    return Some(a);
-                }
-                // Gate away the portion unique to the other side before unioning targets.
-                let a_ex = w2 - w1; // portions unique to b to exclude from a
-                let b_ex = w1 - w2; // portions unique to a to exclude from b
-                let a_gated = self.exclude_weight_from_state(a, &a_ex, gating_memo, interner);
-                let b_gated = self.exclude_weight_from_state(b, &b_ex, gating_memo, interner);
-                Some(self.union_state(a_gated, b_gated, memo, gating_memo, interner))
-            }
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
-    }
-
-    /// Intersects all weights in the given state with `weight`, without copying the state if
-    /// the intersection is no-op. Returns either the original state_id or a new gated copy.
-    /// See `exclude_weight_from_state` for the complementary subtractive gating.
-    ///
     pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
         assert!(state_id < self.len(), "state_id out of bounds");
         self[state_id].apply_weight(weight);
@@ -513,19 +449,15 @@ impl DWAStates {
         &mut self,
         state_id: StateID,
         weight: &Weight,
-        gating_memo: &mut GatingMemo,
-        interner: &mut WeightInterner,
+        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
     ) -> StateID {
         assert!(state_id < self.len(), "state_id out of bounds");
         if weight.is_empty() {
             return state_id;
         }
 
-        let wid = interner.intern(weight);
-        let key = (state_id, wid);
-        if let Some(&id) = gating_memo.get(&key) {
-            return id;
-        }
+        let key = (state_id, weight.clone());
+        if let Some(&id) = gating_memo.get(&key) { return id; }
 
         // Check if any weight in the state will be affected. If not, we don't need to copy.
         let state = &self[state_id];
@@ -549,152 +481,93 @@ impl DWAStates {
         s_from_id: StateID,
         s_into_id: StateID,
         memo: &mut HashMap<(StateID, StateID), StateID>,
-        gating_memo: &mut GatingMemo,
-        interner: &mut WeightInterner,
+        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
     ) {
         assert!(s_from_id < self.len(), "s_from_id out of bounds");
         assert!(s_into_id < self.len(), "s_into_id out of bounds");
         if s_from_id == s_into_id {
             return;
         }
-        // Fast path: identical states, nothing to merge.
-        if self.0[s_from_id] == self.0[s_into_id] {
-            return;
-        }
-        // Fast path: s_from has neither transitions nor final weight -> no-op.
-        {
-            let s_from = &self.0[s_from_id];
-            let inert = s_from.final_weight.as_ref().map_or(true, |w| w.is_empty())
-                && s_from.transitions.default.is_none()
-                && s_from.transitions.exceptions.is_empty();
-            if inert {
-                return;
-            }
-        }
+        // crate::debug!(2, "Unioning state {} into state {}", s_from_id, s_into_id);
 
-        // Final weights: join (∨)
-        let fw_from = self.0[s_from_id].final_weight.clone().unwrap_or_else(Weight::zeros);
-        let fw_into = self.0[s_into_id].final_weight.clone().unwrap_or_else(Weight::zeros);
-        let new_final_weight = &fw_from | &fw_into;
+        let s_from = self.0[s_from_id].clone();
+        let s_into_orig = self.0[s_into_id].clone();
 
-        // Snapshot defaults and their weights (cloned once).
-        let def_from = self.0[s_from_id].transitions.default;
-        let def_into = self.0[s_into_id].transitions.default;
-        let w_def_from = self.0[s_from_id]
-            .trans_weight_default
-            .clone()
-            .unwrap_or_else(Weight::zeros);
-        let w_def_into = self.0[s_into_id]
-            .trans_weight_default
-            .clone()
-            .unwrap_or_else(Weight::zeros);
+        // Union final weights
+        let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
+        let fw_into = s_into_orig.final_weight.clone().unwrap_or_else(Weight::zeros);
+        let new_final_weight = fw_from | fw_into;
 
-        // --- Transitions (default first) ---
+        // --- Transitions ---
         let mut new_transitions = I16Map::new();
         let mut new_trans_weights_exceptions = BTreeMap::new();
+        let new_trans_weight_default;
 
-        // Merge default targets using precise gating.
-        let new_def_tgt_id = self.union_targets_with_gating(
-            def_from,
-            &w_def_from,
-            def_into,
-            &w_def_into,
-            memo,
-            gating_memo,
-            interner,
-        );
+        let critical_points: BTreeSet<i16> = s_from.transitions.exceptions.keys()
+            .chain(s_into_orig.transitions.exceptions.keys())
+            .cloned()
+            .collect();
+
+        let get_target = |s: &DWAState, ch: i16| -> Option<StateID> {
+            s.transitions.exceptions.get(&ch).copied().or(s.transitions.default)
+        };
+
+        let get_weight = |s: &DWAState, ch: i16| -> Weight {
+            s.trans_weights_exceptions.get(&ch)
+                .or(s.trans_weight_default.as_ref())
+                .cloned().unwrap_or_else(Weight::zeros)
+        };
+
+        // Default transition
+        let def_tgt_from = s_from.transitions.default;
+        let def_tgt_into = s_into_orig.transitions.default;
+        let w_def_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+        let w_def_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+        let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
+            (Some(t1), Some(t2)) => if t1 == t2 {
+                Some(t1)
+            } else {
+                let to_exclude_from_t2 = &w_def_from - &w_def_into;
+                let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
+                let to_exclude_from_t1 = &w_def_into - &w_def_from;
+                let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
+                Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
+            },
+            (Some(t), None) | (None, Some(t)) => Some(t),
+            (None, None) => None,
+        };
         new_transitions.default = new_def_tgt_id;
-        let new_trans_weight_default = if new_def_tgt_id.is_some() {
-            Some(&w_def_from | &w_def_into)
+        new_trans_weight_default = if new_def_tgt_id.is_some() {
+            Some(w_def_from | w_def_into)
         } else {
             None
         };
 
-        // Collect the union of exception keys in linear time by merging the already sorted key sets.
-        let keys: Vec<i16> = {
-            // Take snapshots of the keys to avoid borrowing self across recursive calls.
-            let a_keys: Vec<i16> = self.0[s_from_id]
-                .transitions
-                .exceptions
-                .keys()
-                .copied()
-                .collect();
-            let b_keys: Vec<i16> = self.0[s_into_id]
-                .transitions
-                .exceptions
-                .keys()
-                .copied()
-                .collect();
-            let mut merged: Vec<i16> = Vec::with_capacity(a_keys.len() + b_keys.len());
-            let mut ia = 0usize;
-            let mut ib = 0usize;
-            while ia < a_keys.len() && ib < b_keys.len() {
-                let ka = a_keys[ia];
-                let kb = b_keys[ib];
-                if ka == kb {
-                    merged.push(ka);
-                    ia += 1;
-                    ib += 1;
-                } else if ka < kb {
-                    merged.push(ka);
-                    ia += 1;
-                } else {
-                    merged.push(kb);
-                    ib += 1;
-                }
-            }
-            while ia < a_keys.len() {
-                merged.push(a_keys[ia]);
-                ia += 1;
-            }
-            while ib < b_keys.len() {
-                merged.push(b_keys[ib]);
-                ib += 1;
-            }
-            merged
-        };
+        // Exception transitions
+        for &ch in &critical_points {
+            let tgt_from = get_target(&s_from, ch);
+            let tgt_into = get_target(&s_into_orig, ch);
+            let w_from = get_weight(&s_from, ch);
+            let w_into = get_weight(&s_into_orig, ch);
 
-        // Merge per-exception transitions.
-        for ch in keys {
-            // Snapshot all data needed for this character, then drop borrows before recursive calls.
-            let (t_from, t_into, w_from, w_into) = {
-                let s_from = &self.0[s_from_id];
-                let s_into = &self.0[s_into_id];
-                let tf = s_from
-                    .transitions
-                    .exceptions
-                    .get(&ch)
-                    .copied()
-                    .or(def_from);
-                let ti = s_into
-                    .transitions
-                    .exceptions
-                    .get(&ch)
-                    .copied()
-                    .or(def_into);
-                let wf = s_from
-                    .trans_weights_exceptions
-                    .get(&ch)
-                    .or(s_from.trans_weight_default.as_ref())
-                    .cloned()
-                    .unwrap_or_else(Weight::zeros);
-                let wi = s_into
-                    .trans_weights_exceptions
-                    .get(&ch)
-                    .or(s_into.trans_weight_default.as_ref())
-                    .cloned()
-                    .unwrap_or_else(Weight::zeros);
-                (tf, ti, wf, wi)
+            let new_exc_tgt_id = match (tgt_from, tgt_into) {
+                (Some(t1), Some(t2)) => if t1 == t2 {
+                    Some(t1)
+                } else {
+                    let to_exclude_from_t2 = &w_from - &w_into;
+                    let t2_gated = self.exclude_weight_from_state(t2, &to_exclude_from_t2, gating_memo);
+                    let to_exclude_from_t1 = &w_into - &w_from;
+                    let t1_gated = self.exclude_weight_from_state(t1, &to_exclude_from_t1, gating_memo);
+                    Some(self.union_state(t1_gated, t2_gated, memo, gating_memo))
+                },
+                (Some(t), None) | (None, Some(t)) => Some(t),
+                (None, None) => None,
             };
 
-            let new_exc_tgt_id =
-                self.union_targets_with_gating(t_from, &w_from, t_into, &w_into, memo, gating_memo, interner);
-
-            // Only materialize an exception if its target differs from the (already merged) default.
             if new_exc_tgt_id != new_def_tgt_id {
                 if let Some(tgt_id) = new_exc_tgt_id {
                     new_transitions.exceptions.insert(ch, tgt_id);
-                    new_trans_weights_exceptions.insert(ch, &w_from | &w_into);
+                    new_trans_weights_exceptions.insert(ch, w_from | w_into);
                 }
             }
         }
@@ -705,6 +578,7 @@ impl DWAStates {
         s_into.transitions = new_transitions;
         s_into.trans_weight_default = new_trans_weight_default;
         s_into.trans_weights_exceptions = new_trans_weights_exceptions;
+        // crate::debug!(2, "Done unioning state {} into state {}", s_from_id, s_into_id);
     }
 
     pub fn union_state(
@@ -712,8 +586,7 @@ impl DWAStates {
         s1_id: StateID,
         s2_id: StateID,
         memo: &mut HashMap<(StateID, StateID), StateID>,
-        gating_memo: &mut GatingMemo,
-        interner: &mut WeightInterner,
+        gating_memo: &mut HashMap<(StateID, Weight), StateID>,
     ) -> StateID {
         assert!(s1_id < self.len(), "s1_id out of bounds");
         assert!(s2_id < self.len(), "s2_id out of bounds");
@@ -730,7 +603,7 @@ impl DWAStates {
         memo.insert(key, new_id);
 
         // Merge s2 into the new state
-        self.union_assign_state(s2_id, new_id, memo, gating_memo, interner);
+        self.union_assign_state(s2_id, new_id, memo, gating_memo);
 
         new_id
     }
@@ -1381,11 +1254,8 @@ impl DWA {
         let self_start = new_dwa.body.start_state;
 
         let mut memo = HashMap::new();
-        let mut gating_memo: GatingMemo = HashMap::new();
-        let mut interner = WeightInterner::new();
-        let new_start = new_dwa
-            .states
-            .union_state(self_start, other_start_remapped, &mut memo, &mut gating_memo, &mut interner);
+        let mut gating_memo = HashMap::new();
+        let new_start = new_dwa.states.union_state(self_start, other_start_remapped, &mut memo, &mut gating_memo);
         new_dwa.body.start_state = new_start;
 
         if STOCHASTIC_VALIDATION {
@@ -1653,7 +1523,6 @@ impl DWA {
             .filter_map(|(i, s)| s.final_weight.clone().map(|w| (i, w)))
             .collect();
 
-        let mut interner = WeightInterner::new();
         // For each final state from `self`, graft on a gated version of `other`.
         for (s_a_id, final_weight) in final_self_states {
             // Create a copy of `other`'s start state, gated by `final_weight`.
@@ -1673,9 +1542,7 @@ impl DWA {
             new_dwa.states[s_a_id].final_weight = None;
 
             // Merge the gated start state into the final `self` state.
-            new_dwa
-                .states
-                .union_assign_state(temp_id, s_a_id, &mut memo, &mut gating_memo, &mut interner);
+            new_dwa.states.union_assign_state(temp_id, s_a_id, &mut memo, &mut gating_memo);
 
             // Set the correct final weight at the junction.
             // It must be unioned with any final weight that might have been
@@ -1700,10 +1567,8 @@ impl DWA {
     /// Component-based union. Operates on a shared DWAStates arena.
     pub fn union_components(states: &mut DWAStates, body1: &DWABody, body2: &DWABody) -> DWABody {
         let mut memo = HashMap::new();
-        let mut gating_memo: GatingMemo = HashMap::new();
-        let mut interner = WeightInterner::new();
-        let new_start =
-            states.union_state(body1.start_state, body2.start_state, &mut memo, &mut gating_memo, &mut interner);
+        let mut gating_memo = HashMap::new();
+        let new_start = states.union_state(body1.start_state, body2.start_state, &mut memo, &mut gating_memo);
         DWABody { start_state: new_start }
     }
 
@@ -1718,8 +1583,7 @@ impl DWA {
             .collect();
 
         let mut memo = HashMap::new();
-        let mut gating_memo: GatingMemo = HashMap::new();
-        let mut interner = WeightInterner::new();
+        let mut gating_memo = HashMap::new();
 
         for (s_a_id, final_weight) in final_a_states {
             // Create a temporary, gated version of B's start state.
@@ -1731,7 +1595,7 @@ impl DWA {
             let temp_id = states.add_existing_state(gated_b_start);
 
             states[s_a_id].final_weight = None;
-            states.union_assign_state(temp_id, s_a_id, &mut memo, &mut gating_memo, &mut interner);
+            states.union_assign_state(temp_id, s_a_id, &mut memo, &mut gating_memo);
 
             if let Some(w) = junction_final_weight {
                 if let Some(existing_fw) = states[s_a_id].final_weight.as_mut() {
@@ -1749,9 +1613,7 @@ impl DWA {
             let new_start_final_weight = gated_b_start.final_weight.clone();
             let temp_id = states.add_existing_state(gated_b_start);
 
-            states.union_assign_state(
-                temp_id, new_start_a, &mut memo, &mut gating_memo, &mut interner,
-            );
+            states.union_assign_state(temp_id, new_start_a, &mut memo, &mut gating_memo);
 
             if let Some(w) = new_start_final_weight {
                 if let Some(existing_fw) = states[new_start_a].final_weight.as_mut() {

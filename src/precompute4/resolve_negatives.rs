@@ -1,5 +1,5 @@
 use crate::precompute4::full_dwa::Precomputed4;
-use crate::precompute4::weighted_automata::{DWA, DWAStates, StateID, Weight, WeightInterner};
+use crate::precompute4::weighted_automata::{DWA, DWAStates, StateID, Weight};
 use std::collections::{BTreeMap, HashMap};
 
 pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
@@ -40,7 +40,6 @@ fn resolve_negative_codes_in_dwa_internal(
     let mut changed = false;
     let mut memo = HashMap::new();
     let mut gating_memo = HashMap::new();
-    let mut interner = WeightInterner::new();
 
     // We need to collect the negative transitions first because we'll be modifying the state's transitions.
     let negative_transitions: Vec<(i16, StateID)> = states[state_id]
@@ -97,7 +96,7 @@ fn resolve_negative_codes_in_dwa_internal(
             let w = w_neg & w_b_c;
             states.apply_weight(c_copy_id, &w);
             // Merge into A
-            states.union_assign_state(c_copy_id, state_id, &mut memo, &mut gating_memo, &mut interner);
+            states.union_assign_state(c_copy_id, state_id, &mut memo, &mut gating_memo);
         }
     }
 
