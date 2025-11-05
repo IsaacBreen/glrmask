@@ -1567,8 +1567,8 @@ impl NWA {
             for (&u, &w_in_id) in pre {
                 ensure_eps_closure(u, states, cache, interner, id_zero, id_zero); // id_all not used in this call
                 if let Some(vs) = &cache[u] {
-                    for (v, &w_uv_id) in vs {
-                        let prop = interner.get(w_in_id) & interner.get(w_uv_id);
+                    for (v, w_uv_id) in vs {
+                        let prop = interner.get(w_in_id) & interner.get(*w_uv_id);
                         if prop.is_empty() { continue; }
                         let prop_id = interner.intern(prop);
                         if let Some(&old_id) = acc.get(v) {
