@@ -1161,6 +1161,7 @@ fn test_concatenate_complex_from_attachment() {
     left.add_transition(25, 8, 12, w_01.clone()).unwrap();
     left.add_transition(25, 9, 4, w_01.clone()).unwrap();
     left.add_transition(25, 10, 5, w_01.clone()).unwrap();
+    left.simplify();
 
     // --- Build RIGHT DWA ---
     let mut right = DWA::new();
