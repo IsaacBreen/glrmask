@@ -214,7 +214,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         &traversal_data,
         initial_values,
         // step function
-        |current_dwa_body, edge_terminal_opt, dest_map| {
+        |current_dwa_body: &DWABody, edge_terminal_opt, dest_map| {
             let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
                 let terminal_id = edge_terminal_opt.unwrap();
                 template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
@@ -268,7 +268,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     for (tok_id, body) in final_bodies {
         let mut new_dwa = DWA::new();
         new_dwa.states.0.clear();
-        crate::debug!(5, "Copying final DWA subgraph for tokenizer state {} from arena (start: {})...", tok_id, body.start_state);
+        crate::debug!(5, "Copying final DWA subgraph for tokenizer state {:?} from arena (start: {})...", tok_id, body.start_state);
         let (new_start, _) = new_dwa.states.copy_subgraph_from(&final_states, body.start_state);
         new_dwa.body.start_state = new_start;
         crate::debug!(5, "Final DWA subgraph copied. Starting simplification ({} states)...", new_dwa.states.len());
