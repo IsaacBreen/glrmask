@@ -1552,6 +1552,36 @@ pub struct NWA {
     pub body: NWABody,
 }
 
+// A compact grouping key used during determinization for lazy step application:
+// - mask: an interned epsilon-closure mask (Arc<Vec<(state, weight)>>).
+//         We key by pointer identity to avoid scanning; these masks are already interned.
+// - w:    the edge weight to apply on top of the mask; fingerprint used for hashing, full Eq for correctness.
+#[derive(Clone)]
+struct StepGroupKey {
+    mask: Arc<Vec<(NWAStateID, Weight)>>,
+    w: Weight,
+    fp: u64,
+}
+
+impl PartialEq for StepGroupKey {
+    fn eq(&self, other: &Self) -> bool {
+        // Fast pointer check on mask; if masks differ, keys differ.
+        if !Arc::ptr_eq(&self.mask, &other.mask) {
+            return false;
+        }
+        // Fast fingerprint mismatch => not equal.
+        if self.fp != other.fp {
+            return false;
+        }
+        // Fall back to structural equality on the weight only if needed.
+        self.w == other.w
+    }
+}
+impl Eq for StepGroupKey {}
+impl std::hash::Hash for StepGroupKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_usize(Arc::as_ptr(&self.mask) as usize); state.write_u64(self.fp); }
+}
+
 impl NWA {
     pub fn new() -> Self {
         let mut states = NWAStates::default();
@@ -1856,6 +1886,15 @@ impl NWA {
         }
         impl PartialEq for StepKeyArc {
             fn eq(&self, other: &Self) -> bool {
+                // Fingerprint mismatch => definitely not equal; avoids costly structural compare.
+                if self.fp != other.fp {
+                    return false;
+                }
+                // Pointer equality fast-path.
+                if Arc::ptr_eq(&self.entries, &other.entries) {
+                    return true;
+                }
+                // Fall back to full structural equality on entries.
                 Arc::ptr_eq(&self.entries, &other.entries) || *self.entries == *other.entries
             }
         }
@@ -1959,37 +1998,6 @@ impl NWA {
             }
         }
 
-        // 2) Global step cache keyed by (target, weight) irrespective of source or label.
-        let mut step_cache_by_target_weight: HashMap<(NWAStateID, Weight), StepVec> = HashMap::new();
-
-        fn get_step_for_target_weight(
-            to: NWAStateID,
-            w: &Weight,
-            states: &NWAStates,
-            fut: &[Weight],
-            comp_of: &[usize],
-            pure_comp: &[bool],
-            comps: &Vec<Vec<NWAStateID>>,
-            eps_cache_state: &mut HashMap<NWAStateID, StepVec>,
-            eps_cache_comp: &mut HashMap<usize, StepVec>,
-            step_cache: &mut HashMap<(NWAStateID, Weight), StepVec>,
-            intern: &mut HashMap<StepKeyArc, StepVec>,
-        ) -> StepVec {
-            let key = (to, w.clone());
-            if let Some(v) = step_cache.get(&key) {
-                return v.clone();
-            }
-            let mask = get_eps_mask(to, states, fut, comp_of, pure_comp, comps, eps_cache_state, eps_cache_comp, intern);
-            let mut tmp: Vec<(NWAStateID, Weight)> = Vec::with_capacity(mask.len());
-            for (t, m) in mask.iter() {
-                let ww = m & w;
-                if !ww.is_empty() { tmp.push((*t, ww)); }
-            }
-            let sv = intern_step_vec(tmp, intern);
-            step_cache.insert(key, sv.clone());
-            sv
-        }
-
         // Build initial subset: epsilon-closure from start; already future-gated and interned.
         let init_sv: StepVec = get_eps_mask(
             self.body.start_state,
@@ -2037,6 +2045,28 @@ impl NWA {
 
             let d_id = *subset_to_d_id.get(&subset_key).unwrap();
             let subset_vec: &[(NWAStateID, Weight)] = &subset_key.entries;
+
+            // Helper: Lazily apply a (mask, w) group with an aggregated group-weight gw
+            // into an accumulator map (target -> weight).
+            fn accumulate_step_group(
+                mask: &StepVec,
+                w: &Weight,
+                gw: &Weight,
+                acc: &mut HashMap<NWAStateID, Weight>,
+            ) {
+                let gw_all = gw.is_all_fast();
+                for (t, m) in mask.iter() {
+                    let mw = m & w;
+                    if mw.is_empty() { continue; }
+                    if gw_all {
+                        if let Some(old) = acc.get_mut(t) { *old |= &mw; } else { acc.insert(*t, mw); }
+                    } else {
+                        let contrib = &mw & gw;
+                        if contrib.is_empty() { continue; }
+                        if let Some(old) = acc.get_mut(t) { *old |= &contrib; } else { acc.insert(*t, contrib); }
+                    }
+                }
+            }
 
             // Compute final weight
             let mut d_final: Option<Weight> = None;
