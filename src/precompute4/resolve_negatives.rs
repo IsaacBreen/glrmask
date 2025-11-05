@@ -37,7 +37,7 @@ fn resolve_negative_codes_in_dwa_internal(
     state_id: StateID,
     states: &mut DWAStates,
 ) -> (DWAState, bool) {
-    let orig = &states[state_id];
+    let orig = states[state_id].clone();
 
     // Create a fresh state:
     // - preserve state weight and existing final_weight
@@ -131,7 +131,7 @@ fn resolve_negative_codes_in_dwa_internal(
         }
     }
 
-    let changed = &new_state != orig;
+    let changed = new_state != orig;
     (new_state, changed)
 }
 
