@@ -1866,8 +1866,8 @@ mod tests {
 
     #[test]
     fn test_concatenate_simple() {
-        let d1 = dwa_accepts_char('a', Weight::from_item(1)); // Final state is 1
-        let d2 = dwa_accepts_char('b', Weight::from_item(2));
+        let d1 = dwa_accepts_char('a', Weight::from_iter([1, 2]));
+        let d2 = dwa_accepts_char('b', Weight::from_iter([2, 3]));
         let c = d1.concatenate(&d2);
         let expected = dwa_from_str("ab", Weight::from_item(2));
         assert_dwa_equivalent(c, expected);
