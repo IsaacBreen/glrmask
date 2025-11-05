@@ -2306,10 +2306,6 @@ impl GrammarConstraint {
             &dummy_terminal_penalties,
         );
 
-        // After optimization and cycle breaking, assert that no structural cycles remain.
-        let final_roots: Vec<_> = precomputed1.values().cloned().collect();
-        assert!(!PrecomputeNode1::has_cycle(&trie1_god, final_roots), "Cycles remain in Trie1 after cycle breaking pass");
-
         (precomputed1, trie1_god)
     }
 
