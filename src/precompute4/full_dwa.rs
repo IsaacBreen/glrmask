@@ -131,8 +131,8 @@ fn build_template_dwas(
     let mut out = BTreeMap::new();
     for (term, bb) in all {
         let dwa = build_template_dwa_from_characterization(&bb)?;
-        crate::debug!(5, "Built template DWA for terminal {:?}:", term);
-        crate::debug!(5, "{}", dwa);
+        crate::debug!(6, "Built template DWA for terminal {:?}:", term);
+        crate::debug!(6, "{}", dwa);
         out.insert(term, dwa);
     }
     Ok(out)
@@ -226,18 +226,18 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 left.apply_weight(&weight);
 
                 // Concatenate: left then current (right)
-                crate::debug!(5, "Concatenating DWAs:\nLEFT:\n{}\nRIGHT:\n{}", left, current_dwa);
+                crate::debug!(6, "Concatenating DWAs:\nLEFT:\n{}\nRIGHT:\n{}", left, current_dwa);
                 let mut composed = left.concatenate(&current_dwa);
-                crate::debug!(5, "Resulting composed DWA:\n{}", composed);
+                crate::debug!(6, "Resulting composed DWA:\n{}", composed);
                 results.push((*dest_idx, composed));
             }
             results
         },
         // merge function: union them
         |dwa1, dwa2| {
-            crate::debug!(5, "Unioning DWAs:\nLEFT:\n{}\nRIGHT:\n{}", dwa1, dwa2);
+            crate::debug!(6, "Unioning DWAs:\nLEFT:\n{}\nRIGHT:\n{}", dwa1, dwa2);
             *dwa1 = dwa1.union(&dwa2);
-            crate::debug!(5, "Resulting unioned DWA:\n{}", dwa1);
+            crate::debug!(6, "Resulting unioned DWA:\n{}", dwa1);
         },
         // process function: capture at original roots
         |_node_data, node_idx, mut dwa| {
