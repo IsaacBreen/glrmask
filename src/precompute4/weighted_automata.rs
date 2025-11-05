@@ -298,7 +298,84 @@ impl DWAStates {
     }
 
     pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID) {
-        todo!()
+        assert!(s_from_id < self.len(), "s_from_id out of bounds");
+        assert!(s_into_id < self.len(), "s_into_id out of bounds");
+        if s_from_id == s_into_id {
+            return;
+        }
+
+        let s_from = self.0[s_from_id].clone();
+        let s_into_orig = self.0[s_into_id].clone();
+
+        // Union weights
+        let new_weight = &s_into_orig.weight | &s_from.weight;
+        let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
+        let fw_into = s_into_orig.final_weight.clone().unwrap_or_else(Weight::zeros);
+        let new_final_weight = fw_from | fw_into;
+
+        // --- Transitions ---
+        let mut new_transitions = I16Map::new();
+        let mut new_trans_weights_exceptions = BTreeMap::new();
+        let new_trans_weight_default;
+
+        let critical_points: BTreeSet<i16> = s_from.transitions.exceptions.keys()
+            .chain(s_into_orig.transitions.exceptions.keys())
+            .cloned()
+            .collect();
+
+        let get_target = |s: &DWAState, ch: i16| -> Option<StateID> {
+            s.transitions.exceptions.get(&ch).copied().or(s.transitions.default)
+        };
+
+        let get_weight = |s: &DWAState, ch: i16| -> Weight {
+            s.trans_weights_exceptions.get(&ch)
+                .or(s.trans_weight_default.as_ref())
+                .cloned().unwrap_or_else(Weight::zeros)
+        };
+
+        // Default transition
+        let def_tgt_from = s_from.transitions.default;
+        let def_tgt_into = s_into_orig.transitions.default;
+        let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
+            (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+            (Some(t), None) | (None, Some(t)) => Some(t),
+            (None, None) => None,
+        };
+        new_transitions.default = new_def_tgt_id;
+        new_trans_weight_default = if new_def_tgt_id.is_some() {
+            let w_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+            let w_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+            Some(w_from | w_into)
+        } else {
+            None
+        };
+
+        // Exception transitions
+        for &ch in &critical_points {
+            let tgt_from = get_target(&s_from, ch);
+            let tgt_into = get_target(&s_into_orig, ch);
+
+            let new_exc_tgt_id = match (tgt_from, tgt_into) {
+                (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+                (Some(t), None) | (None, Some(t)) => Some(t),
+                (None, None) => None,
+            };
+
+            if new_exc_tgt_id != new_def_tgt_id {
+                if let Some(tgt_id) = new_exc_tgt_id {
+                    new_transitions.exceptions.insert(ch, tgt_id);
+                    new_trans_weights_exceptions.insert(ch, get_weight(&s_from, ch) | get_weight(&s_into_orig, ch));
+                }
+            }
+        }
+
+        // Commit changes
+        let s_into = &mut self.0[s_into_id];
+        s_into.weight = new_weight;
+        s_into.final_weight = if new_final_weight.is_empty() { None } else { Some(new_final_weight) };
+        s_into.transitions = new_transitions;
+        s_into.trans_weight_default = new_trans_weight_default;
+        s_into.trans_weights_exceptions = new_trans_weights_exceptions;
     }
 
     pub fn union_state(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {

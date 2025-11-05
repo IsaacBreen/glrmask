@@ -295,61 +295,29 @@ local_system:
               self.add_existing_state(state)
           }
 
+          pub fn remove_state(&mut self, state_id: StateID) -> DWAState {
+              self.0.remove(state_id)
+          }
+
           pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
               assert!(state_id < self.len(), "state_id out of bounds");
               self[state_id].apply_weight(weight);
           }
 
-          /// Merges two states that are transition-equivalent into a new state.
-          /// The new state's weights are the union of the original states' weights.
-          ///
-          /// This function asserts that the two states have identical transition structures
-          /// (i.e., for any input, they transition to the same destination state).
-          ///
-          /// It does NOT update any transitions in the automaton that point to the old
-          /// states (`s1_id`, `s2_id`). The caller is responsible for remapping any such
-          /// transitions to the returned `StateID` of the new merged state.
-          pub fn merge_states(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
+          pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID) {
+              todo!()
+          }
+
+          pub fn union_state(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
               assert!(s1_id < self.len(), "s1_id out of bounds");
               assert!(s2_id < self.len(), "s2_id out of bounds");
 
-              let s1 = &self[s1_id];
-              let s2 = &self[s2_id];
+              // Create a new state by copying s1
+              let new_id = self.copy_state(s1_id);
 
-              // For this to be correct, s1 and s2 must be behaviorally equivalent,
-              // i.e., for any input they transition to the same state.
-              assert_eq!(s1.transitions, s2.transitions, "States must be transition-equivalent to be merged.");
+              // Merge s2 into the new state
+              self.union_assign_state(s2_id, new_id);
 
-              let mut new_state = DWAState::default();
-
-              // Copy transition structure from s1 (since it's same as s2)
-              new_state.transitions = s1.transitions.clone();
-
-              // Merge state and final weights
-              new_state.weight = &s1.weight | &s2.weight;
-              let fw1 = s1.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let fw2 = s2.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let final_w = fw1 | fw2;
-              if !final_w.is_empty() {
-                  new_state.final_weight = Some(final_w);
-              }
-
-              // Merge default transition weight
-              if new_state.transitions.default.is_some() {
-                  let tw1 = s1.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  let tw2 = s2.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  new_state.trans_weight_default = Some(tw1 | tw2);
-              }
-
-              // Merge exception transition weights
-              for (ch, _tgt) in &new_state.transitions.exceptions {
-                  let w1 = s1.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  let w2 = s2.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  new_state.trans_weights_exceptions.insert(*ch, w1 | w2);
-              }
-
-              let new_id = self.add_state();
-              self[new_id] = new_state;
               new_id
           }
       }
@@ -2122,66 +2090,97 @@ local_system:
               self.add_existing_state(state)
           }
 
+          pub fn remove_state(&mut self, state_id: StateID) -> DWAState {
+              self.0.remove(state_id)
+          }
+
           pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
               assert!(state_id < self.len(), "state_id out of bounds");
               self[state_id].apply_weight(weight);
           }
 
-          /// Merges `s_from_id` into `s_into_id`.
-          /// The weights of `s_into_id` become the union of both states' weights.
-          /// `s_from_id` is not modified.
-          ///
-          /// This function asserts that the two states have identical transition structures.
-          pub fn merge_state_into(&mut self, s_from_id: StateID, s_into_id: StateID) {
+          pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID) {
               assert!(s_from_id < self.len(), "s_from_id out of bounds");
               assert!(s_into_id < self.len(), "s_into_id out of bounds");
-              assert_ne!(s_from_id, s_into_id, "Cannot merge a state into itself");
+              if s_from_id == s_into_id {
+                  return;
+              }
 
-              // To satisfy the borrow checker, we need to clone the from_state's data
-              // because we're modifying self[s_into_id].
-              let s_from = self[s_from_id].clone();
-              let s_into = &self[s_into_id];
+              let s_from = self.0[s_from_id].clone();
+              let s_into_orig = self.0[s_into_id].clone();
 
-              assert_eq!(s_from.transitions, s_into.transitions, "States must be transition-equivalent to be merged.");
+              // Union weights
+              let new_weight = &s_into_orig.weight | &s_from.weight;
+              let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
+              let fw_into = s_into_orig.final_weight.clone().unwrap_or_else(Weight::zeros);
+              let new_final_weight = fw_from | fw_into;
 
-              let s_into_mut = &mut self[s_into_id];
+              // --- Transitions ---
+              let mut new_transitions = I16Map::new();
+              let mut new_trans_weights_exceptions = BTreeMap::new();
+              let new_trans_weight_default;
 
-              // Merge state and final weights
-              s_into_mut.weight |= &s_from.weight;
-              let fw_from = s_from.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let fw_into = s_into_mut.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let final_w = fw_into | fw_from;
-              if !final_w.is_empty() {
-                  s_into_mut.final_weight = Some(final_w);
+              let critical_points: BTreeSet<i16> = s_from.transitions.exceptions.keys()
+                  .chain(s_into_orig.transitions.exceptions.keys())
+                  .cloned()
+                  .collect();
+
+              let get_target = |s: &DWAState, ch: i16| -> Option<StateID> {
+                  s.transitions.exceptions.get(&ch).copied().or(s.transitions.default)
+              };
+
+              let get_weight = |s: &DWAState, ch: i16| -> Weight {
+                  s.trans_weights_exceptions.get(&ch)
+                      .or(s.trans_weight_default.as_ref())
+                      .cloned().unwrap_or_else(Weight::zeros)
+              };
+
+              // Default transition
+              let def_tgt_from = s_from.transitions.default;
+              let def_tgt_into = s_into_orig.transitions.default;
+              let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
+                  (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+                  (Some(t), None) | (None, Some(t)) => Some(t),
+                  (None, None) => None,
+              };
+              new_transitions.default = new_def_tgt_id;
+              new_trans_weight_default = if new_def_tgt_id.is_some() {
+                  let w_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                  let w_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+                  Some(w_from | w_into)
               } else {
-                  s_into_mut.final_weight = None;
+                  None
+              };
+
+              // Exception transitions
+              for &ch in &critical_points {
+                  let tgt_from = get_target(&s_from, ch);
+                  let tgt_into = get_target(&s_into_orig, ch);
+
+                  let new_exc_tgt_id = match (tgt_from, tgt_into) {
+                      (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+                      (Some(t), None) | (None, Some(t)) => Some(t),
+                      (None, None) => None,
+                  };
+
+                  if new_exc_tgt_id != new_def_tgt_id {
+                      if let Some(tgt_id) = new_exc_tgt_id {
+                          new_transitions.exceptions.insert(ch, tgt_id);
+                          new_trans_weights_exceptions.insert(ch, get_weight(&s_from, ch) | get_weight(&s_into_orig, ch));
+                      }
+                  }
               }
 
-              // Merge default transition weight
-              if s_into_mut.transitions.default.is_some() {
-                  let tw_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  let tw_into = s_into_mut.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  s_into_mut.trans_weight_default = Some(tw_into | tw_from);
-              }
-
-              // Merge exception transition weights
-              for ch in s_from.transitions.exceptions.keys() {
-                  let w_from = s_from.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  let w_into = s_into_mut.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  s_into_mut.trans_weights_exceptions.insert(*ch, w_into | w_from);
-              }
+              // Commit changes
+              let s_into = &mut self.0[s_into_id];
+              s_into.weight = new_weight;
+              s_into.final_weight = if new_final_weight.is_empty() { None } else { Some(new_final_weight) };
+              s_into.transitions = new_transitions;
+              s_into.trans_weight_default = new_trans_weight_default;
+              s_into.trans_weights_exceptions = new_trans_weights_exceptions;
           }
 
-          /// Merges two states that are transition-equivalent into a new state.
-          /// The new state's weights are the union of the original states' weights.
-          ///
-          /// This function asserts that the two states have identical transition structures
-          /// (i.e., for any input, they transition to the same destination state).
-          ///
-          /// It does NOT update any transitions in the automaton that point to the old
-          /// states (`s1_id`, `s2_id`). The caller is responsible for remapping any such
-          /// transitions to the returned `StateID` of the new merged state.
-          pub fn merge_states(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
+          pub fn union_state(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
               assert!(s1_id < self.len(), "s1_id out of bounds");
               assert!(s2_id < self.len(), "s2_id out of bounds");
 
@@ -2189,7 +2188,7 @@ local_system:
               let new_id = self.copy_state(s1_id);
 
               // Merge s2 into the new state
-              self.merge_state_into(s2_id, new_id);
+              self.union_assign_state(s2_id, new_id);
 
               new_id
           }
@@ -3682,7 +3681,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -4005,61 +4004,29 @@ messages:
               self.add_existing_state(state)
           }
 
+          pub fn remove_state(&mut self, state_id: StateID) -> DWAState {
+              self.0.remove(state_id)
+          }
+
           pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
               assert!(state_id < self.len(), "state_id out of bounds");
               self[state_id].apply_weight(weight);
           }
 
-          /// Merges two states that are transition-equivalent into a new state.
-          /// The new state's weights are the union of the original states' weights.
-          ///
-          /// This function asserts that the two states have identical transition structures
-          /// (i.e., for any input, they transition to the same destination state).
-          ///
-          /// It does NOT update any transitions in the automaton that point to the old
-          /// states (`s1_id`, `s2_id`). The caller is responsible for remapping any such
-          /// transitions to the returned `StateID` of the new merged state.
-          pub fn merge_states(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
+          pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID) {
+              todo!()
+          }
+
+          pub fn union_state(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
               assert!(s1_id < self.len(), "s1_id out of bounds");
               assert!(s2_id < self.len(), "s2_id out of bounds");
 
-              let s1 = &self[s1_id];
-              let s2 = &self[s2_id];
+              // Create a new state by copying s1
+              let new_id = self.copy_state(s1_id);
 
-              // For this to be correct, s1 and s2 must be behaviorally equivalent,
-              // i.e., for any input they transition to the same state.
-              assert_eq!(s1.transitions, s2.transitions, "States must be transition-equivalent to be merged.");
+              // Merge s2 into the new state
+              self.union_assign_state(s2_id, new_id);
 
-              let mut new_state = DWAState::default();
-
-              // Copy transition structure from s1 (since it's same as s2)
-              new_state.transitions = s1.transitions.clone();
-
-              // Merge state and final weights
-              new_state.weight = &s1.weight | &s2.weight;
-              let fw1 = s1.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let fw2 = s2.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let final_w = fw1 | fw2;
-              if !final_w.is_empty() {
-                  new_state.final_weight = Some(final_w);
-              }
-
-              // Merge default transition weight
-              if new_state.transitions.default.is_some() {
-                  let tw1 = s1.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  let tw2 = s2.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  new_state.trans_weight_default = Some(tw1 | tw2);
-              }
-
-              // Merge exception transition weights
-              for (ch, _tgt) in &new_state.transitions.exceptions {
-                  let w1 = s1.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  let w2 = s2.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  new_state.trans_weights_exceptions.insert(*ch, w1 | w2);
-              }
-
-              let new_id = self.add_state();
-              self[new_id] = new_state;
               new_id
           }
       }
@@ -5544,8 +5511,8 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata.rs
-  - user: Turn `merge_states` into `merge_state_into`. Add another method `merge_states`
-      that just uses `merge_state_into`.
+  - user: Implement `union_state_into`. It should handle everything properly, including
+      defaults.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5565,243 +5532,114 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to refactor `merge_states`, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to implement `union_assign_state`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
       1.  **Open the file `src/precompute4/weighted_automata.rs`**.
+      2.  **Navigate to the `union_assign_state` function**. You can find this function within the `impl DWAStates` block, around line 348. It currently contains a `todo!()`.
+      3.  **Replace the body of the function**. You will replace the `todo!()` line with a complete implementation that merges the state `s_from_id` into the state `s_into_id`.
 
-      2.  **Locate the `impl DWAStates` block.** Inside this block, find the `merge_states` method (around line 335).
-
-      3.  **Insert the new `merge_state_into` method** immediately before the `merge_states` method. Paste the following code:
-
-          ```rust
-          /// Merges `s_from_id` into `s_into_id`.
-          /// The weights of `s_into_id` become the union of both states' weights.
-          /// `s_from_id` is not modified.
-          ///
-          /// This function asserts that the two states have identical transition structures.
-          pub fn merge_state_into(&mut self, s_from_id: StateID, s_into_id: StateID) {
-              assert!(s_from_id < self.len(), "s_from_id out of bounds");
-              assert!(s_into_id < self.len(), "s_into_id out of bounds");
-              assert_ne!(s_from_id, s_into_id, "Cannot merge a state into itself");
-
-              // To satisfy the borrow checker, we need to clone the from_state's data
-              // because we're modifying self[s_into_id].
-              let s_from = self[s_from_id].clone();
-              let s_into = &self[s_into_id];
-
-              assert_eq!(s_from.transitions, s_into.transitions, "States must be transition-equivalent to be merged.");
-
-              let s_into_mut = &mut self[s_into_id];
-
-              // Merge state and final weights
-              s_into_mut.weight |= &s_from.weight;
-              let fw_from = s_from.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let fw_into = s_into_mut.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let final_w = fw_into | fw_from;
-              if !final_w.is_empty() {
-                  s_into_mut.final_weight = Some(final_w);
-              } else {
-                  s_into_mut.final_weight = None;
-              }
-
-              // Merge default transition weight
-              if s_into_mut.transitions.default.is_some() {
-                  let tw_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  let tw_into = s_into_mut.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  s_into_mut.trans_weight_default = Some(tw_into | tw_from);
-              }
-
-              // Merge exception transition weights
-              for ch in s_from.transitions.exceptions.keys() {
-                  let w_from = s_from.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  let w_into = s_into_mut.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  s_into_mut.trans_weights_exceptions.insert(*ch, w_into | w_from);
-              }
-          }
-          ```
-
-      4.  **Replace the implementation of the `merge_states` method** with the new version that calls `merge_state_into`. The signature and documentation comments should remain unchanged.
-
-          *From this:*
-          ```rust
-          pub fn merge_states(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
-              assert!(s1_id < self.len(), "s1_id out of bounds");
-              assert!(s2_id < self.len(), "s2_id out of bounds");
-
-              let s1 = &self[s1_id];
-              let s2 = &self[s2_id];
-
-              // For this to be correct, s1 and s2 must be behaviorally equivalent,
-              // i.e., for any input they transition to the same state.
-              assert_eq!(s1.transitions, s2.transitions, "States must be transition-equivalent to be merged.");
-
-              let mut new_state = DWAState::default();
-
-              // Copy transition structure from s1 (since it's same as s2)
-              new_state.transitions = s1.transitions.clone();
-
-              // Merge state and final weights
-              new_state.weight = &s1.weight | &s2.weight;
-              let fw1 = s1.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let fw2 = s2.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-              let final_w = fw1 | fw2;
-              if !final_w.is_empty() {
-                  new_state.final_weight = Some(final_w);
-              }
-
-              // Merge default transition weight
-              if new_state.transitions.default.is_some() {
-                  let tw1 = s1.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  let tw2 = s2.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-                  new_state.trans_weight_default = Some(tw1 | tw2);
-              }
-
-              // Merge exception transition weights
-              for (ch, _tgt) in &new_state.transitions.exceptions {
-                  let w1 = s1.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  let w2 = s2.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-                  new_state.trans_weights_exceptions.insert(*ch, w1 | w2);
-              }
-
-              let new_id = self.add_state();
-              self[new_id] = new_state;
-              new_id
-          }
-          ```
-
-          *To this:*
-          ```rust
-          pub fn merge_states(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
-              assert!(s1_id < self.len(), "s1_id out of bounds");
-              assert!(s2_id < self.len(), "s2_id out of bounds");
-
-              // Create a new state by copying s1
-              let new_id = self.copy_state(s1_id);
-
-              // Merge s2 into the new state
-              self.merge_state_into(s2_id, new_id);
-
-              new_id
-          }
-          ```
+      The new implementation will perform the following actions:
+      *   It unions the `weight` and `final_weight` of the two states.
+      *   It correctly merges the transition tables. This is done by considering every possible input character that has an explicit transition in either state.
+      *   For the default transition and each exception, it determines the new target state by recursively calling `self.union_state()` on the original target states. This creates a new state representing the union of the two original targets.
+      *   The transition weights for the new, merged transitions are calculated by taking the union of the weights from the original transitions.
+      *   Finally, it updates the state at `s_into_id` with the newly computed, merged properties.
 
       ### Git Diff
 
-      Here is the git diff for the changes described above.
+      Here is the git diff to apply the changes:
 
       ```diff
       --- a/src/precompute4/weighted_automata.rs
       +++ b/src/precompute4/weighted_automata.rs
-      @@ -323,53 +323,65 @@
-               self[state_id].apply_weight(weight);
+      @@ -345,7 +345,67 @@
            }
        
-      +    /// Merges `s_from_id` into `s_into_id`.
-      +    /// The weights of `s_into_id` become the union of both states' weights.
-      +    /// `s_from_id` is not modified.
-      +    ///
-      +    /// This function asserts that the two states have identical transition structures.
-      +    pub fn merge_state_into(&mut self, s_from_id: StateID, s_into_id: StateID) {
+           pub fn union_assign_state(&mut self, s_from_id: StateID, s_into_id: StateID) {
+      -        todo!()
       +        assert!(s_from_id < self.len(), "s_from_id out of bounds");
       +        assert!(s_into_id < self.len(), "s_into_id out of bounds");
-      +        assert_ne!(s_from_id, s_into_id, "Cannot merge a state into itself");
+      +        if s_from_id == s_into_id {
+      +            return;
+      +        }
       +
-      +        // To satisfy the borrow checker, we need to clone the from_state's data
-      +        // because we're modifying self[s_into_id].
-      +        let s_from = self[s_from_id].clone();
-      +        let s_into = &self[s_into_id];
+      +        let s_from = self.0[s_from_id].clone();
+      +        let s_into_orig = self.0[s_into_id].clone();
       +
-      +        assert_eq!(s_from.transitions, s_into.transitions, "States must be transition-equivalent to be merged.");
+      +        // Union weights
+      +        let new_weight = &s_into_orig.weight | &s_from.weight;
+      +        let fw_from = s_from.final_weight.clone().unwrap_or_else(Weight::zeros);
+      +        let fw_into = s_into_orig.final_weight.clone().unwrap_or_else(Weight::zeros);
+      +        let new_final_weight = fw_from | fw_into;
       +
-      +        let s_into_mut = &mut self[s_into_id];
+      +        // --- Transitions ---
+      +        let mut new_transitions = I16Map::new();
+      +        let mut new_trans_weights_exceptions = BTreeMap::new();
+      +        let new_trans_weight_default;
       +
-      +        // Merge state and final weights
-      +        s_into_mut.weight |= &s_from.weight;
-      +        let fw_from = s_from.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-      +        let fw_into = s_into_mut.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-      +        let final_w = fw_into | fw_from;
-      +        if !final_w.is_empty() {
-      +            s_into_mut.final_weight = Some(final_w);
+      +        let critical_points: BTreeSet<i16> = s_from.transitions.exceptions.keys()
+      +            .chain(s_into_orig.transitions.exceptions.keys())
+      +            .cloned()
+      +            .collect();
+      +
+      +        let get_target = |s: &DWAState, ch: i16| -> Option<StateID> {
+      +            s.transitions.exceptions.get(&ch).copied().or(s.transitions.default)
+      +        };
+      +
+      +        let get_weight = |s: &DWAState, ch: i16| -> Weight {
+      +            s.trans_weights_exceptions.get(&ch)
+      +                .or(s.trans_weight_default.as_ref())
+      +                .cloned().unwrap_or_else(Weight::zeros)
+      +        };
+      +
+      +        // Default transition
+      +        let def_tgt_from = s_from.transitions.default;
+      +        let def_tgt_into = s_into_orig.transitions.default;
+      +        let new_def_tgt_id = match (def_tgt_from, def_tgt_into) {
+      +            (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+      +            (Some(t), None) | (None, Some(t)) => Some(t),
+      +            (None, None) => None,
+      +        };
+      +        new_transitions.default = new_def_tgt_id;
+      +        new_trans_weight_default = if new_def_tgt_id.is_some() {
+      +            let w_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      +            let w_into = s_into_orig.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+      +            Some(w_from | w_into)
       +        } else {
-      +            s_into_mut.final_weight = None;
+      +            None
+      +        };
+      +
+      +        // Exception transitions
+      +        for &ch in &critical_points {
+      +            let tgt_from = get_target(&s_from, ch);
+      +            let tgt_into = get_target(&s_into_orig, ch);
+      +
+      +            let new_exc_tgt_id = match (tgt_from, tgt_into) {
+      +                (Some(t1), Some(t2)) => if t1 == t2 { Some(t1) } else { Some(self.union_state(t1, t2)) },
+      +                (Some(t), None) | (None, Some(t)) => Some(t),
+      +                (None, None) => None,
+      +            };
+      +
+      +            if new_exc_tgt_id != new_def_tgt_id {
+      +                if let Some(tgt_id) = new_exc_tgt_id {
+      +                    new_transitions.exceptions.insert(ch, tgt_id);
+      +                    new_trans_weights_exceptions.insert(ch, get_weight(&s_from, ch) | get_weight(&s_into_orig, ch));
+      +                }
+      +            }
       +        }
       +
-      +        // Merge default transition weight
-      +        if s_into_mut.transitions.default.is_some() {
-      +            let tw_from = s_from.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-      +            let tw_into = s_into_mut.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-      +            s_into_mut.trans_weight_default = Some(tw_into | tw_from);
-      +        }
-      +
-      +        // Merge exception transition weights
-      +        for ch in s_from.transitions.exceptions.keys() {
-      +            let w_from = s_from.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-      +            let w_into = s_into_mut.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-      +            s_into_mut.trans_weights_exceptions.insert(*ch, w_into | w_from);
-      +        }
-      +    }
-      +
-           /// Merges two states that are transition-equivalent into a new state.
-           /// The new state's weights are the union of the original states' weights.
-           ///
-           /// This function asserts that the two states have identical transition structures
-           /// (i.e., for any input, they transition to the same destination state).
-           ///
-           /// It does NOT update any transitions in the automaton that point to the old
-           /// states (`s1_id`, `s2_id`). The caller is responsible for remapping any such
-           /// transitions to the returned `StateID` of the new merged state.
-           pub fn merge_states(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
-               assert!(s1_id < self.len(), "s1_id out of bounds");
-               assert!(s2_id < self.len(), "s2_id out of bounds");
-       
-      -        let s1 = &self[s1_id];
-      -        let s2 = &self[s2_id];
-      -
-      -        // For this to be correct, s1 and s2 must be behaviorally equivalent,
-      -        // i.e., for any input they transition to the same state.
-      -        assert_eq!(s1.transitions, s2.transitions, "States must be transition-equivalent to be merged.");
-      -
-      -        let mut new_state = DWAState::default();
-      -
-      -        // Copy transition structure from s1 (since it's same as s2)
-      -        new_state.transitions = s1.transitions.clone();
-      -
-      -        // Merge state and final weights
-      -        new_state.weight = &s1.weight | &s2.weight;
-      -        let fw1 = s1.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-      -        let fw2 = s2.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-      -        let final_w = fw1 | fw2;
-      -        if !final_w.is_empty() {
-      -            new_state.final_weight = Some(final_w);
-      -        }
-      -
-      -        // Merge default transition weight
-      -        if new_state.transitions.default.is_some() {
-      -            let tw1 = s1.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-      -            let tw2 = s2.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-      -            new_state.trans_weight_default = Some(tw1 | tw2);
-      -        }
-      -
-      -        // Merge exception transition weights
-      -        for (ch, _tgt) in &new_state.transitions.exceptions {
-      -            let w1 = s1.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-      -            let w2 = s2.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
-      -            new_state.trans_weights_exceptions.insert(*ch, w1 | w2);
-      -        }
-      -
-      -        let new_id = self.add_state();
-      -        self[new_id] = new_state;
-      +        // Create a new state by copying s1
-      +        let new_id = self.copy_state(s1_id);
-      +
-      +        // Merge s2 into the new state
-      +        self.merge_state_into(s2_id, new_id);
-      +
-               new_id
+      +        // Commit changes
+      +        let s_into = &mut self.0[s_into_id];
+      +        s_into.weight = new_weight;
+      +        s_into.final_weight = if new_final_weight.is_empty() { None } else { Some(new_final_weight) };
+      +        s_into.transitions = new_transitions;
+      +        s_into.trans_weight_default = new_trans_weight_default;
+      +        s_into.trans_weights_exceptions = new_trans_weights_exceptions;
            }
-       }
+       
+           pub fn union_state(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
 
       ```
     metadata:
@@ -5814,7 +5652,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Introduce `merge_state_into`
-      and update `merge_states` to use it for merging weights"'
+  - user: 'Changes committed with message: "precompute4: Implement union_assign_state
+      for DWA states"'
     metadata:
 ...
