@@ -9,6 +9,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
 use std::time::Instant;
+use crate::precompute4::nwa::{NWA, NWABody, NWAStates};
 
 // --- Part 1: SimpleBitset ---
 
@@ -1045,6 +1046,58 @@ impl DWA {
             }
             None => Weight::zeros(),
         }
+    }
+
+    pub fn union(&self, other: &DWA) -> DWA {
+        let nwa1 = NWA::from_dwa(self);
+        let nwa2 = NWA::from_dwa(other);
+
+        let mut combined_states = NWAStates::default();
+        let (start1, _) = combined_states.copy_subgraph_from(&nwa1.states, nwa1.body.start_state);
+        let (start2, _) = combined_states.copy_subgraph_from(&nwa2.states, nwa2.body.start_state);
+
+        let body1 = NWABody { start_state: start1 };
+        let body2 = NWABody { start_state: start2 };
+
+        let union_body = NWA::union_components(&mut combined_states, &body1, &body2);
+
+        let union_nwa = NWA { states: combined_states, body: union_body };
+        let mut result_dwa = union_nwa.determinize_to_dwa();
+        result_dwa.simplify();
+        result_dwa
+    }
+
+    pub fn concatenate(&self, other: &DWA) -> DWA {
+        let nwa1 = NWA::from_dwa(self);
+        let nwa2 = NWA::from_dwa(other);
+
+        let mut combined_states = NWAStates::default();
+        let (start1, _) = combined_states.copy_subgraph_from(&nwa1.states, nwa1.body.start_state);
+        let (start2, _) = combined_states.copy_subgraph_from(&nwa2.states, nwa2.body.start_state);
+
+        let body1 = NWABody { start_state: start1 };
+        let body2 = NWABody { start_state: start2 };
+
+        // Concatenate with an ALL weight epsilon transition
+        let concat_body = NWA::concatenate_components(&mut combined_states, &body1, &body2, &Weight::all());
+
+        let concat_nwa = NWA { states: combined_states, body: concat_body };
+        let mut result_dwa = concat_nwa.determinize_to_dwa();
+        result_dwa.simplify();
+        result_dwa
+    }
+
+    pub fn apply_weight(&mut self, weight: &Weight) -> StateID {
+        // Create a new start state that is a copy of the old one.
+        let old_start_id = self.body.start_state;
+        let new_start_id = self.states.copy_state(old_start_id);
+
+        // Apply the weight to the new start state.
+        self.states.apply_weight(new_start_id, weight);
+
+        // Update the DWA's start state.
+        self.body.start_state = new_start_id;
+        new_start_id
     }
 }
 
