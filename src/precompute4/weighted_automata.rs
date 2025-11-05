@@ -7,7 +7,7 @@ use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // --- Part 1: SimpleBitset ---
@@ -232,6 +232,20 @@ impl<'a> BitOr<SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;
     fn bitor(self, rhs: SimpleBitset) -> Self::Output {
         self | &rhs
+    }
+}
+
+impl Not for SimpleBitset {
+    type Output = SimpleBitset;
+    fn not(self) -> Self::Output {
+        SimpleBitset(self.0.complement())
+    }
+}
+
+impl Not for &SimpleBitset {
+    type Output = SimpleBitset;
+    fn not(self) -> Self::Output {
+        SimpleBitset(self.0.complement())
     }
 }
 
@@ -590,6 +604,9 @@ impl DWA {
             if Self::propagate_and_constrain_weights(states, body) {
                 changed_any = true;
             }
+            if Self::propagate_future_weights(states) {
+                changed_any = true;
+            }
             if Self::minimize_partition_refinement(states, body) {
                 changed_any = true;
             }
@@ -671,6 +688,114 @@ impl DWA {
             }
         }
         changed
+    }
+
+    pub fn propagate_future_weights(states: &mut DWAStates) -> bool {
+        let n = states.len();
+        if n == 0 {
+            return false;
+        }
+
+        // 1. Compute future weights via backward analysis.
+        // future_weights[i] = union of weights of all accepting paths starting from i.
+        let mut rev_adj: Vec<Vec<StateID>> = vec![vec![]; n];
+        for i in 0..n {
+            if let Some(d) = states[i].transitions.default {
+                if d < n {
+                    rev_adj[d].push(i);
+                }
+            }
+            for &v in states[i].transitions.exceptions.values() {
+                if v < n {
+                    rev_adj[v].push(i);
+                }
+            }
+        }
+        for preds in rev_adj.iter_mut() {
+            preds.sort_unstable();
+            preds.dedup();
+        }
+
+        let mut future_weights = vec![Weight::zeros(); n];
+        let mut worklist = VecDeque::new();
+        for i in 0..n {
+            if let Some(fw) = &states[i].final_weight {
+                if !fw.is_empty() {
+                    future_weights[i] = fw.clone();
+                    for &pred in &rev_adj[i] {
+                        worklist.push_back(pred);
+                    }
+                }
+            }
+        }
+
+        while let Some(u) = worklist.pop_front() {
+            let mut u_new_fw = states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
+            let u_state = &states[u];
+
+            // Default transition
+            if let Some(v) = u_state.transitions.default {
+                if v < n {
+                    if let Some(edge_w) = u_state.trans_weight_default.as_ref() {
+                        u_new_fw |= &(edge_w & &future_weights[v]);
+                    }
+                }
+            }
+
+            // Exception transitions
+            for (&ch, &v) in &u_state.transitions.exceptions {
+                if v < n {
+                    if let Some(edge_w) = u_state.trans_weights_exceptions.get(&ch) {
+                        u_new_fw |= &(edge_w & &future_weights[v]);
+                    }
+                }
+            }
+
+            if u_new_fw != future_weights[u] {
+                future_weights[u] = u_new_fw;
+                for &pred in &rev_adj[u] {
+                    worklist.push_back(pred);
+                }
+            }
+        }
+
+        // 2. Update edge weights. An edge weight W can be relaxed to W | !future_weight(target)
+        // because any bits not in future_weight(target) would be filtered out anyway.
+        let mut any_weight_changed = false;
+        for i in 0..n {
+            let st = &mut states[i];
+            // Default
+            if let Some(v) = st.transitions.default {
+                if v < n {
+                    if let Some(w) = st.trans_weight_default.as_mut() {
+                        let not_future_v = !&future_weights[v];
+                        let new_w = &*w | &not_future_v;
+                        if new_w != *w {
+                            *w = new_w;
+                            any_weight_changed = true;
+                        }
+                    }
+                }
+            }
+            // Exceptions
+            let keys: Vec<i16> = st.transitions.exceptions.keys().copied().collect();
+            for ch in keys {
+                if let Some(&v) = st.transitions.exceptions.get(&ch) {
+                    if v < n {
+                        if let Some(w) = st.trans_weights_exceptions.get_mut(&ch) {
+                            let not_future_v = !&future_weights[v];
+                            let new_w = &*w | &not_future_v;
+                            if new_w != *w {
+                                *w = new_w;
+                                any_weight_changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        any_weight_changed
     }
 
     pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
@@ -2014,6 +2139,36 @@ mod tests {
         expected.set_final_weight(expected.body.start_state, Weight::from_item(0)).unwrap();
 
         assert_dwa_equivalent(c, expected);
+    }
+
+    #[test]
+    fn test_simplify_propagates_future_weights() {
+        // This test checks that weight constraints from final states are propagated
+        // backward to relax unnecessarily restrictive edge weights.
+        // DWA A has a transition 1 -> 2 with weight [1..=2], but the final
+        // state 2 only has weight [2]. The path weight for "ab" is thus
+        // ALL & [1..=2] & [2] = [2].
+        let mut a = DWA::new();
+        let s1 = a.add_state();
+        let s2 = a.add_state();
+        a.add_transition(0, 'a' as i16, s1, Weight::all()).unwrap();
+        a.add_transition(s1, 'b' as i16, s2, Weight::from_iter([1..=2])).unwrap();
+        a.set_final_weight(s2, Weight::from_item(2)).unwrap();
+
+        // DWA B is the expected simplified form. The transition 1 -> 2 has its
+        // weight relaxed to ALL, because any components of the weight other than
+        // [2] would be filtered by the final state anyway. The path weight for "ab"
+        // is ALL & ALL & [2] = [2], which is equivalent.
+        let mut b = DWA::new();
+        let s1_b = b.add_state();
+        let s2_b = b.add_state();
+        b.add_transition(0, 'a' as i16, s1_b, Weight::all()).unwrap();
+        b.add_transition(s1_b, 'b' as i16, s2_b, Weight::all()).unwrap();
+        b.set_final_weight(s2_b, Weight::from_item(2)).unwrap();
+
+        a.simplify();
+
+        assert_dwa_equivalent(a, b);
     }
 
     #[test]
