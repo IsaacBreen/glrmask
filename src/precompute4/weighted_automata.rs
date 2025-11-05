@@ -1093,12 +1093,10 @@ impl DWA {
         let new_start = new_dwa.states.union_state(self_start, other_start_remapped);
         new_dwa.body.start_state = new_start;
 
-        // if STOCHASTIC_VALIDATION {
-        //     // Validate C against A and B via stochastic sampling.
-        //     // NOTE: The union logic is known to be flawed for this weight algebra,
-        //     // causing this validation to fail. Disabling until union is fixed.
-        //     DWA::stochastic_validate_union(self, other, &new_dwa);
-        // }
+        if STOCHASTIC_VALIDATION {
+            // Validate C against A and B via stochastic sampling.
+            DWA::stochastic_validate_union(self, other, &new_dwa);
+        }
 
         new_dwa
     }
