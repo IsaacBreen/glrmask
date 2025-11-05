@@ -108,11 +108,10 @@ fn resolve_negative_codes_in_nwa_internal(
         // Step 3: Replace edge A -(neg)-> B with A -(neg)-> B_copy (keep original weight)
         {
             let st = &mut states[state_id];
-            if let Some((ref mut tgt, _)) = st.transitions.get_mut(&neg_code) {
-                if *tgt != b_copy_id {
-                    *tgt = b_copy_id;
-                    changed = true;
-                }
+            let (ref mut tgt, _) = &mut st.transitions.get_mut(&neg_code).unwrap();
+            if *tgt != b_copy_id {
+                *tgt = b_copy_id;
+                changed = true;
             }
         }
 
