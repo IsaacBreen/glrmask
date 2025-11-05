@@ -274,6 +274,59 @@ impl DWAStates {
         self.0.push(DWAState::default());
         id
     }
+
+    /// Merges two states that are transition-equivalent into a new state.
+    /// The new state's weights are the union of the original states' weights.
+    ///
+    /// This function asserts that the two states have identical transition structures
+    /// (i.e., for any input, they transition to the same destination state).
+    ///
+    /// It does NOT update any transitions in the automaton that point to the old
+    /// states (`s1_id`, `s2_id`). The caller is responsible for remapping any such
+    /// transitions to the returned `StateID` of the new merged state.
+    pub fn merge_states(&mut self, s1_id: StateID, s2_id: StateID) -> StateID {
+        assert!(s1_id < self.len(), "s1_id out of bounds");
+        assert!(s2_id < self.len(), "s2_id out of bounds");
+
+        let s1 = &self[s1_id];
+        let s2 = &self[s2_id];
+
+        // For this to be correct, s1 and s2 must be behaviorally equivalent,
+        // i.e., for any input they transition to the same state.
+        assert_eq!(s1.transitions, s2.transitions, "States must be transition-equivalent to be merged.");
+
+        let mut new_state = DWAState::default();
+
+        // Copy transition structure from s1 (since it's same as s2)
+        new_state.transitions = s1.transitions.clone();
+
+        // Merge state and final weights
+        new_state.weight = &s1.weight | &s2.weight;
+        let fw1 = s1.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+        let fw2 = s2.final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+        let final_w = fw1 | fw2;
+        if !final_w.is_empty() {
+            new_state.final_weight = Some(final_w);
+        }
+
+        // Merge default transition weight
+        if new_state.transitions.default.is_some() {
+            let tw1 = s1.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+            let tw2 = s2.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+            new_state.trans_weight_default = Some(tw1 | tw2);
+        }
+
+        // Merge exception transition weights
+        for (ch, _tgt) in &new_state.transitions.exceptions {
+            let w1 = s1.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+            let w2 = s2.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::zeros);
+            new_state.trans_weights_exceptions.insert(*ch, w1 | w2);
+        }
+
+        let new_id = self.add_state();
+        self[new_id] = new_state;
+        new_id
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
