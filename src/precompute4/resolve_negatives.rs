@@ -38,6 +38,7 @@ fn resolve_negative_codes_in_dwa_internal(
     states: &mut DWAStates,
 ) -> bool {
     let mut changed = false;
+
     // We need to collect the negative transitions first because we'll be modifying the state's transitions.
     let negative_transitions: Vec<(i16, StateID)> = states[state_id]
         .transitions
@@ -48,18 +49,15 @@ fn resolve_negative_codes_in_dwa_internal(
         .collect();
 
     for (neg_code, b_orig_id) in negative_transitions {
-        changed = true;
         let p = neg_code.wrapping_sub(i16::MIN);
         let w_neg = states[state_id].get_weight(neg_code).unwrap().clone();
 
-        // This negative transition is being resolved, so remove it from A.
-        states[state_id].transitions.exceptions.remove(&neg_code);
-        states[state_id].trans_weights_exceptions.remove(&neg_code);
-
-        let b_orig_state_clone = states[b_orig_id].clone();
+        // Step 1: Copy B
+        let b_copy_id = states.copy_state(b_orig_id);
 
         // Step 2: Handle final weight from B
-        if let Some(b_final_weight) = &b_orig_state_clone.final_weight {
+        if let Some(b_final_weight) = states[b_copy_id].final_weight.take() {
+            changed = true;
             let new_a_final_weight = b_final_weight & &w_neg;
             if !new_a_final_weight.is_empty() {
                 let a_state = &mut states[state_id];
@@ -71,39 +69,30 @@ fn resolve_negative_codes_in_dwa_internal(
             }
         }
 
+        // Step 3: Discard all positive edges from B_copy
+        let b_orig_state_clone = states[b_orig_id].clone();
+        let b_copy_state = &mut states[b_copy_id];
+        b_copy_state.transitions.exceptions.retain(|k, _| *k < 0);
+        b_copy_state.trans_weights_exceptions.retain(|k, _| *k < 0);
+        b_copy_state.transitions.default = None;
+
+        // Step 4: Replace A -> B with A -> B_copy
+        if b_copy_state != &b_orig_state_clone {
+            changed = true;
+            states[state_id].transitions.exceptions.insert(neg_code, b_copy_id);
+        } else {
+            states.remove_state(b_copy_id);
+        }
+
         // Step 5: Handle matching positive edge (cancellation)
         if let Some(&c_orig_id) = b_orig_state_clone.transitions.get(p) {
+            changed = true;
             let c_copy_id = states.copy_state(c_orig_id);
             let w_b_c = b_orig_state_clone.get_weight(p).unwrap();
-            let w = w_neg.clone() & w_b_c;
+            let w = w_neg & w_b_c;
             states.apply_weight(c_copy_id, &w);
             // Merge into A
             states.union_assign_state(c_copy_id, state_id);
-        }
-
-        // Create a temporary state for B's other transitions (positive and negative)
-        // and merge it into A.
-        let mut b_other_trans_state = b_orig_state_clone;
-        b_other_trans_state.final_weight = None; // Final weight is handled separately
-
-        // Remove the cancelling transition on `p` if it exists
-        if b_other_trans_state.transitions.exceptions.remove(&p).is_some() {
-            b_other_trans_state.trans_weights_exceptions.remove(&p);
-        } else if let Some(def_target) = b_other_trans_state.transitions.default {
-            if b_other_trans_state.transitions.get(p) == Some(&def_target) {
-                // p was covered by default. This is hard. For now, just remove default.
-                b_other_trans_state.transitions.default = None;
-                b_other_trans_state.trans_weight_default = None;
-            }
-        }
-
-        let has_transitions = !b_other_trans_state.transitions.exceptions.is_empty()
-            || b_other_trans_state.transitions.default.is_some();
-
-        if has_transitions {
-            let b_other_trans_id = states.add_existing_state(b_other_trans_state);
-            states.apply_weight(b_other_trans_id, &w_neg);
-            states.union_assign_state(b_other_trans_id, state_id);
         }
     }
 
