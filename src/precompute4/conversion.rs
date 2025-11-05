@@ -32,7 +32,7 @@ pub fn dwa_to_precompute3(
 
         // Edge to the shared end node for final states
         if let Some(final_weight) = &dwa_state.final_weight {
-            let final_weight_bv = LLMTokenBV::from(final_weight.0.clone());
+            let final_weight_bv = LLMTokenBV::from(final_weight.rsb.clone());
             if !final_weight_bv.is_empty() {
                 let edge_key = (0, final_weight_bv); // pop 0
                 let edge_val = all_parser_states.clone();
@@ -53,7 +53,7 @@ pub fn dwa_to_precompute3(
             handled_exceptions.insert(parser_state_id);
 
             let trans_weight = dwa_state.trans_weights_exceptions.get(&char_code).cloned().unwrap_or_else(Weight::zeros);
-            let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
+            let trans_weight_bv = LLMTokenBV::from(trans_weight.rsb.clone());
 
             if !trans_weight_bv.is_empty() {
                 let edge_key = (pop_len as isize, trans_weight_bv); // pop 1
@@ -67,7 +67,7 @@ pub fn dwa_to_precompute3(
         if let Some(target_dwa_id) = dwa_state.transitions.default {
             let target_trie_node = *dwa_state_to_trie_node.get(&target_dwa_id).unwrap();
             let trans_weight = dwa_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-            let trans_weight_bv = LLMTokenBV::from(trans_weight.0.clone());
+            let trans_weight_bv = LLMTokenBV::from(trans_weight.rsb.clone());
 
             if !trans_weight_bv.is_empty() {
                 let edge_key = (pop_len as isize, trans_weight_bv); // pop 1

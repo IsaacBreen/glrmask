@@ -31,7 +31,7 @@ thread_local! {
 // - is_all tracks whether it is the universe (0..=usize::MAX), enabling fast short-circuits.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Default)]
 pub struct SimpleBitset {
-    rsb: RangeSetBlaze<usize>,
+    pub(crate) rsb: RangeSetBlaze<usize>,
     fp: u64,
     is_all: bool,
 }
@@ -1768,17 +1768,6 @@ impl NWA {
                 def_cache.insert(sid, res);
             }
             def_cache.get(&sid).and_then(|o| o.as_ref())
-        }
-        fn get_ex_step<'a>(
-            sid: NWAStateID,
-            lbl: i16,
-            states: &'a NWAStates,
-            fut: &'a [Weight],
-            eps_cache: &'a mut HashMap<NWAStateID, Vec<(NWAStateID, Weight)>>,
-            ex_cache: &'a mut HashMap<NWAStateID, HashMap<i16, StepVec>>,
-            intern: &'a mut HashMap<Vec<(NWAStateID, Weight)>, StepVec>,
-        ) -> Option<&'a StepVec> {
-            unreachable!()
         }
         // Re-define get_ex_step with the new interner type
         fn get_ex_step<'a>(
