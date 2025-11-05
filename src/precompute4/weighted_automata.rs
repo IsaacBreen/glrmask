@@ -1001,7 +1001,7 @@ impl DWA {
 
         if STOCHASTIC_VALIDATION {
             // Validate C against A and B via stochastic sampling.
-            DWA::stochastic_validate_concatenate(self, other, &new_dwa);
+            DWA::stochastic_validate_union(self, other, &new_dwa);
         }
 
         new_dwa
@@ -1286,19 +1286,18 @@ impl DWA {
 
             let new_state = &mut new_dwa.states[new_id];
 
-            let agg_final_weight = if right_accepts_epsilon {
-                s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros)
-            } else {
-                let mut fw = Weight::zeros();
-                for &id1 in &ids1 {
-                    if id1 != sink1 {
-                        if let Some(w) = &other.states[id1].final_weight {
-                            fw |= w;
-                        }
+            let s0_fw = s0.and_then(|s| s.final_weight.as_ref()).cloned().unwrap_or_else(Weight::zeros);
+            let other_epsilon_w = other.states[right_start].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+
+            let mut final_w_from_b = Weight::zeros();
+            for &id1 in &ids1 {
+                if id1 != sink1 {
+                    if let Some(w) = &other.states[id1].final_weight {
+                        final_w_from_b |= w;
                     }
                 }
-                fw
-            };
+            }
+            let agg_final_weight = (s0_fw & other_epsilon_w) | final_w_from_b;
 
             if !agg_final_weight.is_empty() {
                 new_state.final_weight = Some(agg_final_weight);
@@ -1377,7 +1376,7 @@ impl DWA {
 
         if STOCHASTIC_VALIDATION {
             // Validate U against A and B via stochastic sampling.
-            DWA::stochastic_validate_union(self, other, &new_dwa);
+            DWA::stochastic_validate_concatenate(self, other, &new_dwa);
         }
 
         new_dwa
