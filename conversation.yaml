@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - src/precompute4/utils.rs
     - src/precompute4/weighted_automata.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/precompute4/utils.rs: |-
@@ -4124,228 +4124,70 @@ local_system:
           /// are compositions of a state from `self` and a set of states from `other`.
           ///
           /// Returns the new DWA.
-          pub fn concatenate(
-              &self,
-              other: &DWA,
-          ) -> DWA {
-              // New construction: right component carries per-branch gate weights.
-              type RightFrontier = BTreeMap<StateID, Weight>;
-
-              let mut new_dwa = DWA::new();
-              new_dwa.states.0.clear(); // start with no states
-
-              let mut composition_to_new_id: BTreeMap<(StateID, RightFrontier), StateID> = BTreeMap::new();
-              let mut worklist: VecDeque<(StateID, RightFrontier)> = VecDeque::new();
-
-              let sink0 = self.states.len();
-              let sink1 = other.states.len();
-
-              let mut get_or_create = |comp: (StateID, RightFrontier),
-                                       new_dwa: &mut DWA,
-                                       comp_to_new_id: &mut BTreeMap<(StateID, RightFrontier), StateID>,
-                                       worklist: &mut VecDeque<(StateID, RightFrontier)>|
-               -> StateID {
-                  if let Some(&id) = comp_to_new_id.get(&comp) {
-                      return id;
-                  }
-                  let new_id = new_dwa.states.0.len();
-                  new_dwa.states.0.push(DWAState::default());
-                  comp_to_new_id.insert(comp.clone(), new_id);
-                  worklist.push_back(comp.clone());
-                  new_id
-              };
-
-              if self.states.is_empty() {
+          pub fn concatenate(&self, other: &DWA) -> DWA {
+              // If either automaton is empty (accepts no strings), the concatenation is empty.
+              if self.states.0.is_empty() || other.states.0.is_empty() {
                   return DWA::new();
               }
 
-              // Initial composition: if left start is final, immediately spawn right start with gate = left.final.
-              let start0 = self.body.start_state;
-              let mut start_rf: RightFrontier = RightFrontier::new();
-              if let Some(fw) = &self.states[start0].final_weight {
-                  if !fw.is_empty() {
-                      start_rf.insert(other.body.start_state, fw.clone());
+              let mut new_dwa = self.clone();
+              let offset = new_dwa.states.len();
+
+              // Add all of other's states to the new DWA, remapping their transition targets.
+              for other_state in &other.states.0 {
+                  let mut new_state = other_state.clone();
+                  if let Some(d) = new_state.transitions.default.as_mut() {
+                      *d += offset;
+                  }
+                  for target in new_state.transitions.exceptions.values_mut() {
+                      *target += offset;
+                  }
+                  new_dwa.states.add_existing_state(new_state);
+              }
+
+              let other_start_remapped = other.body.start_state + offset;
+
+              // Identify all states in the `self` part that were final.
+              let final_self_states: Vec<(StateID, Weight)> = new_dwa.states.0[..offset]
+                  .iter()
+                  .enumerate()
+                  .filter_map(|(i, s)| s.final_weight.clone().map(|w| (i, w)))
+                  .collect();
+
+              // For each final state from `self`, graft on a gated version of `other`.
+              for (s_a_id, final_weight) in final_self_states {
+                  // Create a copy of `other`'s start state, gated by `final_weight`.
+                  let mut gated_b_start = new_dwa.states[other_start_remapped].clone();
+                  gated_b_start.apply_weight(&final_weight);
+
+                  // The new final weight at the junction point is determined by whether `other`
+                  // could accept an empty string, gated by `final_weight`.
+                  let junction_final_weight = gated_b_start.final_weight.clone();
+
+                  // Add the gated state to the DWA to get an ID for union_assign_state.
+                  // This temporary state will be removed by simplify().
+                  let temp_id = new_dwa.states.add_existing_state(gated_b_start);
+
+                  // Before merging, clear the final weight of the `self` state.
+                  // We'll replace it with the correct junction final weight afterwards.
+                  new_dwa.states[s_a_id].final_weight = None;
+
+                  // Merge the gated start state into the final `self` state.
+                  new_dwa.states.union_assign_state(temp_id, s_a_id);
+
+                  // Set the correct final weight at the junction.
+                  // It must be unioned with any final weight that might have been
+                  // propagated into s_a_id from other branches during the union.
+                  if let Some(w) = junction_final_weight {
+                      if let Some(existing_fw) = new_dwa.states[s_a_id].final_weight.as_mut() {
+                          *existing_fw |= &w;
+                      } else {
+                          new_dwa.states[s_a_id].final_weight = Some(w);
+                      }
                   }
               }
-              let start_comp = (start0, start_rf);
-              new_dwa.body.start_state =
-                  get_or_create(start_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
 
-              while let Some((id0, rf)) = worklist.pop_front() {
-                  let new_id = *composition_to_new_id.get(&(id0, rf.clone())).unwrap();
-                  let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
-
-                  // Aggregate final weight: union over active right branches of (gate ∧ right.final).
-                  let mut agg_final = Weight::zeros();
-                  for (&id1, gate) in &rf {
-                      if id1 == sink1 {
-                          continue;
-                      }
-                      if let Some(wf) = &other.states[id1].final_weight {
-                          let contrib = gate & wf;
-                          if !contrib.is_empty() {
-                              agg_final |= &contrib;
-                          }
-                      }
-                  }
-                  let final_weight = if !agg_final.is_empty() {
-                      Some(agg_final)
-                  } else {
-                      None
-                  };
-
-                  // Collect critical points (characters with exceptions) from left and all active right states.
-                  let mut critical_points = BTreeSet::new();
-                  if let Some(s) = s0 {
-                      critical_points.extend(s.transitions.exceptions.keys().copied());
-                  }
-                  for (&id1, _) in &rf {
-                      if id1 != sink1 {
-                          critical_points.extend(other.states[id1].transitions.exceptions.keys().copied());
-                      }
-                  }
-
-                  // Default transition components
-                  let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
-                  let mut any_s1_has_default = false;
-                  for (&id1, _) in &rf {
-                      if id1 != sink1 && other.states[id1].transitions.default.is_some() {
-                          any_s1_has_default = true;
-                          break;
-                      }
-                  }
-
-                  let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
-                  let tw_left_def = s0
-                      .and_then(|s| s.trans_weight_default.as_ref())
-                      .cloned()
-                      .unwrap_or_else(Weight::zeros);
-
-                  // Advance right frontier on default and compute right contribution to edge weight.
-                  let mut next_rf_def: RightFrontier = RightFrontier::new();
-                  let mut right_def_weight_sum = Weight::zeros();
-                  for (&id1, gate) in &rf {
-                      if id1 == sink1 {
-                          continue;
-                      }
-                      let s1 = &other.states[id1];
-                      if let Some(t1) = s1.transitions.default {
-                          if let Some(w) = s1.trans_weight_default.as_ref() {
-                              let contrib = gate & w;
-                              if !contrib.is_empty() {
-                                  right_def_weight_sum |= &contrib;
-                                  if t1 != sink1 {
-                                      if let Some(curr) = next_rf_def.get_mut(&t1) {
-                                          *curr |= &contrib;
-                                      } else {
-                                          next_rf_def.insert(t1, contrib);
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-                  // Spawn new right-start if the left default target is final (after consuming this char class).
-                  if def_tgt0 != sink0 {
-                      if let Some(fw) = &self.states[def_tgt0].final_weight {
-                          if !fw.is_empty() {
-                              let rs = other.body.start_state;
-                              if let Some(curr) = next_rf_def.get_mut(&rs) {
-                                  *curr |= fw;
-                              } else {
-                                  next_rf_def.insert(rs, fw.clone());
-                              }
-                          }
-                      }
-                  }
-
-                  let edge_w_def = &tw_left_def | &right_def_weight_sum;
-                  let def_comp = (def_tgt0, next_rf_def.clone());
-                  let (new_def_tgt, new_def_weight) = if s0_has_default || any_s1_has_default {
-                      let new_def_tgt =
-                          get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                      (Some(new_def_tgt), Some(edge_w_def))
-                  } else {
-                      (None, None)
-                  };
-
-                  // Exception transitions: per critical character
-                  let mut new_exceptions = BTreeMap::new();
-                  let mut new_exception_weights = BTreeMap::new();
-                  for &ch in &critical_points {
-                      // Left target and weight for this char
-                      let tgt0_exc = s0
-                          .and_then(|s| s.transitions.get(ch).copied())
-                          .unwrap_or(sink0);
-                      let tw_left_exc = s0
-                          .and_then(|s| s.get_weight(ch))
-                          .cloned()
-                          .unwrap_or_else(Weight::zeros);
-
-                      // Advance right frontier on this char and compute right contribution to edge weight.
-                      let mut next_rf_exc: RightFrontier = RightFrontier::new();
-                      let mut right_exc_weight_sum = Weight::zeros();
-                      for (&id1, gate) in &rf {
-                          if id1 == sink1 {
-                              continue;
-                          }
-                          let s1 = &other.states[id1];
-                          let (maybe_tgt, w_opt): (Option<StateID>, Option<&Weight>) =
-                              if let Some(&tv) = s1.transitions.exceptions.get(&ch) {
-                                  (Some(tv), s1.trans_weights_exceptions.get(&ch))
-                              } else if s1.transitions.default.is_some() {
-                                  (s1.transitions.default, s1.trans_weight_default.as_ref())
-                              } else {
-                                  (None, None)
-                              };
-                          if let Some(t1) = maybe_tgt {
-                              if let Some(w) = w_opt {
-                                  let contrib = gate & w;
-                                  if !contrib.is_empty() {
-                                      right_exc_weight_sum |= &contrib;
-                                      if t1 != sink1 {
-                                          if let Some(curr) = next_rf_exc.get_mut(&t1) {
-                                              *curr |= &contrib;
-                                          } else {
-                                              next_rf_exc.insert(t1, contrib);
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                      // Spawn new right-start if the left target for this char is final.
-                      if tgt0_exc != sink0 {
-                          if let Some(fw) = &self.states[tgt0_exc].final_weight {
-                              if !fw.is_empty() {
-                                  let rs = other.body.start_state;
-                                  if let Some(curr) = next_rf_exc.get_mut(&rs) {
-                                      *curr |= fw;
-                                  } else {
-                                      next_rf_exc.insert(rs, fw.clone());
-                                  }
-                              }
-                          }
-                      }
-
-                      let exc_comp = (tgt0_exc, next_rf_exc.clone());
-                      if exc_comp != def_comp {
-                          let new_exc_tgt =
-                              get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
-                          new_exceptions.insert(ch, new_exc_tgt);
-                          let edge_w_exc = &tw_left_exc | &right_exc_weight_sum;
-                          new_exception_weights.insert(ch, edge_w_exc);
-                      }
-                  }
-
-                  // Commit all computed values to the new state.
-                  let new_state = &mut new_dwa.states[new_id];
-                  new_state.final_weight = final_weight;
-                  new_state.transitions.default = new_def_tgt;
-                  new_state.trans_weight_default = new_def_weight;
-                  new_state.transitions.exceptions = new_exceptions;
-                  new_state.trans_weights_exceptions = new_exception_weights;
-              }
+              new_dwa.simplify();
 
               if STOCHASTIC_VALIDATION {
                   // Validate C against A and B via stochastic sampling.
@@ -8482,5 +8324,353 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor DWA::union to use state ID offsetting
       and union_state for simpler product construction"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      And concatenation?
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to simplify the `concatenate` operation, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      I will simplify the `DWA::concatenate` method by replacing its complex, manual product construction with a more declarative approach that reuses existing helper methods.
+
+      1.  **Open the file `src/precompute4/weighted_automata.rs`**.
+      2.  **Locate the `concatenate` method** inside the `impl DWA` block. It starts around line 1678.
+      3.  **Replace the entire body of the `concatenate` method**. The current implementation is a complex, 150-line manual product construction. I will replace it with a much simpler 40-line implementation that is more declarative.
+          *   The new implementation first clones the left-hand automaton (`self`) and appends the states of the right-hand automaton (`other`), adjusting state IDs by an offset.
+          *   It then iterates through each state in the `self` part that was originally final.
+          *   For each such final state, it "grafts" the behavior of `other`'s start state onto it. This is done by:
+              1.  Creating a temporary copy of `other`'s start state.
+              2.  "Gating" this temporary state by applying the final weight from the `self` state. This intersects all weights in the temporary state with the gate weight.
+              3.  Merging this temporary, gated state into the final `self` state using `union_assign_state`.
+              4.  Carefully setting the new final weight at the junction point, as the original `self` state is no longer truly "final" but rather a bridge into the `other` automaton.
+          *   Finally, it calls `simplify()` to prune the temporary states created during the grafting process and to minimize the resulting automaton.
+
+      This new approach is significantly easier to understand and maintain.
+
+      ### Git Diff
+
+      Here is the git diff to apply the changes.
+
+      ```diff
+      --- a/src/precompute4/weighted_automata.rs
+      +++ b/src/precompute4/weighted_automata.rs
+      @@ -1678,169 +1678,59 @@
+           /// are compositions of a state from `self` and a set of states from `other`.
+           ///
+           /// Returns the new DWA.
+      -    pub fn concatenate(
+      -        &self,
+      -        other: &DWA,
+      -    ) -> DWA {
+      -        // New construction: right component carries per-branch gate weights.
+      -        type RightFrontier = BTreeMap<StateID, Weight>;
+      -
+      -        let mut new_dwa = DWA::new();
+      -        new_dwa.states.0.clear(); // start with no states
+      -
+      -        let mut composition_to_new_id: BTreeMap<(StateID, RightFrontier), StateID> = BTreeMap::new();
+      -        let mut worklist: VecDeque<(StateID, RightFrontier)> = VecDeque::new();
+      -
+      -        let sink0 = self.states.len();
+      -        let sink1 = other.states.len();
+      -
+      -        let mut get_or_create = |comp: (StateID, RightFrontier),
+      -                                 new_dwa: &mut DWA,
+      -                                 comp_to_new_id: &mut BTreeMap<(StateID, RightFrontier), StateID>,
+      -                                 worklist: &mut VecDeque<(StateID, RightFrontier)>|
+      -         -> StateID {
+      -            if let Some(&id) = comp_to_new_id.get(&comp) {
+      -                return id;
+      -            }
+      -            let new_id = new_dwa.states.0.len();
+      -            new_dwa.states.0.push(DWAState::default());
+      -            comp_to_new_id.insert(comp.clone(), new_id);
+      -            worklist.push_back(comp.clone());
+      -            new_id
+      -        };
+      -
+      -        if self.states.is_empty() {
+      -            return DWA::new();
+      +    pub fn concatenate(&self, other: &DWA) -> DWA {
+      +        // If either automaton is empty (accepts no strings), the concatenation is empty.
+      +        if self.states.0.is_empty() || other.states.0.is_empty() {
+      +            return DWA::new();
+               }
+       
+      -        // Initial composition: if left start is final, immediately spawn right start with gate = left.final.
+      -        let start0 = self.body.start_state;
+      -        let mut start_rf: RightFrontier = RightFrontier::new();
+      -        if let Some(fw) = &self.states[start0].final_weight {
+      -            if !fw.is_empty() {
+      -                start_rf.insert(other.body.start_state, fw.clone());
+      -            }
+      -        }
+      -        let start_comp = (start0, start_rf);
+      -        new_dwa.body.start_state =
+      -            get_or_create(start_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
+      +        let mut new_dwa = self.clone();
+      +        let offset = new_dwa.states.len();
+       
+      -        while let Some((id0, rf)) = worklist.pop_front() {
+      -            let new_id = *composition_to_new_id.get(&(id0, rf.clone())).unwrap();
+      -            let s0 = if id0 == sink0 { None } else { Some(&self.states[id0]) };
+      -
+      -            // Aggregate final weight: union over active right branches of (gate ∧ right.final).
+      -            let mut agg_final = Weight::zeros();
+      -            for (&id1, gate) in &rf {
+      -                if id1 == sink1 {
+      -                    continue;
+      -                }
+      -                if let Some(wf) = &other.states[id1].final_weight {
+      -                    let contrib = gate & wf;
+      -                    if !contrib.is_empty() {
+      -                        agg_final |= &contrib;
+      -                    }
+      -                }
+      -            }
+      -            let final_weight = if !agg_final.is_empty() {
+      -                Some(agg_final)
+      -            } else {
+      -                None
+      -            };
+      -
+      -            // Collect critical points (characters with exceptions) from left and all active right states.
+      -            let mut critical_points = BTreeSet::new();
+      -            if let Some(s) = s0 {
+      -                critical_points.extend(s.transitions.exceptions.keys().copied());
+      -            }
+      -            for (&id1, _) in &rf {
+      -                if id1 != sink1 {
+      -                    critical_points.extend(other.states[id1].transitions.exceptions.keys().copied());
+      -                }
+      -            }
+      -
+      -            // Default transition components
+      -            let s0_has_default = s0.map_or(false, |s| s.transitions.default.is_some());
+      -            let mut any_s1_has_default = false;
+      -            for (&id1, _) in &rf {
+      -                if id1 != sink1 && other.states[id1].transitions.default.is_some() {
+      -                    any_s1_has_default = true;
+      -                    break;
+      -                }
+      -            }
+      -
+      -            let def_tgt0 = s0.and_then(|s| s.transitions.default).unwrap_or(sink0);
+      -            let tw_left_def = s0
+      -                .and_then(|s| s.trans_weight_default.as_ref())
+      -                .cloned()
+      -                .unwrap_or_else(Weight::zeros);
+      -
+      -            // Advance right frontier on default and compute right contribution to edge weight.
+      -            let mut next_rf_def: RightFrontier = RightFrontier::new();
+      -            let mut right_def_weight_sum = Weight::zeros();
+      -            for (&id1, gate) in &rf {
+      -                if id1 == sink1 {
+      -                    continue;
+      -                }
+      -                let s1 = &other.states[id1];
+      -                if let Some(t1) = s1.transitions.default {
+      -                    if let Some(w) = s1.trans_weight_default.as_ref() {
+      -                        let contrib = gate & w;
+      -                        if !contrib.is_empty() {
+      -                            right_def_weight_sum |= &contrib;
+      -                            if t1 != sink1 {
+      -                                if let Some(curr) = next_rf_def.get_mut(&t1) {
+      -                                    *curr |= &contrib;
+      -                                } else {
+      -                                    next_rf_def.insert(t1, contrib);
+      -                                }
+      -                            }
+      -                        }
+      -                    }
+      -                }
+      -            }
+      -            // Spawn new right-start if the left default target is final (after consuming this char class).
+      -            if def_tgt0 != sink0 {
+      -                if let Some(fw) = &self.states[def_tgt0].final_weight {
+      -                    if !fw.is_empty() {
+      -                        let rs = other.body.start_state;
+      -                        if let Some(curr) = next_rf_def.get_mut(&rs) {
+      -                            *curr |= fw;
+      -                        } else {
+      -                            next_rf_def.insert(rs, fw.clone());
+      -                        }
+      -                    }
+      -                }
+      -            }
+      -
+      -            let edge_w_def = &tw_left_def | &right_def_weight_sum;
+      -            let def_comp = (def_tgt0, next_rf_def.clone());
+      -            let (new_def_tgt, new_def_weight) = if s0_has_default || any_s1_has_default {
+      -                let new_def_tgt =
+      -                    get_or_create(def_comp.clone(), &mut new_dwa, &mut composition_to_new_id, &mut worklist);
+      -                (Some(new_def_tgt), Some(edge_w_def))
+      -            } else {
+      -                (None, None)
+      -            };
+      -
+      -            // Exception transitions: per critical character
+      -            let mut new_exceptions = BTreeMap::new();
+      -            let mut new_exception_weights = BTreeMap::new();
+      -            for &ch in &critical_points {
+      -                // Left target and weight for this char
+      -                let tgt0_exc = s0
+      -                    .and_then(|s| s.transitions.get(ch).copied())
+      -                    .unwrap_or(sink0);
+      -                let tw_left_exc = s0
+      -                    .and_then(|s| s.get_weight(ch))
+      -                    .cloned()
+      -                    .unwrap_or_else(Weight::zeros);
+      -
+      -                // Advance right frontier on this char and compute right contribution to edge weight.
+      -                let mut next_rf_exc: RightFrontier = RightFrontier::new();
+      -                let mut right_exc_weight_sum = Weight::zeros();
+      -                for (&id1, gate) in &rf {
+      -                    if id1 == sink1 {
+      -                        continue;
+      -                    }
+      -                    let s1 = &other.states[id1];
+      -                    let (maybe_tgt, w_opt): (Option<StateID>, Option<&Weight>) =
+      -                        if let Some(&tv) = s1.transitions.exceptions.get(&ch) {
+      -                            (Some(tv), s1.trans_weights_exceptions.get(&ch))
+      -                        } else if s1.transitions.default.is_some() {
+      -                            (s1.transitions.default, s1.trans_weight_default.as_ref())
+      -                        } else {
+      -                            (None, None)
+      -                        };
+      -                    if let Some(t1) = maybe_tgt {
+      -                        if let Some(w) = w_opt {
+      -                            let contrib = gate & w;
+      -                            if !contrib.is_empty() {
+      -                                right_exc_weight_sum |= &contrib;
+      -                                if t1 != sink1 {
+      -                                    if let Some(curr) = next_rf_exc.get_mut(&t1) {
+      -                                        *curr |= &contrib;
+      -                                    } else {
+      -                                        next_rf_exc.insert(t1, contrib);
+      -                                    }
+      -                                }
+      -                            }
+      -                        }
+      -                    }
+      -                }
+      -                // Spawn new right-start if the left target for this char is final.
+      -                if tgt0_exc != sink0 {
+      -                    if let Some(fw) = &self.states[tgt0_exc].final_weight {
+      -                        if !fw.is_empty() {
+      -                            let rs = other.body.start_state;
+      -                            if let Some(curr) = next_rf_exc.get_mut(&rs) {
+      -                                *curr |= fw;
+      -                            } else {
+      -                                next_rf_exc.insert(rs, fw.clone());
+      -                            }
+      -                        }
+      -                    }
+      -                }
+      -
+      -                let exc_comp = (tgt0_exc, next_rf_exc.clone());
+      -                if exc_comp != def_comp {
+      -                    let new_exc_tgt =
+      -                        get_or_create(exc_comp, &mut new_dwa, &mut composition_to_new_id, &mut worklist);
+      -                    new_exceptions.insert(ch, new_exc_tgt);
+      -                    let edge_w_exc = &tw_left_exc | &right_exc_weight_sum;
+      -                    new_exception_weights.insert(ch, edge_w_exc);
+      -                }
+      -            }
+      -
+      -            // Commit all computed values to the new state.
+      -            let new_state = &mut new_dwa.states[new_id];
+      -            new_state.final_weight = final_weight;
+      -            new_state.transitions.default = new_def_tgt;
+      -            new_state.trans_weight_default = new_def_weight;
+      -            new_state.transitions.exceptions = new_exceptions;
+      -            new_state.trans_weights_exceptions = new_exception_weights;
+      +        // Add all of other's states to the new DWA, remapping their transition targets.
+      +        for other_state in &other.states.0 {
+      +            let mut new_state = other_state.clone();
+      +            if let Some(d) = new_state.transitions.default.as_mut() {
+      +                *d += offset;
+      +            }
+      +            for target in new_state.transitions.exceptions.values_mut() {
+      +                *target += offset;
+      +            }
+      +            new_dwa.states.add_existing_state(new_state);
+               }
+       
+      +        let other_start_remapped = other.body.start_state + offset;
+      +
+      +        // Identify all states in the `self` part that were final.
+      +        let final_self_states: Vec<(StateID, Weight)> = new_dwa.states.0[..offset]
+      +            .iter()
+      +            .enumerate()
+      +            .filter_map(|(i, s)| s.final_weight.clone().map(|w| (i, w)))
+      +            .collect();
+      +
+      +        // For each final state from `self`, graft on a gated version of `other`.
+      +        for (s_a_id, final_weight) in final_self_states {
+      +            // Create a copy of `other`'s start state, gated by `final_weight`.
+      +            let mut gated_b_start = new_dwa.states[other_start_remapped].clone();
+      +            gated_b_start.apply_weight(&final_weight);
+      +
+      +            // The new final weight at the junction point is determined by whether `other`
+      +            // could accept an empty string, gated by `final_weight`.
+      +            let junction_final_weight = gated_b_start.final_weight.clone();
+      +
+      +            // Add the gated state to the DWA to get an ID for union_assign_state.
+      +            // This temporary state will be removed by simplify().
+      +            let temp_id = new_dwa.states.add_existing_state(gated_b_start);
+      +
+      +            // Before merging, clear the final weight of the `self` state.
+      +            // We'll replace it with the correct junction final weight afterwards.
+      +            new_dwa.states[s_a_id].final_weight = None;
+      +
+      +            // Merge the gated start state into the final `self` state.
+      +            new_dwa.states.union_assign_state(temp_id, s_a_id);
+      +
+      +            // Set the correct final weight at the junction.
+      +            // It must be unioned with any final weight that might have been
+      +            // propagated into s_a_id from other branches during the union.
+      +            if let Some(w) = junction_final_weight {
+      +                if let Some(existing_fw) = new_dwa.states[s_a_id].final_weight.as_mut() {
+      +                    *existing_fw |= &w;
+      +                } else {
+      +                    new_dwa.states[s_a_id].final_weight = Some(w);
+      +                }
+      +            }
+      +        }
+      +
+      +        new_dwa.simplify();
+      +
+               if STOCHASTIC_VALIDATION {
+                   // Validate C against A and B via stochastic sampling.
+                   DWA::stochastic_validate_concatenate(self, other, &new_dwa);
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata.rs
+      Applying patch to 'src/precompute4/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor DWA::concatenate to use state
+      ID offsetting and state grafting for simpler product construction"'
     metadata:
 ...
