@@ -75,6 +75,7 @@ fn resolve_negative_codes_in_dwa_internal(
         b_copy_state.transitions.exceptions.retain(|k, _| *k < 0);
         b_copy_state.trans_weights_exceptions.retain(|k, _| *k < 0);
         b_copy_state.transitions.default = None;
+        b_copy_state.trans_weight_default = None;
 
         // Step 4: Replace A -> B with A -> B_copy
         if b_copy_state != &b_orig_state_clone {
