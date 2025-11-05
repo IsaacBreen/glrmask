@@ -247,4 +247,92 @@ mod tests {
 
         assert_dwa_equivalent(d, expected);
     }
+
+    #[test]
+    fn test_resolve_negatives_from_intermediate_dwa() {
+        // DWA structure from debug log (Intermediate DWA: DWA (start: 0)):
+        // State 0: 1->1, 3->2, 4->3, 7->4
+        // State 1: neg(1)->5, 7->4
+        // State 2: 7->6
+        // State 3: *->2 (using 0 for '*')
+        // State 4: final_weight: [2]
+        // State 5: *->7 (using 0 for '*')
+        // State 6: final_weight: [2], neg(7)->1
+        // State 7: 7->4
+        let mut d = DWA::new();
+        let s1 = d.add_state(); // ID 1
+        let s2 = d.add_state(); // ID 2
+        let s3 = d.add_state(); // ID 3
+        let s4 = d.add_state(); // ID 4
+        let s5 = d.add_state(); // ID 5
+        let s6 = d.add_state(); // ID 6
+        let s7 = d.add_state(); // ID 7
+
+        let code1 = 1;
+        let code3 = 3;
+        let code4 = 4;
+        let code7 = 7;
+        let neg_code1 = i16::MIN + code1;
+        let neg_code7 = i16::MIN + code7;
+        let default_code = 0; // Assuming '*' is the default transition, represented by code 0
+
+        // State 0:
+        d.add_transition(d.body.start_state, code1, s1, Weight::all()).unwrap();
+        d.add_transition(d.body.start_state, code3, s2, Weight::all()).unwrap();
+        d.add_transition(d.body.start_state, code4, s3, Weight::all()).unwrap();
+        d.add_transition(d.body.start_state, code7, s4, Weight::all()).unwrap();
+
+        // State 1:
+        d.add_transition(s1, neg_code1, s5, Weight::all()).unwrap();
+        d.add_transition(s1, code7, s4, Weight::all()).unwrap();
+
+        // State 2:
+        d.add_transition(s2, code7, s6, Weight::all()).unwrap();
+
+        // State 3:
+        d.add_transition(s3, default_code, s2, Weight::all()).unwrap();
+
+        // State 4:
+        d.set_final_weight(s4, Weight::from_item(2)).unwrap();
+
+        // State 5:
+        d.add_transition(s5, default_code, s7, Weight::all()).unwrap();
+
+        // State 6:
+        d.set_final_weight(s6, Weight::from_item(2)).unwrap();
+        d.add_transition(s6, neg_code7, s1, Weight::all()).unwrap();
+
+        // State 7:
+        d.add_transition(s7, code7, s4, Weight::all()).unwrap();
+
+        resolve_negative_codes_in_dwa(&mut d);
+
+        // Expected: After resolution and simplification, the DWA should be equivalent to
+        // the one accepting: 7, 3-7, 4-0-7, 1-7 (all with weight [2]).
+        // States 4 and 6 are equivalent and should be merged into a single final state.
+        let mut expected = DWA::new();
+        let s_final = expected.add_state();
+        let s1_e = expected.add_state();
+        let s2_e = expected.add_state();
+        let s3_e = expected.add_state();
+
+        expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
+
+        // s0 (start)
+        expected.add_transition(expected.body.start_state, code7, s_final, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, code3, s2_e, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, code4, s3_e, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, code1, s1_e, Weight::all()).unwrap();
+
+        // s1_e
+        expected.add_transition(s1_e, code7, s_final, Weight::all()).unwrap();
+
+        // s2_e
+        expected.add_transition(s2_e, code7, s_final, Weight::all()).unwrap();
+
+        // s3_e
+        expected.add_transition(s3_e, default_code, s2_e, Weight::all()).unwrap();
+
+        assert_dwa_equivalent(d, expected);
+    }
 }
