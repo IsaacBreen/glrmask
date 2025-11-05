@@ -275,6 +275,13 @@ impl DWAStates {
         id
     }
 
+    /// Adds a pre-existing DWAState to the collection and returns its new ID.
+    pub fn add_existing_state(&mut self, state: DWAState) -> StateID {
+        let id = self.0.len();
+        self.0.push(state);
+        id
+    }
+
     /// Merges two states that are transition-equivalent into a new state.
     /// The new state's weights are the union of the original states' weights.
     ///
