@@ -1639,6 +1639,126 @@ impl NWA {
         nwa
     }
 
+    pub fn simplify(&mut self) -> bool {
+        let initial_n = self.states.len();
+        let mut changed = true;
+        let mut passes = 0;
+        while changed && passes < 5 {
+            passes += 1;
+            changed = false;
+            if self.prune_unreachable() { changed = true; }
+            if self.prune_dead_ends() { changed = true; }
+            if self.collapse_all_weight_epsilon_sccs() { changed = true; }
+        }
+        self.states.len() != initial_n
+    }
+
+    fn prune_unreachable(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 { return false; }
+
+        let mut reachable = vec![false; n];
+        let mut q = VecDeque::new();
+
+        if self.body.start_state < n {
+            reachable[self.body.start_state] = true;
+            q.push_back(self.body.start_state);
+        } else {
+            let changed = n > 0;
+            if changed {
+                self.states.0.clear();
+                self.body.start_state = self.states.add_state();
+            }
+            return changed;
+        }
+
+        while let Some(u) = q.pop_front() {
+            let st = &self.states[u];
+            for (v, _) in &st.epsilons {
+                if *v < n && !reachable[*v] { reachable[*v] = true; q.push_back(*v); }
+            }
+            for (_, (v, _)) in &st.transitions {
+                if *v < n && !reachable[*v] { reachable[*v] = true; q.push_back(*v); }
+            }
+            if let Some((v, _)) = &st.default {
+                if *v < n && !reachable[*v] { reachable[*v] = true; q.push_back(*v); }
+            }
+        }
+
+        let num_reachable = reachable.iter().filter(|&&b| b).count();
+        if num_reachable == n { return false; }
+
+        let mut remap = vec![usize::MAX; n];
+        let mut new_states_vec = Vec::with_capacity(num_reachable);
+        for i in 0..n {
+            if reachable[i] {
+                remap[i] = new_states_vec.len();
+                new_states_vec.push(self.states[i].clone());
+            }
+        }
+
+        for st in &mut new_states_vec {
+            st.epsilons.iter_mut().for_each(|(v, _)| *v = remap[*v]);
+            st.transitions.values_mut().for_each(|(v, _)| *v = remap[*v]);
+            if let Some((v, _)) = &mut st.default {
+                *v = remap[*v];
+            }
+        }
+
+        self.states.0 = new_states_vec;
+        self.body.start_state = remap[self.body.start_state];
+
+        true
+    }
+
+    fn prune_dead_ends(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 { return false; }
+
+        let fut = self.compute_future_weights();
+        let live: Vec<bool> = fut.iter().map(|w| !w.is_empty()).collect();
+
+        if self.body.start_state >= n || !live[self.body.start_state] {
+            let changed = n > 0;
+            self.states.0.clear();
+            self.body.start_state = self.states.add_state();
+            return changed;
+        }
+
+        let num_live = live.iter().filter(|&&b| b).count();
+        if num_live == n { return false; }
+
+        let mut remap = vec![usize::MAX; n];
+        let mut new_states_vec = Vec::with_capacity(num_live);
+        for i in 0..n {
+            if live[i] {
+                remap[i] = new_states_vec.len();
+                new_states_vec.push(self.states[i].clone());
+            }
+        }
+
+        for st in &mut new_states_vec {
+            st.epsilons.retain(|(v, _)| live[*v]);
+            st.epsilons.iter_mut().for_each(|(v, _)| *v = remap[*v]);
+
+            st.transitions.retain(|_, (v, _)| live[*v]);
+            st.transitions.values_mut().for_each(|(v, _)| *v = remap[*v]);
+
+            if let Some((v, _)) = &st.default {
+                if !live[*v] {
+                    st.default = None;
+                } else {
+                    st.default.as_mut().unwrap().0 = remap[*v];
+                }
+            }
+        }
+
+        self.states.0 = new_states_vec;
+        self.body.start_state = remap[self.body.start_state];
+
+        true
+    }
+
     /// Determinize the subgraph reachable from 'start' to a DWA via weighted subset construction.
     /// Representation invariant:
     /// - A D-state is a mapping M: NWAStateID -> Weight capturing epsilon-closure weights.
@@ -1646,6 +1766,12 @@ impl NWA {
     /// - The deterministic edge weight is union of weights in T; the target D-state is canonicalized T.
     /// - Final weight of the D-state is union over s in M of (M[s] & final_weight[s]).
     pub fn determinize_to_dwa(&self) -> DWA {
+        let mut nwa_clone = self.clone();
+        nwa_clone.simplify();
+        nwa_clone.internal_determinize_to_dwa()
+    }
+
+    fn internal_determinize_to_dwa(&self) -> DWA {
         let fut: Vec<Weight> = self.compute_future_weights();
         let n = self.states.len();
 
@@ -2128,6 +2254,116 @@ impl NWA {
         }
 
         dwa
+    }
+
+    fn collapse_all_weight_epsilon_sccs(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 { return false; }
+
+        let mut index = 0;
+        let mut indices = vec![usize::MAX; n];
+        let mut lowlink = vec![0; n];
+        let mut on_stack = vec![false; n];
+        let mut stack = Vec::new();
+        let mut comp_of = vec![0; n];
+        let mut comps: Vec<Vec<NWAStateID>> = Vec::new();
+
+        for i in 0..n {
+            if indices[i] == usize::MAX {
+                self.strongconnect(i, &mut index, &mut indices, &mut lowlink, &mut on_stack, &mut stack, &mut comp_of, &mut comps);
+            }
+        }
+
+        if comps.len() == n { return false; }
+
+        let mut new_states_vec = Vec::with_capacity(comps.len());
+        for (cid, comp) in comps.iter().enumerate() {
+            let mut new_state = NWAState::default();
+
+            let mut final_weight: Option<Weight> = None;
+            for &sid in comp {
+                if let Some(fw) = &self.states[sid].final_weight {
+                    if let Some(acc) = &mut final_weight {
+                        *acc |= fw;
+                    } else {
+                        final_weight = Some(fw.clone());
+                    }
+                }
+            }
+            new_state.final_weight = final_weight;
+
+            for &sid in comp {
+                for (&lbl, &(to, ref w)) in &self.states[sid].transitions {
+                    let to_comp = comp_of[to];
+                    Self::add_transition_to_state(&mut new_state, lbl, to_comp, w.clone());
+                }
+                if let Some((to, w)) = &self.states[sid].default {
+                    if new_state.default.is_none() {
+                        new_state.default = Some((comp_of[*to], w.clone()));
+                    }
+                }
+                for &(to, ref w) in &self.states[sid].epsilons {
+                    let to_comp = comp_of[to];
+                    if cid != to_comp || !w.is_all_fast() {
+                        new_state.epsilons.push((to_comp, w.clone()));
+                    }
+                }
+            }
+            new_states_vec.push(new_state);
+        }
+
+        for st in &mut new_states_vec {
+            st.epsilons.iter_mut().for_each(|(v, _)| *v = comp_of[*v]);
+            st.transitions.values_mut().for_each(|(v, _)| *v = comp_of[*v]);
+            if let Some((v, _)) = &mut st.default {
+                *v = comp_of[*v];
+            }
+        }
+
+        self.states.0 = new_states_vec;
+        self.body.start_state = comp_of[self.body.start_state];
+
+        true
+    }
+
+    fn strongconnect(&self, v: NWAStateID, index: &mut usize, indices: &mut [usize], lowlink: &mut [usize], on_stack: &mut [bool], stack: &mut Vec<NWAStateID>, comp_of: &mut [usize], comps: &mut Vec<Vec<NWAStateID>>) {
+        indices[v] = *index;
+        lowlink[v] = *index;
+        *index += 1;
+        stack.push(v);
+        on_stack[v] = true;
+
+        for (w, weight) in &self.states[v].epsilons {
+            if weight.is_all_fast() {
+                if indices[*w] == usize::MAX {
+                    self.strongconnect(*w, index, indices, lowlink, on_stack, stack, comp_of, comps);
+                    lowlink[v] = lowlink[v].min(lowlink[*w]);
+                } else if on_stack[*w] {
+                    lowlink[v] = lowlink[v].min(indices[*w]);
+                }
+            }
+        }
+
+        if lowlink[v] == indices[v] {
+            let mut comp = Vec::new();
+            loop {
+                let w = stack.pop().unwrap();
+                on_stack[w] = false;
+                comp_of[w] = comps.len();
+                comp.push(w);
+                if w == v { break; }
+            }
+            comps.push(comp);
+        }
+    }
+
+    fn add_transition_to_state(state: &mut NWAState, on: i16, to: NWAStateID, w: Weight) {
+        if let Some((old_to, old_w)) = state.transitions.get_mut(&on) {
+            assert_eq!(*old_to, to, "NWA restricted: cannot merge states with same-label transitions to different components");
+            *old_w |= &w;
+        } else {
+            state.transitions.insert(on, (to, w));
+        }
     }
 
     /// Union of two NWAs (component-level within shared arena):
