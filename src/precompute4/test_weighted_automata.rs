@@ -1,125 +1,3 @@
-#![cfg(test)]
-
-use crate::precompute4::weighted_automata::{DWA, Weight};
-use rand::prelude::*;
-
-fn generate_random_word(dwa: &DWA, rng: &mut impl Rng, max_len: usize) -> Option<Vec<i16>> {
-    if dwa.states.is_empty() {
-        return None;
-    }
-    let mut word = Vec::new();
-    let mut current_state = dwa.body.start_state;
-
-    for _ in 0..max_len {
-        if current_state >= dwa.states.len() {
-            return Some(word); // Dead end
-        }
-        let state = &dwa.states[current_state];
-
-        // Collect all possible transitions
-        let mut transitions = Vec::new();
-        if let Some(target) = state.transitions.default {
-            // We can't really sample from "all other characters".
-            // For testing, we can pick a random character that is not an exception.
-            // Let's pick one from a small range, e.g., 0..256
-            let mut potential_char = rng.gen_range(0..256i16);
-            while state.transitions.exceptions.contains_key(&potential_char) {
-                potential_char = rng.gen_range(0..256i16);
-            }
-            transitions.push((potential_char, target));
-        }
-        for (&ch, &target) in &state.transitions.exceptions {
-            transitions.push((ch, target));
-        }
-
-        if transitions.is_empty() {
-            break; // No way out
-        }
-
-        // Randomly decide to stop if current state is final
-        if state.final_weight.is_some() && rng.gen_bool(0.2) {
-            break;
-        }
-
-        // Pick a random transition
-        let (ch, next_state) = transitions[rng.gen_range(0..transitions.len())];
-        word.push(ch);
-        current_state = next_state;
-    }
-
-    Some(word)
-}
-
-pub fn assert_dwa_equivalent(mut d1: DWA, mut d2: DWA) {
-    // Simplify both to get them into a canonical form, which helps but isn't guaranteed to make them identical.
-    d1.simplify();
-    d2.simplify();
-
-    let mut rng = StdRng::seed_from_u64(12345);
-    const NUM_SAMPLES: usize = 100;
-    const MAX_LEN: usize = 20;
-
-    // Check empty word
-    let w1_empty = d1.eval_word_weight(&[]);
-    let w2_empty = d2.eval_word_weight(&[]);
-    assert_eq!(w1_empty, w2_empty, "Mismatch on empty word.\ndwa1: {}\ndwa2: {}", d1, d2);
-
-    // Sample from d1 and test on both
-    for i in 0..NUM_SAMPLES {
-        if let Some(word) = generate_random_word(&d1, &mut rng, MAX_LEN) {
-            let w1 = d1.eval_word_weight(&word);
-            let w2 = d2.eval_word_weight(&word);
-            assert_eq!(w1, w2, "Mismatch on word {:?} (sample {} from d1).\ndwa1 weight: {}, dwa2 weight: {}\ndwa1:\n{}\ndwa2:\n{}", crate::precompute4::weighted_automata::format_word(&word), i, w1, w2, d1, d2);
-        }
-    }
-
-    // Sample from d2 and test on both
-    for i in 0..NUM_SAMPLES {
-        if let Some(word) = generate_random_word(&d2, &mut rng, MAX_LEN) {
-            let w1 = d1.eval_word_weight(&word);
-            let w2 = d2.eval_word_weight(&word);
-            assert_eq!(w1, w2, "Mismatch on word {:?} (sample {} from d2).\ndwa1 weight: {}, dwa2 weight: {}\ndwa1:\n{}\ndwa2:\n{}", crate::precompute4::weighted_automata::format_word(&word), i, w1, w2, d1, d2);
-        }
-    }
-}
-
-#[test]
-fn test_concatenate_complex_and_simplify() {
-    // This test checks if concatenation followed by simplification produces a minimal, correct DWA.
-    // The weights are chosen to be overlapping, forcing the concatenated DWA to handle shared paths correctly.
-
-    // dwa1 accepts "a" with weight {1, 10} or "b" with weight {2, 10}.
-    // The two paths merge into a single final state.
-    let mut dwa1 = DWA::new();
-    let s1_final = dwa1.add_state();
-    dwa1.add_transition(dwa1.body.start_state, 'a' as i16, s1_final, Weight::from_iter([1, 10])).unwrap();
-    dwa1.add_transition(dwa1.body.start_state, 'b' as i16, s1_final, Weight::from_iter([2, 10])).unwrap();
-    dwa1.set_final_weight(s1_final, Weight::all()).unwrap();
-    
-    // dwa2 accepts "c" with weight {10, 20}.
-    let mut dwa2 = DWA::new();
-    let s2_final = dwa2.add_state();
-    dwa2.add_transition(dwa2.body.start_state, 'c' as i16, s2_final, Weight::from_iter([10, 20])).unwrap();
-    dwa2.set_final_weight(s2_final, Weight::all()).unwrap();
-
-    // The concatenate operation will convert to NWA, connect final states of dwa1 to start of dwa2,
-    // determinize, and simplify.
-    let concatenated = dwa1.concatenate(&dwa2);
-
-    // Expected DWA accepts "ac" and "bc".
-    // The weight for "ac" is intersect({1, 10}, {10, 20}) = {10}.
-    // The weight for "bc" is intersect({2, 10}, {10, 20}) = {10}.
-    // Since both paths lead to the same outcome after 'c', a minimal DWA should merge the paths for 'a' and 'b'.
-    let mut expected = DWA::new();
-    let s_after_ab = expected.add_state();
-    let s_final = expected.add_state();
-    expected.add_transition(expected.body.start_state, 'a' as i16, s_after_ab, Weight::from_iter([1, 10])).unwrap();
-    expected.add_transition(expected.body.start_state, 'b' as i16, s_after_ab, Weight::from_iter([2, 10])).unwrap();
-    expected.add_transition(s_after_ab, 'c' as i16, s_final, Weight::from_iter([10, 20])).unwrap();
-    expected.set_final_weight(s_final, Weight::all()).unwrap();
-
-    assert_dwa_equivalent(concatenated, expected);
-}
 use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, Weight, format_word};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1517,4 +1395,42 @@ fn test_concatenate_disjoint_weights() {
     let expected = DWA::expected_concat_weight(&dwa_a, &dwa_b, &combined_word);
     assert!(expected.is_empty());
     assert_eq!(wc, expected);
+}
+
+#[test]
+fn test_concatenate_complex_and_simplify() {
+    // This test checks if concatenation followed by simplification produces a minimal, correct DWA.
+    // The weights are chosen to be overlapping, forcing the concatenated DWA to handle shared paths correctly.
+
+    // dwa1 accepts "a" with weight {1, 10} or "b" with weight {2, 10}.
+    // The two paths merge into a single final state.
+    let mut dwa1 = DWA::new();
+    let s1_final = dwa1.add_state();
+    dwa1.add_transition(dwa1.body.start_state, 'a' as i16, s1_final, Weight::from_iter([1, 10])).unwrap();
+    dwa1.add_transition(dwa1.body.start_state, 'b' as i16, s1_final, Weight::from_iter([2, 10])).unwrap();
+    dwa1.set_final_weight(s1_final, Weight::all()).unwrap();
+
+    // dwa2 accepts "c" with weight {10, 20}.
+    let mut dwa2 = DWA::new();
+    let s2_final = dwa2.add_state();
+    dwa2.add_transition(dwa2.body.start_state, 'c' as i16, s2_final, Weight::from_iter([10, 20])).unwrap();
+    dwa2.set_final_weight(s2_final, Weight::all()).unwrap();
+
+    // The concatenate operation will convert to NWA, connect final states of dwa1 to start of dwa2,
+    // determinize, and simplify.
+    let concatenated = dwa1.concatenate(&dwa2);
+
+    // Expected DWA accepts "ac" and "bc".
+    // The weight for "ac" is intersect({1, 10}, {10, 20}) = {10}.
+    // The weight for "bc" is intersect({2, 10}, {10, 20}) = {10}.
+    // Since both paths lead to the same outcome after 'c', a minimal DWA should merge the paths for 'a' and 'b'.
+    let mut expected = DWA::new();
+    let s_after_ab = expected.add_state();
+    let s_final = expected.add_state();
+    expected.add_transition(expected.body.start_state, 'a' as i16, s_after_ab, Weight::from_iter([1, 10])).unwrap();
+    expected.add_transition(expected.body.start_state, 'b' as i16, s_after_ab, Weight::from_iter([2, 10])).unwrap();
+    expected.add_transition(s_after_ab, 'c' as i16, s_final, Weight::from_iter([10, 20])).unwrap();
+    expected.set_final_weight(s_final, Weight::all()).unwrap();
+
+    assert_dwa_equivalent(concatenated, expected);
 }
