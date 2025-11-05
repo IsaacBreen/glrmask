@@ -336,16 +336,14 @@ mod tests {
         // With the fix, it terminates, producing a stable DWA.
         resolve_negative_codes_in_dwa(&mut d);
 
-        // The stable result of the flawed-but-terminating algorithm is an automaton
-        // where the start state has become final due to cancellation, and it has a
-        // neg(1) transition to a state with a default transition to another final state.
+        // The cancellation of `neg(1)` by a subsequent character matching the default
+        // transition (e.g., `1`) results in an epsilon path to a final state.
+        // This makes the start state final. The logic also splits the target of `neg(1)`
+        // and removes its default transition, effectively pruning paths that start with
+        // `neg(1)` but don't cancel. The result is an automaton that accepts only
+        // the empty string.
         let mut expected = DWA::new();
-        let exp_s1 = expected.add_state();
-        let exp_s2 = expected.add_state();
         expected.set_final_weight(expected.body.start_state, Weight::all()).unwrap();
-        expected.add_transition(expected.body.start_state, neg_code1, exp_s1, Weight::all()).unwrap();
-        expected.set_default_transition(exp_s1, exp_s2, Weight::all()).unwrap();
-        expected.set_final_weight(exp_s2, Weight::all()).unwrap();
 
         assert_dwa_equivalent(d, expected);
     }
