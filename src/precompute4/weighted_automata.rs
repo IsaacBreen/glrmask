@@ -731,7 +731,7 @@ impl DWA {
         changed
     }
 
-    fn compute_future_weights(states: &DWAStates) -> Vec<Weight> {
+    pub(crate) fn compute_future_weights(states: &DWAStates) -> Vec<Weight> {
         let n = states.len();
         if n == 0 {
             return vec![];
@@ -1401,7 +1401,7 @@ impl DWA {
             new_dwa.states[s_a_id].final_weight = None;
 
             // Merge the gated start state into the final `self` state.
-            new_dwa.states.union_assign_state(temp_id, s_a_id);
+            new_dwa.states.union_assign_state(temp_id, s_a_id, &DWA::compute_future_weights(&new_dwa.states));
 
             // Set the correct final weight at the junction.
             // It must be unioned with any final weight that might have been
