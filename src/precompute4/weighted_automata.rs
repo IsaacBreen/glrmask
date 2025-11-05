@@ -1,6 +1,7 @@
 // src/precompute4/weighted_automata.rs
 
 #![allow(dead_code)]
+#![allow(clippy::needless_borrow)]
 
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
@@ -9,10 +10,12 @@ use std::cell::Cell;
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
 use std::sync::Arc;
+use std::hash::{Hash, Hasher};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Index, IndexMut, Not, Sub, SubAssign};
 use crate::precompute4::test_weighted_automata;
 use std::time::Instant;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use std::collections::hash_map::Entry;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
 // --- Part 1: SimpleBitset ---
@@ -23,55 +26,131 @@ thread_local! {
     static IN_SIMPLIFY_CHECK: Cell<bool> = Cell::new(false);
 }
 
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
-pub struct SimpleBitset(pub RangeSetBlaze<usize>);
+// SimpleBitset: a RangeSetBlaze with cached fingerprint and fast "is_all" flag.
+// - fp is a content fingerprint used only for hashing; Eq remains content-based via rsb.
+// - is_all tracks whether it is the universe (0..=usize::MAX), enabling fast short-circuits.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Default)]
+pub struct SimpleBitset {
+    rsb: RangeSetBlaze<usize>,
+    fp: u64,
+    is_all: bool,
+}
+
+// Fingerprint utilities
+const FP_ZERO: u64 = 0x9E37_79B9_7F4A_7C15;
+const FP_ALL: u64  = 0xD6E8_FEB8_6659_FD93;
+const FP_K1: u64   = 0xC2B2_AE3D_27D4_EB4F;
+const FP_K2: u64   = 0x1656_67B1_F3E1_5A6D;
+const FP_K3: u64   = 0x9E37_79B1_1F37_9B97;
+
+fn mix3(a: u64, b: u64, c: u64) -> u64 {
+    let mut x = a ^ b.wrapping_mul(FP_K1);
+    x = x.rotate_left(27) ^ c.wrapping_mul(FP_K2);
+    x = x ^ (x >> 33);
+    x = x.wrapping_mul(FP_K3);
+    x ^ (x >> 29)
+}
+
+fn calc_is_all_and_fp(rsb: &RangeSetBlaze<usize>) -> (bool, u64) {
+    // Quick detect ALL
+    let mut it = rsb.ranges();
+    let mut is_all = false;
+    let mut fp = FP_ZERO;
+    if let Some(first) = it.next() {
+        if *first.start() == 0 && *first.end() == usize::MAX && it.next().is_none() {
+            // Exactly the universe
+            return (true, FP_ALL);
+        }
+        // Not ALL; compute fingerprint
+        fp = mix3(FP_ZERO, *first.start() as u64, (*first.end() as u64).wrapping_mul(FP_K1));
+        for r in it {
+            let s = *r.start() as u64;
+            let e = *r.end() as u64;
+            fp = mix3(fp, s.wrapping_mul(FP_K2), e.wrapping_mul(FP_K3));
+        }
+    } else {
+        // Empty set
+        fp = FP_ZERO;
+    }
+    (is_all, fp)
+}
+
+impl SimpleBitset {
+    fn from_rsb_inner(rsb: RangeSetBlaze<usize>) -> Self {
+        let (is_all, fp) = calc_is_all_and_fp(&rsb);
+        SimpleBitset { rsb, fp, is_all }
+    }
+}
 
 
 impl SimpleBitset {
     pub fn zeros() -> Self {
-        SimpleBitset(RangeSetBlaze::new())
+        SimpleBitset { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false }
     }
     pub fn all() -> Self {
-        SimpleBitset(RangeSetBlaze::from_iter([0..=usize::MAX]))
+        SimpleBitset { rsb: RangeSetBlaze::from_iter([0..=usize::MAX]), fp: FP_ALL, is_all: true }
     }
     pub fn from_item(item: usize) -> Self {
-        SimpleBitset(RangeSetBlaze::from_iter([item]))
+        SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter([item]))
     }
     pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self {
-        SimpleBitset(rsb)
+        SimpleBitset::from_rsb_inner(rsb)
     }
     pub fn len(&self) -> usize {
-        self.0.len().try_into().unwrap_or(usize::MAX)
+        self.rsb.len().try_into().unwrap_or(usize::MAX)
     }
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.rsb.is_empty()
     }
     pub fn contains(&self, index: usize) -> bool {
-        self.0.contains(index)
+        self.rsb.contains(index)
     }
     /// Iterate over items, truncated by `max` to prevent accidental ALL iteration.
     pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> {
-        (&self.0 & &RangeSetBlaze::from_iter([0..=max])).into_iter()
+        (&self.rsb & &RangeSetBlaze::from_iter([0..=max])).into_iter()
+    }
+    #[inline]
+    fn with_new_rsb_and_op(lhs: &SimpleBitset, rhs: &SimpleBitset, rsb: RangeSetBlaze<usize>, op_tag: u64) -> SimpleBitset {
+        let (is_all, fp_rsb) = calc_is_all_and_fp(&rsb);
+        // Combine fingerprints cheaply for operations to avoid scanning ranges again.
+        // We still recompute fp from rsb to keep it robust and collision-resistant.
+        let _ = op_tag; // reserved if we later switch to purely combinational fp
+        SimpleBitset { rsb, fp: fp_rsb, is_all }
+    }
+    #[inline]
+    fn with_new_rsb_unary(src: &SimpleBitset, rsb: RangeSetBlaze<usize>, op_tag: u64) -> SimpleBitset {
+        let (is_all, fp_rsb) = calc_is_all_and_fp(&rsb);
+        let _ = op_tag;
+        SimpleBitset { rsb, fp: fp_rsb, is_all }
+    }
+    #[inline]
+    fn is_all_fast(&self) -> bool { self.is_all }
+}
+
+impl Hash for SimpleBitset {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Use only the cached fingerprint for hashing; equality is still structural.
+        state.write_u64(self.fp);
     }
 }
 
 impl Debug for SimpleBitset {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if self == &Self::all() {
+        if self.is_all_fast() {
             write!(f, "SimpleBitset(ALL)")
         } else {
-            Debug::fmt(&self.0, f)
+            Debug::fmt(&self.rsb, f)
         }
     }
 }
 
 impl Display for SimpleBitset {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if self == &Self::all() {
+        if self.is_all_fast() {
             return write!(f, "ALL");
         }
         write!(f, "[")?;
-        let mut ranges = self.0.ranges().peekable();
+        let mut ranges = self.rsb.ranges().peekable();
         while let Some(range) = ranges.next() {
             if range.start() == range.end() {
                 write!(f, "{}", range.start())?;
@@ -88,13 +167,13 @@ impl Display for SimpleBitset {
 
 impl FromIterator<usize> for SimpleBitset {
     fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
-        SimpleBitset(RangeSetBlaze::from_iter(iter))
+        SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter(iter))
     }
 }
 
 impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
     fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
-        SimpleBitset(RangeSetBlaze::from_iter(iter))
+        SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter(iter))
     }
 }
 
@@ -102,25 +181,62 @@ impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
 impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;
     fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
-        SimpleBitset(&self.0 & &rhs.0)
+        if self.is_empty() || rhs.is_empty() {
+            return SimpleBitset::zeros();
+        }
+        if self.is_all_fast() { return rhs.clone(); }
+        if rhs.is_all_fast() { return self.clone(); }
+        let rsb = &self.rsb & &rhs.rsb;
+        SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xA1)
     }
 }
 impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;
     fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
-        SimpleBitset(&self.0 | &rhs.0)
+        if self.is_all_fast() || rhs.is_all_fast() {
+            return SimpleBitset::all();
+        }
+        if self.is_empty() { return rhs.clone(); }
+        if rhs.is_empty() { return self.clone(); }
+        let rsb = &self.rsb | &rhs.rsb;
+        SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xB1)
     }
 }
 
 // Assign ops (borrowed RHS)
 impl BitAndAssign<&SimpleBitset> for SimpleBitset {
     fn bitand_assign(&mut self, rhs: &SimpleBitset) {
-        self.0 = &self.0 & &rhs.0;
+        if self.is_empty() { return; }
+        if rhs.is_empty() {
+            *self = SimpleBitset::zeros();
+            return;
+        }
+        if rhs.is_all_fast() { return; }
+        if self.is_all_fast() {
+            *self = rhs.clone();
+            return;
+        }
+        self.rsb = &self.rsb & &rhs.rsb;
+        let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
+        self.is_all = is_all;
+        self.fp = fp;
     }
 }
 impl BitOrAssign<&SimpleBitset> for SimpleBitset {
     fn bitor_assign(&mut self, rhs: &SimpleBitset) {
-        self.0 |= &rhs.0;
+        if self.is_all_fast() || rhs.is_all_fast() {
+            *self = SimpleBitset::all();
+            return;
+        }
+        if rhs.is_empty() { return; }
+        if self.is_empty() {
+            *self = rhs.clone();
+            return;
+        }
+        self.rsb |= &rhs.rsb;
+        let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
+        self.is_all = is_all;
+        self.fp = fp;
     }
 }
 
@@ -128,77 +244,94 @@ impl BitOrAssign<&SimpleBitset> for SimpleBitset {
 impl BitAnd<SimpleBitset> for SimpleBitset {
     type Output = SimpleBitset;
     fn bitand(self, rhs: SimpleBitset) -> Self::Output {
-        &self & &rhs
+        (&self) & (&rhs)
     }
 }
 impl BitOr<SimpleBitset> for SimpleBitset {
     type Output = SimpleBitset;
     fn bitor(self, rhs: SimpleBitset) -> Self::Output {
-        &self | &rhs
+        (&self) | (&rhs)
     }
 }
 impl<'a> BitAnd<&'a SimpleBitset> for SimpleBitset {
     type Output = SimpleBitset;
     fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
-        &self & rhs
+        (&self) & rhs
     }
 }
 impl<'a> BitOr<&'a SimpleBitset> for SimpleBitset {
     type Output = SimpleBitset;
     fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
-        &self | rhs
+        (&self) | rhs
     }
 }
 impl<'a> BitAnd<SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;
     fn bitand(self, rhs: SimpleBitset) -> Self::Output {
-        self & &rhs
+        self & (&rhs)
     }
 }
 impl<'a> BitOr<SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;
     fn bitor(self, rhs: SimpleBitset) -> Self::Output {
-        self | &rhs
+        self | (&rhs)
     }
 }
 
 impl SubAssign<&SimpleBitset> for SimpleBitset {
     fn sub_assign(&mut self, rhs: &SimpleBitset) {
-        self.0 = &self.0 - &rhs.0;
+        if self.is_empty() || rhs.is_empty() { return; }
+        if self.is_all_fast() && rhs.is_all_fast() {
+            *self = SimpleBitset::zeros();
+            return;
+        }
+        self.rsb = &self.rsb - &rhs.rsb;
+        let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
+        self.is_all = is_all;
+        self.fp = fp;
     }
 }
 
 impl SubAssign<SimpleBitset> for SimpleBitset {
     fn sub_assign(&mut self, rhs: SimpleBitset) {
-        self.0 = &self.0 - &rhs.0;
+        *self -= &rhs
     }
 }
 
 impl Sub<SimpleBitset> for SimpleBitset {
     type Output = SimpleBitset;
     fn sub(self, rhs: SimpleBitset) -> Self::Output {
-        &self - &rhs
+        (&self) - (&rhs)
     }
     }
 
 impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;
     fn sub(self, rhs: &'a SimpleBitset) -> Self::Output {
-        SimpleBitset(&self.0 - &rhs.0)
+        if self.is_empty() || rhs.is_empty() { return self.clone(); }
+        if self.is_all_fast() && rhs.is_all_fast() { return SimpleBitset::zeros(); }
+        let rsb = &self.rsb - &rhs.rsb;
+        SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xC1)
     }
 }
 
 impl Not for SimpleBitset {
     type Output = SimpleBitset;
     fn not(self) -> Self::Output {
-        &SimpleBitset::all() - &self
+        if self.is_empty() { return SimpleBitset::all(); }
+        if self.is_all_fast() { return SimpleBitset::zeros(); }
+        let rsb = &RangeSetBlaze::from_iter([0usize..=usize::MAX]) - &self.rsb;
+        SimpleBitset::with_new_rsb_unary(&self, rsb, 0xD1)
     }
 }
 
 impl Not for &SimpleBitset {
     type Output = SimpleBitset;
     fn not(self) -> Self::Output {
-        &SimpleBitset::all() - self
+        if self.is_empty() { return SimpleBitset::all(); }
+        if self.is_all_fast() { return SimpleBitset::zeros(); }
+        let rsb = &RangeSetBlaze::from_iter([0usize..=usize::MAX]) - &self.rsb;
+        SimpleBitset::with_new_rsb_unary(self, rsb, 0xD2)
     }
 }
 
@@ -736,6 +869,9 @@ impl DWA {
             }
         }
 
+        // Precompute complements to avoid recomputing !future_weights[v] many times
+        let not_future: Vec<Weight> = future_weights.iter().map(|w| !w).collect();
+
         // 2. Update edge weights. An edge weight W can be relaxed to W | !future_weight(target)
         // because any bits not in future_weight(target) would be filtered out anyway.
         let mut any_weight_changed = false;
@@ -745,8 +881,7 @@ impl DWA {
             if let Some(v) = st.transitions.default {
                 if v < n {
                     if let Some(w) = st.trans_weight_default.as_mut() {
-                        let not_future_v = !&future_weights[v];
-                        let new_w = &*w | &not_future_v;
+                        let new_w = &*w | &not_future[v];
                         if new_w != *w {
                             *w = new_w;
                             any_weight_changed = true;
@@ -760,8 +895,7 @@ impl DWA {
                 if let Some(&v) = st.transitions.exceptions.get(&ch) {
                     if v < n {
                         if let Some(w) = st.trans_weights_exceptions.get_mut(&ch) {
-                            let not_future_v = !&future_weights[v];
-                            let new_w = &*w | &not_future_v;
+                            let new_w = &*w | &not_future[v];
                             if new_w != *w {
                                 *w = new_w;
                                 any_weight_changed = true;
@@ -1198,7 +1332,7 @@ impl Display for DWA {
 
 impl JSONConvertible for SimpleBitset {
     fn to_json(&self) -> JSONNode {
-        let ranges_vec: Vec<Vec<usize>> = self.0.ranges().map(|ri| vec![*ri.start(), *ri.end()]).collect();
+        let ranges_vec: Vec<Vec<usize>> = self.rsb.ranges().map(|ri| vec![*ri.start(), *ri.end()]).collect();
         ranges_vec.to_json()
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -1212,7 +1346,7 @@ impl JSONConvertible for SimpleBitset {
             let start = v.pop().unwrap();
             ranges.push(start..=end);
         }
-        Ok(SimpleBitset(RangeSetBlaze::from_iter(ranges)))
+        Ok(SimpleBitset::from_rsb(RangeSetBlaze::from_iter(ranges)))
     }
 }
 
@@ -1516,7 +1650,33 @@ impl NWA {
         let fut: Vec<Weight> = self.compute_future_weights();
 
         type StepVec = Arc<Vec<(NWAStateID, Weight)>>;
-        let mut step_intern: HashMap<Vec<(NWAStateID, Weight)>, StepVec> = HashMap::new();
+        #[derive(Clone)]
+        struct StepKeyArc {
+            entries: StepVec,
+            fp: u64,
+        }
+        impl StepKeyArc {
+            fn new(entries: StepVec) -> Self {
+                // Fingerprint from entries (id and weight.fingerprint)
+                let mut fp = FP_ZERO;
+                for (sid, w) in entries.iter() {
+                    fp = mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2));
+                }
+                StepKeyArc { entries, fp }
+            }
+        }
+        impl PartialEq for StepKeyArc {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.entries, &other.entries) || *self.entries == *other.entries
+            }
+        }
+        impl Eq for StepKeyArc {}
+        impl Hash for StepKeyArc {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                state.write_u64(self.fp);
+            }
+        }
+        let mut step_intern: HashMap<StepKeyArc, StepVec> = HashMap::new();
         // 1) Lazy epsilon-closure cache with future gating.
         // eps_cache[sid] is a sorted Vec<(t, w)> of epsilon-only reachability from sid,
         // where weights are future-gated: for each target t, w already ∧= fut[t].
@@ -1564,17 +1724,19 @@ impl NWA {
             cache.get(&sid).unwrap()
         }
 
-        // Helper: intern a computed step vector to share identical vectors across states.
+        // Helper: intern a computed step vector to share identical vectors across states (Arc-based).
         fn intern_step_vec(
             v: Vec<(NWAStateID, Weight)>,
-            intern: &mut HashMap<Vec<(NWAStateID, Weight)>, StepVec>
+            intern: &mut HashMap<StepKeyArc, StepVec>
         ) -> StepVec {
-            if let Some(existing) = intern.get(&v) {
-                existing.clone()
-            } else {
-                let arc = Arc::new(v.clone());
-                intern.insert(v, arc.clone());
-                arc
+            let arc = Arc::new(v);
+            let key = StepKeyArc::new(arc.clone());
+            match intern.entry(key) {
+                Entry::Occupied(o) => o.get().clone(),
+                Entry::Vacant(vac) => {
+                    vac.insert(arc.clone());
+                    arc
+                }
             }
         }
 
@@ -1616,7 +1778,20 @@ impl NWA {
             ex_cache: &'a mut HashMap<NWAStateID, HashMap<i16, StepVec>>,
             intern: &'a mut HashMap<Vec<(NWAStateID, Weight)>, StepVec>,
         ) -> Option<&'a StepVec> {
-            if !ex_cache.get(&sid).map_or(false, |m| m.contains_key(&lbl)) {
+            unreachable!()
+        }
+        // Re-define get_ex_step with the new interner type
+        fn get_ex_step<'a>(
+            sid: NWAStateID,
+            lbl: i16,
+            states: &'a NWAStates,
+            fut: &'a [Weight],
+            eps_cache: &'a mut HashMap<NWAStateID, Vec<(NWAStateID, Weight)>>,
+            ex_cache: &'a mut HashMap<NWAStateID, HashMap<i16, StepVec>>,
+            intern: &'a mut HashMap<StepKeyArc, StepVec>,
+        ) -> Option<&'a StepVec> {
+            let has = ex_cache.get(&sid).map_or(false, |m| m.contains_key(&lbl));
+            if !has {
                 if let Some((to, wlbl)) = states[sid].transitions.get(&lbl) {
                     let mask = get_eps_mask(*to, states, fut, eps_cache);
                     let mut tmp: Vec<(NWAStateID, Weight)> = Vec::with_capacity(mask.len());
@@ -1632,8 +1807,33 @@ impl NWA {
         }
 
         // Canonicalization key type
-        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-        struct SubsetKey(Vec<(NWAStateID, Weight)>);
+        #[derive(Clone, Debug)]
+        struct SubsetKey {
+            entries: Vec<(NWAStateID, Weight)>,
+            fp: u64,
+        }
+        impl SubsetKey {
+            fn from_entries(mut entries: Vec<(NWAStateID, Weight)>) -> Self {
+                // Ensure canonical order by NWAStateID
+                entries.sort_by_key(|(sid, _)| *sid);
+                let mut fp = FP_ZERO;
+                for (sid, w) in entries.iter() {
+                    fp = mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2));
+                }
+                SubsetKey { entries, fp }
+            }
+        }
+        impl PartialEq for SubsetKey {
+            fn eq(&self, other: &Self) -> bool {
+                self.fp == other.fp && self.entries == other.entries
+            }
+        }
+        impl Eq for SubsetKey {}
+        impl Hash for SubsetKey {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                state.write_u64(self.fp);
+            }
+        }
 
         // Build initial subset: epsilon-closure from start; already future-gated.
         let init_vec: Vec<(NWAStateID, Weight)> =
@@ -1647,30 +1847,32 @@ impl NWA {
         let mut subset_to_d_id: HashMap<SubsetKey, StateID> = HashMap::new();
         let mut worklist: VecDeque<SubsetKey> = VecDeque::new();
 
-        let init_key = SubsetKey(init_vec);
+        let init_key = SubsetKey::from_entries(init_vec);
         subset_to_d_id.insert(init_key.clone(), start_d_id);
         worklist.push_back(init_key);
 
-        let pb = ProgressBar::new(subset_to_d_id.len() as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [Determinizing DWA: {elapsed_precise}] \
-                           [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
-                .expect("progress-bar"),
-        );
-        if !PROGRESS_BAR_ENABLED {
-            pb.set_draw_target(ProgressDrawTarget::hidden());
-        }
+        let pb = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(subset_to_d_id.len() as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinizing DWA: {elapsed_precise}] \
+                               [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
+                    .expect("progress-bar"),
+            );
+            Some(p)
+        } else {
+            None
+        };
 
         let mut processed_states = 0;
 
         // Ensure enough DWA states vector capacity as we go; transitions/weights filled dynamically
         while let Some(subset_key) = worklist.pop_front() {
             processed_states += 1;
-            pb.set_position(processed_states);
+            if let Some(p) = &pb { p.set_position(processed_states as u64); }
 
             let d_id = *subset_to_d_id.get(&subset_key).unwrap();
-            let subset_vec: &Vec<(NWAStateID, Weight)> = &subset_key.0;
+            let subset_vec: &Vec<(NWAStateID, Weight)> = &subset_key.entries;
 
             // Compute final weight
             let mut d_final: Option<Weight> = None;
@@ -1715,14 +1917,14 @@ impl NWA {
             if !def_acc.is_empty() {
                 let mut def_vec: Vec<(NWAStateID, Weight)> = def_acc.into_iter().collect();
                 def_vec.sort_by_key(|(k, _)| *k);
-                let def_key = SubsetKey(def_vec.clone());
+                let def_key = SubsetKey::from_entries(def_vec.clone());
                 let def_target = if let Some(id) = subset_to_d_id.get(&def_key) {
                     *id
                 } else {
                     let nid = dwa.states.add_state();
                     subset_to_d_id.insert(def_key.clone(), nid);
                     worklist.push_back(def_key);
-                    pb.set_length(subset_to_d_id.len() as u64);
+                    if let Some(p) = &pb { p.set_length(subset_to_d_id.len() as u64); }
                     nid
                 };
                 // Edge weight = union of weights in def_vec
@@ -1835,14 +2037,14 @@ impl NWA {
                     continue;
                 }
 
-                let target_key = SubsetKey(target_vec.clone());
+                let target_key = SubsetKey::from_entries(target_vec.clone());
                 let target_d_id = if let Some(id) = subset_to_d_id.get(&target_key) {
                     *id
                 } else {
                     let nid = dwa.states.add_state();
                     subset_to_d_id.insert(target_key.clone(), nid);
                     worklist.push_back(target_key.clone());
-                    pb.set_length(subset_to_d_id.len() as u64);
+                    if let Some(p) = &pb { p.set_length(subset_to_d_id.len() as u64); }
                     nid
                 };
 
@@ -1868,7 +2070,9 @@ impl NWA {
             }
         }
 
-        pb.finish_with_message(format!("Determinized to {} states", subset_to_d_id.len()));
+        if let Some(p) = &pb {
+            p.finish_with_message(format!("Determinized to {} states", subset_to_d_id.len()));
+        }
 
         dwa
     }
@@ -1958,3 +2162,4 @@ impl Display for NWA {
         Ok(())
     }
 }
+
