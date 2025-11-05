@@ -2286,7 +2286,8 @@ mod tests {
         right.set_final_weight(41, Weight::all()).unwrap();
         right.set_final_weight(42, Weight::all()).unwrap();
 
-        todo!();
+        let u = left.union(&right);
+        DWA::stochastic_validate_union(&left, &right, &u);
     }
 
     #[test]
@@ -2425,6 +2426,7 @@ mod tests {
         // State 22
         right.set_final_weight(22, Weight::from_item(0)).unwrap();
 
-        todo!();
+        let u = left.union(&right);
+        DWA::stochastic_validate_union(&left, &right, &u);
     }
 }
