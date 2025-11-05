@@ -21,7 +21,6 @@ pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
 fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     // Convert to NWA
     let mut nwa = NWA::from_dwa(dwa);
-    let mut last_dwa = dwa.clone();
     loop {
         let mut changed_in_pass = false;
 
@@ -40,13 +39,6 @@ fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         // Determinize to DWA then back to NWA to normalize the graph, which helps subsequent passes.
         let mut tmp_dwa = nwa.determinize_to_dwa();
         tmp_dwa.simplify();
-
-        if tmp_dwa == last_dwa {
-            *dwa = tmp_dwa;
-            return;
-        }
-        last_dwa = tmp_dwa.clone();
-
         crate::debug!(3, "Intermediate DWA: {}", tmp_dwa);
         nwa = NWA::from_dwa(&tmp_dwa);
     }
@@ -82,15 +74,11 @@ fn resolve_negative_codes_in_nwa_internal(
         if let Some(b_final) = states[b_orig_id].final_weight.clone() {
             let new_a_final = &w_neg & &b_final;
             if !new_a_final.is_empty() {
+                changed = true;
                 if let Some(a_fw) = states[state_id].final_weight.as_mut() {
-                    let old_fw = a_fw.clone();
                     *a_fw |= &new_a_final;
-                    if *a_fw != old_fw {
-                        changed = true;
-                    }
                 } else {
                     states[state_id].final_weight = Some(new_a_final);
-                    changed = true;
                 }
             }
         }
