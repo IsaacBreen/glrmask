@@ -47,13 +47,10 @@ fn build_template_dwa_from_characterization(
         let s3 = dwa.add_state();
 
         // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-        dwa.states[start].transitions.exceptions.insert(pos_initial, s1);
-        dwa.states[start].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-        dwa.states[s1].transitions.exceptions.insert(neg_initial, s2);
-        dwa.states[s1].trans_weights_exceptions.insert(neg_initial, w_all.clone());
-        dwa.states[s2].transitions.exceptions.insert(neg_shift, s3);
-        dwa.states[s2].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-        dwa.states[s3].final_weight = Some(w_all.clone());
+        dwa.add_transition(start, pos_initial, s1, w_all.clone()).unwrap();
+        dwa.add_transition(s1, neg_initial, s2, w_all.clone()).unwrap();
+        dwa.add_transition(s2, neg_shift, s3, w_all.clone()).unwrap();
+        dwa.set_final_weight(s3, w_all.clone()).unwrap();
     }
 
     for &(initial_state, len, nt) in &bb.initial_reduces {
@@ -64,14 +61,12 @@ fn build_template_dwa_from_characterization(
         // start --(+initial)--> s1 --(default)*len--> target_nt_state
         let mut from = start;
         let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
-        dwa.states[from].transitions.exceptions.insert(pos_initial, next_state);
-        dwa.states[from].trans_weights_exceptions.insert(pos_initial, w_all.clone());
+        dwa.add_transition(from, pos_initial, next_state, w_all.clone()).unwrap();
         from = next_state;
 
         for i in 0..len {
             let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
-            dwa.states[from].transitions.default = Some(to);
-            dwa.states[from].trans_weight_default = Some(w_all.clone());
+            dwa.set_default_transition(from, to, w_all.clone()).unwrap();
             from = to;
         }
     }
@@ -88,14 +83,12 @@ fn build_template_dwa_from_characterization(
             // src --(+revealed)--> s1 --(default)*len--> dst
             let mut from = src_nt_state;
             let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
-            dwa.states[from].transitions.exceptions.insert(pos_revealed, next_state);
-            dwa.states[from].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
+            dwa.add_transition(from, pos_revealed, next_state, w_all.clone()).unwrap();
             from = next_state;
 
             for i in 0..len {
                 let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
-                dwa.states[from].transitions.default = Some(to);
-                dwa.states[from].trans_weight_default = Some(w_all.clone());
+                dwa.set_default_transition(from, to, w_all.clone()).unwrap();
                 from = to;
             }
         }
@@ -112,15 +105,11 @@ fn build_template_dwa_from_characterization(
             let s4 = dwa.add_state();
 
             // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-            dwa.states[src_nt_state].transitions.exceptions.insert(pos_revealed, s1);
-            dwa.states[src_nt_state].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-            dwa.states[s1].transitions.exceptions.insert(neg_revealed, s2);
-            dwa.states[s1].trans_weights_exceptions.insert(neg_revealed, w_all.clone());
-            dwa.states[s2].transitions.exceptions.insert(neg_goto, s3);
-            dwa.states[s2].trans_weights_exceptions.insert(neg_goto, w_all.clone());
-            dwa.states[s3].transitions.exceptions.insert(neg_shift, s4);
-            dwa.states[s3].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-            dwa.states[s4].final_weight = Some(w_all.clone());
+            dwa.add_transition(src_nt_state, pos_revealed, s1, w_all.clone()).unwrap();
+            dwa.add_transition(s1, neg_revealed, s2, w_all.clone()).unwrap();
+            dwa.add_transition(s2, neg_goto, s3, w_all.clone()).unwrap();
+            dwa.add_transition(s3, neg_shift, s4, w_all.clone()).unwrap();
+            dwa.set_final_weight(s4, w_all.clone()).unwrap();
         }
     }
 
@@ -146,7 +135,7 @@ fn build_template_dwas(
 fn build_ignore_terminal_dwa() -> DWA {
     // Identity DWA: start is final, no transitions.
     let mut dwa = DWA::new();
-    dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
+    dwa.set_final_weight(dwa.body.start_state, Weight::all()).unwrap();
     dwa
 }
 
