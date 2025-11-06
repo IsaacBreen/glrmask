@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{StateID, Weight};
+use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use crate::precompute4::test_weighted_automata;
@@ -14,7 +14,6 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
-const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
 /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
 /// This is semantics-preserving; it only reduces the amount of compression performed.
 const LARGE_AUTOMATON_THRESHOLD: usize = 200_000;

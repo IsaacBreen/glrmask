@@ -3,13 +3,11 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{StateID, Weight};
+use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
 use super::dwa::DWA;
 use super::nwa::{NWABody, NWAStates, NWA};
 use crate::precompute4::weighted_automata::NWAStateID;
 use std::collections::VecDeque;
-
-const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
 
 impl DWA {
     /// Evaluate a word's weight in this DWA by intersecting per-edge weights, optional state-entry weights, and the final state's weight.
