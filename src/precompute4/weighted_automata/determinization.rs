@@ -318,11 +318,11 @@ fn determinize_closures_to_dwa(
     let mut label_aggs: HashMap<i16, LabelAgg> = HashMap::new();
 
     while let Some(did) = q.pop_front() {
-        let subset = &subsets_arena[did];
+        let subset = subsets_arena[did].clone();
 
         // 1) Final weight of this DWA state
         let mut final_w: Option<Weight> = None;
-        for (s, gate) in subset.items.iter() {
+        for (s, gate) in &subset.items {
             if let Some(fw) = &nwa.states[*s].final_weight {
                 let c = gate & fw;
                 if !c.is_empty() {
@@ -345,7 +345,7 @@ fn determinize_closures_to_dwa(
         def_map.clear();
         let mut def_edge_mask = Weight::zeros();
 
-        for (s, gate) in subset.items.iter() {
+        for (s, gate) in &subset.items {
             if let Some((to, wdef)) = &nwa.states[*s].default {
                 let g = gate & wdef;
                 if g.is_empty() {
@@ -382,7 +382,7 @@ fn determinize_closures_to_dwa(
         // 3) Aggregate per-label patches: for every exception seen in any source.
         label_aggs.clear();
 
-        for (s, gate) in subset.items.iter() {
+        for (s, gate) in &subset.items {
             // For each labeled exception out of s
             for (lbl, (to_ex, wex)) in nwa.states[*s].transitions.iter() {
                 // ADD: exception contributions
