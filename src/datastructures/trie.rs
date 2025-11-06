@@ -823,7 +823,7 @@ where
         arena: &Arena<Self>,
         roots: &[Trie2Index],
         is_end: F,
-    ) -> Vec<(Trie2Index, Vec<(EK, EV, T)>)>
+    ) -> Vec<(T, Vec<(EK, EV, T)>)>
     where
         F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
         T: Clone,
@@ -833,7 +833,8 @@ where
 
         for &root in roots {
             let mut visiting = std::collections::HashSet::new();
-            if root.read(arena).is_some() {
+            if let Some(root_guard) = root.read(arena) {
+                let root_value = root_guard.value.clone();
                 Self::get_all_paths_recursive(
                     arena,
                     root,
@@ -841,7 +842,7 @@ where
                     &mut all_paths,
                     &mut visiting,
                     &is_end,
-                    root,
+                    root_value,
                 );
             }
         }
@@ -852,10 +853,10 @@ where
         arena: &Arena<Self>,
         node_idx: Trie2Index,
         current_path: Vec<(EK, EV, T)>,
-        all_paths: &mut Vec<(Trie2Index, Vec<(EK, EV, T)>)>,
+        all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
         visiting: &mut std::collections::HashSet<Trie2Index>,
         is_end: &F,
-        root_idx: Trie2Index,
+        root_value: T,
     ) where
         F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
         T: Clone,
@@ -868,7 +869,7 @@ where
 
         if let Some(guard) = node_idx.read(arena) {
             if is_end(node_idx, &guard) {
-                all_paths.push((root_idx, current_path));
+                all_paths.push((root_value, current_path));
             } else {
                 for (edge_key, dest_map) in guard.children() {
                     for (child_idx, edge_value) in dest_map.iter() {
@@ -883,7 +884,7 @@ where
                                 all_paths,
                                 visiting,
                                 is_end,
-                                root_idx,
+                                root_value.clone(),
                             );
                         }
                     }
@@ -922,7 +923,7 @@ where
         is_end: F,
         is_path_edge: G,
         max_path_length: usize,
-    ) -> Vec<(Trie2Index, Vec<(EK, EV, T)>)>
+    ) -> Vec<(T, Vec<(EK, EV, T)>)>
     where
         F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
         G: Fn(&EK, &EV, Trie2Index) -> bool,
@@ -932,7 +933,8 @@ where
         let mut all_paths = Vec::new();
 
         for &root in roots {
-            if root.read(arena).is_some() {
+            if let Some(root_guard) = root.read(arena) {
+                let root_value = root_guard.value.clone();
                 Self::get_all_paths_with_cycles_recursive(
                     arena,
                     root,
@@ -940,7 +942,7 @@ where
                     &mut all_paths,
                     &is_end,
                     &is_path_edge,
-                    root,
+                    &root_value,
                     max_path_length,
                 );
             }
@@ -952,10 +954,10 @@ where
         arena: &Arena<Self>,
         node_idx: Trie2Index,
         current_path: &mut Vec<(EK, EV, T)>,
-        all_paths: &mut Vec<(Trie2Index, Vec<(EK, EV, T)>)>,
+        all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
         is_end: &F,
         is_path_edge: &G,
-        root_idx: Trie2Index,
+        root_value: &T,
         max_path_length: usize,
     ) where
         F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
@@ -1015,7 +1017,7 @@ where
                 frame.started = true;
                 if let Some(g) = frame.node.read(arena) {
                     if is_end(frame.node, &g) {
-                        all_paths.push((root_idx, path.clone()));
+                        all_paths.push((root_value.clone(), path.clone()));
                     }
                 }
                 // If we've reached the max number of edges on this path, do not expand further.
@@ -3472,7 +3474,7 @@ mod tests {
 
         // Verify path contents for the shortest one.
         let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
-        assert_eq!(shortest_path.0, root);
+        assert_eq!(shortest_path.0, "root");
         for i in 0..8 {
             let (ek, ev, t) = &shortest_path.1[i];
             assert_eq!(*ek, format!("edge_{}", i + 1));
@@ -3517,8 +3519,8 @@ mod tests {
         // The returned path should only contain the "counted" edges.
         assert_eq!(paths.len(), 1, "Should find exactly one path to the target");
 
-        let (root_idx, path) = &paths[0];
-        assert_eq!(*root_idx, root);
+        let (root_val, path) = &paths[0];
+        assert_eq!(*root_val, "root");
         assert_eq!(path.len(), 2, "Path should have 2 counted edges");
 
         // Verify path contents
