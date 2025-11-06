@@ -190,14 +190,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
     // 3. Reverse the precompute1 trie.
     let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
 
-    let leaf_node = all_nodes.iter().find_map(|&idx| {
-        idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
-    }).expect("Precompute1 trie must have a single leaf node.");
-
-    let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
-    let reversed_trie_root = leaf_node;
+    let (reversed_trie1_god, reversed_trie1_roots) = Trie::reverse(trie1_god, &trie1_roots);
 
     // 4. Traverse the reversed trie with NWA bodies.
     let initial_nwa_body = {
@@ -207,12 +201,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         NWABody { start_state: start }
     };
     let initial_tokens = LLMTokenBV::max_ones();
-    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
-    let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = reversed_trie1_roots.iter().map(|&root| (root, (initial_nwa_body.clone(), initial_tokens.clone()))).collect();
+    let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &reversed_trie1_roots).expect("Failed to compute traversal data for reversed trie1");
     let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
 
     crate::debug!(5, "Trie:\n{}", Trie::pretty_print(&trie1_god, &trie1_roots));
-    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print(&reversed_trie1_god, &trie1_roots));
+    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print(&reversed_trie1_god, &reversed_trie1_roots));
 
     let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
