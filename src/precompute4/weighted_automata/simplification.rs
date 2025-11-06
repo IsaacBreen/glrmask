@@ -42,68 +42,93 @@ impl DWA {
         if states.0.is_empty() {
             return;
         }
+        if states.len() > LARGE_AUTOMATON_THRESHOLD {
+            Self::simplify_large(states, body);
+        } else {
+            Self::simplify_small(states, body);
+        }
+        crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+    }
 
-        let max_passes: usize = if states.len() > LARGE_AUTOMATON_THRESHOLD { 2 } else { 10 };
+    fn run_pass(
+        pb: &Option<ProgressBar>,
+        msg: &str,
+        changed_any: &mut bool,
+        mut pass: impl FnMut() -> bool,
+    ) {
+        if let Some(p) = pb {
+            p.set_message(msg.to_string());
+        }
+        if pass() {
+            *changed_any = true;
+        }
+    }
+
+    fn simplify_small(states: &mut DWAStates, body: &mut DWABody) {
+        let max_passes: usize = 10;
         let pb = if PROGRESS_BAR_ENABLED {
             let p = ProgressBar::new(max_passes as u64);
             p.set_style(
                 ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Simplifying DWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
+                    .template("{spinner:.green} [Simplifying DWA (small): {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
                     .expect("progress-bar"),
             );
             Some(p)
         } else {
             None
         };
-
         if let Some(p) = &pb { p.set_message("Initial normalize/prune"); }
         Self::normalize_edges_inplace(states);
         Self::prune_unreachable(states, body);
-
         let mut changed_any = true;
         let mut passes = 0usize;
         while changed_any && passes < max_passes {
             passes += 1;
             if let Some(p) = &pb { p.inc(1); }
             changed_any = false;
-
-            if let Some(p) = &pb { p.set_message("normalize"); }
-            if Self::normalize_edges_inplace(states) {
-                changed_any = true;
-            }
-            let is_large = states.len() > LARGE_AUTOMATON_THRESHOLD;
-            if !is_large {
-                if let Some(p) = &pb { p.set_message("propagate constraints"); }
-                if Self::propagate_and_constrain_weights(states, body) {
-                    changed_any = true;
-                }
-            }
-            if let Some(p) = &pb { p.set_message("relax local future"); }
-            if Self::relax_weights_by_local_future(states) {
-                changed_any = true;
-            }
-            if !is_large {
-                if let Some(p) = &pb { p.set_message("minimize"); }
-                if Self::minimize_partition_refinement(states, body) {
-                    changed_any = true;
-                }
-            }
-            if let Some(p) = &pb { p.set_message("normalize"); }
-            if Self::normalize_edges_inplace(states) {
-                changed_any = true;
-            }
-            if let Some(p) = &pb { p.set_message("prune"); }
-            if Self::prune_unreachable(states, body) {
-                changed_any = true;
-            }
+            Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
+            Self::run_pass(&pb, "propagate constraints", &mut changed_any, || Self::propagate_and_constrain_weights(states, body));
+            Self::run_pass(&pb, "propagate future", &mut changed_any, || Self::propagate_future_weights(states));
+            Self::run_pass(&pb, "minimize", &mut changed_any, || Self::minimize_partition_refinement(states, body));
+            Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
+            Self::run_pass(&pb, "prune", &mut changed_any, || Self::prune_unreachable(states, body));
         }
-
         if let Some(p) = &pb {
             p.finish_with_message(format!("Simplified to {} states", states.len()));
         }
-        crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
     }
 
+    fn simplify_large(states: &mut DWAStates, body: &mut DWABody) {
+        let max_passes: usize = 2;
+        let pb = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(max_passes as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Simplifying DWA (large): {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
+                    .expect("progress-bar"),
+            );
+            Some(p)
+        } else {
+            None
+        };
+        if let Some(p) = &pb { p.set_message("Initial normalize/prune"); }
+        Self::normalize_edges_inplace(states);
+        Self::prune_unreachable(states, body);
+        let mut changed_any = true;
+        let mut passes = 0usize;
+        while changed_any && passes < max_passes {
+            passes += 1;
+            if let Some(p) = &pb { p.inc(1); }
+            changed_any = false;
+            Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
+            Self::run_pass(&pb, "relax local future", &mut changed_any, || Self::relax_weights_by_local_future(states));
+            Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
+            Self::run_pass(&pb, "prune", &mut changed_any, || Self::prune_unreachable(states, body));
+        }
+        if let Some(p) = &pb {
+            p.finish_with_message(format!("Simplified to {} states", states.len()));
+        }
+    }
     pub fn propagate_and_constrain_weights(states: &mut DWAStates, body: &mut DWABody) -> bool {
         let n = states.len();
         if n == 0 {
