@@ -109,7 +109,7 @@ impl DWA {
         result_dwa.simplify();
 
         if STOCHASTIC_DEBUG {
-            DWA::stochastic_validate_concatenate(&self, other, &result_dwa);
+            DWA::stochastic_validate_concatenate(&self, other, &result_dwa, &Weight::all());
         }
 
         result_dwa
@@ -307,7 +307,7 @@ impl NWA {
             let mut result_dwa = concat_nwa.determinize_to_dwa();
             result_dwa.simplify();
 
-            DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa);
+            DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
         }
         Self::internal_concatenate_components(states, left, right, eps_weight)
     }

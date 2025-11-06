@@ -2829,7 +2829,7 @@ local_system:
               }
           }
       }
-    src/precompute4/test_weighted_automata.rs: |-
+    src/precompute4/test_weighted_automata.rs: |
       use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, Weight, format_word};
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::time::{SystemTime, UNIX_EPOCH};
@@ -4402,6 +4402,33 @@ local_system:
           // Word "x" should not be accepted by C.
           let weight_x = c.eval_word_weight(&['x' as i16]);
           assert!(weight_x.is_empty());
+      }
+
+      #[test]
+      fn test_concatenate_neg_path_and_empty() {
+          fn neg(x: i16) -> i16 {
+              i16::MIN + x
+          }
+
+          // DWA A accepts [0, neg(0), neg(1)]
+          let mut a = DWA::new();
+          let s1 = a.add_state();
+          let s2 = a.add_state();
+          let s3 = a.add_state();
+          a.add_transition(0, 0, s1, Weight::all()).unwrap();
+          a.add_transition(s1, neg(0), s2, Weight::all()).unwrap();
+          a.add_transition(s2, neg(1), s3, Weight::all()).unwrap();
+          a.set_final_weight(s3, Weight::all()).unwrap();
+
+          // DWA B accepts the empty word
+          let mut b = DWA::new();
+          b.set_final_weight(b.body.start_state, Weight::all()).unwrap();
+
+          let c = a.concatenate(&b);
+
+          // The result should be equivalent to A, as concatenating with the empty-word language is a no-op.
+          DWA::stochastic_validate_concatenate(&a, &b, &c);
+          assert_dwa_equivalent(c, a);
       }
   prev_file_contents:
     src/precompute4/weighted_automata/bitset.rs: |
@@ -6123,7 +6150,7 @@ local_system:
               result_dwa.simplify();
 
               if STOCHASTIC_DEBUG {
-                  DWA::stochastic_validate_concatenate(&self, other, &result_dwa);
+                  DWA::stochastic_validate_concatenate(&self, other, &result_dwa, &Weight::all());
               }
 
               result_dwa
@@ -6321,7 +6348,7 @@ local_system:
                   let mut result_dwa = concat_nwa.determinize_to_dwa();
                   result_dwa.simplify();
 
-                  DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa);
+                  DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
               }
               Self::internal_concatenate_components(states, left, right, eps_weight)
           }
@@ -7398,7 +7425,7 @@ local_system:
 
           /// Expected concatenation weight:
           /// union over all split points i of (A(word[..i]) ∧ B(word[i..])).
-          fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
+          fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16], eps_weight: &Weight) -> Weight {
               let mut acc = Weight::zeros();
               for i in 0..=word.len() {
                   let wa = a.eval_word_weight(&word[..i]);
@@ -7409,7 +7436,7 @@ local_system:
                   if wb.is_empty() {
                       continue;
                   }
-                  let both = &wa & &wb;
+                  let both = &(&wa & &wb) & eps_weight;
                   if !both.is_empty() {
                       acc |= &both;
                   }
@@ -7446,7 +7473,7 @@ local_system:
               }
           }
 
-          pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
+          pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA, eps_weight: &Weight) {
               let mut rng = SimpleRng::from_time();
               for _ in 0..VALIDATION_SAMPLES {
                   // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
@@ -7455,19 +7482,19 @@ local_system:
                           let mut w = wa_word.clone();
                           w.extend_from_slice(&wb_word);
                           let wc = c.eval_word_weight(&w);
-                          let expected_simple = &wa & &wb;
+                          let expected_simple = &(&wa & &wb) & eps_weight;
                           if !expected_simple.is_empty() {
                               assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword_a: {}\nword_b: {}\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wa, wb, wc, expected_simple, a, b, c);
                           }
                           // Also verify full expected across all splits equals C's result
-                          let expected_all = DWA::expected_concat_weight(a, b, &w);
+                          let expected_all = DWA::expected_concat_weight(a, b, &w, eps_weight);
                           assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword_a: {}\nword_b: {}\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wc, expected_all, a, b, c);
                       }
                   }
 
                   // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
                   if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
-                      let expected = DWA::expected_concat_weight(a, b, &w);
+                      let expected = DWA::expected_concat_weight(a, b, &w, eps_weight);
                       assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected, a, b, c);
                   }
               }
@@ -8818,7 +8845,7 @@ local_system:
           let c = a.concatenate(&b);
 
           // The result should be equivalent to A, as concatenating with the empty-word language is a no-op.
-          DWA::stochastic_validate_concatenate(&a, &b, &c);
+          // The validation is called inside a.concatenate(&b)
           assert_dwa_equivalent(c, a);
       }
   diffs_applied_this_send: true
@@ -13299,11 +13326,48 @@ messages:
           let weight_x = c.eval_word_weight(&['x' as i16]);
           assert!(weight_x.is_empty());
       }
+
+      #[test]
+      fn test_concatenate_neg_path_and_empty() {
+          fn neg(x: i16) -> i16 {
+              i16::MIN + x
+          }
+
+          // DWA A accepts [0, neg(0), neg(1)]
+          let mut a = DWA::new();
+          let s1 = a.add_state();
+          let s2 = a.add_state();
+          let s3 = a.add_state();
+          a.add_transition(0, 0, s1, Weight::all()).unwrap();
+          a.add_transition(s1, neg(0), s2, Weight::all()).unwrap();
+          a.add_transition(s2, neg(1), s3, Weight::all()).unwrap();
+          a.set_final_weight(s3, Weight::all()).unwrap();
+
+          // DWA B accepts the empty word
+          let mut b = DWA::new();
+          b.set_final_weight(b.body.start_state, Weight::all()).unwrap();
+
+          let c = a.concatenate(&b);
+
+          // The result should be equivalent to A, as concatenating with the empty-word language is a no-op.
+          DWA::stochastic_validate_concatenate(&a, &b, &c);
+          assert_dwa_equivalent(c, a);
+      }
+
       ```
     metadata:
       filename: src/precompute4/test_weighted_automata.rs
-  - user: |-
-      ```
+  - user: |+
+      thread 'test_constraint_basic::test_trivial' (4759571) panicked at src/precompute4/test_weighted_automata.rs:237:25:
+      Concatenation missing expected subset.
+      word_a: [0, neg(0), neg(1)]
+      word_b: []
+      word: [0, neg(0), neg(1)]
+      A(wA): ALL
+      B(wB): ALL
+      C(wA∘wB): [0]
+      Expected subset: ALL
+
       DWA A:
       DWA (start: 0)
         State 0:
@@ -13320,9 +13384,51 @@ messages:
       DWA (start: 0)
         State 0:
           final_weight: ALL
-      ```
 
-      Add a test for CONCATENATION with these two DWA.
+
+      DWA C:
+      DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: [0])
+        State 1:
+          neg(0) -> 2 (trans_weight: [0])
+        State 2:
+          neg(1) -> 3 (trans_weight: [0])
+        State 3:
+          final_weight: [0]
+
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::precompute4::test_weighted_automata::<impl sep1::precompute4::weighted_automata::dwa::DWA>::stochastic_validate_concatenate
+                   at ./src/precompute4/test_weighted_automata.rs:237:25
+         3: sep1::precompute4::weighted_automata::ops::<impl sep1::precompute4::weighted_automata::nwa::NWA>::concatenate_components
+                   at ./src/precompute4/weighted_automata/ops.rs:310:13
+         4: sep1::precompute4::full_dwa::precompute4::{{closure}}
+                   at ./src/precompute4/full_dwa.rs:261:37
+         5: sep1::datastructures::trie::Trie<EK,EV,T>::special_map_grouped
+                   at ./src/datastructures/trie.rs:2061:51
+         6: sep1::precompute4::full_dwa::precompute4
+                   at ./src/precompute4/full_dwa.rs:228:5
+         7: sep1::constraint::GrammarConstraint::new_with_config_and_precompute0_cache
+                   at ./src/constraint.rs:1886:36
+         8: sep1::constraint::GrammarConstraint::new_from_grammar_definition
+                   at ./src/constraint.rs:1280:9
+         9: sep1::test_constraint_basic::test_trivial
+                   at ./src/test_constraint_basic.rs:51:22
+        10: sep1::test_constraint_basic::test_trivial::{{closure}}
+                   at ./src/test_constraint_basic.rs:35:18
+        11: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+        12: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - user: "Another question: Why doesn't this error show up in the last test in test_weighted_automata?
+      It's the same DWA right?"
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -13342,95 +13448,153 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the requested test case, followed by the corresponding git diff.
+      Of course. It looks like you've found a subtle bug in the stochastic validation logic for automaton concatenation. Here's a breakdown of the issue and the necessary fixes.
+
+      ### Analysis of the Error
+
+      The panic you're seeing is indeed revealing.
+
+      1.  **The Core Problem**: The function `stochastic_validate_concatenate` was written with the assumption that the weight of the epsilon transition connecting the two automata is always `Weight::all()`. Its calculation for the expected weight of a concatenated word (`expected_simple` and `expected_all`) did not account for an additional `eps_weight` being intersected. When your `test_trivial` calls `NWA::concatenate_components` with an `eps_weight` of `[0]`, the resulting automaton `C` correctly has its weights intersected with `[0]`. However, the validation logic still expected a weight of `ALL`, leading to the assertion failure.
+
+      2.  **Why `test_concatenate_neg_path_and_empty` Passes**: You are correct that the DWAs are functionally identical in both scenarios. The reason the test in `test_weighted_automata.rs` passes is that it calls `DWA::concatenate`. This higher-level wrapper function always calls the underlying `NWA::concatenate_components` with a hardcoded `eps_weight` of `Weight::all()`. Since the validation logic was (incorrectly) also assuming `Weight::all()`, the expectations matched the result, and the test passed. The panic in `test_trivial` occurs because it calls `NWA::concatenate_components` from a different code path that supplies a specific, non-`ALL` weight, exposing the flaw in the validation logic.
+
+      The fix is to make the validation logic aware of the `eps_weight` used during concatenation.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/precompute4/test_weighted_automata.rs`**.
-      2.  **Navigate to the end of the file**.
-      3.  **Append the following new test function**:
+      Here are the edits to fix the validation logic:
 
-          ```rust
-          #[test]
-          fn test_concatenate_neg_path_and_empty() {
-              fn neg(x: i16) -> i16 {
-                  i16::MIN + x
-              }
-          
-              // DWA A accepts [0, neg(0), neg(1)]
-              let mut a = DWA::new();
-              let s1 = a.add_state();
-              let s2 = a.add_state();
-              let s3 = a.add_state();
-              a.add_transition(0, 0, s1, Weight::all()).unwrap();
-              a.add_transition(s1, neg(0), s2, Weight::all()).unwrap();
-              a.add_transition(s2, neg(1), s3, Weight::all()).unwrap();
-              a.set_final_weight(s3, Weight::all()).unwrap();
-          
-              // DWA B accepts the empty word
-              let mut b = DWA::new();
-              b.set_final_weight(b.body.start_state, Weight::all()).unwrap();
-          
-              let c = a.concatenate(&b);
-          
-              // The result should be equivalent to A, as concatenating with the empty-word language is a no-op.
-              DWA::stochastic_validate_concatenate(&a, &b, &c);
-              assert_dwa_equivalent(c, a);
-          }
-          ```
+      1.  **File**: `src/precompute4/test_weighted_automata.rs`
+          *   Modify `expected_concat_weight` to accept an `eps_weight: &Weight` and factor it into the calculation.
+          *   Modify `stochastic_validate_concatenate` to also accept `eps_weight: &Weight` and pass it to `expected_concat_weight`.
+          *   Update the calculation of `expected_simple` inside `stochastic_validate_concatenate` to also use `eps_weight`.
 
-      ### Git Diff
+      2.  **File**: `src/precompute4/weighted_automata/ops.rs`
+          *   In `DWA::concatenate`, update the call to `stochastic_validate_concatenate` to pass `&Weight::all()`, as this is the weight it uses for the epsilon transition.
+          *   In `NWA::concatenate_components`, update the call to `stochastic_validate_concatenate` to pass through its `eps_weight` parameter.
 
-      Here is the git diff for the changes:
+      ### Git Diffs
+
+      Here are the corresponding git diffs to apply the changes.
 
       ```diff
+      diff --git a/src/precompute4/weighted_automata/ops.rs b/src/precompute4/weighted_automata/ops.rs
+      --- a/src/precompute4/weighted_automata/ops.rs
+      +++ b/src/precompute4/weighted_automata/ops.rs
+      @@ -93,7 +93,7 @@
+               result_dwa.simplify();
+       
+               if STOCHASTIC_DEBUG {
+      -            DWA::stochastic_validate_concatenate(&self, other, &result_dwa);
+      +            DWA::stochastic_validate_concatenate(&self, other, &result_dwa, &Weight::all());
+               }
+       
+               result_dwa
+      @@ -282,7 +282,7 @@
+                   let mut result_dwa = concat_nwa.determinize_to_dwa();
+                   result_dwa.simplify();
+       
+      -            DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa);
+      +            DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
+               }
+               Self::internal_concatenate_components(states, left, right, eps_weight)
+           }
+
+      ``````diff
       diff --git a/src/precompute4/test_weighted_automata.rs b/src/precompute4/test_weighted_automata.rs
       --- a/src/precompute4/test_weighted_automata.rs
       +++ b/src/precompute4/test_weighted_automata.rs
-      @@ -1004,3 +1004,28 @@
-           let weight_x = c.eval_word_weight(&['x' as i16]);
-           assert!(weight_x.is_empty());
+      @@ -201,17 +201,17 @@
+       
+           /// Expected concatenation weight:
+           /// union over all split points i of (A(word[..i]) ∧ B(word[i..])).
+      -    fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
+      +    fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16], eps_weight: &Weight) -> Weight {
+               let mut acc = Weight::zeros();
+               for i in 0..=word.len() {
+                   let wa = a.eval_word_weight(&word[..i]);
+                   if wa.is_empty() {
+                       continue;
+                   }
+                   let wb = b.eval_word_weight(&word[i..]);
+                   if wb.is_empty() {
+                       continue;
+                   }
+      -            let both = &wa & &wb;
+      +            let both = &(&wa & &wb) & eps_weight;
+                   if !both.is_empty() {
+                       acc |= &both;
+                   }
+      @@ -219,7 +219,7 @@
+               acc
+           }
+       
+      -    pub fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
+      +    pub fn stochastic_validate_union(a: &DWA, b: &DWA, u: &DWA) {
+               let mut rng = SimpleRng::from_time();
+               for _ in 0..VALIDATION_SAMPLES {
+                   // Sample a path from A -> must be in U, and U == A ∪ B for that word.
+      @@ -246,26 +246,26 @@
+               }
+           }
+       
+      -    pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
+      +    pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA, eps_weight: &Weight) {
+               let mut rng = SimpleRng::from_time();
+               for _ in 0..VALIDATION_SAMPLES {
+                   // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
+                   if let Some((wa_word, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                       if let Some((wb_word, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                           let mut w = wa_word.clone();
+                           w.extend_from_slice(&wb_word);
+                           let wc = c.eval_word_weight(&w);
+      -                    let expected_simple = &wa & &wb;
+      +                    let expected_simple = &(&wa & &wb) & eps_weight;
+                           if !expected_simple.is_empty() {
+                               assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword_a: {}\nword_b: {}\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wa, wb, wc, expected_simple, a, b, c);
+                           }
+                           // Also verify full expected across all splits equals C's result
+      -                    let expected_all = DWA::expected_concat_weight(a, b, &w);
+      +                    let expected_all = DWA::expected_concat_weight(a, b, &w, eps_weight);
+                           assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword_a: {}\nword_b: {}\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wc, expected_all, a, b, c);
+                       }
+                   }
+       
+                   // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
+                   if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+      -                let expected = DWA::expected_concat_weight(a, b, &w);
+      +                let expected = DWA::expected_concat_weight(a, b, &w, eps_weight);
+                       assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected, a, b, c);
+                   }
+               }
+      @@ -1026,7 +1026,7 @@
+           let c = a.concatenate(&b);
+       
+           // The result should be equivalent to A, as concatenating with the empty-word language is a no-op.
+      -    DWA::stochastic_validate_concatenate(&a, &b, &c);
+      +    // The validation is called inside a.concatenate(&b)
+           assert_dwa_equivalent(c, a);
        }
-      +
-      +#[test]
-      +fn test_concatenate_neg_path_and_empty() {
-      +    fn neg(x: i16) -> i16 {
-      +        i16::MIN + x
-      +    }
-      +
-      +    // DWA A accepts [0, neg(0), neg(1)]
-      +    let mut a = DWA::new();
-      +    let s1 = a.add_state();
-      +    let s2 = a.add_state();
-      +    let s3 = a.add_state();
-      +    a.add_transition(0, 0, s1, Weight::all()).unwrap();
-      +    a.add_transition(s1, neg(0), s2, Weight::all()).unwrap();
-      +    a.add_transition(s2, neg(1), s3, Weight::all()).unwrap();
-      +    a.set_final_weight(s3, Weight::all()).unwrap();
-      +
-      +    // DWA B accepts the empty word
-      +    let mut b = DWA::new();
-      +    b.set_final_weight(b.body.start_state, Weight::all()).unwrap();
-      +
-      +    let c = a.concatenate(&b);
-      +
-      +    // The result should be equivalent to A, as concatenating with the empty-word language is a no-op.
-      +    DWA::stochastic_validate_concatenate(&a, &b, &c);
-      +    assert_dwa_equivalent(c, a);
-      +}
 
       ```
+
+      These changes correct the validation logic to handle arbitrary epsilon weights during concatenation, which will resolve the panic you observed.
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/ops.rs
+      Applying patch to 'src/precompute4/weighted_automata/ops.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/ops.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/precompute4/test_weighted_automata.rs
       Applying patch to 'src/precompute4/test_weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/test_weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Add test for DWA concatenation with
-      an empty-word DWA"'
+  - user: 'Changes committed with message: "Fix: Account for epsilon weight in DWA
+      concatenation validation"'
     metadata:
 ...

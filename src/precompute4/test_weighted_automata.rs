@@ -175,7 +175,7 @@ impl DWA {
 
     /// Expected concatenation weight:
     /// union over all split points i of (A(word[..i]) ∧ B(word[i..])).
-    fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
+    fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16], eps_weight: &Weight) -> Weight {
         let mut acc = Weight::zeros();
         for i in 0..=word.len() {
             let wa = a.eval_word_weight(&word[..i]);
@@ -186,7 +186,7 @@ impl DWA {
             if wb.is_empty() {
                 continue;
             }
-            let both = &wa & &wb;
+            let both = &(&wa & &wb) & eps_weight;
             if !both.is_empty() {
                 acc |= &both;
             }
@@ -223,7 +223,7 @@ impl DWA {
         }
     }
 
-    pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA) {
+    pub fn stochastic_validate_concatenate(a: &DWA, b: &DWA, c: &DWA, eps_weight: &Weight) {
         let mut rng = SimpleRng::from_time();
         for _ in 0..VALIDATION_SAMPLES {
             // Sample accepted paths in A and B; the concatenation of the words should be in C and contain WA ∧ WB.
@@ -232,19 +232,19 @@ impl DWA {
                     let mut w = wa_word.clone();
                     w.extend_from_slice(&wb_word);
                     let wc = c.eval_word_weight(&w);
-                    let expected_simple = &wa & &wb;
+                    let expected_simple = &(&wa & &wb) & eps_weight;
                     if !expected_simple.is_empty() {
                         assert!(weight_subset(&expected_simple, &wc), "Concatenation missing expected subset.\nword_a: {}\nword_b: {}\nword: {}\nA(wA): {}\nB(wB): {}\nC(wA∘wB): {}\nExpected subset: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wa, wb, wc, expected_simple, a, b, c);
                     }
                     // Also verify full expected across all splits equals C's result
-                    let expected_all = DWA::expected_concat_weight(a, b, &w);
+                    let expected_all = DWA::expected_concat_weight(a, b, &w, eps_weight);
                     assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword_a: {}\nword_b: {}\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wc, expected_all, a, b, c);
                 }
             }
 
             // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
             if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
-                let expected = DWA::expected_concat_weight(a, b, &w);
+                let expected = DWA::expected_concat_weight(a, b, &w, eps_weight);
                 assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected, a, b, c);
             }
         }
@@ -1595,6 +1595,6 @@ fn test_concatenate_neg_path_and_empty() {
     let c = a.concatenate(&b);
 
     // The result should be equivalent to A, as concatenating with the empty-word language is a no-op.
-    DWA::stochastic_validate_concatenate(&a, &b, &c);
+    // The validation is called inside a.concatenate(&b)
     assert_dwa_equivalent(c, a);
 }
