@@ -49,12 +49,14 @@ fn build_template_nwa_from_characterization(
         let neg_initial = utils::encode_negative_i16(initial_state)?;
         let neg_shift = utils::encode_negative_i16(shift_state)?;
 
+        let s0 = nwa.states.add_state();
         let s1 = nwa.states.add_state();
         let s2 = nwa.states.add_state();
         let s3 = nwa.states.add_state();
 
-        // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-        nwa.add_transition(start, pos_initial, s1, w_all.clone())?;
+        // start --(eps)--> s0 --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
+        nwa.add_epsilon(start, s0, w_all.clone());
+        nwa.add_transition(s0, pos_initial, s1, w_all.clone())?;
         nwa.add_transition(s1, neg_initial, s2, w_all.clone())?;
         nwa.add_transition(s2, neg_shift, s3, w_all.clone())?;
         nwa.states[s3].final_weight = Some(w_all.clone());
@@ -65,8 +67,10 @@ fn build_template_nwa_from_characterization(
         let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
 
         // Create a chain of default transitions for the pops.
-        // start --(+initial)--> s1 --(default)*len--> target_nt_state
-        let mut from = start;
+        // start --(eps)--> s0 --(+initial)--> s1 --(default)*len--> target_nt_state
+        let s0 = nwa.states.add_state();
+        nwa.add_epsilon(start, s0, w_all.clone());
+        let mut from = s0;
         let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
         nwa.add_transition(from, pos_initial, next_state, w_all.clone())?;
         from = next_state;
@@ -87,8 +91,10 @@ fn build_template_nwa_from_characterization(
             let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
             let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
 
-            // src --(+revealed)--> s1 --(default)*len--> dst
-            let mut from = src_nt_state;
+            // src --(eps)--> s0 --(+revealed)--> s1 --(default)*len--> dst
+            let s0 = nwa.states.add_state();
+            nwa.add_epsilon(src_nt_state, s0, w_all.clone());
+            let mut from = s0;
             let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
             nwa.add_transition(from, pos_revealed, next_state, w_all.clone())?;
             from = next_state;
@@ -106,13 +112,15 @@ fn build_template_nwa_from_characterization(
             let neg_goto = utils::encode_negative_i16(goto_state)?;
             let neg_shift = utils::encode_negative_i16(shift_state)?;
 
+            let s0 = nwa.states.add_state();
             let s1 = nwa.states.add_state();
             let s2 = nwa.states.add_state();
             let s3 = nwa.states.add_state();
             let s4 = nwa.states.add_state();
 
-            // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-            nwa.add_transition(src_nt_state, pos_revealed, s1, w_all.clone())?;
+            // src --(eps)--> s0 --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
+            nwa.add_epsilon(src_nt_state, s0, w_all.clone());
+            nwa.add_transition(s0, pos_revealed, s1, w_all.clone())?;
             nwa.add_transition(s1, neg_revealed, s2, w_all.clone())?;
             nwa.add_transition(s2, neg_goto, s3, w_all.clone())?;
             nwa.add_transition(s3, neg_shift, s4, w_all.clone())?;
