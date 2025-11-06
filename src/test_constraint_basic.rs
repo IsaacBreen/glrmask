@@ -339,7 +339,6 @@ fn test_constraint_expression() {
 
     assert_eq!(*tokenizer_state_id_comp, constraint.tokenizer.initial_state_id(), "Tokenizer should be in initial state");
     assert_eq!(actual_constraint_parser_state.active_state, comparable_parser_active_state, "GSS structures should match");
-
 }
 
 #[test]
