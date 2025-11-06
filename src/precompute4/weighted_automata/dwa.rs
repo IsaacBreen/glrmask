@@ -271,11 +271,11 @@ impl DWA {
         Ok(())
     }
 
-    pub fn set_final_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
+    pub fn set_final_weight(&mut self, state: StateID, weight: Option<Weight>) -> Result<(), DWABuildError> {
         if state >= self.states.len() {
             return Err(DWABuildError::StateOutOfBounds { state });
         }
-        self.states[state].final_weight = Some(weight);
+        self.states[state].final_weight = weight;
         Ok(())
     }
 

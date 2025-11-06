@@ -453,7 +453,7 @@ impl NWA {
                     }
                 }
             }
-            dwa.states[d_id].final_weight = d_final;
+            dwa.set_final_weight(d_id, d_final).expect("set_final_weight");
 
             // Default edge: accumulate contributions across all signatures that have a default macro.
             let mut def_acc: HashMap<usize, Weight> = HashMap::new();
