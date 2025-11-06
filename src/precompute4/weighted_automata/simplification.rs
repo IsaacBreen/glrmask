@@ -65,7 +65,7 @@ impl DWA {
     }
 
     fn simplify_small(states: &mut DWAStates, body: &mut DWABody) {
-        let max_passes: usize = 10;
+        let max_passes: usize = 50;
         let pb = if PROGRESS_BAR_ENABLED {
             let p = ProgressBar::new(max_passes as u64);
             p.set_style(
@@ -121,8 +121,8 @@ impl DWA {
             if let Some(p) = &pb { p.inc(1); }
             changed_any = false;
             Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
-            // Self::run_pass(&pb, "relax local future", &mut changed_any, || Self::relax_weights_by_local_future(states));
-            // Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
+            Self::run_pass(&pb, "relax local future", &mut changed_any, || Self::relax_weights_by_local_future(states));
+            Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
             Self::run_pass(&pb, "prune", &mut changed_any, || Self::prune_unreachable(states, body));
         }
         if let Some(p) = &pb {
