@@ -126,7 +126,6 @@ impl<'a> EquivalenceAnalyzer<'a> {
         );
 
         // === Phase 1: Suffix Collection ===
-        // Identify all unique suffixes that appear in the input strings.
         let mut deduper = SuffixDeduper::new(self.strings);
         let pb_suffixes = ProgressBar::new(self.strings.len() as u64);
         pb_suffixes.set_style(
@@ -148,9 +147,6 @@ impl<'a> EquivalenceAnalyzer<'a> {
         crate::debug!(2, "Found {} unique suffixes.", num_suffixes);
 
         // === Phase 2: Initial Partition ===
-        // Create the first coarse partition (P_0). Group suffixes based on their
-        // immediate, non-recursive properties: the vector of final DFA states
-        // they reach from each of the initial_states.
         let mut partitions: Vec<usize> = vec![0; num_suffixes];
         let mut num_blocks = 0;
         {
@@ -174,15 +170,11 @@ impl<'a> EquivalenceAnalyzer<'a> {
         crate::debug!(2, "Initial partition has {} blocks.", num_blocks);
 
         // === Phase 3: Iterative Refinement ===
-        // A key that uniquely identifies a suffix's one-step behavior, considering
-        // the partition of its remainders from the *previous* iteration.
-        #[derive(PartialEq, Eq, Hash)]
-        struct RefinementKey<'b> {
-            // One entry per initial DFA state.
-            // Each entry contains the final state and a sorted list of matches.
-            // A match is defined by (group_id, position, remainder_block_id).
+        // This struct represents the complex, one-step behavior of a suffix.
+        // It's too expensive to use directly as a HashMap key in a tight loop.
+        #[derive(PartialEq, Eq, Hash, Clone)]
+        struct OneStepBehavior {
             key_per_state: SmallVec<[(Option<usize>, SmallVec<[(GroupID, usize, usize); 4]>); 1]>,
-            _phantom: std::marker::PhantomData<&'b ()>,
         }
 
         let pb_refine = ProgressBar::new_spinner();
@@ -205,7 +197,6 @@ impl<'a> EquivalenceAnalyzer<'a> {
             let mut next_partitions = vec![0; num_suffixes];
             let mut next_block_id_counter = 0;
 
-            // Group suffixes by their current block ID to process one block at a time.
             let mut blocks: Vec<Vec<usize>> = vec![Vec::new(); num_blocks];
             for (suffix_id, &block_id) in partitions.iter().enumerate() {
                 blocks[block_id].push(suffix_id);
@@ -213,7 +204,6 @@ impl<'a> EquivalenceAnalyzer<'a> {
 
             for block in blocks {
                 if block.len() <= 1 {
-                    // This block cannot be split further.
                     for suffix_id in block {
                         next_partitions[suffix_id] = next_block_id_counter;
                     }
@@ -221,24 +211,24 @@ impl<'a> EquivalenceAnalyzer<'a> {
                     continue;
                 }
 
-                // Use a HashMap to split the current block based on refinement keys.
-                let mut splitter: HashMap<RefinementKey, Vec<usize>> = HashMap::new();
+                // --- FIX START ---
+                // We intern the complex `OneStepBehavior` into a simple `usize` ID.
+                // This makes the `splitter` HashMap extremely fast, as it now uses
+                // `usize` as its key instead of a deeply nested structure.
+                let mut interner: HashMap<OneStepBehavior, usize> = HashMap::new();
+                let mut splitter: HashMap<usize, Vec<usize>> = HashMap::new();
+                // --- FIX END ---
+
                 for &suffix_id in &block {
-                    // --- FIX START ---
-                    // Get the representation and create the slice from `self.strings`.
-                    // This avoids holding an immutable borrow on `deduper` itself,
-                    // which would conflict with the mutable borrow in `remainder_of`.
                     let rep = deduper.nodes[suffix_id];
                     let suffix_bytes = &self.strings[rep.str_idx][rep.offset..];
-                    // --- FIX END ---
 
                     let mut key_per_state = SmallVec::new();
-
                     for &initial_state in self.initial_states {
                         let result = self.regex.execute_from_state2(suffix_bytes, initial_state);
                         let mut matches = SmallVec::new();
                         for m in result.matches {
-                            if m.position == 0 { continue; } // Avoid infinite loops
+                            if m.position == 0 { continue; }
                             let remainder_id = deduper.remainder_of(suffix_id, m.position);
                             let remainder_block_id = partitions[remainder_id];
                             matches.push((m.group_id, m.position, remainder_block_id));
@@ -248,15 +238,20 @@ impl<'a> EquivalenceAnalyzer<'a> {
                         key_per_state.push((result.end_state, matches));
                     }
 
-                    let key = RefinementKey { key_per_state, _phantom: std::marker::PhantomData };
-                    splitter.entry(key).or_default().push(suffix_id);
+                    let behavior = OneStepBehavior { key_per_state };
+
+                    // --- FIX START ---
+                    // Intern the behavior to get a cheap ID, then use that ID as the key.
+                    let next_intern_id = interner.len();
+                    let interned_id = *interner.entry(behavior).or_insert(next_intern_id);
+                    splitter.entry(interned_id).or_default().push(suffix_id);
+                    // --- FIX END ---
                 }
 
                 if splitter.len() > 1 {
                     has_changed = true;
                 }
 
-                // Assign new block IDs to the newly formed sub-blocks.
                 for sub_block in splitter.values() {
                     for &suffix_id in sub_block {
                         next_partitions[suffix_id] = next_block_id_counter;
@@ -275,18 +270,14 @@ impl<'a> EquivalenceAnalyzer<'a> {
         pb_refine.finish_with_message(format!("Converged with {} blocks.", num_blocks));
 
         // === Phase 4: Result Generation ===
-        // The final partitions are the equivalence classes. Map the original string
-        // indices to their corresponding final block IDs.
         let mut equivalence_classes: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
         for i in 0..self.strings.len() {
             let full_string_suffix_id = deduper.get_or_intern(i, 0);
             let final_block_id = partitions[full_string_suffix_id];
-            // The API expects a Vec<SignatureId> as the key. We use the final block ID.
             equivalence_classes.entry(vec![final_block_id]).or_default().push(i);
         }
 
         if VERIFY_EQUIVALENCE_CLASSES {
-            // The verification function expects a HashMap, so we convert.
             let computed_for_verify: HashMap<Vec<SignatureId>, Vec<usize>> =
                 equivalence_classes.clone().into_iter().collect();
             verify_equivalence_classes(self.regex, self.strings, self.initial_states, &computed_for_verify);
@@ -298,9 +289,6 @@ impl<'a> EquivalenceAnalyzer<'a> {
 
 /// Finds equivalence classes among a set of strings based on their tokenization
 /// behavior with a given Regex, starting from a set of initial DFA states.
-///
-/// Two strings are considered equivalent if, for every initial DFA state provided,
-/// they produce the same sequence of tokens.
 pub fn find_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
@@ -311,7 +299,6 @@ pub fn find_equivalence_classes(
 }
 
 /// Brute-force verification of equivalence classes.
-/// This is slow and should only be used for debugging.
 fn verify_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
@@ -320,7 +307,6 @@ fn verify_equivalence_classes(
 ) {
     println!("Verifying equivalence classes (this may be slow)...");
 
-    // A canonical representation of the tokenization graph for verification.
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct InternedVerificationSignature {
         matches: BTreeSet<(GroupID, usize, InternedVerificationSignatureId)>,
@@ -352,7 +338,6 @@ fn verify_equivalence_classes(
         }
     }
 
-    // 1. Collect all unique suffixes.
     let mut suffixes = HashSet::new();
     suffixes.insert(&[] as &[u8]);
     for s in strings {
@@ -363,14 +348,12 @@ fn verify_equivalence_classes(
     let mut sorted_suffixes: Vec<&[u8]> = suffixes.into_iter().collect();
     sorted_suffixes.sort_by_key(|s| s.len());
 
-    // 2. Identify all relevant DFA states.
     let relevant_states: BTreeSet<usize> = initial_states
         .iter()
         .cloned()
         .chain(std::iter::once(regex.dfa.start_state))
         .collect();
 
-    // 3. Compute signatures for all suffixes, from shortest to longest.
     let mut interner = VerificationSignatureInterner::new();
     let mut memo: HashMap<&[u8], BTreeMap<usize, InternedVerificationSignatureId>> = HashMap::new();
 
@@ -416,7 +399,6 @@ fn verify_equivalence_classes(
     }
     pb.finish();
 
-    // 4. Classify original strings based on their signature vectors.
     let mut brute_force_classes: BTreeMap<Vec<InternedVerificationSignatureId>, Vec<usize>> = BTreeMap::new();
     for (i, s) in strings.iter().enumerate() {
         let mut signature_vector = Vec::with_capacity(initial_states.len());
@@ -429,8 +411,6 @@ fn verify_equivalence_classes(
         brute_force_classes.entry(signature_vector).or_default().push(i);
     }
 
-    // 5. Compare partitions.
-    // A partition is a set of sets of indices. This is a canonical representation.
     let computed_partitions: BTreeSet<BTreeSet<usize>> = computed_classes
         .values()
         .map(|class| class.iter().cloned().collect())
