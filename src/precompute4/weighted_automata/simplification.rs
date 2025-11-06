@@ -591,9 +591,9 @@ impl NWA {
         while changed && passes < 5 {
             passes += 1;
             changed = false;
+            if self.collapse_all_weight_epsilon_sccs() { changed = true; }
             if self.prune_unreachable() { changed = true; }
             if self.prune_dead_ends() { changed = true; }
-            if self.collapse_all_weight_epsilon_sccs() { changed = true; }
         }
         self.states.len() != initial_n
     }
@@ -670,8 +670,44 @@ impl NWA {
             return changed;
         }
 
+        // Relax edge weights using future weights.
+        // This is semantically correct because any path from a state `v` will have its weight
+        // intersected with `fut[v]`. So, for an edge `u -> v` with weight `w`, we can relax `w`
+        // to `w | !fut[v]` without changing the language, because
+        // `(w | !fut[v]) & fut[v] == w & fut[v]`.
+        // This relaxation can turn some weights into `Weight::all()`, enabling more
+        // `collapse_all_weight_epsilon_sccs` in subsequent passes.
+        let not_fut: Vec<Weight> = fut.iter().map(|w| !w).collect();
+        let mut changed_weights = false;
+        for i in 0..n {
+            let st = &mut self.states[i];
+            for (v, w) in &mut st.epsilons {
+                let new_w = &*w | &not_fut[*v];
+                if new_w != *w {
+                    *w = new_w;
+                    changed_weights = true;
+                }
+            }
+            for (_, (v, w)) in &mut st.transitions {
+                let new_w = &*w | &not_fut[*v];
+                if new_w != *w {
+                    *w = new_w;
+                    changed_weights = true;
+                }
+            }
+            if let Some((v, w)) = &mut st.default {
+                let new_w = &*w | &not_fut[*v];
+                if new_w != *w {
+                    *w = new_w;
+                    changed_weights = true;
+                }
+            }
+        }
+
         let num_live = live.iter().filter(|&&b| b).count();
-        if num_live == n { return false; }
+        if num_live == n {
+            return changed_weights;
+        }
 
         let mut remap = vec![usize::MAX; n];
         let mut new_states_vec = Vec::with_capacity(num_live);
