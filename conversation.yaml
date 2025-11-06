@@ -1,326 +1,47 @@
 local_system:
   attached_files:
+    - /Users/isaacbreen/Downloads/full_dwa.patch
     - src/precompute4/full_dwa.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/precompute4/full_dwa.rs: |
-      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
-      use crate::datastructures::trie::{Trie, Trie2Index};
-      use crate::glr::parser::{ExpectElse, GLRParser};
-      use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
-      use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
-      use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
-      use crate::precompute4::utils;
-      use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWAStates, NWABody, StateID, Weight};
-      use crate::constraint::LLMTokenBV;
-      use range_set_blaze::RangeSetBlaze;
-      use std::cell::RefCell;
-      use std::collections::{BTreeMap, BTreeSet};
-      use std::time::Instant;
-
-      pub type Precomputed4 = DWA;
-      use crate::tokenizer::TokenizerStateID;
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub enum FullDWABuildError {
-          ParserStateIdOutOfRange { state_id: ParserStateID },
-      }
-
-      fn build_template_dwa_from_characterization(
-          bb: &BelowBottomCharacterization,
-      ) -> Result<DWA, FullDWABuildError> {
-          let mut dwa = DWA::new();
-          let w_all = Weight::all();
-
-          // Create a node for each non-terminal, similar to the NWA construction.
-          let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
-          for &nt in &bb.all_nts {
-              let id = dwa.add_state();
-              nt_nodes.insert(nt, id);
-          }
-
-          let start = dwa.body.start_state;
-
-          // --- Initial Actions from Start State ---
-
-          for &(initial_state, shift_state) in &bb.initial_shifts {
-              let pos_initial = utils::encode_symbol_i16(initial_state)?;
-              let neg_initial = utils::encode_negative_i16(initial_state)?;
-              let neg_shift = utils::encode_negative_i16(shift_state)?;
-
-              let s1 = dwa.add_state();
-              let s2 = dwa.add_state();
-              let s3 = dwa.add_state();
-
-              // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-              dwa.states[start].transitions.exceptions.insert(pos_initial, s1);
-              dwa.states[start].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-              dwa.states[s1].transitions.exceptions.insert(neg_initial, s2);
-              dwa.states[s1].trans_weights_exceptions.insert(neg_initial, w_all.clone());
-              dwa.states[s2].transitions.exceptions.insert(neg_shift, s3);
-              dwa.states[s2].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-              dwa.states[s3].final_weight = Some(w_all.clone());
-          }
-
-          for &(initial_state, len, nt) in &bb.initial_reduces {
-              let pos_initial = utils::encode_symbol_i16(initial_state)?;
-              let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
-
-              // Create a chain of default transitions for the pops.
-              // start --(+initial)--> s1 --(default)*len--> target_nt_state
-              let mut from = start;
-              let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
-              dwa.states[from].transitions.exceptions.insert(pos_initial, next_state);
-              dwa.states[from].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-              from = next_state;
-
-              for i in 0..len {
-                  let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.default = Some(to);
-                  dwa.states[from].trans_weight_default = Some(w_all.clone());
-                  from = to;
-              }
-          }
-
-          // --- Actions from Non-Terminal States ---
-
-          for (nt, rc) in &bb.reduce_characterizations {
-              let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
-
-              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
-                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-                  let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
-
-                  // src --(+revealed)--> s1 --(default)*len--> dst
-                  let mut from = src_nt_state;
-                  let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.exceptions.insert(pos_revealed, next_state);
-                  dwa.states[from].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-                  from = next_state;
-
-                  for i in 0..len {
-                      let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
-                      dwa.states[from].transitions.default = Some(to);
-                      dwa.states[from].trans_weight_default = Some(w_all.clone());
-                      from = to;
-                  }
-              }
-
-              for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
-                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-                  let neg_revealed = utils::encode_negative_i16(revealed_state)?;
-                  let neg_goto = utils::encode_negative_i16(goto_state)?;
-                  let neg_shift = utils::encode_negative_i16(shift_state)?;
-
-                  let s1 = dwa.add_state();
-                  let s2 = dwa.add_state();
-                  let s3 = dwa.add_state();
-                  let s4 = dwa.add_state();
-
-                  // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-                  dwa.states[src_nt_state].transitions.exceptions.insert(pos_revealed, s1);
-                  dwa.states[src_nt_state].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-                  dwa.states[s1].transitions.exceptions.insert(neg_revealed, s2);
-                  dwa.states[s1].trans_weights_exceptions.insert(neg_revealed, w_all.clone());
-                  dwa.states[s2].transitions.exceptions.insert(neg_goto, s3);
-                  dwa.states[s2].trans_weights_exceptions.insert(neg_goto, w_all.clone());
-                  dwa.states[s3].transitions.exceptions.insert(neg_shift, s4);
-                  dwa.states[s3].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-                  dwa.states[s4].final_weight = Some(w_all.clone());
-              }
-          }
-
-          dwa.simplify();
-
-          Ok(dwa)
-      }
-
-      fn build_template_dwas(
-          parser: &GLRParser,
-      ) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
-          let all = compute_all_characterizations(parser);
-          let mut out = BTreeMap::new();
-          for (term, bb) in all {
-              let dwa = build_template_dwa_from_characterization(&bb)?;
-              crate::debug!(6, "Built template DWA for terminal {:?}:", term);
-              crate::debug!(6, "{}", dwa);
-              out.insert(term, dwa);
-          }
-          Ok(out)
-      }
-
-      fn build_ignore_terminal_dwa() -> DWA {
-          // Identity DWA: start is final, no transitions.
-          let mut dwa = DWA::new();
-          dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
-          dwa
-      }
-
-      // Helper: collect final states of a DWA
-      fn collect_final_states(dwa: &DWA) -> BTreeSet<usize> {
-          let mut finals = BTreeSet::new();
-          for (i, st) in dwa.states.0.iter().enumerate() {
-              if st.final_weight.is_some() {
-                  finals.insert(i);
-              }
-          }
-          finals
-      }
-
-      // Helper: join_map for concatenation: map each left final to the right's start.
-      fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<usize>> {
-          let left_final_states = collect_final_states(left);
-          let right_start = right.body.start_state;
-          let mut join_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-          for lf in left_final_states {
-              join_map.insert(lf, BTreeSet::from([right_start]));
-          }
-          join_map
-      }
-
-      // Public API: precompute4 using NWA-first approach, determinize at the end.
-      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
-          let now_total = Instant::now();
-          let now = Instant::now();
-          crate::debug!(5, "Starting precompute4...");
-          // 1. Build template DWAs for all terminals.
-          let template_dwas = match build_template_dwas(parser) {
-              Ok(m) => m,
-              Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-          };
-          let ignore_dwa = build_ignore_terminal_dwa();
-          crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
-
-          // 2. Set up shared NWA state arena.
-          let states_arena = RefCell::new(NWAStates::default());
-
-          // 3. Reverse the precompute1 trie.
-          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
-
-          let (reversed_trie1_god, reversed_trie1_roots) = Trie::reverse(trie1_god, &trie1_roots);
-
-          // 4. Traverse the reversed trie with NWA bodies.
-          let initial_nwa_body = {
-              let mut states = states_arena.borrow_mut();
-              let start = states.add_state();
-              states[start].final_weight = Some(Weight::all());
-              NWABody { start_state: start }
-          };
-          let initial_tokens = LLMTokenBV::max_ones();
-          let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = reversed_trie1_roots.iter().map(|&root| (root, (initial_nwa_body.clone(), initial_tokens.clone()))).collect();
-          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &reversed_trie1_roots).expect("Failed to compute traversal data for reversed trie1");
-          let original_trie1_roots_map: BTreeMap<_, _> = precomputed1.iter().map(|(k, v)| (v.clone(), *k)).collect();
-
-          let options = crate::datastructures::trie::PrettyPrintOptions::default()
-              .omit_nodes()
-              .omit_depth()
-              ;
-          crate::debug!(5, "Trie:\n{}", Trie::pretty_print_with_options(&trie1_god, &trie1_roots, &options));
-          crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &reversed_trie1_roots, &options));
-
-          let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
-
-          let now = Instant::now();
-          Trie::special_map_grouped(
-              &reversed_trie1_god,
-              &traversal_data,
-              initial_values,
-              // step function
-              |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
-                  let (current_nwa_body, current_tokens) = current_val;
-                  let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
-                      let terminal_id = edge_terminal_opt.unwrap();
-                      template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
-                  } else {
-                      &ignore_dwa
-                  };
-
-                  let mut results: Vec<(PrecomputeNode1Index, (NWABody, LLMTokenBV))> = Vec::new();
-                  for (dest_idx, llm_token_bv) in dest_map.iter() {
-                      let next_tokens = current_tokens & llm_token_bv;
-                      if next_tokens.is_empty() {
-                          continue;
-                      }
-
-                      let mut states = states_arena.borrow_mut();
-
-                      // Convert template DWA to NWA and copy it into the arena
-                      let template_nwa = NWA::from_dwa(template_dwa);
-                      crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
-                      let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
-                      crate::debug!(5, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
-                      let left_body = NWABody { start_state: template_start_in_arena };
-
-                      // Concatenate: left then current (right) via epsilon with weight = llm_token_bv
-                      crate::debug!(5, "Starting NWA::concatenate_components: left_start={} right_start={}...", left_body.start_state, current_nwa_body.start_state);
-                      let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                      let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
-                      crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
-
-                      results.push((*dest_idx, (composed_body, next_tokens)));
-                  }
-                  results
-              },
-              // merge function: union them via epsilon
-              |val1, val2| {
-                  let (body1, tokens1) = val1;
-                  let (body2, tokens2) = val2;
-                  let mut states = states_arena.borrow_mut();
-                  crate::debug!(5, "Starting NWA::union_components: body1_start={} body2_start={}...", body1.start_state, body2.start_state);
-                  *body1 = NWA::union_components(&mut states, body1, &body2);
-                  *tokens1 |= &tokens2;
-                  crate::debug!(5, "NWA::union_components finished. New start state: {}.", body1.start_state);
-              },
-              // process function: capture at original roots
-              |_node_data, node_idx, val| {
-                  let (nwa_body, tokens) = val;
-                  if !tokens.is_empty() {
-                      if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                          final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
-                      }
-                      Some((nwa_body, tokens)) // continue traversal
-                  } else {
-                      None
-                  }
-              },
-          );
-          crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
-
-          // Combine all final NWA bodies into a single NWA
-          let mut combined_nwa_states = states_arena.into_inner();
-          let combined_start_state = combined_nwa_states.add_state();
-
-          for (tok_id, body) in final_bodies {
-              // Add a transition from the new combined start state to the start of the NWA for this tokenizer state.
-              // The label is the tokenizer state ID.
-              let label = tok_id.0 as i16;
-              combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all());
-          }
-
-          let mut combined_nwa = NWA {
-              states: combined_nwa_states,
-              body: NWABody { start_state: combined_start_state },
-          };
-          crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
-          crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
-
-          let now = Instant::now();
-          crate::debug!(5, "Starting resolve_negative_codes_in_nwa...");
-          resolve_negative_codes_in_nwa(&mut combined_nwa);
-          crate::debug!(4, "resolve_negative_codes_in_nwa took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
-
-          let now = Instant::now();
-          // Determinize the single combined NWA
-          crate::debug!(5, "Determinizing final combined NWA...");
-          let mut final_dwa = combined_nwa.determinize_to_dwa();
-          final_dwa.simplify();
-          crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
-
-          crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
-          final_dwa
-      }
-  prev_file_contents:
+    /Users/isaacbreen/Downloads/full_dwa.patch: |
+      diff --git a/src/precompute4/full_dwa.rs b/src/precompute4/full_dwa.rs
+      index 562777504..d48c52b63 100644
+      --- a/src/precompute4/full_dwa.rs
+      +++ b/src/precompute4/full_dwa.rs
+      @@ -190,14 +190,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
+       
+           // 3. Reverse the precompute1 trie.
+           let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
+      -    let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+       
+      -    let leaf_node = all_nodes.iter().find_map(|&idx| {
+      -        idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+      -    }).expect("Precompute1 trie must have a single leaf node.");
+      -
+      -    let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+      -    let reversed_trie_root = leaf_node;
+      +    let (reversed_trie1_god, reversed_trie1_roots) = Trie::reverse(trie1_god, &trie1_roots);
+       
+           // 4. Traverse the reversed trie with NWA bodies.
+           let initial_nwa_body = {
+      @@ -207,12 +201,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
+               NWABody { start_state: start }
+           };
+           let initial_tokens = LLMTokenBV::max_ones();
+      -    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
+      -    let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+      +    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = reversed_trie1_roots.iter().map(|&root| (root, (initial_nwa_body.clone(), initial_tokens.clone()))).collect();
+      +    let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &reversed_trie1_roots).expect("Failed to compute traversal data for reversed trie1");
+           let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
+       
+           crate::debug!(5, "Trie:\n{}", Trie::pretty_print(&trie1_god, &trie1_roots));
+      -    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print(&reversed_trie1_god, &trie1_roots));
+      +    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print(&reversed_trie1_god, &reversed_trie1_roots));
+       
+           let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
+       
     src/precompute4/full_dwa.rs: |
       use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
       use crate::datastructures::trie::{Trie, Trie2Index};
@@ -642,6 +363,372 @@ local_system:
           crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
           final_dwa
       }
+  prev_file_contents:
+    /Users/isaacbreen/Downloads/full_dwa.patch: |
+      diff --git a/src/precompute4/full_dwa.rs b/src/precompute4/full_dwa.rs
+      index 562777504..d48c52b63 100644
+      --- a/src/precompute4/full_dwa.rs
+      +++ b/src/precompute4/full_dwa.rs
+      @@ -190,14 +190,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
+       
+           // 3. Reverse the precompute1 trie.
+           let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
+      -    let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+       
+      -    let leaf_node = all_nodes.iter().find_map(|&idx| {
+      -        idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+      -    }).expect("Precompute1 trie must have a single leaf node.");
+      -
+      -    let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+      -    let reversed_trie_root = leaf_node;
+      +    let (reversed_trie1_god, reversed_trie1_roots) = Trie::reverse(trie1_god, &trie1_roots);
+       
+           // 4. Traverse the reversed trie with NWA bodies.
+           let initial_nwa_body = {
+      @@ -207,12 +201,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
+               NWABody { start_state: start }
+           };
+           let initial_tokens = LLMTokenBV::max_ones();
+      -    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
+      -    let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+      +    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = reversed_trie1_roots.iter().map(|&root| (root, (initial_nwa_body.clone(), initial_tokens.clone()))).collect();
+      +    let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &reversed_trie1_roots).expect("Failed to compute traversal data for reversed trie1");
+           let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
+       
+           crate::debug!(5, "Trie:\n{}", Trie::pretty_print(&trie1_god, &trie1_roots));
+      -    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print(&reversed_trie1_god, &trie1_roots));
+      +    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print(&reversed_trie1_god, &reversed_trie1_roots));
+       
+           let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
+       
+    src/precompute4/full_dwa.rs: |
+      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
+      use crate::datastructures::trie::{Trie, Trie2Index};
+      use crate::glr::parser::{ExpectElse, GLRParser};
+      use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
+      use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
+      use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
+      use crate::precompute4::utils;
+      use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWAStates, NWABody, StateID, Weight};
+      use crate::constraint::LLMTokenBV;
+      use range_set_blaze::RangeSetBlaze;
+      use std::cell::RefCell;
+      use std::collections::{BTreeMap, BTreeSet};
+      use std::time::Instant;
+
+      pub type Precomputed4 = DWA;
+      use crate::tokenizer::TokenizerStateID;
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum FullDWABuildError {
+          ParserStateIdOutOfRange { state_id: ParserStateID },
+      }
+
+      fn build_template_dwa_from_characterization(
+          bb: &BelowBottomCharacterization,
+      ) -> Result<DWA, FullDWABuildError> {
+          let mut dwa = DWA::new();
+          let w_all = Weight::all();
+
+          // Create a node for each non-terminal, similar to the NWA construction.
+          let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
+          for &nt in &bb.all_nts {
+              let id = dwa.add_state();
+              nt_nodes.insert(nt, id);
+          }
+
+          let start = dwa.body.start_state;
+
+          // --- Initial Actions from Start State ---
+
+          for &(initial_state, shift_state) in &bb.initial_shifts {
+              let pos_initial = utils::encode_symbol_i16(initial_state)?;
+              let neg_initial = utils::encode_negative_i16(initial_state)?;
+              let neg_shift = utils::encode_negative_i16(shift_state)?;
+
+              let s1 = dwa.add_state();
+              let s2 = dwa.add_state();
+              let s3 = dwa.add_state();
+
+              // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
+              dwa.states[start].transitions.exceptions.insert(pos_initial, s1);
+              dwa.states[start].trans_weights_exceptions.insert(pos_initial, w_all.clone());
+              dwa.states[s1].transitions.exceptions.insert(neg_initial, s2);
+              dwa.states[s1].trans_weights_exceptions.insert(neg_initial, w_all.clone());
+              dwa.states[s2].transitions.exceptions.insert(neg_shift, s3);
+              dwa.states[s2].trans_weights_exceptions.insert(neg_shift, w_all.clone());
+              dwa.states[s3].final_weight = Some(w_all.clone());
+          }
+
+          for &(initial_state, len, nt) in &bb.initial_reduces {
+              let pos_initial = utils::encode_symbol_i16(initial_state)?;
+              let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
+
+              // Create a chain of default transitions for the pops.
+              // start --(+initial)--> s1 --(default)*len--> target_nt_state
+              let mut from = start;
+              let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
+              dwa.states[from].transitions.exceptions.insert(pos_initial, next_state);
+              dwa.states[from].trans_weights_exceptions.insert(pos_initial, w_all.clone());
+              from = next_state;
+
+              for i in 0..len {
+                  let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
+                  dwa.states[from].transitions.default = Some(to);
+                  dwa.states[from].trans_weight_default = Some(w_all.clone());
+                  from = to;
+              }
+          }
+
+          // --- Actions from Non-Terminal States ---
+
+          for (nt, rc) in &bb.reduce_characterizations {
+              let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
+
+              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
+                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+                  let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
+
+                  // src --(+revealed)--> s1 --(default)*len--> dst
+                  let mut from = src_nt_state;
+                  let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
+                  dwa.states[from].transitions.exceptions.insert(pos_revealed, next_state);
+                  dwa.states[from].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
+                  from = next_state;
+
+                  for i in 0..len {
+                      let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
+                      dwa.states[from].transitions.default = Some(to);
+                      dwa.states[from].trans_weight_default = Some(w_all.clone());
+                      from = to;
+                  }
+              }
+
+              for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+                  let neg_revealed = utils::encode_negative_i16(revealed_state)?;
+                  let neg_goto = utils::encode_negative_i16(goto_state)?;
+                  let neg_shift = utils::encode_negative_i16(shift_state)?;
+
+                  let s1 = dwa.add_state();
+                  let s2 = dwa.add_state();
+                  let s3 = dwa.add_state();
+                  let s4 = dwa.add_state();
+
+                  // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
+                  dwa.states[src_nt_state].transitions.exceptions.insert(pos_revealed, s1);
+                  dwa.states[src_nt_state].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
+                  dwa.states[s1].transitions.exceptions.insert(neg_revealed, s2);
+                  dwa.states[s1].trans_weights_exceptions.insert(neg_revealed, w_all.clone());
+                  dwa.states[s2].transitions.exceptions.insert(neg_goto, s3);
+                  dwa.states[s2].trans_weights_exceptions.insert(neg_goto, w_all.clone());
+                  dwa.states[s3].transitions.exceptions.insert(neg_shift, s4);
+                  dwa.states[s3].trans_weights_exceptions.insert(neg_shift, w_all.clone());
+                  dwa.states[s4].final_weight = Some(w_all.clone());
+              }
+          }
+
+          dwa.simplify();
+
+          Ok(dwa)
+      }
+
+      fn build_template_dwas(
+          parser: &GLRParser,
+      ) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+          let all = compute_all_characterizations(parser);
+          let mut out = BTreeMap::new();
+          for (term, bb) in all {
+              let dwa = build_template_dwa_from_characterization(&bb)?;
+              crate::debug!(6, "Built template DWA for terminal {:?}:", term);
+              crate::debug!(6, "{}", dwa);
+              out.insert(term, dwa);
+          }
+          Ok(out)
+      }
+
+      fn build_ignore_terminal_dwa() -> DWA {
+          // Identity DWA: start is final, no transitions.
+          let mut dwa = DWA::new();
+          dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
+          dwa
+      }
+
+      // Helper: collect final states of a DWA
+      fn collect_final_states(dwa: &DWA) -> BTreeSet<usize> {
+          let mut finals = BTreeSet::new();
+          for (i, st) in dwa.states.0.iter().enumerate() {
+              if st.final_weight.is_some() {
+                  finals.insert(i);
+              }
+          }
+          finals
+      }
+
+      // Helper: join_map for concatenation: map each left final to the right's start.
+      fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<usize>> {
+          let left_final_states = collect_final_states(left);
+          let right_start = right.body.start_state;
+          let mut join_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+          for lf in left_final_states {
+              join_map.insert(lf, BTreeSet::from([right_start]));
+          }
+          join_map
+      }
+
+      // Public API: precompute4 using NWA-first approach, determinize at the end.
+      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
+          let now_total = Instant::now();
+          let now = Instant::now();
+          crate::debug!(5, "Starting precompute4...");
+          // 1. Build template DWAs for all terminals.
+          let template_dwas = match build_template_dwas(parser) {
+              Ok(m) => m,
+              Err(e) => panic!("Failed to build template DWAs: {:?}", e),
+          };
+          let ignore_dwa = build_ignore_terminal_dwa();
+          crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
+
+          // 2. Set up shared NWA state arena.
+          let states_arena = RefCell::new(NWAStates::default());
+
+          // 3. Reverse the precompute1 trie.
+          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
+
+          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+
+          let leaf_node = all_nodes.iter().find_map(|&idx| {
+              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+          }).expect("Precompute1 trie must have a single leaf node.");
+
+          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+          let reversed_trie_root = leaf_node;
+
+          // 4. Traverse the reversed trie with NWA bodies.
+          let initial_nwa_body = {
+              let mut states = states_arena.borrow_mut();
+              let start = states.add_state();
+              states[start].final_weight = Some(Weight::all());
+              NWABody { start_state: start }
+          };
+          let initial_tokens = LLMTokenBV::max_ones();
+          let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
+          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+          let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
+          for (k, v) in precomputed1.iter() {
+              original_trie1_roots_map.entry(v.clone()).or_default().push(*k);
+          }
+
+          let options = crate::datastructures::trie::PrettyPrintOptions::default()
+              .omit_nodes()
+              .omit_depth()
+              ;
+          crate::debug!(5, "Trie:\n{}", Trie::pretty_print_with_options(&trie1_god, &trie1_roots, &options));
+          crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+
+          let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
+
+          let now = Instant::now();
+          Trie::special_map_grouped(
+              &reversed_trie1_god,
+              &traversal_data,
+              initial_values,
+              // step function
+              |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
+                  let (current_nwa_body, current_tokens) = current_val;
+                  let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                      let terminal_id = edge_terminal_opt.unwrap();
+                      template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
+                  } else {
+                      &ignore_dwa
+                  };
+
+                  let mut results: Vec<(PrecomputeNode1Index, (NWABody, LLMTokenBV))> = Vec::new();
+                  for (dest_idx, llm_token_bv) in dest_map.iter() {
+                      let next_tokens = current_tokens & llm_token_bv;
+                      if next_tokens.is_empty() {
+                          continue;
+                      }
+
+                      let mut states = states_arena.borrow_mut();
+
+                      // Convert template DWA to NWA and copy it into the arena
+                      let template_nwa = NWA::from_dwa(template_dwa);
+                      crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
+                      let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
+                      crate::debug!(5, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
+                      let left_body = NWABody { start_state: template_start_in_arena };
+
+                      // Concatenate: left then current (right) via epsilon with weight = llm_token_bv
+                      crate::debug!(5, "Starting NWA::concatenate_components: left_start={} right_start={}...", left_body.start_state, current_nwa_body.start_state);
+                      let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                      let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
+                      crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
+
+                      results.push((*dest_idx, (composed_body, next_tokens)));
+                  }
+                  results
+              },
+              // merge function: union them via epsilon
+              |val1, val2| {
+                  let (body1, tokens1) = val1;
+                  let (body2, tokens2) = val2;
+                  let mut states = states_arena.borrow_mut();
+                  crate::debug!(5, "Starting NWA::union_components: body1_start={} body2_start={}...", body1.start_state, body2.start_state);
+                  *body1 = NWA::union_components(&mut states, body1, &body2);
+                  *tokens1 |= &tokens2;
+                  crate::debug!(5, "NWA::union_components finished. New start state: {}.", body1.start_state);
+              },
+              // process function: capture at original roots
+              |_node_data, node_idx, val| {
+                  let (nwa_body, tokens) = val;
+                  if !tokens.is_empty() {
+                      if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
+                          for tokenizer_state_id in tokenizer_state_ids {
+                              final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
+                          }
+                      }
+                      Some((nwa_body, tokens)) // continue traversal
+                  } else {
+                      None
+                  }
+              },
+          );
+          crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
+
+          // Combine all final NWA bodies into a single NWA
+          let mut combined_nwa_states = states_arena.into_inner();
+          let combined_start_state = combined_nwa_states.add_state();
+
+          for (tok_id, body) in final_bodies {
+              // Add a transition from the new combined start state to the start of the NWA for this tokenizer state.
+              // The label is the tokenizer state ID.
+              let label = tok_id.0 as i16;
+              combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all());
+          }
+
+          let mut combined_nwa = NWA {
+              states: combined_nwa_states,
+              body: NWABody { start_state: combined_start_state },
+          };
+          crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
+          crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
+
+          let now = Instant::now();
+          crate::debug!(5, "Starting resolve_negative_codes_in_nwa...");
+          resolve_negative_codes_in_nwa(&mut combined_nwa);
+          crate::debug!(4, "resolve_negative_codes_in_nwa took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+
+          let now = Instant::now();
+          // Determinize the single combined NWA
+          crate::debug!(5, "Determinizing final combined NWA...");
+          let mut final_dwa = combined_nwa.determinize_to_dwa();
+          final_dwa.simplify();
+          crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
+
+          crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
+          final_dwa
+      }
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -684,6 +771,48 @@ messages:
       kind: core-guidance
       role: developer
       ephemeral: false
+  - user: |-
+      ```text "/Users/isaacbreen/Downloads/full_dwa.patch"
+      diff --git a/src/precompute4/full_dwa.rs b/src/precompute4/full_dwa.rs
+      index 562777504..d48c52b63 100644
+      --- a/src/precompute4/full_dwa.rs
+      +++ b/src/precompute4/full_dwa.rs
+      @@ -190,14 +190,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
+       
+           // 3. Reverse the precompute1 trie.
+           let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
+      -    let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+       
+      -    let leaf_node = all_nodes.iter().find_map(|&idx| {
+      -        idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+      -    }).expect("Precompute1 trie must have a single leaf node.");
+      -
+      -    let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+      -    let reversed_trie_root = leaf_node;
+      +    let (reversed_trie1_god, reversed_trie1_roots) = Trie::reverse(trie1_god, &trie1_roots);
+       
+           // 4. Traverse the reversed trie with NWA bodies.
+           let initial_nwa_body = {
+      @@ -207,12 +201,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
+               NWABody { start_state: start }
+           };
+           let initial_tokens = LLMTokenBV::max_ones();
+      -    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
+      -    let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+      +    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = reversed_trie1_roots.iter().map(|&root| (root, (initial_nwa_body.clone(), initial_tokens.clone()))).collect();
+      +    let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &reversed_trie1_roots).expect("Failed to compute traversal data for reversed trie1");
+           let original_trie1_roots_map: BTreeMap<_,_> = precomputed1.iter().map(|(k,v)|(v.clone(), *k)).collect();
+       
+           crate::debug!(5, "Trie:\n{}", Trie::pretty_print(&trie1_god, &trie1_roots));
+      -    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print(&reversed_trie1_god, &trie1_roots));
+      +    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print(&reversed_trie1_god, &reversed_trie1_roots));
+       
+           let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
+       
+
+      ```
+    metadata:
+      filename: /Users/isaacbreen/Downloads/full_dwa.patch
   - user: |-
       ```rust "src/precompute4/full_dwa.rs"
       use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
@@ -891,7 +1020,10 @@ messages:
           let initial_tokens = LLMTokenBV::max_ones();
           let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = reversed_trie1_roots.iter().map(|&root| (root, (initial_nwa_body.clone(), initial_tokens.clone()))).collect();
           let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &reversed_trie1_roots).expect("Failed to compute traversal data for reversed trie1");
-          let original_trie1_roots_map: BTreeMap<_, _> = precomputed1.iter().map(|(k, v)| (v.clone(), *k)).collect();
+          let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
+          for (k, v) in precomputed1.iter() {
+              original_trie1_roots_map.entry(v.clone()).or_default().push(*k);
+          }
 
           let options = crate::datastructures::trie::PrettyPrintOptions::default()
               .omit_nodes()
@@ -957,8 +1089,10 @@ messages:
               |_node_data, node_idx, val| {
                   let (nwa_body, tokens) = val;
                   if !tokens.is_empty() {
-                      if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                          final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
+                      if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
+                          for tokenizer_state_id in tokenizer_state_ids {
+                              final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
+                          }
                       }
                       Some((nwa_body, tokens)) // continue traversal
                   } else {
@@ -1005,9 +1139,12 @@ messages:
       ```
     metadata:
       filename: src/precompute4/full_dwa.rs
-  - user: 'Problem with this code: original_trie1_roots_map is wrong. We might have
-      two tokenizer state IDs mapped to the same node ID. original_trie1_roots_map
-      loses this.'
+  - user: /Users/isaacbreen/Downloads/full_dwa.patch
+    metadata:
+  - user: I want to essentially revert the attached diff. But I can't easily because
+      other changes have happened since then that I want to keep. Revert just the
+      changes in the diff. ie use leaf node and don't expect reverse to return new
+      roots.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1027,79 +1164,98 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      You've correctly identified a bug where `original_trie1_roots_map` could lose data if multiple `TokenizerStateID`s map to the same trie node. A `BTreeMap` will only store the last key-value pair for a given key, overwriting any previous entries.
-
-      To fix this, we'll change `original_trie1_roots_map` to store a collection of `TokenizerStateID`s for each node index and then update the code that uses this map to iterate over that collection.
-
-      Here are the step-by-step instructions to fix the issue:
+      Of course. Based on your request to revert the changes from the provided diff while keeping other modifications, here are the step-by-step instructions and the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/precompute4/full_dwa.rs`.**
+      Here are the edits for `src/precompute4/full_dwa.rs`:
 
-      2.  **Navigate to the `precompute4` function.**
+      1.  **Revert Trie Reversal Logic:** In the `precompute4` function, locate the line that reverses the trie:
+          ```rust
+          let (reversed_trie1_god, reversed_trie1_roots) = Trie::reverse(trie1_god, &trie1_roots);
+          ```
+          Replace this line with the original logic that finds the single leaf node to use as the new root. Also, ensure the call to `Trie::reverse` expects a single return value.
+          ```rust
+          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
 
-      3.  **Modify the initialization of `original_trie1_roots_map`**.
-          Find this line:
-          ```rust
-          let original_trie1_roots_map: BTreeMap<_, _> = precomputed1.iter().map(|(k, v)| (v.clone(), *k)).collect();
-          ```
-          Replace it with the following code block to correctly aggregate all tokenizer state IDs for each trie node index into a `Vec<TokenizerStateID>`:
-          ```rust
-          let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
-          for (k, v) in precomputed1.iter() {
-              original_trie1_roots_map.entry(v.clone()).or_default().push(*k);
-          }
+          let leaf_node = all_nodes.iter().find_map(|&idx| {
+              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+          }).expect("Precompute1 trie must have a single leaf node.");
+
+          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+          let reversed_trie_root = leaf_node;
           ```
 
-      4.  **Update the `process` closure in `Trie::special_map_grouped`**.
-          Locate the closure passed as the final argument to `Trie::special_map_grouped`. Inside it, find this `if let` block:
+      2.  **Update Initial Values for Traversal:** Modify the `initial_values` variable to use the single `reversed_trie_root`. Replace:
           ```rust
-          if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-              final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
-          }
+          let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = reversed_trie1_roots.iter().map(|&root| (root, (initial_nwa_body.clone(), initial_tokens.clone()))).collect();
           ```
-          Replace it with a loop that iterates over the vector of tokenizer state IDs and inserts an entry into `final_bodies` for each one:
+          with:
           ```rust
-          if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
-              for tokenizer_state_id in tokenizer_state_ids {
-                  final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
-              }
-          }
+          let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
+          ```
+
+      3.  **Update Traversal Data Computation:** Adjust the `traversal_data` computation to also use the single `reversed_trie_root`. Replace:
+          ```rust
+          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &reversed_trie1_roots).expect("Failed to compute traversal data for reversed trie1");
+          ```
+          with:
+          ```rust
+          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+          ```
+
+      4.  **Correct Debug Print Statement:** Update the debug statement that prints the reversed trie to use the correct root. Replace:
+          ```rust
+          crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &reversed_trie1_roots, &options));
+          ```
+          with:
+          ```rust
+          crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
           ```
 
       ### Git Diff
 
-      Here is the git diff for the changes:
+      Here is the git diff to apply these changes:
 
       ```diff
       --- a/src/precompute4/full_dwa.rs
       +++ b/src/precompute4/full_dwa.rs
-      @@ -242,7 +242,11 @@
-           let initial_tokens = LLMTokenBV::max_ones();
-           let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = reversed_trie1_roots.iter().map(|&root| (root, (initial_nwa_body.clone(), initial_tokens.clone()))).collect();
-           let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &reversed_trie1_roots).expect("Failed to compute traversal data for reversed trie1");
-      -    let original_trie1_roots_map: BTreeMap<_, _> = precomputed1.iter().map(|(k, v)| (v.clone(), *k)).collect();
-      +    let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
-      +    for (k, v) in precomputed1.iter() {
-      +        original_trie1_roots_map.entry(v.clone()).or_default().push(*k);
-      +    }
+      @@ -229,7 +229,15 @@
+           // 3. Reverse the precompute1 trie.
+           let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
        
-           let options = crate::datastructures::trie::PrettyPrintOptions::default()
-               .omit_nodes()
-      @@ -302,8 +306,10 @@
-               |_node_data, node_idx, val| {
-                   let (nwa_body, tokens) = val;
-                   if !tokens.is_empty() {
-      -                if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-      -                    final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
-      +                if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
-      +                    for tokenizer_state_id in tokenizer_state_ids {
-      +                        final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
-      +                    }
-                       }
-                       Some((nwa_body, tokens)) // continue traversal
-                   } else {
+      -    let (reversed_trie1_god, reversed_trie1_roots) = Trie::reverse(trie1_god, &trie1_roots);
+      +    let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+      +
+      +    let leaf_node = all_nodes.iter().find_map(|&idx| {
+      +        idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+      +    }).expect("Precompute1 trie must have a single leaf node.");
+      +
+      +    let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+      +    let reversed_trie_root = leaf_node;
+       
+           // 4. Traverse the reversed trie with NWA bodies.
+           let initial_nwa_body = {
+      @@ -240,8 +248,8 @@
+               NWABody { start_state: start }
+           };
+           let initial_tokens = LLMTokenBV::max_ones();
+      -    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = reversed_trie1_roots.iter().map(|&root| (root, (initial_nwa_body.clone(), initial_tokens.clone()))).collect();
+      -    let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &reversed_trie1_roots).expect("Failed to compute traversal data for reversed trie1");
+      +    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
+      +    let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+           let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
+           for (k, v) in precomputed1.iter() {
+               original_trie1_roots_map.entry(v.clone()).or_default().push(*k);
+      @@ -252,7 +260,7 @@
+               .omit_depth()
+               ;
+           crate::debug!(5, "Trie:\n{}", Trie::pretty_print_with_options(&trie1_god, &trie1_roots, &options));
+      -    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &reversed_trie1_roots, &options));
+      +    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+       
+           let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
+       
 
       ```
     metadata:
@@ -1112,7 +1268,7 @@ messages:
       Applying patch to 'src/precompute4/full_dwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/full_dwa.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Aggregate TokenizerStateIDs in original_trie1_roots_map
-      to handle multiple roots per node"'
+  - user: 'Changes committed with message: "Revert precompute4 to use single leaf
+      node as reversed trie root"'
     metadata:
 ...
