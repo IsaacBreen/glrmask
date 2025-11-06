@@ -1424,7 +1424,7 @@ impl GrammarConstraint {
                 precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
-                precomputed4: DWA::new(),
+                precomputed4: Precomputed4::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -1466,7 +1466,7 @@ impl GrammarConstraint {
                 precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
-                precomputed4: DWA::new(),
+                precomputed4: Precomputed4::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -1551,7 +1551,7 @@ impl GrammarConstraint {
                 config,
                 &mut precompute3_vocab,
             );
-            (p3, t3g, DWA::new())
+            (p3, t3g, Precomputed4::new())
         };
 
         // After precompute3, vocab may have changed due to optimizations. Remap other structures that use internal LLM token IDs.
@@ -1770,7 +1770,7 @@ impl GrammarConstraint {
                 precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
-                precomputed4: BTreeMap::new(),
+                precomputed4: Precomputed4::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -1831,7 +1831,7 @@ impl GrammarConstraint {
                 precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
-                precomputed4: BTreeMap::new(),
+                precomputed4: Precomputed4::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -1904,7 +1904,7 @@ impl GrammarConstraint {
                 config,
                 &mut precompute3_vocab,
             );
-            (p3, t3g, DWA::new())
+            (p3, t3g, Precomputed4::new())
         };
 
         // After precompute3, vocab may have changed due to optimizations. Remap other structures that use internal LLM token IDs.
