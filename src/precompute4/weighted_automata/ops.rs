@@ -292,12 +292,15 @@ impl NWA {
     /// - Set s.final_weight = None (standard concatenation semantics).
     /// Return body with start = left.start.
     pub fn concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+        println!("Concatenating NWAs with eps_weight={:?}", eps_weight);
+        println!("LEFT:\n{}\nRIGHT:\n{}STATES BEFORE CONCAT:{}", left, right, states);
         if STOCHASTIC_DEBUG {
             let nwa1 = NWA { states: states.clone(), body: left.clone() };
             let nwa2 = NWA { states: states.clone(), body: right.clone() };
 
             let mut states_after_concat = states.clone();
             let concat_body = Self::internal_concatenate_components(&mut states_after_concat, left, right, eps_weight);
+            println!("RESULT:\n{}\nSTATES AFTER CONCAT:{}", concat_body, states_after_concat);
             let concat_nwa = NWA { states: states_after_concat, body: concat_body };
 
             let mut dwa1 = nwa1.determinize_to_dwa();
@@ -306,6 +309,7 @@ impl NWA {
             dwa2.simplify();
             let mut result_dwa = concat_nwa.determinize_to_dwa();
             result_dwa.simplify();
+
 
             DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
         }
