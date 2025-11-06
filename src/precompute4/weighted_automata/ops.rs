@@ -254,9 +254,8 @@ impl NWA {
         for sid in 0..states.len() {
             if !visited[sid] { continue; }
             if let Some(fw) = states[sid].final_weight.clone() {
-                let w = &fw & eps_weight;
-                if !w.is_empty() {
-                    states.add_epsilon(sid, right.start_state, w);
+                if !eps_weight.is_empty() {
+                    states.add_epsilon(sid, right.start_state, eps_weight.clone());
                 }
                 states[sid].final_weight = None;
             }
