@@ -2216,14 +2216,14 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// * `roots`: The set of roots to start traversal from. All reachable nodes will be included.
     ///
     /// # Returns
-    /// A new `Arena` containing the reversed graph.
+    /// A tuple containing the new `Arena` and a `Vec<Trie2Index>` of the new roots.
     pub fn reverse(
         source_arena: &Arena<Self>,
         roots: &[Trie2Index],
-    ) -> Arena<Self> {
+    ) -> (Arena<Self>, Vec<Trie2Index>) {
         let new_arena = Arena::new();
         if roots.is_empty() {
-            return new_arena;
+            return (new_arena, Vec::new());
         }
 
         let all_nodes = Self::all_nodes(source_arena, roots);
@@ -2267,7 +2267,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             Self::recompute_all_max_depths(&new_arena, &new_roots);
         }
 
-        new_arena
+        (new_arena, new_roots)
     }
 }
 
@@ -3699,13 +3699,16 @@ mod tests {
         drop(n1_w);
 
         // Reverse the graph
-        let reversed_arena = TestTrie::reverse(&arena, &[n0]);
+        let (reversed_arena, new_roots) = TestTrie::reverse(&arena, &[n0]);
 
         // Check the reversed graph
         // Expected:
         // 1 -> 0 (key "a", val 10)
         // 2 -> 0 (key "b", val 20)
         // 2 -> 1 (key "c", val 30)
+
+        // The original leaf was n2.
+        assert_eq!(new_roots, vec![n2]);
 
         // Check node values are preserved
         assert_eq!(n0.read(&reversed_arena).unwrap().value, "node0");
@@ -3761,7 +3764,7 @@ mod tests {
             .force_insert_to_node(Some(2), 40, n1);
 
         // Reverse the graph
-        let reversed_arena = TestTrie::reverse(&arena, &[n0]);
+        let (reversed_arena, new_roots) = TestTrie::reverse(&arena, &[n0]);
 
         // Check the reversed graph
         // Expected edges:
@@ -3769,6 +3772,9 @@ mod tests {
         // 3 -> 0 (key 4, val 20)
         // 2 -> 1 (key 3, val 30)
         // 1 -> 3 (key 2, val 40)
+
+        // The only leaf in the original graph reachable from n0 is n2.
+        assert_eq!(new_roots, vec![n2]);
 
         // Check node values are preserved
         assert_eq!(n0.read(&reversed_arena).unwrap().value, "n0");
@@ -3814,4 +3820,49 @@ mod tests {
         assert_eq!(n3.read(&reversed_arena).unwrap().max_depth, 2);
         assert_eq!(n0.read(&reversed_arena).unwrap().max_depth, 3);
     }
+
+    #[test]
+    fn test_reverse_from_debug_log_structure() {
+        // This test mimics the structure from the debug log provided in the issue.
+        // 0 -> 1 (k:3)
+        // 0 -> 3 (k:4)
+        // 1 -> 2 (k:3)
+        // 3 -> 1 (k:2)
+        // The only leaf reachable from root 0 is node 2.
+        type TestTrie = Trie<u32, (), String>;
+        let arena = Arena::<TestTrie>::new();
+
+        let n0 = Trie2Index::from(arena.insert(Trie::new("n0".to_string())));
+        let n1 = Trie2Index::from(arena.insert(Trie::new("n1".to_string())));
+        let n2 = Trie2Index::from(arena.insert(Trie::new("n2".to_string())));
+        let n3 = Trie2Index::from(arena.insert(Trie::new("n3".to_string())));
+
+        arena.insert_edge_simple(n0, n1, 3, ());
+        arena.insert_edge_simple(n0, n3, 4, ());
+        arena.insert_edge_simple(n1, n2, 3, ());
+        arena.insert_edge_simple(n3, n1, 2, ());
+
+        let (reversed_arena, new_roots) = TestTrie::reverse(&arena, &[n0]);
+
+        // The only leaf in the original graph was n2, so it's the only root in the reversed graph.
+        assert_eq!(new_roots.len(), 1);
+        assert_eq!(new_roots[0], n2);
+
+        // Verify the structure of the reversed graph.
+        // Expected:
+        // 2 -> 1 (k:3)
+        // 1 -> 3 (k:2)
+        // 1 -> 0 (k:3)
+        // 3 -> 0 (k:4)
+        let n2_r = n2.read(&reversed_arena).unwrap();
+        assert_eq!(n2_r.get(&3).unwrap().keys().next(), Some(&n1));
+
+        let n1_r = n1.read(&reversed_arena).unwrap();
+        assert_eq!(n1_r.get(&2).unwrap().keys().next(), Some(&n3));
+        assert_eq!(n1_r.get(&3).unwrap().keys().next(), Some(&n0));
+
+        let n3_r = n3.read(&reversed_arena).unwrap();
+        assert_eq!(n3_r.get(&4).unwrap().keys().next(), Some(&n0));
+    }
 }
+
