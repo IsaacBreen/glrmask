@@ -55,22 +55,9 @@ impl NWAStates {
         new_id
     }
 
-    /// Adds an epsilon transition. If one to the same target already exists,
-    /// unions the weight. Returns true if a change was made (new edge, or weight changed).
-    pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> bool {
+    pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
         assert!(from < self.len() && to < self.len(), "add_epsilon: state id out of bounds");
-        for (v, old_w) in self.0[from].epsilons.iter_mut() {
-            if *v == to {
-                let new_w = &*old_w | &w;
-                if new_w != *old_w {
-                    *old_w = new_w;
-                    return true;
-                }
-                return false;
-            }
-        }
         self.0[from].epsilons.push((to, w));
-        true
     }
 
     /// Add a labeled transition; if an existing transition on the same label exists,
