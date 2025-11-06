@@ -718,21 +718,21 @@ fn test_concatenate_left_start_is_final() {
     // LEFT: DWA (start: 0)
     //   State 0:
     //     weight: []
-    //     final_weight: [0]
+    //     final_weight: [0, 1]
     let mut left = DWA::new();
-    left.set_final_weight(left.body.start_state, Weight::from_item(0)).unwrap();
+    left.set_final_weight(left.body.start_state, Weight::from_iter([0, 1])).unwrap();
 
     // RIGHT: DWA (start: 0)
     //   State 0:
     //     weight: []
-    //     final_weight: ALL
+    //     final_weight: [1, 2]
     let mut right = DWA::new();
-    right.set_final_weight(right.body.start_state, Weight::all()).unwrap();
+    right.set_final_weight(right.body.start_state, Weight::from_iter([1, 2])).unwrap();
 
     let c = left.concatenate(&right);
 
     let mut expected = DWA::new();
-    expected.set_final_weight(expected.body.start_state, Weight::from_item(0)).unwrap();
+    expected.set_final_weight(expected.body.start_state, Weight::from_item(1)).unwrap();
 
     assert_dwa_equivalent(c, expected);
 }
