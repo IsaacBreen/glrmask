@@ -1177,7 +1177,7 @@ fn test_concatenate_complex_from_attachment() {
     right.simplify();
 
     let c = left.concatenate(&right);
-    DWA::stochastic_validate_concatenate(&left, &right, &c);
+    DWA::stochastic_validate_concatenate(&left, &right, &c, &Weight::all());
 }
 
 #[test]
@@ -1402,7 +1402,7 @@ fn test_concatenate_disjoint_weights() {
     assert!(wc.is_empty());
 
     // The expected weight over all splits should also be empty.
-    let expected = DWA::expected_concat_weight(&dwa_a, &dwa_b, &combined_word);
+    let expected = DWA::expected_concat_weight(&dwa_a, &dwa_b, &combined_word, &Weight::all());
     assert!(expected.is_empty());
     assert_eq!(wc, expected);
 }
@@ -1546,7 +1546,7 @@ fn test_concatenate_from_debug_log() {
 
     let c = dwa1.concatenate(&dwa2);
 
-    DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &c);
+    DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &c, &Weight::all());
 }
 
 #[test]
