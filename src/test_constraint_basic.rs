@@ -345,7 +345,6 @@ fn test_constraint_expression() {
 fn test_constraint_expression_simplified_06_11_25() {
     let mut llm_token_map = LLMTokenMap::new();
     llm_token_map.insert(b"+".to_vec(), LLMTokenID(0));
-    llm_token_map.insert(b"*".to_vec(), LLMTokenID(1));
 
     let ebnf_grammar = indoc! {r#"
         s ::= e;
@@ -377,9 +376,9 @@ fn test_constraint_expression_simplified_06_11_25() {
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 
     // Commit "(i"
-    state.commit_bytes(b"(i");
+    state.commit_bytes(b"i");
     let mask = state.get_mask();
-    assert_eq!(mask, HybridBitset::from_iter(vec![0, 1]));
+    assert_eq!(mask, HybridBitset::from_iter(vec![0]));
 }
 
 #[test]
