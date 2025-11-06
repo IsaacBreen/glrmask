@@ -14,47 +14,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
-const STOCHASTIC_DEBUG: bool = false; // Keep false: stochastic checks are extremely expensive.
-
-/*
-FAST SIMPLIFICATION MODE
-
-This module historically performed several heavyweight, fixpoint-style passes on enormous DWAs:
-- propagate_and_constrain_weights (forward dataflow)
-- propagate_future_weights (backward dataflow computing F[s] = out-weights/back-weight closure)
-- minimize_partition_refinement (partition refinement with signatures containing large bitset weights)
-
-In large real-world cases (hundreds of thousands of states), these passes can be the dominant
-runtime due to repeated big-bitset ops and broad fixpoint propagation over dense graphs.
-
-Observation:
-- All those passes are strictly semantics-preserving transformations; they do not change the language/weight
-  of the automaton, only tighten/relax internal weights to enable more merging. When omitted, the
-  resulting automaton is guaranteed to accept the exact same weighted language (correctness), albeit
-  potentially less minimized.
-
-Design choice:
-- We provide a FAST, proof-safe simplification that only performs:
-  1) Edge normalization (eliminate exception edges that duplicate default target)
-  2) Pruning states that are either (a) not backward-live to any final state or (b) unreachable from start
-These two steps are linear in the number of explicit edges and require no bitset fixpoints. They are
-provably semantics-preserving and have predictable runtime.
-
-Why correctness holds:
-- normalize_edges_inplace: removes redundant exception edges when they are structurally identical to the
-  default edge. Weights are kept aligned to remaining edges; this does not change the transition function.
-- prune_unreachable: drops states that cannot be part of any accepting run from the start (or cannot reach
-  any final). Removing such dead code preserves the accepted language.
-
-We keep the old heavy passes in this file (for future optional use), but FAST_SIMPLIFICATION = true makes
-simplification instant on very large DWAs while preserving correctness rigorously.
-
-If in the future deeper minimization is desired, a strategy that computes over-approximations of the
-future masks (safe relaxations) could be reintroduced with hard O(E) bounds; until then, we default
-to the fast variant for reliability and performance.
-*/
-
-const FAST_SIMPLIFICATION: bool = true;
+const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
 
 thread_local! {
     static IN_SIMPLIFY_CHECK: Cell<bool> = Cell::new(false);
@@ -82,10 +42,10 @@ impl DWA {
         }
 
         let pb = if PROGRESS_BAR_ENABLED {
-            let p = ProgressBar::new(3);
+            let p = ProgressBar::new(10);
             p.set_style(
                 ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Simplifying DWA (fast): {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}")
+                    .template("{spinner:.green} [Simplifying DWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
                     .expect("progress-bar"),
             );
             Some(p)
@@ -93,49 +53,38 @@ impl DWA {
             None
         };
 
-        // Pass 1: Structural edge normalization (linear-time)
-        if let Some(p) = &pb { p.set_message("normalize"); p.inc(1); }
+        if let Some(p) = &pb { p.set_message("Initial normalize/prune"); }
         Self::normalize_edges_inplace(states);
-
-        // Pass 2: Prune structurally dead/unreachable states (linear-time)
-        if let Some(p) = &pb { p.set_message("prune"); p.inc(1); }
         Self::prune_unreachable(states, body);
 
-        if FAST_SIMPLIFICATION {
-            // Fast mode: skip heavy fixpoints and partition refinement.
-            // This is rigorously semantics-preserving (no language change), and completes in O(E).
-            if let Some(p) = &pb {
-                p.inc(1);
-                p.finish_with_message(format!("done ({} -> {} states)", initial_len, states.len()));
-            }
-            crate::debug!(3, "DWA::simplify_components [FAST] ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
-            return;
-        }
-
-        // If someone toggles FAST_SIMPLIFICATION to false, the traditional multi-pass pipeline below will run.
-        if let Some(p) = &pb { p.set_message("enter heavy pipeline"); p.inc(1); }
         let mut changed_any = true;
         let mut passes = 0usize;
         while changed_any && passes < 10 {
             passes += 1;
-
+            if let Some(p) = &pb { p.inc(1); }
             changed_any = false;
 
+            if let Some(p) = &pb { p.set_message("normalize"); }
             if Self::normalize_edges_inplace(states) {
                 changed_any = true;
             }
+            if let Some(p) = &pb { p.set_message("propagate constraints"); }
             if Self::propagate_and_constrain_weights(states, body) {
                 changed_any = true;
             }
+            if let Some(p) = &pb { p.set_message("propagate future"); }
             if Self::propagate_future_weights(states) {
                 changed_any = true;
             }
+            if let Some(p) = &pb { p.set_message("minimize"); }
             if Self::minimize_partition_refinement(states, body) {
                 changed_any = true;
             }
+            if let Some(p) = &pb { p.set_message("normalize"); }
             if Self::normalize_edges_inplace(states) {
                 changed_any = true;
             }
+            if let Some(p) = &pb { p.set_message("prune"); }
             if Self::prune_unreachable(states, body) {
                 changed_any = true;
             }
@@ -206,22 +155,6 @@ impl DWA {
     }
 
     pub fn propagate_future_weights(states: &mut DWAStates) -> bool {
-        /*
-        FAST MODE NOTE:
-        This was the heaviest pass. In fast mode we keep this as a no-op to guarantee
-        near-constant overhead and preserve correctness. The original logic (commented below
-        for reference) computed an exact fixpoint of future-acceptance masks and relaxed edge
-        weights via w' = w ∪ ¬F[target], which is semantics-preserving. Skipping this
-        transformation keeps the automaton language-identical and drastically reduces runtime.
-
-        If deep minimization is later reintroduced, this function can be toggled back to its
-        original form or replaced by a guaranteed O(E) over-approximate variant.
-        */
-        if FAST_SIMPLIFICATION {
-            return false;
-        }
-
-        // Original implementation (kept intact for potential non-fast mode use):
         let n = states.len();
         if n == 0 {
             return false;
@@ -471,7 +404,6 @@ impl DWA {
         let n = states.0.len();
 
         // 1. Backward reachability from final states to find "live" states.
-        // Live = can reach some final state ignoring weights (safe over-approx).
         let mut live = vec![false; n];
         let mut q_live: VecDeque<usize> = VecDeque::new();
         let mut rev_adj: Vec<Vec<usize>> = vec![vec![]; n];
