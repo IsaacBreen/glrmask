@@ -1548,3 +1548,26 @@ fn test_concatenate_from_debug_log() {
 
     DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &c);
 }
+
+#[test]
+fn test_concatenate_default_path_to_final() {
+    let mut a = DWA::new();
+    let s1a = a.add_state();
+    a.set_default_transition(a.body.start_state, s1a, Weight::all()).unwrap();
+    a.set_final_weight(s1a, Weight::from_item(1)).unwrap();
+
+    let mut b = DWA::new();
+    let s1b = b.add_state();
+    b.add_transition(b.body.start_state, 'x' as i16, s1b, Weight::all()).unwrap();
+    b.set_final_weight(s1b, Weight::from_item(1)).unwrap();
+
+    let c = a.concatenate(&b);
+
+    // Word "ax" should be accepted. 'a' uses the default transition in A.
+    let weight = c.eval_word_weight(&['a' as i16, 'x' as i16]);
+    assert_eq!(weight, Weight::from_item(1));
+
+    // Word "x" should not be accepted by C.
+    let weight_x = c.eval_word_weight(&['x' as i16]);
+    assert!(weight_x.is_empty());
+}
