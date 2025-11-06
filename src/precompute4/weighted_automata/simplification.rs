@@ -411,83 +411,65 @@ impl DWA {
             return false;
         }
 
-        // Build representatives
-        let mut pid_to_new: HashMap<usize, usize> = HashMap::new();
-        let mut new_states: Vec<DWAState> = Vec::with_capacity(groups.len());
+        let mut new_dwa = DWA::new();
+        new_dwa.states.0.clear();
+        let mut pid_to_new: HashMap<usize, StateID> = HashMap::new();
+
+        // 1. Create new states and map pids, set weights
         for (pid, members) in &groups {
+            let new_id = new_dwa.add_state();
+            pid_to_new.insert(*pid, new_id);
             let rep = members[0];
             let rep_state = &states[rep];
+            if let Some(sw) = &rep_state.state_weight { let _ = new_dwa.set_state_weight(new_id, sw.clone()); }
+            if let Some(fw) = &rep_state.final_weight { let _ = new_dwa.set_final_weight(new_id, fw.clone()); }
+        }
+
+        // 2. Add transitions
+        for (pid, members) in &groups {
+            let new_id = pid_to_new[pid];
+            let rep = members[0];
+            let rep_state = &states[rep];
+
+            // Default transition
             let def_cls = rep_state.transitions.default.map(|d| part[d]).unwrap_or(sink_pid);
-
-            let mut st = DWAState::default();
-            st.state_weight = rep_state.state_weight.clone();
-            st.final_weight = rep_state.final_weight.clone();
-            st.transitions.default = if def_cls == sink_pid { None } else { Some(0) };
-            for (ch, tgt) in &rep_state.transitions.exceptions {
-                let cls = part[*tgt];
-                if cls != def_cls {
-                    st.transitions.exceptions.insert(*ch, 0);
-                }
-            }
-
-            // Aggregate per-edge weights across members (join).
-            if st.transitions.default.is_some() {
+            if def_cls != sink_pid {
                 let mut agg_def: Option<Weight> = None;
                 for &old in members {
                     if let Some(w) = states[old].trans_weight_default.as_ref() {
-                        if let Some(ref mut a) = agg_def {
-                            *a |= w;
-                        } else {
-                            agg_def = Some(w.clone());
-                        }
+                        if let Some(ref mut a) = agg_def { *a |= w; } else { agg_def = Some(w.clone()); }
                     }
                 }
-                st.trans_weight_default = agg_def;
+                if let Some(w) = agg_def {
+                    let target_id = pid_to_new[&def_cls];
+                    let _ = new_dwa.set_default_transition(new_id, target_id, w);
+                }
             }
-            let ex_keys: Vec<i16> = st.transitions.exceptions.keys().cloned().collect();
-            for ch in ex_keys {
+
+            // Exception transitions
+            for (ch, &tgt) in &rep_state.transitions.exceptions {
+                let cls = part[tgt];
+                if cls == def_cls { continue; }
+
                 let mut agg: Option<Weight> = None;
                 for &old in members {
-                    if let Some(w) = states[old].trans_weights_exceptions.get(&ch) {
-                        if let Some(ref mut a) = agg {
-                            *a |= w;
-                        } else {
-                            agg = Some(w.clone());
-                        }
+                    if let Some(w) = states[old].trans_weights_exceptions.get(ch) {
+                        if let Some(ref mut a) = agg { *a |= w; } else { agg = Some(w.clone()); }
                     }
                 }
                 if let Some(w) = agg {
-                    st.trans_weights_exceptions.insert(ch, w);
+                    let target_id = pid_to_new[&cls];
+                    let _ = new_dwa.add_transition(new_id, *ch, target_id, w);
                 }
             }
-
-            let new_id = new_states.len();
-            pid_to_new.insert(*pid, new_id);
-            new_states.push(st);
         }
 
-        // Fix transition targets
-        for (pid, members) in &groups {
-            let new_id = *pid_to_new.get(pid).unwrap();
-            let rep = members[0];
-            let rep_state = &states[rep];
-
-            let def_cls = rep_state.transitions.default.map(|d| part[d]).unwrap_or(sink_pid);
-            if let Some(ref mut d) = new_states[new_id].transitions.default {
-                *d = *pid_to_new.get(&def_cls).unwrap();
-            }
-            let ex_old = new_states[new_id].transitions.exceptions.clone();
-            new_states[new_id].transitions.exceptions.clear();
-            for (ch, _) in ex_old {
-                let cls = part[*rep_state.transitions.exceptions.get(&ch).unwrap()];
-                new_states[new_id].transitions.exceptions.insert(ch, *pid_to_new.get(&cls).unwrap());
-            }
-        }
-
-        states.0 = new_states;
-        Self::normalize_edges_inplace(states);
         let start_pid = part[body.start_state];
-        body.start_state = *pid_to_new.get(&start_pid).unwrap();
+        new_dwa.body.start_state = *pid_to_new.get(&start_pid).unwrap();
+
+        *states = new_dwa.states;
+        *body = new_dwa.body;
+        Self::normalize_edges_inplace(states);
 
         true
     }
@@ -558,27 +540,44 @@ impl DWA {
         // 4. Remap kept states.
         let mut map = vec![usize::MAX; n];
         let mut next_id = 0usize;
-        for i in 0..n { if visited[i] { map[i] = next_id; next_id += 1; } }
+        let mut new_dwa = DWA::new();
+        new_dwa.states.0.clear();
+        for i in 0..n {
+            if visited[i] {
+                map[i] = new_dwa.add_state();
+                next_id += 1;
+            }
+        }
 
         if next_id == n && !changed { return false; }
 
-        let mut new_states: Vec<DWAState> = Vec::with_capacity(next_id);
         for old in 0..n {
             if !visited[old] { continue; }
-            let mut st = states[old].clone();
-            if let Some(d) = st.transitions.default { st.transitions.default = Some(map[d]); }
-            let ex = st.transitions.exceptions.clone();
-            st.transitions.exceptions.clear();
-            for (ch, tgt) in ex { st.transitions.exceptions.insert(ch, map[tgt]); }
-            new_states.push(st);
+            let new_id = map[old];
+            let st = &states[old];
+
+            if let Some(sw) = &st.state_weight { let _ = new_dwa.set_state_weight(new_id, sw.clone()); }
+            if let Some(fw) = &st.final_weight { let _ = new_dwa.set_final_weight(new_id, fw.clone()); }
+
+            if let Some(d) = st.transitions.default {
+                if let Some(w) = &st.trans_weight_default {
+                    let _ = new_dwa.set_default_transition(new_id, map[d], w.clone());
+                }
+            }
+            for (ch, &tgt) in &st.transitions.exceptions {
+                if let Some(w) = st.trans_weights_exceptions.get(ch) {
+                    let _ = new_dwa.add_transition(new_id, *ch, map[tgt], w.clone());
+                }
+            }
         }
-        states.0 = new_states;
+
         if next_id > 0 {
-            body.start_state = map[body.start_state];
+            new_dwa.body.start_state = map[body.start_state];
         } else if n > 0 {
-            states.0.clear();
-            body.start_state = states.add_state();
+            new_dwa.body.start_state = new_dwa.add_state();
         }
+        *states = new_dwa.states;
+        *body = new_dwa.body;
         true
     }
 }
