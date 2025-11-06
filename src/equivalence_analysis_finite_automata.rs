@@ -8,54 +8,9 @@ use smallvec::SmallVec;
 // For debugging: verify equivalence classes using a brute-force method.
 const VERIFY_EQUIVALENCE_CLASSES: bool = false;
 
-// A canonical representation of a signature. It can be hashed and compared.
-// It's derived from the graph of tokenization possibilities.
-// It represents the result of a single greedy tokenization step.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct CanonicalSignature {
-    // All possible matches and the signature of their remainders (sorted and deduped).
-    matches: Vec<(GroupID, usize, SignatureId)>,
-    // If the string can be fully consumed without a match, the final DFA state.
-    final_state: Option<usize>,
-}
-
-// An ID representing a unique canonical signature.
+// An ID representing a unique canonical signature. In the context of the new algorithm,
+// this is simply the final block ID from the partition refinement.
 type SignatureId = usize;
-
-// Manages interning of canonical signatures to unique IDs.
-struct SignatureInterner {
-    signatures: Vec<CanonicalSignature>,
-    buckets: HashMap<u128, Vec<SignatureId>>,
-}
-
-impl SignatureInterner {
-    fn new() -> Self {
-        SignatureInterner {
-            signatures: Vec::new(),
-            buckets: HashMap::new(),
-        }
-    }
-
-    fn intern(&mut self, sig: CanonicalSignature) -> SignatureId {
-        let fp = fingerprint_canonical_signature(&sig);
-        if let Some(ids) = self.buckets.get_mut(&fp) {
-            for &id in ids.iter() {
-                if self.signatures[id] == sig {
-                    return id;
-                }
-            }
-            let id = self.signatures.len();
-            self.signatures.push(sig);
-            ids.push(id);
-            return id;
-        } else {
-            let id = self.signatures.len();
-            self.signatures.push(sig);
-            self.buckets.insert(fp, vec![id]);
-            return id;
-        }
-    }
-}
 
 // Canonical representation of a suffix by referencing an original string and an offset.
 #[derive(Clone, Copy)]
@@ -146,35 +101,6 @@ fn hash128(bytes: &[u8]) -> u128 {
     ((h1 as u128) << 64) | (h2 as u128)
 }
 
-#[inline]
-fn mix64(mut x: u64) -> u64 {
-    // SplitMix64 mix function
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xbf58476d1ce4e5b9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94d049bb133111eb);
-    x ^= x >> 31;
-    x
-}
-
-// Computes a 128-bit fingerprint for CanonicalSignature to bucket interning candidates.
-// This avoids hashing long vectors with the default hasher on every insertion/lookup.
-#[inline]
-fn fingerprint_canonical_signature(sig: &CanonicalSignature) -> u128 {
-    let mut h1: u64 = 0x9E3779B97F4A7C15;
-    let mut h2: u64 = 0xD6E8FEB86659FD93;
-    for &(g, p, r) in &sig.matches {
-        let k1 = mix64((g as u64).wrapping_mul(0x9E3779B185EBCA87) ^ (p as u64));
-        let k2 = mix64((r as u64).wrapping_mul(0x94D049BB133111EB) ^ ((p as u64) << 1));
-        h1 = h1.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(k1);
-        h2 = h2.wrapping_mul(0x94D049BB133111EB).wrapping_add(k2);
-    }
-    let fsv = sig.final_state.map(|x| x as u64).unwrap_or(0xFFFF_FFFF_FFFF_FFFF);
-    h1 ^= mix64(fsv);
-    h2 ^= mix64(fsv.rotate_left(17));
-    ((h1 as u128) << 64) | (h2 as u128)
-}
-
 pub struct EquivalenceAnalyzer<'a> {
     regex: &'a Regex,
     strings: &'a [Vec<u8>],
@@ -190,149 +116,183 @@ impl<'a> EquivalenceAnalyzer<'a> {
         }
     }
 
-    // Compute the canonical signature for a given canonical suffix node and DFA state,
-    // using on-demand recursion and memoization. Remainders always recurse into start_state.
-    fn compute_signature_for_state(
-        &self,
-        deduper: &mut SuffixDeduper<'a>,
-        cache_start: &mut Vec<Option<SignatureId>>,
-        cache_other: &mut Vec<HashMap<usize, SignatureId>>,
-        interner: &mut SignatureInterner,
-        node_id: usize,
-        dfa_state: usize,
-    ) -> SignatureId {
-        // Ensure cache capacity for current node
-        if cache_start.len() <= node_id {
-            let missing = node_id + 1 - cache_start.len();
-            cache_start.reserve(missing);
-            cache_other.reserve(missing);
-            for _ in 0..missing {
-                cache_start.push(None);
-                cache_other.push(HashMap::new());
-            }
-        }
-        if dfa_state == self.regex.dfa.start_state {
-            if let Some(sid) = cache_start[node_id] {
-                return sid;
-            }
-        } else {
-            if let Some(sid) = cache_other[node_id].get(&dfa_state) {
-                return *sid;
-            }
-        }
-
-        let bytes = deduper.slice_of(node_id);
-        let result = self.regex.execute_from_state2(bytes, dfa_state);
-
-        let mut matches_vec: SmallVec<[(GroupID, usize, SignatureId); 4]> = SmallVec::new();
-        for m in result.matches {
-            // Filter out zero-width tokens to avoid infinite recursion.
-            if m.position == 0 {
-                continue;
-            }
-            let remainder_node = deduper.remainder_of(node_id, m.position);
-            // Ensure caches for the remainder node
-            if cache_start.len() <= remainder_node {
-                let missing = remainder_node + 1 - cache_start.len();
-                cache_start.reserve(missing);
-                cache_other.reserve(missing);
-                for _ in 0..missing {
-                    cache_start.push(None);
-                    cache_other.push(HashMap::new());
-                }
-            }
-            let remainder_sig = self.compute_signature_for_state(
-                deduper,
-                cache_start,
-                cache_other,
-                interner,
-                remainder_node,
-                self.regex.dfa.start_state,
-            );
-            matches_vec.push((m.group_id, m.position, remainder_sig));
-        }
-        // Canonicalize matches ordering and dedup identical entries if any.
-        matches_vec.sort_unstable();
-        matches_vec.dedup();
-
-        let sig = CanonicalSignature {
-            matches: matches_vec.into_vec(),
-            final_state: result.end_state,
-        };
-        let sid = interner.intern(sig);
-
-        if dfa_state == self.regex.dfa.start_state {
-            cache_start[node_id] = Some(sid);
-        } else {
-            cache_other[node_id].insert(dfa_state, sid);
-        }
-        sid
-    }
-
+    /// Finds equivalence classes using an iterative partition refinement algorithm.
+    /// This is vastly more efficient than the recursive approach for large inputs.
     pub fn find_equivalence_classes(&mut self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
-        // On-demand analysis: dedupe suffixes globally; compute signatures lazily.
         crate::debug!(
             2,
-            "Starting LLM token equivalence analysis (on-demand) for {} strings...",
+            "Starting LLM token equivalence analysis (partition refinement) for {} strings...",
             self.strings.len()
         );
-        let pb = ProgressBar::new(self.strings.len() as u64);
-        pb.set_style(
+
+        // === Phase 1: Suffix Collection ===
+        // Identify all unique suffixes that appear in the input strings.
+        let mut deduper = SuffixDeduper::new(self.strings);
+        let pb_suffixes = ProgressBar::new(self.strings.len() as u64);
+        pb_suffixes.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Equivalence Analysis)")
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Collecting Suffixes)")
                 .expect("progress-bar"),
         );
         if !PROGRESS_BAR_ENABLED {
-            pb.set_draw_target(ProgressDrawTarget::hidden());
+            pb_suffixes.set_draw_target(ProgressDrawTarget::hidden());
+        }
+        for (i, s) in self.strings.iter().enumerate() {
+            for j in 0..=s.len() {
+                deduper.get_or_intern(i, j);
+            }
+            pb_suffixes.inc(1);
+        }
+        pb_suffixes.finish_and_clear();
+        let num_suffixes = deduper.nodes.len();
+        crate::debug!(2, "Found {} unique suffixes.", num_suffixes);
+
+        // === Phase 2: Initial Partition ===
+        // Create the first coarse partition (P_0). Group suffixes based on their
+        // immediate, non-recursive properties: the vector of final DFA states
+        // they reach from each of the initial_states.
+        let mut partitions: Vec<usize> = vec![0; num_suffixes];
+        let mut num_blocks = 0;
+        {
+            let mut initial_partitioner: HashMap<Vec<Option<usize>>, usize> = HashMap::new();
+            for i in 0..num_suffixes {
+                let suffix_bytes = deduper.slice_of(i);
+                let key: Vec<Option<usize>> = self
+                    .initial_states
+                    .iter()
+                    .map(|&state| self.regex.execute_from_state2(suffix_bytes, state).end_state)
+                    .collect();
+
+                let block_id = *initial_partitioner.entry(key).or_insert_with(|| {
+                    let id = num_blocks;
+                    num_blocks += 1;
+                    id
+                });
+                partitions[i] = block_id;
+            }
+        }
+        crate::debug!(2, "Initial partition has {} blocks.", num_blocks);
+
+        // === Phase 3: Iterative Refinement ===
+        // A key that uniquely identifies a suffix's one-step behavior, considering
+        // the partition of its remainders from the *previous* iteration.
+        #[derive(PartialEq, Eq, Hash)]
+        struct RefinementKey<'b> {
+            // One entry per initial DFA state.
+            // Each entry contains the final state and a sorted list of matches.
+            // A match is defined by (group_id, position, remainder_block_id).
+            key_per_state: SmallVec<[(Option<usize>, SmallVec<[(GroupID, usize, usize); 4]>); 1]>,
+            _phantom: std::marker::PhantomData<&'b ()>,
         }
 
-        let mut signature_interner = SignatureInterner::new();
-        let mut deduper = SuffixDeduper::new(self.strings);
-        // Cache for signatures at start_state and at other states.
-        let mut cache_start: Vec<Option<SignatureId>> = Vec::new();
-        let mut cache_other: Vec<HashMap<usize, SignatureId>> = Vec::new();
+        let pb_refine = ProgressBar::new_spinner();
+        pb_refine.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] Iteration {pos}: {wide_msg}")
+                .expect("progress-bar"),
+        );
+        if !PROGRESS_BAR_ENABLED {
+            pb_refine.set_draw_target(ProgressDrawTarget::hidden());
+        }
 
-        // Classify original strings based on their signature vectors for the provided initial states.
-        let mut equivalence_classes: HashMap<Vec<SignatureId>, Vec<usize>> = HashMap::new();
-        for (i, _s) in self.strings.iter().enumerate() {
-            pb.inc(1);
-            let node_id = deduper.get_or_intern(i, 0);
-            // Ensure cache capacity for this node
-            if cache_start.len() <= node_id {
-                let missing = node_id + 1 - cache_start.len();
-                cache_start.reserve(missing);
-                cache_other.reserve(missing);
-                for _ in 0..missing {
-                    cache_start.push(None);
-                    cache_other.push(HashMap::new());
+        let mut iteration = 0;
+        loop {
+            iteration += 1;
+            pb_refine.set_position(iteration);
+            pb_refine.set_message(format!("{} blocks", num_blocks));
+
+            let mut has_changed = false;
+            let mut next_partitions = vec![0; num_suffixes];
+            let mut next_block_id_counter = 0;
+
+            // Group suffixes by their current block ID to process one block at a time.
+            let mut blocks: Vec<Vec<usize>> = vec![Vec::new(); num_blocks];
+            for (suffix_id, &block_id) in partitions.iter().enumerate() {
+                blocks[block_id].push(suffix_id);
+            }
+
+            for block in blocks {
+                if block.len() <= 1 {
+                    // This block cannot be split further.
+                    for suffix_id in block {
+                        next_partitions[suffix_id] = next_block_id_counter;
+                    }
+                    next_block_id_counter += 1;
+                    continue;
+                }
+
+                // Use a HashMap to split the current block based on refinement keys.
+                let mut splitter: HashMap<RefinementKey, Vec<usize>> = HashMap::new();
+                for &suffix_id in &block {
+                    // --- FIX START ---
+                    // Get the representation and create the slice from `self.strings`.
+                    // This avoids holding an immutable borrow on `deduper` itself,
+                    // which would conflict with the mutable borrow in `remainder_of`.
+                    let rep = deduper.nodes[suffix_id];
+                    let suffix_bytes = &self.strings[rep.str_idx][rep.offset..];
+                    // --- FIX END ---
+
+                    let mut key_per_state = SmallVec::new();
+
+                    for &initial_state in self.initial_states {
+                        let result = self.regex.execute_from_state2(suffix_bytes, initial_state);
+                        let mut matches = SmallVec::new();
+                        for m in result.matches {
+                            if m.position == 0 { continue; } // Avoid infinite loops
+                            let remainder_id = deduper.remainder_of(suffix_id, m.position);
+                            let remainder_block_id = partitions[remainder_id];
+                            matches.push((m.group_id, m.position, remainder_block_id));
+                        }
+                        matches.sort_unstable();
+                        matches.dedup();
+                        key_per_state.push((result.end_state, matches));
+                    }
+
+                    let key = RefinementKey { key_per_state, _phantom: std::marker::PhantomData };
+                    splitter.entry(key).or_default().push(suffix_id);
+                }
+
+                if splitter.len() > 1 {
+                    has_changed = true;
+                }
+
+                // Assign new block IDs to the newly formed sub-blocks.
+                for sub_block in splitter.values() {
+                    for &suffix_id in sub_block {
+                        next_partitions[suffix_id] = next_block_id_counter;
+                    }
+                    next_block_id_counter += 1;
                 }
             }
-            let mut signature_vector = Vec::with_capacity(self.initial_states.len());
-            for &initial_state in self.initial_states {
-                let sig_id = self.compute_signature_for_state(
-                    &mut deduper,
-                    &mut cache_start,
-                    &mut cache_other,
-                    &mut signature_interner,
-                    node_id,
-                    initial_state,
-                );
-                signature_vector.push(sig_id);
+
+            partitions = next_partitions;
+            num_blocks = next_block_id_counter;
+
+            if !has_changed {
+                break;
             }
-            equivalence_classes.entry(signature_vector).or_default().push(i);
         }
-        pb.finish();
+        pb_refine.finish_with_message(format!("Converged with {} blocks.", num_blocks));
+
+        // === Phase 4: Result Generation ===
+        // The final partitions are the equivalence classes. Map the original string
+        // indices to their corresponding final block IDs.
+        let mut equivalence_classes: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
+        for i in 0..self.strings.len() {
+            let full_string_suffix_id = deduper.get_or_intern(i, 0);
+            let final_block_id = partitions[full_string_suffix_id];
+            // The API expects a Vec<SignatureId> as the key. We use the final block ID.
+            equivalence_classes.entry(vec![final_block_id]).or_default().push(i);
+        }
 
         if VERIFY_EQUIVALENCE_CLASSES {
-            verify_equivalence_classes(self.regex, self.strings, self.initial_states, &equivalence_classes);
+            // The verification function expects a HashMap, so we convert.
+            let computed_for_verify: HashMap<Vec<SignatureId>, Vec<usize>> =
+                equivalence_classes.clone().into_iter().collect();
+            verify_equivalence_classes(self.regex, self.strings, self.initial_states, &computed_for_verify);
         }
 
-        // Convert to BTreeMap to preserve the original return type determinism.
-        let mut out: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
-        for (k, v) in equivalence_classes {
-            out.entry(k).or_default().extend(v);
-        }
-        out
+        equivalence_classes
     }
 }
 
@@ -359,7 +319,7 @@ fn verify_equivalence_classes(
     computed_classes: &HashMap<Vec<SignatureId>, Vec<usize>>,
 ) {
     println!("Verifying equivalence classes (this may be slow)...");
- 
+
     // A canonical representation of the tokenization graph for verification.
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct InternedVerificationSignature {
@@ -470,6 +430,7 @@ fn verify_equivalence_classes(
     }
 
     // 5. Compare partitions.
+    // A partition is a set of sets of indices. This is a canonical representation.
     let computed_partitions: BTreeSet<BTreeSet<usize>> = computed_classes
         .values()
         .map(|class| class.iter().cloned().collect())
@@ -489,4 +450,3 @@ fn verify_equivalence_classes(
         panic!("Equivalence class verification failed.");
     }
 }
-
