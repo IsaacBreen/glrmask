@@ -5,7 +5,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::precompute4::utils;
-use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWAStates, NWABody, StateID, Weight};
+use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight};
 use crate::constraint::LLMTokenBV;
 use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
@@ -18,6 +18,13 @@ use crate::tokenizer::TokenizerStateID;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FullDWABuildError {
     ParserStateIdOutOfRange { state_id: ParserStateID },
+    AutomatonBuild(NWABuildError),
+}
+
+impl From<NWABuildError> for FullDWABuildError {
+    fn from(e: NWABuildError) -> Self {
+        FullDWABuildError::AutomatonBuild(e)
+    }
 }
 
 fn build_template_nwa_from_characterization(
@@ -47,9 +54,9 @@ fn build_template_nwa_from_characterization(
         let s3 = nwa.states.add_state();
 
         // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-        nwa.states.add_transition(start, pos_initial, s1, w_all.clone());
-        nwa.states.add_transition(s1, neg_initial, s2, w_all.clone());
-        nwa.states.add_transition(s2, neg_shift, s3, w_all.clone());
+        nwa.add_transition(start, pos_initial, s1, w_all.clone())?;
+        nwa.add_transition(s1, neg_initial, s2, w_all.clone())?;
+        nwa.add_transition(s2, neg_shift, s3, w_all.clone())?;
         nwa.states[s3].final_weight = Some(w_all.clone());
     }
 
@@ -61,13 +68,12 @@ fn build_template_nwa_from_characterization(
         // start --(+initial)--> s1 --(default)*len--> target_nt_state
         let mut from = start;
         let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
-        nwa.states.add_transition(from, pos_initial, next_state, w_all.clone());
+        nwa.add_transition(from, pos_initial, next_state, w_all.clone())?;
         from = next_state;
 
         for i in 0..len {
             let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
-            assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
-            nwa.states[from].default = Some((to, w_all.clone()));
+            nwa.add_default_transition(from, to, w_all.clone())?;
             from = to;
         }
     }
@@ -84,13 +90,12 @@ fn build_template_nwa_from_characterization(
             // src --(+revealed)--> s1 --(default)*len--> dst
             let mut from = src_nt_state;
             let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
-            nwa.states.add_transition(from, pos_revealed, next_state, w_all.clone());
+            nwa.add_transition(from, pos_revealed, next_state, w_all.clone())?;
             from = next_state;
 
             for i in 0..len {
                 let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
-                assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
-                nwa.states[from].default = Some((to, w_all.clone()));
+                nwa.add_default_transition(from, to, w_all.clone())?;
                 from = to;
             }
         }
@@ -107,10 +112,10 @@ fn build_template_nwa_from_characterization(
             let s4 = nwa.states.add_state();
 
             // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-            nwa.states.add_transition(src_nt_state, pos_revealed, s1, w_all.clone());
-            nwa.states.add_transition(s1, neg_revealed, s2, w_all.clone());
-            nwa.states.add_transition(s2, neg_goto, s3, w_all.clone());
-            nwa.states.add_transition(s3, neg_shift, s4, w_all.clone());
+            nwa.add_transition(src_nt_state, pos_revealed, s1, w_all.clone())?;
+            nwa.add_transition(s1, neg_revealed, s2, w_all.clone())?;
+            nwa.add_transition(s2, neg_goto, s3, w_all.clone())?;
+            nwa.add_transition(s3, neg_shift, s4, w_all.clone())?;
             nwa.states[s4].final_weight = Some(w_all.clone());
         }
     }
@@ -291,7 +296,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         // Add a transition from the new combined start state to the start of the NWA for this tokenizer state.
         // The label is the tokenizer state ID.
         let label = tok_id.0 as i16;
-        combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all());
+        combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all()).unwrap();
     }
 
     let mut combined_nwa = NWA {

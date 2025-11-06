@@ -203,7 +203,7 @@ impl NWA {
             // Labeled
             for (lbl, to) in &st.transitions.exceptions {
                 if let Some(w) = st.trans_weights_exceptions.get(lbl) {
-                    nwa.states.add_transition(i, *lbl, *to, w.clone());
+                    nwa.states.add_transition(i, *lbl, *to, w.clone()).unwrap();
                 }
             }
         }

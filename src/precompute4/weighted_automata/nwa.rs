@@ -8,6 +8,23 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NWABuildError {
+    DefaultTransitionAlreadyExists { from: NWAStateID },
+    StateOutOfBounds { state: NWAStateID },
+}
+
+impl Display for NWABuildError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NWABuildError::DefaultTransitionAlreadyExists { from } => {
+                write!(f, "Default transition from state {} already exists", from)
+            }
+            NWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
+        }
+    }
+}
+
 /// - Non-epsilon transitions: unique target per input symbol.
 /// - Each transition carries a weight (Weight), which is intersected along the path; final states
 ///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
@@ -62,14 +79,34 @@ impl NWAStates {
 
     /// Add a labeled transition; if an existing transition on the same label exists,
     /// we merge weights if the target is the same, otherwise we assert (as per restricted NWA).
-    pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) {
-        assert!(from < self.len() && to < self.len(), "add_transition: state id out of bounds");
+    pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+        if from >= self.len() {
+            return Err(NWABuildError::StateOutOfBounds { state: from });
+        }
+        if to >= self.len() {
+            return Err(NWABuildError::StateOutOfBounds { state: to });
+        }
         if let Some((old_to, old_w)) = self.0[from].transitions.get_mut(&on) {
             assert_eq!(*old_to, to, "NWA restricted: only one target per (state, symbol)");
             *old_w |= &w;
         } else {
             self.0[from].transitions.insert(on, (to, w));
         }
+        Ok(())
+    }
+
+    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+        if from >= self.len() {
+            return Err(NWABuildError::StateOutOfBounds { state: from });
+        }
+        if to >= self.len() {
+            return Err(NWABuildError::StateOutOfBounds { state: to });
+        }
+        if self.0[from].default.is_some() {
+            return Err(NWABuildError::DefaultTransitionAlreadyExists { from });
+        }
+        self.0[from].default = Some((to, w));
+        Ok(())
     }
 
     /// Deep-copy a subgraph starting at 'start_id' from another NWAStates arena into self.
@@ -183,6 +220,14 @@ impl NWA {
         let mut states = NWAStates::default();
         let start = states.add_state();
         Self { states, body: NWABody { start_state: start } }
+    }
+
+    pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+        self.states.add_transition(from, on, to, w)
+    }
+
+    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+        self.states.add_default_transition(from, to, w)
     }
 }
 

@@ -1006,20 +1006,20 @@ local_system:
           ParserStateIdOutOfRange { state_id: ParserStateID },
       }
 
-      fn build_template_dwa_from_characterization(
+      fn build_template_nwa_from_characterization(
           bb: &BelowBottomCharacterization,
-      ) -> Result<DWA, FullDWABuildError> {
-          let mut dwa = DWA::new();
+      ) -> Result<NWA, FullDWABuildError> {
+          let mut nwa = NWA::new();
           let w_all = Weight::all();
 
           // Create a node for each non-terminal, similar to the NWA construction.
           let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
           for &nt in &bb.all_nts {
-              let id = dwa.add_state();
+              let id = nwa.states.add_state();
               nt_nodes.insert(nt, id);
           }
 
-          let start = dwa.body.start_state;
+          let start = nwa.body.start_state;
 
           // --- Initial Actions from Start State ---
 
@@ -1028,18 +1028,15 @@ local_system:
               let neg_initial = utils::encode_negative_i16(initial_state)?;
               let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-              let s1 = dwa.add_state();
-              let s2 = dwa.add_state();
-              let s3 = dwa.add_state();
+              let s1 = nwa.states.add_state();
+              let s2 = nwa.states.add_state();
+              let s3 = nwa.states.add_state();
 
               // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-              dwa.states[start].transitions.exceptions.insert(pos_initial, s1);
-              dwa.states[start].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-              dwa.states[s1].transitions.exceptions.insert(neg_initial, s2);
-              dwa.states[s1].trans_weights_exceptions.insert(neg_initial, w_all.clone());
-              dwa.states[s2].transitions.exceptions.insert(neg_shift, s3);
-              dwa.states[s2].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-              dwa.states[s3].final_weight = Some(w_all.clone());
+              nwa.states.add_transition(start, pos_initial, s1, w_all.clone());
+              nwa.states.add_transition(s1, neg_initial, s2, w_all.clone());
+              nwa.states.add_transition(s2, neg_shift, s3, w_all.clone());
+              nwa.states[s3].final_weight = Some(w_all.clone());
           }
 
           for &(initial_state, len, nt) in &bb.initial_reduces {
@@ -1049,15 +1046,14 @@ local_system:
               // Create a chain of default transitions for the pops.
               // start --(+initial)--> s1 --(default)*len--> target_nt_state
               let mut from = start;
-              let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
-              dwa.states[from].transitions.exceptions.insert(pos_initial, next_state);
-              dwa.states[from].trans_weights_exceptions.insert(pos_initial, w_all.clone());
+              let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
+              nwa.states.add_transition(from, pos_initial, next_state, w_all.clone());
               from = next_state;
 
               for i in 0..len {
-                  let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.default = Some(to);
-                  dwa.states[from].trans_weight_default = Some(w_all.clone());
+                  let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
+                  assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
+                  nwa.states[from].default = Some((to, w_all.clone()));
                   from = to;
               }
           }
@@ -1073,15 +1069,14 @@ local_system:
 
                   // src --(+revealed)--> s1 --(default)*len--> dst
                   let mut from = src_nt_state;
-                  let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.exceptions.insert(pos_revealed, next_state);
-                  dwa.states[from].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
+                  let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
+                  nwa.states.add_transition(from, pos_revealed, next_state, w_all.clone());
                   from = next_state;
 
                   for i in 0..len {
-                      let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
-                      dwa.states[from].transitions.default = Some(to);
-                      dwa.states[from].trans_weight_default = Some(w_all.clone());
+                      let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
+                      assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
+                      nwa.states[from].default = Some((to, w_all.clone()));
                       from = to;
                   }
               }
@@ -1092,27 +1087,21 @@ local_system:
                   let neg_goto = utils::encode_negative_i16(goto_state)?;
                   let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-                  let s1 = dwa.add_state();
-                  let s2 = dwa.add_state();
-                  let s3 = dwa.add_state();
-                  let s4 = dwa.add_state();
+                  let s1 = nwa.states.add_state();
+                  let s2 = nwa.states.add_state();
+                  let s3 = nwa.states.add_state();
+                  let s4 = nwa.states.add_state();
 
                   // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-                  dwa.states[src_nt_state].transitions.exceptions.insert(pos_revealed, s1);
-                  dwa.states[src_nt_state].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-                  dwa.states[s1].transitions.exceptions.insert(neg_revealed, s2);
-                  dwa.states[s1].trans_weights_exceptions.insert(neg_revealed, w_all.clone());
-                  dwa.states[s2].transitions.exceptions.insert(neg_goto, s3);
-                  dwa.states[s2].trans_weights_exceptions.insert(neg_goto, w_all.clone());
-                  dwa.states[s3].transitions.exceptions.insert(neg_shift, s4);
-                  dwa.states[s3].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-                  dwa.states[s4].final_weight = Some(w_all.clone());
+                  nwa.states.add_transition(src_nt_state, pos_revealed, s1, w_all.clone());
+                  nwa.states.add_transition(s1, neg_revealed, s2, w_all.clone());
+                  nwa.states.add_transition(s2, neg_goto, s3, w_all.clone());
+                  nwa.states.add_transition(s3, neg_shift, s4, w_all.clone());
+                  nwa.states[s4].final_weight = Some(w_all.clone());
               }
           }
 
-          dwa.simplify();
-
-          Ok(dwa)
+          Ok(nwa)
       }
 
       fn build_template_dwas(
@@ -1121,7 +1110,9 @@ local_system:
           let all = compute_all_characterizations(parser);
           let mut out = BTreeMap::new();
           for (term, bb) in all {
-              let dwa = build_template_dwa_from_characterization(&bb)?;
+              let nwa = build_template_nwa_from_characterization(&bb)?;
+              let mut dwa = nwa.determinize_to_dwa();
+              dwa.simplify();
               crate::debug!(5, "Built template DWA for terminal {:?}:", term);
               crate::debug!(5, "{}", dwa);
               out.insert(term, dwa);
@@ -1329,7 +1320,7 @@ local_system:
       pub use self::bitset::SimpleBitset;
       pub use self::common::{format_i16_char, format_pos_code, format_word, I16Map, NWAStateID, StateID, Weight};
       pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
-      pub use self::nwa::{NWABody, NWAState, NWAStates, NWA};
+      pub use self::nwa::{NWABody, NWABuildError, NWAState, NWAStates, NWA};
     src/precompute4/weighted_automata/dwa.rs: |
       // src/precompute4/weighted_automata/dwa.rs
 
@@ -1702,6 +1693,23 @@ local_system:
       use std::fmt::{Display, Formatter};
       use std::ops::{Index, IndexMut};
 
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum NWABuildError {
+          DefaultTransitionAlreadyExists { from: NWAStateID },
+          StateOutOfBounds { state: NWAStateID },
+      }
+
+      impl Display for NWABuildError {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              match self {
+                  NWABuildError::DefaultTransitionAlreadyExists { from } => {
+                      write!(f, "Default transition from state {} already exists", from)
+                  }
+                  NWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
+              }
+          }
+      }
+
       /// - Non-epsilon transitions: unique target per input symbol.
       /// - Each transition carries a weight (Weight), which is intersected along the path; final states
       ///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
@@ -1756,14 +1764,34 @@ local_system:
 
           /// Add a labeled transition; if an existing transition on the same label exists,
           /// we merge weights if the target is the same, otherwise we assert (as per restricted NWA).
-          pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) {
-              assert!(from < self.len() && to < self.len(), "add_transition: state id out of bounds");
+          pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+              if from >= self.len() {
+                  return Err(NWABuildError::StateOutOfBounds { state: from });
+              }
+              if to >= self.len() {
+                  return Err(NWABuildError::StateOutOfBounds { state: to });
+              }
               if let Some((old_to, old_w)) = self.0[from].transitions.get_mut(&on) {
                   assert_eq!(*old_to, to, "NWA restricted: only one target per (state, symbol)");
                   *old_w |= &w;
               } else {
                   self.0[from].transitions.insert(on, (to, w));
               }
+              Ok(())
+          }
+
+          pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+              if from >= self.len() {
+                  return Err(NWABuildError::StateOutOfBounds { state: from });
+              }
+              if to >= self.len() {
+                  return Err(NWABuildError::StateOutOfBounds { state: to });
+              }
+              if self.0[from].default.is_some() {
+                  return Err(NWABuildError::DefaultTransitionAlreadyExists { from });
+              }
+              self.0[from].default = Some((to, w));
+              Ok(())
           }
 
           /// Deep-copy a subgraph starting at 'start_id' from another NWAStates arena into self.
@@ -1877,6 +1905,14 @@ local_system:
               let mut states = NWAStates::default();
               let start = states.add_state();
               Self { states, body: NWABody { start_state: start } }
+          }
+
+          pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+              self.states.add_transition(from, on, to, w)
+          }
+
+          pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+              self.states.add_default_transition(from, to, w)
           }
       }
 
@@ -2170,7 +2206,7 @@ local_system:
                   // Labeled
                   for (lbl, to) in &st.transitions.exceptions {
                       if let Some(w) = st.trans_weights_exceptions.get(lbl) {
-                          nwa.states.add_transition(i, *lbl, *to, w.clone());
+                          nwa.states.add_transition(i, *lbl, *to, w.clone()).unwrap();
                       }
                   }
               }
@@ -2294,7 +2330,7 @@ local_system:
       use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
       use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
       use crate::precompute4::utils;
-      use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWAStates, NWABody, StateID, Weight};
+      use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight};
       use crate::constraint::LLMTokenBV;
       use range_set_blaze::RangeSetBlaze;
       use std::cell::RefCell;
@@ -2307,6 +2343,13 @@ local_system:
       #[derive(Debug, Clone, PartialEq, Eq)]
       pub enum FullDWABuildError {
           ParserStateIdOutOfRange { state_id: ParserStateID },
+          AutomatonBuild(NWABuildError),
+      }
+
+      impl From<NWABuildError> for FullDWABuildError {
+          fn from(e: NWABuildError) -> Self {
+              FullDWABuildError::AutomatonBuild(e)
+          }
       }
 
       fn build_template_nwa_from_characterization(
@@ -2336,9 +2379,9 @@ local_system:
               let s3 = nwa.states.add_state();
 
               // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-              nwa.states.add_transition(start, pos_initial, s1, w_all.clone());
-              nwa.states.add_transition(s1, neg_initial, s2, w_all.clone());
-              nwa.states.add_transition(s2, neg_shift, s3, w_all.clone());
+              nwa.add_transition(start, pos_initial, s1, w_all.clone())?;
+              nwa.add_transition(s1, neg_initial, s2, w_all.clone())?;
+              nwa.add_transition(s2, neg_shift, s3, w_all.clone())?;
               nwa.states[s3].final_weight = Some(w_all.clone());
           }
 
@@ -2350,13 +2393,12 @@ local_system:
               // start --(+initial)--> s1 --(default)*len--> target_nt_state
               let mut from = start;
               let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
-              nwa.states.add_transition(from, pos_initial, next_state, w_all.clone());
+              nwa.add_transition(from, pos_initial, next_state, w_all.clone())?;
               from = next_state;
 
               for i in 0..len {
                   let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
-                  assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
-                  nwa.states[from].default = Some((to, w_all.clone()));
+                  nwa.add_default_transition(from, to, w_all.clone())?;
                   from = to;
               }
           }
@@ -2373,13 +2415,12 @@ local_system:
                   // src --(+revealed)--> s1 --(default)*len--> dst
                   let mut from = src_nt_state;
                   let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
-                  nwa.states.add_transition(from, pos_revealed, next_state, w_all.clone());
+                  nwa.add_transition(from, pos_revealed, next_state, w_all.clone())?;
                   from = next_state;
 
                   for i in 0..len {
                       let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
-                      assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
-                      nwa.states[from].default = Some((to, w_all.clone()));
+                      nwa.add_default_transition(from, to, w_all.clone())?;
                       from = to;
                   }
               }
@@ -2396,10 +2437,10 @@ local_system:
                   let s4 = nwa.states.add_state();
 
                   // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-                  nwa.states.add_transition(src_nt_state, pos_revealed, s1, w_all.clone());
-                  nwa.states.add_transition(s1, neg_revealed, s2, w_all.clone());
-                  nwa.states.add_transition(s2, neg_goto, s3, w_all.clone());
-                  nwa.states.add_transition(s3, neg_shift, s4, w_all.clone());
+                  nwa.add_transition(src_nt_state, pos_revealed, s1, w_all.clone())?;
+                  nwa.add_transition(s1, neg_revealed, s2, w_all.clone())?;
+                  nwa.add_transition(s2, neg_goto, s3, w_all.clone())?;
+                  nwa.add_transition(s3, neg_shift, s4, w_all.clone())?;
                   nwa.states[s4].final_weight = Some(w_all.clone());
               }
           }
@@ -2580,7 +2621,7 @@ local_system:
               // Add a transition from the new combined start state to the start of the NWA for this tokenizer state.
               // The label is the tokenizer state ID.
               let label = tok_id.0 as i16;
-              combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all());
+              combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all()).unwrap();
           }
 
           let mut combined_nwa = NWA {
@@ -3670,20 +3711,20 @@ messages:
           ParserStateIdOutOfRange { state_id: ParserStateID },
       }
 
-      fn build_template_dwa_from_characterization(
+      fn build_template_nwa_from_characterization(
           bb: &BelowBottomCharacterization,
-      ) -> Result<DWA, FullDWABuildError> {
-          let mut dwa = DWA::new();
+      ) -> Result<NWA, FullDWABuildError> {
+          let mut nwa = NWA::new();
           let w_all = Weight::all();
 
           // Create a node for each non-terminal, similar to the NWA construction.
           let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
           for &nt in &bb.all_nts {
-              let id = dwa.add_state();
+              let id = nwa.states.add_state();
               nt_nodes.insert(nt, id);
           }
 
-          let start = dwa.body.start_state;
+          let start = nwa.body.start_state;
 
           // --- Initial Actions from Start State ---
 
@@ -3692,18 +3733,15 @@ messages:
               let neg_initial = utils::encode_negative_i16(initial_state)?;
               let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-              let s1 = dwa.add_state();
-              let s2 = dwa.add_state();
-              let s3 = dwa.add_state();
+              let s1 = nwa.states.add_state();
+              let s2 = nwa.states.add_state();
+              let s3 = nwa.states.add_state();
 
               // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-              dwa.states[start].transitions.exceptions.insert(pos_initial, s1);
-              dwa.states[start].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-              dwa.states[s1].transitions.exceptions.insert(neg_initial, s2);
-              dwa.states[s1].trans_weights_exceptions.insert(neg_initial, w_all.clone());
-              dwa.states[s2].transitions.exceptions.insert(neg_shift, s3);
-              dwa.states[s2].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-              dwa.states[s3].final_weight = Some(w_all.clone());
+              nwa.states.add_transition(start, pos_initial, s1, w_all.clone());
+              nwa.states.add_transition(s1, neg_initial, s2, w_all.clone());
+              nwa.states.add_transition(s2, neg_shift, s3, w_all.clone());
+              nwa.states[s3].final_weight = Some(w_all.clone());
           }
 
           for &(initial_state, len, nt) in &bb.initial_reduces {
@@ -3713,15 +3751,14 @@ messages:
               // Create a chain of default transitions for the pops.
               // start --(+initial)--> s1 --(default)*len--> target_nt_state
               let mut from = start;
-              let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
-              dwa.states[from].transitions.exceptions.insert(pos_initial, next_state);
-              dwa.states[from].trans_weights_exceptions.insert(pos_initial, w_all.clone());
+              let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
+              nwa.states.add_transition(from, pos_initial, next_state, w_all.clone());
               from = next_state;
 
               for i in 0..len {
-                  let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.default = Some(to);
-                  dwa.states[from].trans_weight_default = Some(w_all.clone());
+                  let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
+                  assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
+                  nwa.states[from].default = Some((to, w_all.clone()));
                   from = to;
               }
           }
@@ -3737,15 +3774,14 @@ messages:
 
                   // src --(+revealed)--> s1 --(default)*len--> dst
                   let mut from = src_nt_state;
-                  let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
-                  dwa.states[from].transitions.exceptions.insert(pos_revealed, next_state);
-                  dwa.states[from].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
+                  let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
+                  nwa.states.add_transition(from, pos_revealed, next_state, w_all.clone());
                   from = next_state;
 
                   for i in 0..len {
-                      let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
-                      dwa.states[from].transitions.default = Some(to);
-                      dwa.states[from].trans_weight_default = Some(w_all.clone());
+                      let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
+                      assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
+                      nwa.states[from].default = Some((to, w_all.clone()));
                       from = to;
                   }
               }
@@ -3756,27 +3792,21 @@ messages:
                   let neg_goto = utils::encode_negative_i16(goto_state)?;
                   let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-                  let s1 = dwa.add_state();
-                  let s2 = dwa.add_state();
-                  let s3 = dwa.add_state();
-                  let s4 = dwa.add_state();
+                  let s1 = nwa.states.add_state();
+                  let s2 = nwa.states.add_state();
+                  let s3 = nwa.states.add_state();
+                  let s4 = nwa.states.add_state();
 
                   // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-                  dwa.states[src_nt_state].transitions.exceptions.insert(pos_revealed, s1);
-                  dwa.states[src_nt_state].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-                  dwa.states[s1].transitions.exceptions.insert(neg_revealed, s2);
-                  dwa.states[s1].trans_weights_exceptions.insert(neg_revealed, w_all.clone());
-                  dwa.states[s2].transitions.exceptions.insert(neg_goto, s3);
-                  dwa.states[s2].trans_weights_exceptions.insert(neg_goto, w_all.clone());
-                  dwa.states[s3].transitions.exceptions.insert(neg_shift, s4);
-                  dwa.states[s3].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-                  dwa.states[s4].final_weight = Some(w_all.clone());
+                  nwa.states.add_transition(src_nt_state, pos_revealed, s1, w_all.clone());
+                  nwa.states.add_transition(s1, neg_revealed, s2, w_all.clone());
+                  nwa.states.add_transition(s2, neg_goto, s3, w_all.clone());
+                  nwa.states.add_transition(s3, neg_shift, s4, w_all.clone());
+                  nwa.states[s4].final_weight = Some(w_all.clone());
               }
           }
 
-          dwa.simplify();
-
-          Ok(dwa)
+          Ok(nwa)
       }
 
       fn build_template_dwas(
@@ -3785,7 +3815,9 @@ messages:
           let all = compute_all_characterizations(parser);
           let mut out = BTreeMap::new();
           for (term, bb) in all {
-              let dwa = build_template_dwa_from_characterization(&bb)?;
+              let nwa = build_template_nwa_from_characterization(&bb)?;
+              let mut dwa = nwa.determinize_to_dwa();
+              dwa.simplify();
               crate::debug!(5, "Built template DWA for terminal {:?}:", term);
               crate::debug!(5, "{}", dwa);
               out.insert(term, dwa);
@@ -3979,10 +4011,9 @@ messages:
       ```
     metadata:
       filename: src/precompute4/full_dwa.rs
-  - user: Build the templates as NWA rather than DWA, then convert to DWA. That resolves
-      issues we're having with edges getting overwritten. Use the 'official' builders
-      like add_transition (which panics properly when there's already a transition)
-      so we get alerted to any errors.
+  - user: Try to use the dedicated constructor things like `add_transition` and `add_default_transition`
+      in full_dwa.rs. It's safer. Oh, and add `add_default_transition` for NWA and
+      DWA. If one already exists and it conflicts, return error.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4002,205 +4033,274 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to refactor the template automaton construction to build an NWA first, and then the corresponding git diff.
+      Of course. I'll add safe constructors for default transitions in `NWA` and update `full_dwa.rs` to use these safer methods for building automata. Here are the step-by-step instructions and the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **In `src/precompute4/full_dwa.rs`:**
-          *   Rename the function `build_template_dwa_from_characterization` to `build_template_nwa_from_characterization`.
-          *   Change its return type from `Result<DWA, FullDWABuildError>` to `Result<NWA, FullDWABuildError>`.
-          *   Inside this function, change the logic to build an `NWA` instead of a `DWA`.
-              *   Replace `DWA::new()` with `NWA::new()`.
-              *   Use `nwa.states.add_state()` to create new states.
-              *   Replace direct manipulation of `dwa.states` transitions and weights with calls to `nwa.states.add_transition(...)` for labeled transitions.
-              *   For default transitions, assign to `nwa.states[from].default` and add an `assert!` to ensure you are not overwriting an existing default transition.
-              *   Remove the `dwa.simplify()` call at the end of the function.
-          *   **In `src/precompute4/full_dwa.rs`, update `build_template_dwas`:**
-              *   Call the new `build_template_nwa_from_characterization` function to get an `NWA`.
-              *   After getting the `NWA`, determinize it to a `DWA` by calling `nwa.determinize_to_dwa()`.
-              *   Call `dwa.simplify()` on the newly created `DWA`.
+      1.  **File: `src/precompute4/weighted_automata/mod.rs`**
+          *   Export the new `NWABuildError` type from the `nwa` module.
 
-      ### Git Diff
+      2.  **File: `src/precompute4/weighted_automata/nwa.rs`**
+          *   Add a new `NWABuildError` enum to handle cases like adding a duplicate default transition or using an out-of-bounds state ID.
+          *   Implement `Display` for `NWABuildError`.
+          *   In `NWAStates`, change `add_transition` to return a `Result<(), NWABuildError>` and perform bounds checking.
+          *   In `NWAStates`, add a new method `add_default_transition` which returns a `Result` and checks for pre-existing default transitions and out-of-bounds states.
+          *   In the `NWA` struct, add `add_transition` and `add_default_transition` helper methods that call the corresponding methods on `self.states`.
 
-      Here is the git diff to apply these changes.
+      3.  **File: `src/precompute4/weighted_automata/ops.rs`**
+          *   In `NWA::from_dwa`, update the call to `nwa.states.add_transition` to `nwa.states.add_transition(...).unwrap()`. This is safe because the state IDs are guaranteed to be valid within the function's logic.
+
+      4.  **File: `src/precompute4/full_dwa.rs`**
+          *   Import `NWABuildError`.
+          *   Update `FullDWABuildError` to include an `AutomatonBuild(NWABuildError)` variant and implement `From<NWABuildError>`.
+          *   In `build_template_nwa_from_characterization`:
+              *   Replace all direct calls to `nwa.states.add_transition` with `nwa.add_transition(...)?` to propagate potential errors.
+              *   Replace direct assignments to `nwa.states[...].default` with calls to the new `nwa.add_default_transition(...)?` method.
+          *   In the `precompute4` function, update the final `combined_nwa_states.add_transition` call to `...unwrap()`, as the state IDs are known to be valid at that point.
+
+      ### Git Diffs
+
+      Here are the git diffs to apply these changes:
 
       ```diff
+      diff --git a/src/precompute4/full_dwa.rs b/src/precompute4/full_dwa.rs
+      index 7254553..b66236b 100644
       --- a/src/precompute4/full_dwa.rs
       +++ b/src/precompute4/full_dwa.rs
-      @@ -14,118 +14,115 @@
+      @@ -4,7 +4,7 @@
+       use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
+       use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
+       use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
+       use crate::precompute4::utils;
+      -use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWAStates, NWABody, StateID, Weight};
+      +use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight};
+       use crate::constraint::LLMTokenBV;
+       use range_set_blaze::RangeSetBlaze;
+       use std::cell::RefCell;
+      @@ -17,6 +17,13 @@
+       #[derive(Debug, Clone, PartialEq, Eq)]
+       pub enum FullDWABuildError {
            ParserStateIdOutOfRange { state_id: ParserStateID },
+      +    AutomatonBuild(NWABuildError),
+      +}
+      +
+      +impl From<NWABuildError> for FullDWABuildError {
+      +    fn from(e: NWABuildError) -> Self {
+      +        FullDWABuildError::AutomatonBuild(e)
+      +    }
        }
        
-      -fn build_template_dwa_from_characterization(
-      +fn build_template_nwa_from_characterization(
-           bb: &BelowBottomCharacterization,
-      -) -> Result<DWA, FullDWABuildError> {
-      -    let mut dwa = DWA::new();
-      +) -> Result<NWA, FullDWABuildError> {
-      +    let mut nwa = NWA::new();
-           let w_all = Weight::all();
-       
-           // Create a node for each non-terminal, similar to the NWA construction.
-           let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
-           for &nt in &bb.all_nts {
-      -        let id = dwa.add_state();
-      +        let id = nwa.states.add_state();
-               nt_nodes.insert(nt, id);
-           }
-       
-      -    let start = dwa.body.start_state;
-      +    let start = nwa.body.start_state;
-       
-           // --- Initial Actions from Start State ---
-       
-           for &(initial_state, shift_state) in &bb.initial_shifts {
-               let pos_initial = utils::encode_symbol_i16(initial_state)?;
-               let neg_initial = utils::encode_negative_i16(initial_state)?;
-               let neg_shift = utils::encode_negative_i16(shift_state)?;
-       
-      -        let s1 = dwa.add_state();
-      -        let s2 = dwa.add_state();
-      -        let s3 = dwa.add_state();
-      +        let s1 = nwa.states.add_state();
-      +        let s2 = nwa.states.add_state();
-      +        let s3 = nwa.states.add_state();
+       fn build_template_nwa_from_characterization(
+      @@ -45,9 +52,9 @@
+               let s3 = nwa.states.add_state();
        
                // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-      -        dwa.states[start].transitions.exceptions.insert(pos_initial, s1);
-      -        dwa.states[start].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-      -        dwa.states[s1].transitions.exceptions.insert(neg_initial, s2);
-      -        dwa.states[s1].trans_weights_exceptions.insert(neg_initial, w_all.clone());
-      -        dwa.states[s2].transitions.exceptions.insert(neg_shift, s3);
-      -        dwa.states[s2].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-      -        dwa.states[s3].final_weight = Some(w_all.clone());
-      +        nwa.states.add_transition(start, pos_initial, s1, w_all.clone());
-      +        nwa.states.add_transition(s1, neg_initial, s2, w_all.clone());
-      +        nwa.states.add_transition(s2, neg_shift, s3, w_all.clone());
-      +        nwa.states[s3].final_weight = Some(w_all.clone());
+      -        nwa.states.add_transition(start, pos_initial, s1, w_all.clone());
+      -        nwa.states.add_transition(s1, neg_initial, s2, w_all.clone());
+      -        nwa.states.add_transition(s2, neg_shift, s3, w_all.clone());
+      +        nwa.add_transition(start, pos_initial, s1, w_all.clone())?;
+      +        nwa.add_transition(s1, neg_initial, s2, w_all.clone())?;
+      +        nwa.add_transition(s2, neg_shift, s3, w_all.clone())?;
+               nwa.states[s3].final_weight = Some(w_all.clone());
            }
        
-           for &(initial_state, len, nt) in &bb.initial_reduces {
-               let pos_initial = utils::encode_symbol_i16(initial_state)?;
-               let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
-       
-               // Create a chain of default transitions for the pops.
+      @@ -58,13 +65,12 @@
                // start --(+initial)--> s1 --(default)*len--> target_nt_state
                let mut from = start;
-      -        let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
-      -        dwa.states[from].transitions.exceptions.insert(pos_initial, next_state);
-      -        dwa.states[from].trans_weights_exceptions.insert(pos_initial, w_all.clone());
-      +        let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
-      +        nwa.states.add_transition(from, pos_initial, next_state, w_all.clone());
+               let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
+      -        nwa.states.add_transition(from, pos_initial, next_state, w_all.clone());
+      +        nwa.add_transition(from, pos_initial, next_state, w_all.clone())?;
                from = next_state;
        
                for i in 0..len {
-      -            let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
-      -            dwa.states[from].transitions.default = Some(to);
-      -            dwa.states[from].trans_weight_default = Some(w_all.clone());
-      +            let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
-      +            assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
-      +            nwa.states[from].default = Some((to, w_all.clone()));
+                   let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
+      -            assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
+      -            nwa.states[from].default = Some((to, w_all.clone()));
+      +            nwa.add_default_transition(from, to, w_all.clone())?;
                    from = to;
                }
            }
-       
-           // --- Actions from Non-Terminal States ---
-       
-           for (nt, rc) in &bb.reduce_characterizations {
-               let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
-       
-               for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
-                   let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-                   let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
-       
+      @@ -81,13 +87,12 @@
                    // src --(+revealed)--> s1 --(default)*len--> dst
                    let mut from = src_nt_state;
-      -            let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
-      -            dwa.states[from].transitions.exceptions.insert(pos_revealed, next_state);
-      -            dwa.states[from].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-      +            let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
-      +            nwa.states.add_transition(from, pos_revealed, next_state, w_all.clone());
+                   let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
+      -            nwa.states.add_transition(from, pos_revealed, next_state, w_all.clone());
+      +            nwa.add_transition(from, pos_revealed, next_state, w_all.clone())?;
                    from = next_state;
        
                    for i in 0..len {
-      -                let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
-      -                dwa.states[from].transitions.default = Some(to);
-      -                dwa.states[from].trans_weight_default = Some(w_all.clone());
-      +                let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
-      +                assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
-      +                nwa.states[from].default = Some((to, w_all.clone()));
+                       let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
+      -                assert!(nwa.states[from].default.is_none(), "Default transition already exists from state {}", from);
+      -                nwa.states[from].default = Some((to, w_all.clone()));
+      +                nwa.add_default_transition(from, to, w_all.clone())?;
                        from = to;
                    }
                }
-       
-               for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
-                   let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-                   let neg_revealed = utils::encode_negative_i16(revealed_state)?;
-                   let neg_goto = utils::encode_negative_i16(goto_state)?;
-                   let neg_shift = utils::encode_negative_i16(shift_state)?;
-       
-      -            let s1 = dwa.add_state();
-      -            let s2 = dwa.add_state();
-      -            let s3 = dwa.add_state();
-      -            let s4 = dwa.add_state();
-      +            let s1 = nwa.states.add_state();
-      +            let s2 = nwa.states.add_state();
-      +            let s3 = nwa.states.add_state();
-      +            let s4 = nwa.states.add_state();
+      @@ -104,10 +109,10 @@
+                   let s4 = nwa.states.add_state();
        
                    // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-      -            dwa.states[src_nt_state].transitions.exceptions.insert(pos_revealed, s1);
-      -            dwa.states[src_nt_state].trans_weights_exceptions.insert(pos_revealed, w_all.clone());
-      -            dwa.states[s1].transitions.exceptions.insert(neg_revealed, s2);
-      -            dwa.states[s1].trans_weights_exceptions.insert(neg_revealed, w_all.clone());
-      -            dwa.states[s2].transitions.exceptions.insert(neg_goto, s3);
-      -            dwa.states[s2].trans_weights_exceptions.insert(neg_goto, w_all.clone());
-      -            dwa.states[s3].transitions.exceptions.insert(neg_shift, s4);
-      -            dwa.states[s3].trans_weights_exceptions.insert(neg_shift, w_all.clone());
-      -            dwa.states[s4].final_weight = Some(w_all.clone());
-      -        }
-      -    }
-      -
-      -    dwa.simplify();
-      -
-      -    Ok(dwa)
-      +            nwa.states.add_transition(src_nt_state, pos_revealed, s1, w_all.clone());
-      +            nwa.states.add_transition(s1, neg_revealed, s2, w_all.clone());
-      +            nwa.states.add_transition(s2, neg_goto, s3, w_all.clone());
-      +            nwa.states.add_transition(s3, neg_shift, s4, w_all.clone());
-      +            nwa.states[s4].final_weight = Some(w_all.clone());
+      -            nwa.states.add_transition(src_nt_state, pos_revealed, s1, w_all.clone());
+      -            nwa.states.add_transition(s1, neg_revealed, s2, w_all.clone());
+      -            nwa.states.add_transition(s2, neg_goto, s3, w_all.clone());
+      -            nwa.states.add_transition(s3, neg_shift, s4, w_all.clone());
+      +            nwa.add_transition(src_nt_state, pos_revealed, s1, w_all.clone())?;
+      +            nwa.add_transition(s1, neg_revealed, s2, w_all.clone())?;
+      +            nwa.add_transition(s2, neg_goto, s3, w_all.clone())?;
+      +            nwa.add_transition(s3, neg_shift, s4, w_all.clone())?;
+                   nwa.states[s4].final_weight = Some(w_all.clone());
+               }
+           }
+      @@ -279,7 +284,7 @@
+               // Add a transition from the new combined start state to the start of the NWA for this tokenizer state.
+               // The label is the tokenizer state ID.
+               let label = tok_id.0 as i16;
+      -        combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all());
+      +        combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all()).unwrap();
+           }
+       
+           let mut combined_nwa = NWA {
+
+      ``````diff
+      diff --git a/src/precompute4/weighted_automata/mod.rs b/src/precompute4/weighted_automata/mod.rs
+      index 8e4526d..9866946 100644
+      --- a/src/precompute4/weighted_automata/mod.rs
+      +++ b/src/precompute4/weighted_automata/mod.rs
+      @@ -10,4 +10,4 @@
+       pub use self::bitset::SimpleBitset;
+       pub use self::common::{format_i16_char, format_pos_code, format_word, I16Map, NWAStateID, StateID, Weight};
+       pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
+      -pub use self::nwa::{NWABody, NWAState, NWAStates, NWA};
+      +pub use self::nwa::{NWABody, NWABuildError, NWAState, NWAStates, NWA};
+
+      ``````diff
+      diff --git a/src/precompute4/weighted_automata/nwa.rs b/src/precompute4/weighted_automata/nwa.rs
+      index 451e048..0d2432a 100644
+      --- a/src/precompute4/weighted_automata/nwa.rs
+      +++ b/src/precompute4/weighted_automata/nwa.rs
+      @@ -5,6 +5,24 @@
+       use std::collections::{BTreeMap, HashMap, VecDeque};
+       use std::fmt::{Display, Formatter};
+       use std::ops::{Index, IndexMut};
+      +
+      +#[derive(Debug, Clone, PartialEq, Eq)]
+      +pub enum NWABuildError {
+      +    DefaultTransitionAlreadyExists { from: NWAStateID },
+      +    StateOutOfBounds { state: NWAStateID },
+      +}
+      +
+      +impl Display for NWABuildError {
+      +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+      +        match self {
+      +            NWABuildError::DefaultTransitionAlreadyExists { from } => {
+      +                write!(f, "Default transition from state {} already exists", from)
+      +            }
+      +            NWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
       +        }
       +    }
+      +}
+       
+       /// - Non-epsilon transitions: unique target per input symbol.
+       /// - Each transition carries a weight (Weight), which is intersected along the path; final states
+      @@ -53,16 +71,36 @@
+       
+           /// Add a labeled transition; if an existing transition on the same label exists,
+           /// we merge weights if the target is the same, otherwise we assert (as per restricted NWA).
+      -    pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) {
+      -        assert!(from < self.len() && to < self.len(), "add_transition: state id out of bounds");
+      +    pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+      +        if from >= self.len() {
+      +            return Err(NWABuildError::StateOutOfBounds { state: from });
+      +        }
+      +        if to >= self.len() {
+      +            return Err(NWABuildError::StateOutOfBounds { state: to });
+      +        }
+               if let Some((old_to, old_w)) = self.0[from].transitions.get_mut(&on) {
+                   assert_eq!(*old_to, to, "NWA restricted: only one target per (state, symbol)");
+                   *old_w |= &w;
+               } else {
+                   self.0[from].transitions.insert(on, (to, w));
+               }
+      -    }
+      -
+      +        Ok(())
+      +    }
       +
-      +    Ok(nwa)
+      +    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+      +        if from >= self.len() {
+      +            return Err(NWABuildError::StateOutOfBounds { state: from });
+      +        }
+      +        if to >= self.len() {
+      +            return Err(NWABuildError::StateOutOfBounds { state: to });
+      +        }
+      +        if self.0[from].default.is_some() {
+      +            return Err(NWABuildError::DefaultTransitionAlreadyExists { from });
+      +        }
+      +        self.0[from].default = Some((to, w));
+      +        Ok(())
+      +    }
+      +
+           /// Deep-copy a subgraph starting at 'start_id' from another NWAStates arena into self.
+           /// Returns (new_start_id, remap_old_to_new)
+           pub fn copy_subgraph_from(&mut self, other: &NWAStates, start_id: NWAStateID) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
+      @@ -165,6 +203,14 @@
+               let start = states.add_state();
+               Self { states, body: NWABody { start_state: start } }
+           }
+      +
+      +    pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+      +        self.states.add_transition(from, on, to, w)
+      +    }
+      +
+      +    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+      +        self.states.add_default_transition(from, to, w)
+      +    }
        }
        
-       fn build_template_dwas(
-           parser: &GLRParser,
-       ) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
-           let all = compute_all_characterizations(parser);
-           let mut out = BTreeMap::new();
-           for (term, bb) in all {
-      -        let dwa = build_template_dwa_from_characterization(&bb)?;
-      +        let nwa = build_template_nwa_from_characterization(&bb)?;
-      +        let mut dwa = nwa.determinize_to_dwa();
-      +        dwa.simplify();
-               crate::debug!(5, "Built template DWA for terminal {:?}:", term);
-               crate::debug!(5, "{}", dwa);
-               out.insert(term, dwa);
+       impl Display for NWA {
+
+      ``````diff
+      diff --git a/src/precompute4/weighted_automata/ops.rs b/src/precompute4/weighted_automata/ops.rs
+      index 2872658..889d71c 100644
+      --- a/src/precompute4/weighted_automata/ops.rs
+      +++ b/src/precompute4/weighted_automata/ops.rs
+      @@ -201,7 +201,7 @@
+                   // Labeled
+                   for (lbl, to) in &st.transitions.exceptions {
+                       if let Some(w) = st.trans_weights_exceptions.get(lbl) {
+      -                    nwa.states.add_transition(i, *lbl, *to, w.clone());
+      +                    nwa.states.add_transition(i, *lbl, *to, w.clone()).unwrap();
+                       }
+                   }
+               }
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 4 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/precompute4/full_dwa.rs
       Applying patch to 'src/precompute4/full_dwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/full_dwa.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/precompute4/weighted_automata/mod.rs
+      Applying patch to 'src/precompute4/weighted_automata/mod.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/mod.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/precompute4/weighted_automata/nwa.rs
+      Applying patch to 'src/precompute4/weighted_automata/nwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/nwa.rs.
+
+      --- Processing Diff Block 4 ---
+      Identified target file: src/precompute4/weighted_automata/ops.rs
+      Applying patch to 'src/precompute4/weighted_automata/ops.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/ops.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor template automaton construction
-      to build NWA first, then determinize to DWA"'
+  - user: 'Changes committed with message: "Refactor NWA construction to use safe
+      transition methods with error propagation"'
     metadata:
 ...
