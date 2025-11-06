@@ -1,4 +1,9 @@
 // src/precompute4/weighted_automata/simplification.rs
+//
+// Simplified structure with the same core passes and behavior:
+// - One core simplification loop parameterized for small/large DWAs.
+// - Helpers to normalize edges, prune unreachable, relax edge weights, and minimize via partition refinement.
+// - NWA simplification kept feature-complete with light refactoring for clarity.
 
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
@@ -12,8 +17,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::cmp::Ordering;
-use std::time::{Instant};
+use std::time::Instant;
 
 /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
 /// This is semantics-preserving; it only reduces the amount of compression performed.
@@ -43,93 +47,62 @@ impl DWA {
         if states.0.is_empty() {
             return;
         }
-        if states.len() > LARGE_AUTOMATON_THRESHOLD {
-            Self::simplify_large(states, body);
-        } else {
-            Self::simplify_small(states, body);
-        }
+        let large = states.len() > LARGE_AUTOMATON_THRESHOLD;
+        Self::simplify_core(states, body, large);
         crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
     }
 
-    fn run_pass(
-        pb: &Option<ProgressBar>,
-        msg: &str,
-        changed_any: &mut bool,
-        mut pass: impl FnMut() -> bool,
-    ) {
-        if let Some(p) = pb {
-            p.set_message(msg.to_string());
-        }
-        if pass() {
-            *changed_any = true;
-        }
-    }
-
-    fn simplify_small(states: &mut DWAStates, body: &mut DWABody) {
-        let max_passes: usize = 50;
+    fn simplify_core(states: &mut DWAStates, body: &mut DWABody, large: bool) {
+        let max_passes: usize = if large { 2 } else { 50 };
         let pb = if PROGRESS_BAR_ENABLED {
+            let title = if large { "Simplifying DWA (large)" } else { "Simplifying DWA (small)" };
             let p = ProgressBar::new(max_passes as u64);
             p.set_style(
                 ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Simplifying DWA (small): {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
+                    .template("{spinner:.green} [".to_owned() + title + ": {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
                     .expect("progress-bar"),
             );
             Some(p)
         } else {
             None
         };
-        if let Some(p) = &pb { p.set_message("Initial normalize/prune"); }
-        Self::normalize_edges_inplace(states);
-        Self::prune_unreachable(states, body);
+
+        // Initial normalize + prune
+        if let Some(p) = &pb { p.set_message("normalize/prune".to_string()); }
+        let _ = Self::normalize_edges_inplace(states);
+        let _ = Self::prune_unreachable(states, body);
+
         let mut changed_any = true;
         let mut passes = 0usize;
         while changed_any && passes < max_passes {
             passes += 1;
             if let Some(p) = &pb { p.inc(1); }
             changed_any = false;
-            Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
-            // Self::run_pass(&pb, "propagate constraints", &mut changed_any, || Self::propagate_and_constrain_weights(states, body));
-            // Self::run_pass(&pb, "propagate future", &mut changed_any, || Self::propagate_future_weights(states));
-            Self::run_pass(&pb, "minimize", &mut changed_any, || Self::minimize_partition_refinement(states, body));
-            Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
-            Self::run_pass(&pb, "prune", &mut changed_any, || Self::prune_unreachable(states, body));
+
+            if let Some(p) = &pb { p.set_message("normalize".to_string()); }
+            changed_any |= Self::normalize_edges_inplace(states);
+
+            if large {
+                // Fast relaxation to expose more compression opportunities
+                if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
+                changed_any |= Self::relax_weights_by_local_future(states);
+            } else {
+                if let Some(p) = &pb { p.set_message("minimize".to_string()); }
+                changed_any |= Self::minimize_partition_refinement(states, body);
+            }
+
+            if let Some(p) = &pb { p.set_message("normalize".to_string()); }
+            changed_any |= Self::normalize_edges_inplace(states);
+
+            if let Some(p) = &pb { p.set_message("prune".to_string()); }
+            changed_any |= Self::prune_unreachable(states, body);
         }
+
         if let Some(p) = &pb {
             p.finish_with_message(format!("Simplified to {} states", states.len()));
         }
     }
 
-    fn simplify_large(states: &mut DWAStates, body: &mut DWABody) {
-        let max_passes: usize = 2;
-        let pb = if PROGRESS_BAR_ENABLED {
-            let p = ProgressBar::new(max_passes as u64);
-            p.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Simplifying DWA (large): {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
-                    .expect("progress-bar"),
-            );
-            Some(p)
-        } else {
-            None
-        };
-        if let Some(p) = &pb { p.set_message("Initial normalize/prune"); }
-        Self::normalize_edges_inplace(states);
-        Self::prune_unreachable(states, body);
-        let mut changed_any = true;
-        let mut passes = 0usize;
-        while changed_any && passes < max_passes {
-            passes += 1;
-            if let Some(p) = &pb { p.inc(1); }
-            changed_any = false;
-            Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
-            Self::run_pass(&pb, "relax local future", &mut changed_any, || Self::relax_weights_by_local_future(states));
-            Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
-            Self::run_pass(&pb, "prune", &mut changed_any, || Self::prune_unreachable(states, body));
-        }
-        if let Some(p) = &pb {
-            p.finish_with_message(format!("Simplified to {} states", states.len()));
-        }
-    }
     pub fn propagate_and_constrain_weights(states: &mut DWAStates, body: &mut DWABody) -> bool {
         let n = states.len();
         if n == 0 {
@@ -293,17 +266,13 @@ impl DWA {
         // 1) Compute U[v] for all v
         let mut upper: Vec<Weight> = Vec::with_capacity(n);
         for i in 0..n {
-            // Start with final weight (or zeros)
             let mut u = states[i].final_weight.clone().unwrap_or_else(Weight::zeros);
-            // Include default outgoing weight if present
             if let Some(w) = states[i].trans_weight_default.as_ref() {
                 u |= w;
             }
-            // Include all exception outgoing weights
             for w in states[i].trans_weights_exceptions.values() {
                 u |= w;
             }
-            // Gate by state-weight (applied on state entry)
             if let Some(sw) = states[i].state_weight.as_ref() {
                 u &= sw;
             }
@@ -315,7 +284,6 @@ impl DWA {
         let mut any_weight_changed = false;
         for i in 0..n {
             let st = &mut states[i];
-            // Default
             if let Some(v) = st.transitions.default {
                 if let Some(w) = st.trans_weight_default.as_mut() {
                     let new_w = &*w | &not_upper[v];
@@ -325,7 +293,6 @@ impl DWA {
                     }
                 }
             }
-            // Exceptions
             let keys: Vec<i16> = st.transitions.exceptions.keys().copied().collect();
             for ch in keys {
                 if let Some(&v) = st.transitions.exceptions.get(&ch) {
@@ -358,12 +325,12 @@ impl DWA {
         changed
     }
 
+    /// Partition-refinement minimization (structure-only), aggregating weights by union.
     pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> bool {
         let n = states.0.len();
         if n <= 1 {
             return false;
         }
-        let sink_pid: usize = n;
 
         // Initial partition by outputs (state_weight, final_weight).
         let mut part: Vec<usize> = vec![0; n];
@@ -381,15 +348,15 @@ impl DWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: HashMap<(Option<Weight>, Option<Weight>, usize, Vec<(i16, usize)>), usize> = HashMap::new();
+            let mut sig2pid: HashMap<(Option<Weight>, Option<Weight>, Option<usize>, Vec<(i16, usize)>), usize> = HashMap::new();
 
             for i in 0..n {
                 let st = &states[i];
-                let def_cls = st.transitions.default.map(|d| part[d]).unwrap_or(sink_pid);
+                let def_cls = st.transitions.default.map(|d| part[d]);
                 let mut ex: Vec<(i16, usize)> = Vec::with_capacity(st.transitions.exceptions.len());
                 for (ch, tgt) in &st.transitions.exceptions {
                     let cls = part[*tgt];
-                    if cls != def_cls {
+                    if def_cls.map_or(true, |dc| dc != cls) {
                         ex.push((*ch, cls));
                     }
                 }
@@ -403,7 +370,7 @@ impl DWA {
             }
         }
 
-        // Early exit if nothing to merge
+        // Build groups
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, p) in part.iter().enumerate() {
             groups.entry(*p).or_default().push(i);
@@ -412,49 +379,43 @@ impl DWA {
             return false;
         }
 
-        // Build representatives
+        // Map partition id -> new state id
         let mut pid_to_new: HashMap<usize, usize> = HashMap::new();
         let mut new_states: Vec<DWAState> = Vec::with_capacity(groups.len());
+
         for (pid, members) in &groups {
             let rep = members[0];
             let rep_state = &states[rep];
-            let def_cls = rep_state.transitions.default.map(|d| part[d]).unwrap_or(sink_pid);
+            let def_cls = rep_state.transitions.default.map(|d| part[d]);
 
             let mut st = DWAState::default();
             st.state_weight = rep_state.state_weight.clone();
             st.final_weight = rep_state.final_weight.clone();
-            st.transitions.default = if def_cls == sink_pid { None } else { Some(0) };
+
+            // Structure: keep default if present, and exceptions that differ from default class
+            st.transitions.default = def_cls.map(|_| Some(0)).flatten();
             for (ch, tgt) in &rep_state.transitions.exceptions {
                 let cls = part[*tgt];
-                if cls != def_cls {
+                if def_cls.map_or(true, |dc| dc != cls) {
                     st.transitions.exceptions.insert(*ch, 0);
                 }
             }
 
-            // Aggregate per-edge weights across members (join).
+            // Aggregate weights (union) across members: default and per-label exceptions
             if st.transitions.default.is_some() {
                 let mut agg_def: Option<Weight> = None;
                 for &old in members {
                     if let Some(w) = states[old].trans_weight_default.as_ref() {
-                        if let Some(ref mut a) = agg_def {
-                            *a |= w;
-                        } else {
-                            agg_def = Some(w.clone());
-                        }
+                        if let Some(ref mut a) = agg_def { *a |= w; } else { agg_def = Some(w.clone()); }
                     }
                 }
                 st.trans_weight_default = agg_def;
             }
-            let ex_keys: Vec<i16> = st.transitions.exceptions.keys().cloned().collect();
-            for ch in ex_keys {
+            for ch in st.transitions.exceptions.keys().cloned().collect::<Vec<_>>() {
                 let mut agg: Option<Weight> = None;
                 for &old in members {
                     if let Some(w) = states[old].trans_weights_exceptions.get(&ch) {
-                        if let Some(ref mut a) = agg {
-                            *a |= w;
-                        } else {
-                            agg = Some(w.clone());
-                        }
+                        if let Some(ref mut a) = agg { *a |= w; } else { agg = Some(w.clone()); }
                     }
                 }
                 if let Some(w) = agg {
@@ -473,10 +434,11 @@ impl DWA {
             let rep = members[0];
             let rep_state = &states[rep];
 
-            let def_cls = rep_state.transitions.default.map(|d| part[d]).unwrap_or(sink_pid);
-            if let Some(ref mut d) = new_states[new_id].transitions.default {
-                *d = *pid_to_new.get(&def_cls).unwrap();
+            if let Some(d) = rep_state.transitions.default {
+                let cls = part[d];
+                new_states[new_id].transitions.default = Some(*pid_to_new.get(&cls).unwrap());
             }
+
             let ex_old = new_states[new_id].transitions.exceptions.clone();
             new_states[new_id].transitions.exceptions.clear();
             for (ch, _) in ex_old {
@@ -486,7 +448,7 @@ impl DWA {
         }
 
         states.0 = new_states;
-        Self::normalize_edges_inplace(states);
+        let _ = Self::normalize_edges_inplace(states);
         let start_pid = part[body.start_state];
         body.start_state = *pid_to_new.get(&start_pid).unwrap();
 
@@ -619,9 +581,7 @@ impl NWA {
         let mut passes = 0;
         while changed && passes < max_passes {
             passes += 1;
-            if let Some(p) = &pb {
-                p.inc(1);
-            }
+            if let Some(p) = &pb { p.inc(1); }
             changed = false;
             Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
             Self::run_pass(&pb, "dedup epsilons", &mut changed, || self.dedup_epsilon_edges());
@@ -632,9 +592,7 @@ impl NWA {
             Self::run_pass(&pb, "merge equivalent", &mut changed, || self.merge_equivalent_states_partition());
             Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
         }
-        if let Some(p) = &pb {
-            p.finish_with_message(format!("Simplified to {} states", self.states.len()));
-        }
+        if let Some(p) = &pb { p.finish_with_message(format!("Simplified to {} states", self.states.len())); }
         crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
         self.states.len() != initial_n
     }
@@ -711,37 +669,22 @@ impl NWA {
             return changed;
         }
 
-        // Relax edge weights using future weights.
-        // This is semantically correct because any path from a state `v` will have its weight
-        // intersected with `fut[v]`. So, for an edge `u -> v` with weight `w`, we can relax `w`
-        // to `w | !fut[v]` without changing the language, because
-        // `(w | !fut[v]) & fut[v] == w & fut[v]`.
-        // This relaxation can turn some weights into `Weight::all()`, enabling more
-        // `collapse_all_weight_epsilon_sccs` in subsequent passes.
+        // Relax edges using future weights (sound: (w | !F[v]) & F[v] == w & F[v])
         let not_fut: Vec<Weight> = fut.iter().map(|w| !w).collect();
         let mut changed_weights = false;
         for i in 0..n {
             let st = &mut self.states[i];
             for (v, w) in &mut st.epsilons {
                 let new_w = &*w | &not_fut[*v];
-                if new_w != *w {
-                    *w = new_w;
-                    changed_weights = true;
-                }
+                if new_w != *w { *w = new_w; changed_weights = true; }
             }
             for (_, (v, w)) in &mut st.transitions {
                 let new_w = &*w | &not_fut[*v];
-                if new_w != *w {
-                    *w = new_w;
-                    changed_weights = true;
-                }
+                if new_w != *w { *w = new_w; changed_weights = true; }
             }
             if let Some((v, w)) = &mut st.default {
                 let new_w = &*w | &not_fut[*v];
-                if new_w != *w {
-                    *w = new_w;
-                    changed_weights = true;
-                }
+                if new_w != *w { *w = new_w; changed_weights = true; }
             }
         }
 
@@ -808,11 +751,7 @@ impl NWA {
             let mut final_weight: Option<Weight> = None;
             for &sid in comp {
                 if let Some(fw) = &self.states[sid].final_weight {
-                    if let Some(acc) = &mut final_weight {
-                        *acc |= fw;
-                    } else {
-                        final_weight = Some(fw.clone());
-                    }
+                    if let Some(acc) = &mut final_weight { *acc |= fw; } else { final_weight = Some(fw.clone()); }
                 }
             }
             new_state.final_weight = final_weight;
@@ -902,16 +841,12 @@ impl NWA {
             // Remove empty-weight epsilons
             let before_eps = st.epsilons.len();
             st.epsilons.retain(|(_, w)| !w.is_empty());
-            if st.epsilons.len() != before_eps {
-                changed = true;
-            }
+            if st.epsilons.len() != before_eps { changed = true; }
 
             // Remove empty-weight labeled transitions
             let before_lbl = st.transitions.len();
             st.transitions.retain(|_, (_, w)| !w.is_empty());
-            if st.transitions.len() != before_lbl {
-                changed = true;
-            }
+            if st.transitions.len() != before_lbl { changed = true; }
 
             // Remove empty-weight default
             if let Some((_, w)) = &st.default {
@@ -927,9 +862,7 @@ impl NWA {
                 let def_w = def_w.clone();
                 let before = st.transitions.len();
                 st.transitions.retain(|_, (to, w)| !(*to == def_to && *w == def_w));
-                if st.transitions.len() != before {
-                    changed = true;
-                }
+                if st.transitions.len() != before { changed = true; }
             }
         }
         changed
@@ -970,25 +903,13 @@ impl NWA {
         let mut bypass: Vec<Option<NWAStateID>> = vec![None; n];
         for s in 0..n {
             let st = &self.states[s];
-            if st.final_weight.is_some() {
-                continue;
-            }
-            if !st.transitions.is_empty() {
-                continue;
-            }
-            if st.default.is_some() {
-                continue;
-            }
-            if st.epsilons.len() != 1 {
-                continue;
-            }
+            if st.final_weight.is_some() { continue; }
+            if !st.transitions.is_empty() { continue; }
+            if st.default.is_some() { continue; }
+            if st.epsilons.len() != 1 { continue; }
             let (t, w) = &st.epsilons[0];
-            if !w.is_all_fast() {
-                continue;
-            }
-            if *t == s {
-                continue;
-            }
+            if !w.is_all_fast() { continue; }
+            if *t == s { continue; }
             bypass[s] = Some(*t);
         }
         if bypass.iter().all(|o| o.is_none()) {
@@ -1000,9 +921,7 @@ impl NWA {
         for i in 0..n {
             let mut v = i;
             while let Some(t) = bypass[v] {
-                if t == v {
-                    break;
-                }
+                if t == v { break; }
                 v = t;
             }
             ultimate[i] = v;
@@ -1012,24 +931,15 @@ impl NWA {
         for st in &mut self.states.0 {
             for (v, _) in &mut st.epsilons {
                 let nv = ultimate[*v];
-                if nv != *v {
-                    *v = nv;
-                    changed = true;
-                }
+                if nv != *v { *v = nv; changed = true; }
             }
             for (_, (v, _)) in &mut st.transitions {
                 let nv = ultimate[*v];
-                if nv != *v {
-                    *v = nv;
-                    changed = true;
-                }
+                if nv != *v { *v = nv; changed = true; }
             }
             if let Some((ref mut dv, _)) = &mut st.default {
                 let nv = ultimate[*dv];
-                if nv != *dv {
-                    *dv = nv;
-                    changed = true;
-                }
+                if nv != *dv { *dv = nv; changed = true; }
             }
         }
         let new_start = ultimate[self.body.start_state];
@@ -1038,7 +948,6 @@ impl NWA {
             changed = true;
         }
         if changed {
-            // Drop states that became unreachable due to bypassing.
             changed |= self.prune_unreachable();
         }
         changed
@@ -1126,7 +1035,6 @@ impl NWA {
             if let Some((to, w)) = st.default.clone() {
                 let cls = part[to];
                 st.default = Some((*pid_to_new.entry(cls).or_insert_with(|| {
-                    // Assign sequentially; we only need the mapping - fill later after all groups known.
                     groups.keys().position(|k| *k == cls).unwrap()
                 }), w));
             }
@@ -1135,7 +1043,6 @@ impl NWA {
             st.transitions.clear();
             for (lbl, (to, w)) in trans {
                 let cls = part[to];
-                // We'll reinsert; weight stays the same
                 st.transitions.insert(lbl, (cls, w));
             }
             // Epsilons (aggregate after class remap)
@@ -1146,7 +1053,6 @@ impl NWA {
                 st.epsilons.push((cls, w));
             }
 
-            // Temporarily push; we'll rewrite class ids to new ids next.
             pid_to_new.insert(*pid, new_states.len());
             new_states.push(st);
         }
@@ -1178,11 +1084,9 @@ impl NWA {
 
         self.states.0 = new_states;
         self.body.start_state = *pid_to_new.get(&part[self.body.start_state]).expect("missing start class");
-        // Final normalization for maximal effect
         let _ = self.normalize_edges_inplace();
         let _ = self.dedup_epsilon_edges();
 
         true
     }
 }
-
