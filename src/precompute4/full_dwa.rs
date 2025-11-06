@@ -42,14 +42,17 @@ fn build_template_dwa_from_characterization(
         let neg_initial = utils::encode_negative_i16(initial_state)?;
         let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-        let s1 = dwa.add_state();
-        let s2 = dwa.add_state();
-        let s3 = dwa.add_state();
-
         // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-        dwa.add_transition(start, pos_initial, s1, w_all.clone()).unwrap();
-        dwa.add_transition(s1, neg_initial, s2, w_all.clone()).unwrap();
-        dwa.add_transition(s2, neg_shift, s3, w_all.clone()).unwrap();
+        let s1_candidate = dwa.add_state();
+        let s1 = dwa.add_transition_if_missing(start, pos_initial, s1_candidate, w_all.clone()).unwrap();
+
+        let s2_candidate = dwa.add_state();
+        let s2 = dwa.add_transition_if_missing(s1, neg_initial, s2_candidate, w_all.clone()).unwrap();
+
+        let s3_candidate = dwa.add_state();
+        let s3 =
+            dwa.add_transition_if_missing(s2, neg_shift, s3_candidate, w_all.clone()).unwrap();
+
         dwa.set_final_weight(s3, w_all.clone()).unwrap();
     }
 
@@ -59,15 +62,17 @@ fn build_template_dwa_from_characterization(
 
         // Create a chain of default transitions for the pops.
         // start --(+initial)--> s1 --(default)*len--> target_nt_state
-        let mut from = start;
-        let mut next_state = if len == 0 { target_nt_state } else { dwa.add_state() };
-        dwa.add_transition(from, pos_initial, next_state, w_all.clone()).unwrap();
-        from = next_state;
+        let next_state_candidate = if len == 0 { target_nt_state } else { dwa.add_state() };
+        let mut from =
+            dwa.add_transition_if_missing(start, pos_initial, next_state_candidate, w_all.clone())
+                .unwrap();
 
-        for i in 0..len {
-            let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
-            dwa.set_default_transition(from, to, w_all.clone()).unwrap();
-            from = to;
+        if from == next_state_candidate && len > 0 {
+            for i in 0..len {
+                let to = if i == len - 1 { target_nt_state } else { dwa.add_state() };
+                dwa.set_default_transition(from, to, w_all.clone()).unwrap();
+                from = to;
+            }
         }
     }
 
@@ -81,15 +86,17 @@ fn build_template_dwa_from_characterization(
             let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
 
             // src --(+revealed)--> s1 --(default)*len--> dst
-            let mut from = src_nt_state;
-            let mut next_state = if len == 0 { dst_nt_state } else { dwa.add_state() };
-            dwa.add_transition(from, pos_revealed, next_state, w_all.clone()).unwrap();
-            from = next_state;
+            let next_state_candidate = if len == 0 { dst_nt_state } else { dwa.add_state() };
+            let mut from = dwa
+                .add_transition_if_missing(src_nt_state, pos_revealed, next_state_candidate, w_all.clone())
+                .unwrap();
 
-            for i in 0..len {
-                let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
-                dwa.set_default_transition(from, to, w_all.clone()).unwrap();
-                from = to;
+            if from == next_state_candidate && len > 0 {
+                for i in 0..len {
+                    let to = if i == len - 1 { dst_nt_state } else { dwa.add_state() };
+                    dwa.set_default_transition(from, to, w_all.clone()).unwrap();
+                    from = to;
+                }
             }
         }
 
@@ -99,16 +106,22 @@ fn build_template_dwa_from_characterization(
             let neg_goto = utils::encode_negative_i16(goto_state)?;
             let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-            let s1 = dwa.add_state();
-            let s2 = dwa.add_state();
-            let s3 = dwa.add_state();
-            let s4 = dwa.add_state();
-
             // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-            dwa.add_transition(src_nt_state, pos_revealed, s1, w_all.clone()).unwrap();
-            dwa.add_transition(s1, neg_revealed, s2, w_all.clone()).unwrap();
-            dwa.add_transition(s2, neg_goto, s3, w_all.clone()).unwrap();
-            dwa.add_transition(s3, neg_shift, s4, w_all.clone()).unwrap();
+            let s1_candidate = dwa.add_state();
+            let s1 = dwa
+                .add_transition_if_missing(src_nt_state, pos_revealed, s1_candidate, w_all.clone())
+                .unwrap();
+
+            let s2_candidate = dwa.add_state();
+            let s2 =
+                dwa.add_transition_if_missing(s1, neg_revealed, s2_candidate, w_all.clone()).unwrap();
+
+            let s3_candidate = dwa.add_state();
+            let s3 = dwa.add_transition_if_missing(s2, neg_goto, s3_candidate, w_all.clone()).unwrap();
+
+            let s4_candidate = dwa.add_state();
+            let s4 =
+                dwa.add_transition_if_missing(s3, neg_shift, s4_candidate, w_all.clone()).unwrap();
             dwa.set_final_weight(s4, w_all.clone()).unwrap();
         }
     }

@@ -301,6 +301,31 @@ impl DWA {
         Ok(())
     }
 
+    /// Adds a transition if it does not already exist for the given `from` state and `on` symbol.
+    /// If a transition already exists, it returns the existing target state ID.
+    /// If it does not exist, it adds a new transition to the given `to` state and returns `to`.
+    pub fn add_transition_if_missing(
+        &mut self,
+        from: StateID,
+        on: i16,
+        to: StateID,
+        weight: Weight,
+    ) -> Result<StateID, DWABuildError> {
+        if from >= self.states.len() {
+            return Err(DWABuildError::StateOutOfBounds { state: from });
+        }
+        if to >= self.states.len() {
+            return Err(DWABuildError::StateOutOfBounds { state: to });
+        }
+        let from_state = &mut self.states[from];
+        if let Some(&existing_to) = from_state.transitions.exceptions.get(&on) {
+            return Ok(existing_to);
+        }
+        from_state.transitions.exceptions.insert(on, to);
+        from_state.trans_weights_exceptions.insert(on, weight);
+        Ok(to)
+    }
+
     pub fn set_default_transition(
         &mut self,
         from: StateID,
