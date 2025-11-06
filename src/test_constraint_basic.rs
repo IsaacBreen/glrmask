@@ -342,6 +342,90 @@ fn test_constraint_expression() {
 }
 
 #[test]
+fn test_constraint_expression_simplified_06_11_25() {
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"*".to_vec(), LLMTokenID(2));
+
+    let ebnf_grammar = indoc! {r#"
+        s ::= e;
+        e ::= e PLUS t | t;
+        t ::= t TIMES f | f;
+        f ::= LPAREN e RPAREN | I;
+        PLUS ::= '+';
+        TIMES ::= '*';
+        LPAREN ::= '(';
+        RPAREN ::= ')';
+        I ::= 'i';
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map.clone(),
+        6, // max_original_llm_token_id
+        &GrammarConstraintConfig::default(),
+        None,
+    );
+    constraint.dump_precomputed1();
+    // constraint.dump_precomputed2();
+    constraint.dump_precomputed3();
+    constraint.dump_precomputed4();
+    // constraint.dump_precomputed_special();
+
+    // Initial state and step
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+    assert_eq!(mask, HybridBitset::from_iter(vec![]));
+
+    // Commit "(i"
+    state.commit(LLMTokenID(5));
+    let mask = state.get_mask();
+    // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
+    assert_eq!(mask, HybridBitset::from_iter(vec![1, 2, 4, 6]));
+
+    // Test Serialization/Deserialization
+    let json = constraint.to_json();
+    let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
+    constraint.assert_eq(&constraint_from_json); // Use the new assert_eq method
+
+    // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
+    // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
+    let llm_token = b"(i".to_vec();
+    let grammar_tokens = vec!["LPAREN", "I"];
+    let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
+    let parser = &constraint.parser;
+    let grammar_token_map = &parser.terminal_map;
+    let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&regex_name(token)).unwrap()).collect::<Vec<_>>();
+
+    let mut constraint_state_for_comp = constraint.init();
+    let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging
+    constraint_state_for_comp.commit(*llm_token_id_for_comp);
+
+    let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
+    for grammar_token_id in grammar_token_ids {
+        if let Some(dummy_id) = constraint.original_to_dummy_map.get(grammar_token_id) {
+            parser_state_for_comp.process_token(*dummy_id);
+        }
+        parser_state_for_comp.step(*grammar_token_id);
+    }
+
+    assert_eq!(constraint_state_for_comp.state().len(), 1);
+    let (tokenizer_state_id_comp, actual_constraint_parser_state) = constraint_state_for_comp.state().iter().next().unwrap();
+    let mut actual_constraint_parser_state = actual_constraint_parser_state.clone();
+
+    // For comparison, parser_state_for_comp's GSS acc needs to be "all_ones" like commit does.
+    let mut comparable_parser_gss = (*parser_state_for_comp.active_state.stack).clone();
+    let mut comparable_parser_active_state = ParseState::with_stack(Arc::new(comparable_parser_gss));
+
+    Arc::make_mut(&mut comparable_parser_active_state.stack).reset_llm_tokens();
+    Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_llm_tokens();
+
+    assert_eq!(*tokenizer_state_id_comp, constraint.tokenizer.initial_state_id(), "Tokenizer should be in initial state");
+    assert_eq!(actual_constraint_parser_state.active_state, comparable_parser_active_state, "GSS structures should match");
+}
+
+#[test]
 fn test_precompute_for_python_name_token() {
     // ignore = rep(choice([
     //     eat_u8(ord(" ")),
