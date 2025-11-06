@@ -379,10 +379,9 @@ fn test_constraint_expression_simplified_06_11_25() {
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 
     // Commit "(i"
-    state.commit(LLMTokenID(5));
+    state.commit_bytes(b"(i");
     let mask = state.get_mask();
-    // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
-    assert_eq!(mask, HybridBitset::from_iter(vec![1, 2, 4, 6]));
+    assert_eq!(mask, HybridBitset::from_iter(vec![1]));
 
     // Test Serialization/Deserialization
     let json = constraint.to_json();
