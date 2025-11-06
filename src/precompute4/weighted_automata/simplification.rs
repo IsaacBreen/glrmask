@@ -584,16 +584,49 @@ impl DWA {
 }
 
 impl NWA {
+    fn run_pass(
+        pb: &Option<ProgressBar>,
+        msg: &str,
+        changed_any: &mut bool,
+        mut pass: impl FnMut() -> bool,
+    ) {
+        if let Some(p) = pb {
+            p.set_message(msg.to_string());
+        }
+        if pass() {
+            *changed_any = true;
+        }
+    }
+
     pub fn simplify(&mut self) -> bool {
         let initial_n = self.states.len();
+        let max_passes = 5;
+        let pb = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(max_passes as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Simplifying NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
+                    .expect("progress-bar"),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
         let mut changed = true;
         let mut passes = 0;
-        while changed && passes < 5 {
+        while changed && passes < max_passes {
             passes += 1;
+            if let Some(p) = &pb {
+                p.inc(1);
+            }
             changed = false;
-            if self.collapse_all_weight_epsilon_sccs() { changed = true; }
-            if self.prune_unreachable() { changed = true; }
-            if self.prune_dead_ends() { changed = true; }
+            Self::run_pass(&pb, "collapse SCCs", &mut changed, || self.collapse_all_weight_epsilon_sccs());
+            Self::run_pass(&pb, "prune unreachable", &mut changed, || self.prune_unreachable());
+            Self::run_pass(&pb, "prune dead ends", &mut changed, || self.prune_dead_ends());
+        }
+        if let Some(p) = &pb {
+            p.finish_with_message(format!("Simplified to {} states", self.states.len()));
         }
         self.states.len() != initial_n
     }
