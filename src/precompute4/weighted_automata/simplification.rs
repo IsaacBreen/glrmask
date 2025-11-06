@@ -12,7 +12,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Instant};
 
 /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
 /// This is semantics-preserving; it only reduces the amount of compression performed.
@@ -599,6 +599,7 @@ impl NWA {
     }
 
     pub fn simplify(&mut self) -> bool {
+        let now = Instant::now();
         let initial_n = self.states.len();
         let max_passes = 5;
         let pb = if PROGRESS_BAR_ENABLED {
@@ -628,6 +629,7 @@ impl NWA {
         if let Some(p) = &pb {
             p.finish_with_message(format!("Simplified to {} states", self.states.len()));
         }
+        crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
         self.states.len() != initial_n
     }
 

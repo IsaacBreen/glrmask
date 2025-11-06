@@ -10,6 +10,7 @@ use crate::constraint::LLMTokenBV;
 use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 pub type Precomputed4 = DWA;
 use crate::tokenizer::TokenizerStateID;
@@ -173,13 +174,16 @@ fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<
 
 // Public API: precompute4 using NWA-first approach, determinize at the end.
 pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
+    let now_total = Instant::now();
+    let now = Instant::now();
     crate::debug!(5, "Starting precompute4...");
     // 1. Build template DWAs for all terminals.
     let template_dwas = match build_template_dwas(parser) {
         Ok(m) => m,
         Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-        };
+    };
     let ignore_dwa = build_ignore_terminal_dwa();
+    crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
 
     // 2. Set up shared NWA state arena.
     let states_arena = RefCell::new(NWAStates::default());
@@ -209,6 +213,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
     let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
+    let now = Instant::now();
     Trie::special_map_grouped(
         &reversed_trie1_god,
         &traversal_data,
@@ -272,6 +277,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             }
         },
     );
+    crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
 
     // Combine all final NWA bodies into a single NWA
     let mut combined_nwa_states = states_arena.into_inner();
@@ -288,17 +294,20 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         states: combined_nwa_states,
         body: NWABody { start_state: combined_start_state },
     };
+    crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
 
+    let now = Instant::now();
     // Determinize the single combined NWA
     crate::debug!(5, "Determinizing final combined NWA...");
     let mut final_dwa = combined_nwa.determinize_to_dwa();
-    crate::debug!(5, "Determinization produced DWA with {} states. Starting simplification...", final_dwa.states.len());
     final_dwa.simplify();
-    crate::debug!(5, "Simplification finished ({} states).", final_dwa.states.len());
+    crate::debug!(4, "Initial determinize & simplify took: {:?}. Resulting DWA has {} states.", now.elapsed(), final_dwa.states.len());
 
+    let now = Instant::now();
     crate::debug!(5, "Starting resolve_negative_codes_for_all...");
     resolve_negative_codes_in_dwa(&mut final_dwa);
-    crate::debug!(5, "resolve_negative_codes_for_all finished.");
+    crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
 
+    crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
     final_dwa
 }

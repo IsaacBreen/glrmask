@@ -2,6 +2,7 @@ use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Wei
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, VecDeque};
+use std::time::Instant;
 
 /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
 /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
@@ -22,6 +23,9 @@ use std::collections::{HashMap, VecDeque};
 /// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
 ///     DWA, which is the final result.
 pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
+    let now = Instant::now();
+    crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
+
     let pb = if PROGRESS_BAR_ENABLED {
         let p = ProgressBar::new(6);
         p.set_style(
@@ -36,9 +40,11 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
 
     if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
     let mut nwa = NWA::from_dwa(dwa);
+    crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
 
     if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(2); }
     let epsilons_to_add = compute_cancellations(&nwa.states);
+    crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
 
     if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(3); }
     let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
@@ -63,6 +69,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     for st in &mut nwa.states.0 {
         st.transitions.retain(|k, _| *k >= 0);
     }
+    crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
 
     if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(5); }
     let mut result = nwa.determinize_to_dwa();
@@ -71,6 +78,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     *dwa = result;
 
     if let Some(p) = &pb { p.finish_with_message("Done"); }
+    crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
 }
 
 /// Helper to compute the weighted epsilon closure of a state.

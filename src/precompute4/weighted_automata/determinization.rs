@@ -13,8 +13,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-
+use std::sync::{Arc};
+use std::time::Instant;
 impl NWA {
     /// Determinize the subgraph reachable from 'start' to a DWA via a radically simplified, high-performance construction:
     ///
@@ -35,9 +35,14 @@ impl NWA {
     ///   use only explicit sources; default edge contains all sources (both with/without explicit), but at runtime default is ignored where exceptions exist.
     pub fn determinize_to_dwa(&self) -> DWA {
         let mut nwa_clone = self.clone();
+        let now = Instant::now();
+        crate::debug!(4, "Determinizing NWA with {} states...", nwa_clone.states.len());
         // Aggressive but safe simplification before determinization
         nwa_clone.simplify();
-        nwa_clone.internal_determinize_to_dwa_fast()
+        crate::debug!(4, "NWA simplified to {} states.", nwa_clone.states.len());
+        let result = nwa_clone.internal_determinize_to_dwa_fast();
+        crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
+        result
     }
 
     fn internal_determinize_to_dwa_fast(&self) -> DWA {
