@@ -15,6 +15,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
 const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
+/// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
+/// This is semantics-preserving; it only reduces the amount of compression performed.
+const LARGE_AUTOMATON_THRESHOLD: usize = 200_000;
 
 thread_local! {
     static IN_SIMPLIFY_CHECK: Cell<bool> = Cell::new(false);
@@ -41,8 +44,9 @@ impl DWA {
             return;
         }
 
+        let max_passes: usize = if states.len() > LARGE_AUTOMATON_THRESHOLD { 2 } else { 10 };
         let pb = if PROGRESS_BAR_ENABLED {
-            let p = ProgressBar::new(10);
+            let p = ProgressBar::new(max_passes as u64);
             p.set_style(
                 ProgressStyle::default_bar()
                     .template("{spinner:.green} [Simplifying DWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
@@ -59,7 +63,7 @@ impl DWA {
 
         let mut changed_any = true;
         let mut passes = 0usize;
-        while changed_any && passes < 10 {
+        while changed_any && passes < max_passes {
             passes += 1;
             if let Some(p) = &pb { p.inc(1); }
             changed_any = false;
@@ -68,17 +72,22 @@ impl DWA {
             if Self::normalize_edges_inplace(states) {
                 changed_any = true;
             }
-            if let Some(p) = &pb { p.set_message("propagate constraints"); }
-            if Self::propagate_and_constrain_weights(states, body) {
+            let is_large = states.len() > LARGE_AUTOMATON_THRESHOLD;
+            if !is_large {
+                if let Some(p) = &pb { p.set_message("propagate constraints"); }
+                if Self::propagate_and_constrain_weights(states, body) {
+                    changed_any = true;
+                }
+            }
+            if let Some(p) = &pb { p.set_message("relax local future"); }
+            if Self::relax_weights_by_local_future(states) {
                 changed_any = true;
             }
-            if let Some(p) = &pb { p.set_message("propagate future"); }
-            if Self::propagate_future_weights(states) {
-                changed_any = true;
-            }
-            if let Some(p) = &pb { p.set_message("minimize"); }
-            if Self::minimize_partition_refinement(states, body) {
-                changed_any = true;
+            if !is_large {
+                if let Some(p) = &pb { p.set_message("minimize"); }
+                if Self::minimize_partition_refinement(states, body) {
+                    changed_any = true;
+                }
             }
             if let Some(p) = &pb { p.set_message("normalize"); }
             if Self::normalize_edges_inplace(states) {
@@ -243,6 +252,68 @@ impl DWA {
             }
         }
 
+        any_weight_changed
+    }
+
+    /// Fast, single-pass local relaxation:
+    /// For each state v, compute an upper bound U[v] on future acceptance:
+    ///     U[v] = (state_weight[v] if present else ALL) ∧ (final_weight[v] ∪ default_weight[v] ∪ ⋃ exception_weights[v])
+    /// Then S[v] = ¬U[v] ⊆ ¬F[v], so for each edge u→v we can safely set weight(u→v) := weight(u→v) ∪ S[v].
+    /// This preserves semantics and is O(E) per pass.
+    pub fn relax_weights_by_local_future(states: &mut DWAStates) -> bool {
+        let n = states.len();
+        if n == 0 {
+            return false;
+        }
+        // 1) Compute U[v] for all v
+        let mut upper: Vec<Weight> = Vec::with_capacity(n);
+        for i in 0..n {
+            // Start with final weight (or zeros)
+            let mut u = states[i].final_weight.clone().unwrap_or_else(Weight::zeros);
+            // Include default outgoing weight if present
+            if let Some(w) = states[i].trans_weight_default.as_ref() {
+                u |= w;
+            }
+            // Include all exception outgoing weights
+            for w in states[i].trans_weights_exceptions.values() {
+                u |= w;
+            }
+            // Gate by state-weight (applied on state entry)
+            if let Some(sw) = states[i].state_weight.as_ref() {
+                u &= sw;
+            }
+            upper.push(u);
+        }
+        // 2) Precompute complements S[v] = ¬U[v]
+        let not_upper: Vec<Weight> = upper.iter().map(|w| !w).collect();
+        // 3) Relax all edges using S[target]
+        let mut any_weight_changed = false;
+        for i in 0..n {
+            let st = &mut states[i];
+            // Default
+            if let Some(v) = st.transitions.default {
+                if let Some(w) = st.trans_weight_default.as_mut() {
+                    let new_w = &*w | &not_upper[v];
+                    if new_w != *w {
+                        *w = new_w;
+                        any_weight_changed = true;
+                    }
+                }
+            }
+            // Exceptions
+            let keys: Vec<i16> = st.transitions.exceptions.keys().copied().collect();
+            for ch in keys {
+                if let Some(&v) = st.transitions.exceptions.get(&ch) {
+                    if let Some(w) = st.trans_weights_exceptions.get_mut(&ch) {
+                        let new_w = &*w | &not_upper[v];
+                        if new_w != *w {
+                            *w = new_w;
+                            any_weight_changed = true;
+                        }
+                    }
+                }
+            }
+        }
         any_weight_changed
     }
 
