@@ -12,6 +12,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::cmp::Ordering;
 use std::time::{Instant};
 
 /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
@@ -601,7 +602,7 @@ impl NWA {
     pub fn simplify(&mut self) -> bool {
         let now = Instant::now();
         let initial_n = self.states.len();
-        let max_passes = 5;
+        let max_passes = 12;
         let pb = if PROGRESS_BAR_ENABLED {
             let p = ProgressBar::new(max_passes as u64);
             p.set_style(
@@ -622,9 +623,14 @@ impl NWA {
                 p.inc(1);
             }
             changed = false;
+            Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
+            Self::run_pass(&pb, "dedup epsilons", &mut changed, || self.dedup_epsilon_edges());
+            Self::run_pass(&pb, "bypass ε-chains", &mut changed, || self.bypass_trivial_epsilon_chains());
             Self::run_pass(&pb, "collapse SCCs", &mut changed, || self.collapse_all_weight_epsilon_sccs());
             Self::run_pass(&pb, "prune unreachable", &mut changed, || self.prune_unreachable());
             Self::run_pass(&pb, "prune dead ends", &mut changed, || self.prune_dead_ends());
+            Self::run_pass(&pb, "merge equivalent", &mut changed, || self.merge_equivalent_states_partition());
+            Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
         }
         if let Some(p) = &pb {
             p.finish_with_message(format!("Simplified to {} states", self.states.len()));
@@ -885,3 +891,298 @@ impl NWA {
         }
     }
 }
+
+impl NWA {
+    /// Normalize in-place:
+    /// - Remove empty-weight edges (ε, labeled, and default)
+    /// - Drop labeled transitions that are identical to the default (same target and weight)
+    fn normalize_edges_inplace(&mut self) -> bool {
+        let mut changed = false;
+        for st in &mut self.states.0 {
+            // Remove empty-weight epsilons
+            let before_eps = st.epsilons.len();
+            st.epsilons.retain(|(_, w)| !w.is_empty());
+            if st.epsilons.len() != before_eps {
+                changed = true;
+            }
+
+            // Remove empty-weight labeled transitions
+            let before_lbl = st.transitions.len();
+            st.transitions.retain(|_, (_, w)| !w.is_empty());
+            if st.transitions.len() != before_lbl {
+                changed = true;
+            }
+
+            // Remove empty-weight default
+            if let Some((_, w)) = &st.default {
+                if w.is_empty() {
+                    st.default = None;
+                    changed = true;
+                }
+            }
+
+            // Remove labeled transitions that are identical to default (same target, same weight)
+            if let Some((def_to, def_w)) = &st.default {
+                let def_to = *def_to;
+                let def_w = def_w.clone();
+                let before = st.transitions.len();
+                st.transitions.retain(|_, (to, w)| !(*to == def_to && *w == def_w));
+                if st.transitions.len() != before {
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Deduplicate epsilon edges to the same target by unioning their weights.
+    fn dedup_epsilon_edges(&mut self) -> bool {
+        let mut changed = false;
+        for st in &mut self.states.0 {
+            if st.epsilons.len() <= 1 {
+                continue;
+            }
+            let mut acc: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+            for (to, w) in &st.epsilons {
+                let e = acc.entry(*to).or_insert_with(Weight::zeros);
+                *e |= w;
+            }
+            let new_eps: Vec<(NWAStateID, Weight)> = acc.into_iter().collect();
+            if new_eps != st.epsilons {
+                st.epsilons = new_eps;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Bypass trivial ε-chains: if a state s
+    /// - has no labeled transitions
+    /// - has no default
+    /// - has no final weight
+    /// - has exactly one ε edge with ALL weight to t (t != s)
+    /// then redirect all incoming edges targeting s to t and (after a prune) drop s.
+    fn bypass_trivial_epsilon_chains(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 {
+            return false;
+        }
+        let mut bypass: Vec<Option<NWAStateID>> = vec![None; n];
+        for s in 0..n {
+            let st = &self.states[s];
+            if st.final_weight.is_some() {
+                continue;
+            }
+            if !st.transitions.is_empty() {
+                continue;
+            }
+            if st.default.is_some() {
+                continue;
+            }
+            if st.epsilons.len() != 1 {
+                continue;
+            }
+            let (t, w) = &st.epsilons[0];
+            if !w.is_all_fast() {
+                continue;
+            }
+            if *t == s {
+                continue;
+            }
+            bypass[s] = Some(*t);
+        }
+        if bypass.iter().all(|o| o.is_none()) {
+            return false;
+        }
+
+        // Compute ultimate mapping along bypass chains (path compression-like).
+        let mut ultimate: Vec<NWAStateID> = (0..n).collect();
+        for i in 0..n {
+            let mut v = i;
+            while let Some(t) = bypass[v] {
+                if t == v {
+                    break;
+                }
+                v = t;
+            }
+            ultimate[i] = v;
+        }
+
+        let mut changed = false;
+        for st in &mut self.states.0 {
+            for (v, _) in &mut st.epsilons {
+                let nv = ultimate[*v];
+                if nv != *v {
+                    *v = nv;
+                    changed = true;
+                }
+            }
+            for (_, (v, _)) in &mut st.transitions {
+                let nv = ultimate[*v];
+                if nv != *v {
+                    *v = nv;
+                    changed = true;
+                }
+            }
+            if let Some((ref mut dv, _)) = &mut st.default {
+                let nv = ultimate[*dv];
+                if nv != *dv {
+                    *dv = nv;
+                    changed = true;
+                }
+            }
+        }
+        let new_start = ultimate[self.body.start_state];
+        if new_start != self.body.start_state {
+            self.body.start_state = new_start;
+            changed = true;
+        }
+        if changed {
+            // Drop states that became unreachable due to bypassing.
+            changed |= self.prune_unreachable();
+        }
+        changed
+    }
+
+    /// Merge equivalent NWA states by partition refinement.
+    /// Signature per state includes:
+    ///  - final_weight
+    ///  - default: Option<(class(target), weight)>
+    ///  - epsilons: vector of (class(target), UNION(weight to that class)), sorted by class
+    ///  - labeled transitions: vector of (label, class(target), weight), sorted by label
+    fn merge_equivalent_states_partition(&mut self) -> bool {
+        let n = self.states.len();
+        if n <= 1 {
+            return false;
+        }
+        // Initial partition by final_weight only (coarse).
+        let mut part: Vec<usize> = vec![0; n];
+        let mut canon0: HashMap<Option<Weight>, usize> = HashMap::new();
+        for i in 0..n {
+            let key = self.states[i].final_weight.clone();
+            let next_id = canon0.len();
+            part[i] = *canon0.entry(key).or_insert(next_id);
+        }
+
+        // Iteratively refine using structural signatures keyed by current partitions.
+        let mut changed = true;
+        let mut rounds = 0usize;
+        while changed && rounds < 30 {
+            rounds += 1;
+            changed = false;
+            let mut next_part: Vec<usize> = vec![0; n];
+            let mut sig2pid: HashMap<
+                (Option<Weight>, Option<(usize, Weight)>, Vec<(usize, Weight)>, Vec<(i16, (usize, Weight))>),
+                usize,
+            > = HashMap::new();
+
+            for i in 0..n {
+                let st = &self.states[i];
+                let def_sig = st.default.as_ref().map(|(to, w)| (part[*to], w.clone()));
+
+                // Aggregate epsilons by target class (union weights)
+                let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
+                for (to, w) in &st.epsilons {
+                    let cls = part[*to];
+                    let e = eps_map.entry(cls).or_insert_with(Weight::zeros);
+                    *e |= w;
+                }
+                let eps_sig: Vec<(usize, Weight)> = eps_map.into_iter().collect();
+
+                // Labeled transitions in label order (BTreeMap already ordered by label)
+                let mut lbl_sig: Vec<(i16, (usize, Weight))> = Vec::with_capacity(st.transitions.len());
+                for (lbl, (to, w)) in &st.transitions {
+                    lbl_sig.push((*lbl, (part[*to], w.clone())));
+                }
+
+                let sig = (st.final_weight.clone(), def_sig, eps_sig, lbl_sig);
+                let pid_next = sig2pid.len();
+                next_part[i] = *sig2pid.entry(sig).or_insert(pid_next);
+            }
+            if next_part != part {
+                part = next_part;
+                changed = true;
+            }
+        }
+
+        // Group states by final partition id
+        let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (i, p) in part.iter().enumerate() {
+            groups.entry(*p).or_default().push(i);
+        }
+        if groups.len() == n {
+            return false;
+        }
+
+        // Map partition id -> new state id
+        let mut pid_to_new: HashMap<usize, usize> = HashMap::new();
+        let mut new_states: Vec<NWAState> = Vec::with_capacity(groups.len());
+        for (pid, members) in &groups {
+            let rep = members[0];
+            let mut st = self.states[rep].clone();
+
+            // Fix targets to new partition ids
+            // Default
+            if let Some((to, w)) = st.default.clone() {
+                let cls = part[to];
+                st.default = Some((*pid_to_new.entry(cls).or_insert_with(|| {
+                    // Assign sequentially; we only need the mapping - fill later after all groups known.
+                    groups.keys().position(|k| *k == cls).unwrap()
+                }), w));
+            }
+            // Labeled transitions
+            let trans = st.transitions.clone();
+            st.transitions.clear();
+            for (lbl, (to, w)) in trans {
+                let cls = part[to];
+                // We'll reinsert; weight stays the same
+                st.transitions.insert(lbl, (cls, w));
+            }
+            // Epsilons (aggregate after class remap)
+            let eps = st.epsilons.clone();
+            st.epsilons.clear();
+            for (to, w) in eps {
+                let cls = part[to];
+                st.epsilons.push((cls, w));
+            }
+
+            // Temporarily push; we'll rewrite class ids to new ids next.
+            pid_to_new.insert(*pid, new_states.len());
+            new_states.push(st);
+        }
+
+        // Rewrite class ids in edges to actual new state ids and deduplicate ε-edges
+        for st in &mut new_states {
+            // Default
+            if let Some((cls, w)) = &st.default.clone() {
+                st.default = Some((*pid_to_new.get(cls).expect("missing class"), w.clone()));
+            }
+            // Labeled
+            let trans = st.transitions.clone();
+            st.transitions.clear();
+            for (lbl, (cls, w)) in trans {
+                let to_new = *pid_to_new.get(&cls).expect("missing class");
+                st.transitions.insert(lbl, (to_new, w));
+            }
+            // Epsilons
+            let eps = st.epsilons.clone();
+            st.epsilons.clear();
+            let mut acc: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+            for (cls, w) in eps {
+                let to_new = *pid_to_new.get(&cls).expect("missing class");
+                let e = acc.entry(to_new).or_insert_with(Weight::zeros);
+                *e |= &w;
+            }
+            st.epsilons = acc.into_iter().collect();
+        }
+
+        self.states.0 = new_states;
+        self.body.start_state = *pid_to_new.get(&part[self.body.start_state]).expect("missing start class");
+        // Final normalization for maximal effect
+        let _ = self.normalize_edges_inplace();
+        let _ = self.dedup_epsilon_edges();
+
+        true
+    }
+}
+
