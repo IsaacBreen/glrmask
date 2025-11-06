@@ -348,12 +348,9 @@ fn test_constraint_expression_simplified_06_11_25() {
 
     let ebnf_grammar = indoc! {r#"
         s ::= e;
-        e ::= e PLUS t | t;
-        t ::= t TIMES f | f;
-        f ::= I;
-        PLUS ::= '+';
-        TIMES ::= '*';
-        I ::= 'i';
+        e ::= e '+' t | t;
+        t ::= t '*' f | f;
+        f ::= 'i';
     "#};
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
 
