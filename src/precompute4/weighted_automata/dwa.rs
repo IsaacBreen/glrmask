@@ -301,69 +301,6 @@ impl DWA {
         Ok(())
     }
 
-    /// Adds a transition if it does not already exist for the given `from` state and `on` symbol,
-    /// or merges the weight if it does.
-    /// If a transition already exists, it merges the weight and returns the existing target state ID.
-    /// If it does not exist, it adds a new transition to the given `to` state and returns `to`.
-    pub fn add_transition_if_missing(
-        &mut self,
-        from: StateID,
-        on: i16,
-        to: StateID,
-        weight: Weight,
-    ) -> Result<StateID, DWABuildError> {
-        if from >= self.states.len() {
-            return Err(DWABuildError::StateOutOfBounds { state: from });
-        }
-        if to >= self.states.len() {
-            return Err(DWABuildError::StateOutOfBounds { state: to });
-        }
-        let from_state = &mut self.states[from];
-        if let Some(&existing_to) = from_state.transitions.exceptions.get(&on) {
-            if let Some(existing_weight) = from_state.trans_weights_exceptions.get_mut(&on) {
-                *existing_weight |= &weight;
-            } else {
-                from_state.trans_weights_exceptions.insert(on, weight);
-            }
-            return Ok(existing_to);
-        }
-        from_state.transitions.exceptions.insert(on, to);
-        from_state.trans_weights_exceptions.insert(on, weight);
-        Ok(to)
-    }
-
-    /// Gets the target of an existing transition or creates a new state and a transition to it.
-    /// If a transition on `on` already exists from `from`, its weight is merged with the given `weight`
-    /// and its target state ID is returned.
-    /// If no such transition exists, a new state is created, a transition from `from` to the new state
-    /// is added with the given `weight`, and the new state's ID is returned.
-    pub fn get_or_add_transition(
-        &mut self,
-        from: StateID,
-        on: i16,
-        weight: Weight,
-    ) -> Result<StateID, DWABuildError> {
-        if from >= self.states.len() {
-            return Err(DWABuildError::StateOutOfBounds { state: from });
-        }
-
-        if let Some(&existing_to) = self.states[from].transitions.exceptions.get(&on) {
-            let from_state = &mut self.states[from];
-            if let Some(existing_weight) = from_state.trans_weights_exceptions.get_mut(&on) {
-                *existing_weight |= &weight;
-            } else {
-                from_state.trans_weights_exceptions.insert(on, weight);
-            }
-            return Ok(existing_to);
-        }
-
-        let to = self.add_state();
-        let from_state = &mut self.states[from];
-        from_state.transitions.exceptions.insert(on, to);
-        from_state.trans_weights_exceptions.insert(on, weight);
-        Ok(to)
-    }
-
     pub fn set_default_transition(
         &mut self,
         from: StateID,
