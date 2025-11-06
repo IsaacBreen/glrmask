@@ -280,40 +280,40 @@ fn retarget_negatives_to_negative_only(
 
     // Helper to determine if original B needs splitting
     let mut needs_split_cache: HashMap<NWAStateID, bool> = HashMap::new();
-    let mut compute_needs_split = |b: NWAStateID| -> bool {
-        if let Some(&ans) = needs_split_cache.get(&b) {
-            return ans;
-        }
-        let b_has_final = !final_fix[b].is_empty();
-        let b_has_pos_or_def = has_pos_or_default_in_eps.get(b).copied().unwrap_or(false);
-        let need = b_has_final || b_has_pos_or_def;
-        needs_split_cache.insert(b, need);
-        need
-    };
+    let mut get_or_create_neg_only_if_needed =
+        |b: NWAStateID, states: &mut NWAStates| -> Option<NWAStateID> {
+            let needs_split = {
+                if let Some(&ans) = needs_split_cache.get(&b) {
+                    ans
+                } else {
+                    let b_has_final = !final_fix[b].is_empty();
+                    let b_has_pos_or_def = has_pos_or_default_in_eps.get(b).copied().unwrap_or(false);
+                    let need = b_has_final || b_has_pos_or_def;
+                    needs_split_cache.insert(b, need);
+                    need
+                }
+            };
 
-    // Helper to build the canonical negative-only copy for B
-    let mut get_neg_only = |b: NWAStateID, states: &mut NWAStates| -> NWAStateID {
-        if let Some(&id) = neg_only_map.get(&b) {
-            return id;
-        }
-        // If B already has no final/default/positive edges, reuse original B
-        if !compute_needs_split(b) {
-            neg_only_map.insert(b, b);
-            return b;
-        }
+            if !needs_split {
+                return None;
+            }
 
-        // Otherwise, create a copy and strip to negative-only
-        let new_id = states.copy_state(b);
-        {
-            let st = &mut states.0[new_id];
-            st.final_weight = None;
-            st.default = None;
-            st.transitions.retain(|k, _| *k < 0);
-            // keep epsilons as-is (per original algorithm)
-        }
-        neg_only_map.insert(b, new_id);
-        new_id
-    };
+            if let Some(&id) = neg_only_map.get(&b) {
+                return Some(id);
+            }
+
+            // Otherwise, create a copy and strip to negative-only
+            let new_id = states.copy_state(b);
+            {
+                let st = &mut states.0[new_id];
+                st.final_weight = None;
+                st.default = None;
+                st.transitions.retain(|k, _| *k < 0);
+                // keep epsilons as-is (per original algorithm)
+            }
+            neg_only_map.insert(b, new_id);
+            Some(new_id)
+        };
 
     // Finally retarget each negative edge
     for e in neg_edges {
@@ -323,15 +323,12 @@ fn retarget_negatives_to_negative_only(
         if e.neg_label >= 0 {
             continue;
         }
-        // Decide if need split
-        if !compute_needs_split(e.to) {
-            continue; // No change
-        }
-        let tgt_neg_only = get_neg_only(e.to, states);
 
-        // Update the (from, neg_label) transition target to tgt_neg_only, if still present
-        if let Some((ref mut to_mut, _w)) = states.0[e.from].transitions.get_mut(&e.neg_label) {
-            *to_mut = tgt_neg_only;
+        if let Some(tgt_neg_only) = get_or_create_neg_only_if_needed(e.to, states) {
+            // Update the (from, neg_label) transition target to tgt_neg_only, if still present
+            if let Some((ref mut to_mut, _w)) = states.0[e.from].transitions.get_mut(&e.neg_label) {
+                *to_mut = tgt_neg_only;
+            }
         }
     }
 }
