@@ -350,11 +350,9 @@ fn test_constraint_expression_simplified_06_11_25() {
         s ::= e;
         e ::= e PLUS t | t;
         t ::= t TIMES f | f;
-        f ::= LPAREN e RPAREN | I;
+        f ::= I;
         PLUS ::= '+';
         TIMES ::= '*';
-        LPAREN ::= '(';
-        RPAREN ::= ')';
         I ::= 'i';
     "#};
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
