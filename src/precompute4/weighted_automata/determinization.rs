@@ -9,6 +9,7 @@ use super::dwa::DWA;
 use super::nwa::{NWAStates, NWA};
 use crate::precompute4::weighted_automata::NWAStateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -449,13 +450,22 @@ impl NWA {
         let mut worklist: VecDeque<SigSubsetKey> = VecDeque::new();
         worklist.push_back(SigSubsetKey::new(init_subset.clone()));
 
-        // Progress bar intentionally disabled in this version for speed.
-        let _pb = if PROGRESS_BAR_ENABLED {
-            // no-op
-            None::<()>
+        let pb = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(1);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template(
+                        "{spinner:.green} [Determinizing DWA (delta): {elapsed_precise}] \
+                         [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})",
+                    )
+                    .expect("progress-bar"),
+            );
+            Some(p)
         } else {
-            None::<()>
+            None
         };
+
+        let mut processed = 0usize;
 
         // Helper: union across entries to get an overall edge mask (fast with stepvec_totalmask)
         let mut union_weight_vec = |pairs: &[(usize, Weight)]| -> Weight {
@@ -506,6 +516,12 @@ impl NWA {
 
         // BFS determinization
         while let Some(subset_key) = worklist.pop_front() {
+            processed += 1;
+            if let Some(p) = &pb {
+                p.set_position(processed as u64);
+                p.set_length(subset_to_d_id.len() as u64);
+            }
+
             let d_id = *subset_to_d_id.get(&subset_key).unwrap();
             let subset: &[(usize, Weight)] = &subset_key.entries;
 
@@ -841,6 +857,10 @@ impl NWA {
                     let _ = dwa.add_transition(d_id, lbl, target_id, label_edge_weight);
                 }
             }
+        }
+
+        if let Some(p) = &pb {
+            p.finish_with_message(format!("Determinized to {} states", subset_to_d_id.len()));
         }
 
         dwa
