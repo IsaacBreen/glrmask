@@ -914,7 +914,11 @@ local_system:
                       // Accumulate across signatures that have this explicit label
                       let mut acc: HashMap<usize, Weight> = HashMap::new();
                       for (sig_id, gate) in subset.iter() {
-                          if let Some(ref sv) = sig_arena[*sig_id].labeled.get(&lbl) {
+                          let sig = &sig_arena[*sig_id];
+                          // If an explicit transition for the label exists, use it. Otherwise, fall back to the default transition.
+                          let sv_opt = sig.labeled.get(&lbl).or(sig.def.as_ref());
+
+                          if let Some(ref sv) = sv_opt {
                               let comp = stepvec_ptr_to_compiled[&(Arc::as_ptr(sv) as usize)].clone();
                               if gate.is_all_fast() {
                                   for (t_sig, w) in comp.iter() {
@@ -1915,12 +1919,15 @@ local_system:
           /// - Set s.final_weight = None (standard concatenation semantics).
           /// Return body with start = left.start.
           pub fn concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+              println!("Concatenating NWAs with eps_weight={:?}", eps_weight);
+              println!("LEFT:\n{}\nRIGHT:\n{}STATES BEFORE CONCAT:{}", left, right, states);
               if STOCHASTIC_DEBUG {
                   let nwa1 = NWA { states: states.clone(), body: left.clone() };
                   let nwa2 = NWA { states: states.clone(), body: right.clone() };
 
                   let mut states_after_concat = states.clone();
                   let concat_body = Self::internal_concatenate_components(&mut states_after_concat, left, right, eps_weight);
+                  println!("RESULT:\n{}\nSTATES AFTER CONCAT:{}", concat_body, states_after_concat);
                   let concat_nwa = NWA { states: states_after_concat, body: concat_body };
 
                   let mut dwa1 = nwa1.determinize_to_dwa();
@@ -1929,6 +1936,7 @@ local_system:
                   dwa2.simplify();
                   let mut result_dwa = concat_nwa.determinize_to_dwa();
                   result_dwa.simplify();
+
 
                   DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
               }
@@ -4382,6 +4390,94 @@ local_system:
       }
 
       #[test]
+      fn test_union_from_panicked_log() {
+          fn neg(x: i16) -> i16 {
+              i16::MIN + x
+          }
+
+          // --- Build LEFT DWA (A) ---
+          let mut a = DWA::new();
+          for _ in 0..23 { a.add_state(); }
+          assert_eq!(a.states.len(), 24);
+
+          a.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+          a.add_transition(0, 1, 2, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 2, 3, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 3, 4, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 4, 5, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 5, 6, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 7, 7, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 8, 8, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
+          a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
+          a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
+          a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
+          a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
+          a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
+          a.add_transition(5, 1, 15, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(5, 5, 16, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(5, 8, 17, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(6, neg(5), 11, Weight::from_item(0)).unwrap();
+          a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
+          a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
+          a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
+          a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
+          a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
+          a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
+          a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
+          a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
+          a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
+          a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
+          a.set_final_weight(18, Weight::from_item(1)).unwrap();
+          a.set_final_weight(19, Weight::from_item(0)).unwrap();
+          a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
+          a.set_final_weight(21, Weight::from_item(2)).unwrap();
+          a.add_transition(22, neg(2), 13, Weight::from_item(2)).unwrap();
+          a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
+          a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
+
+          // --- Build RIGHT DWA (B) ---
+          let mut b = DWA::new();
+          for _ in 0..16 { b.add_state(); }
+          assert_eq!(b.states.len(), 17);
+
+          b.add_transition(0, 0, 1, Weight::from_item(3)).unwrap();
+          b.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
+          b.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
+          b.add_transition(0, 4, 4, Weight::from_item(3)).unwrap();
+          b.add_transition(0, 7, 5, Weight::from_item(3)).unwrap();
+          b.add_transition(0, 9, 6, Weight::from_item(3)).unwrap();
+          b.add_transition(1, neg(0), 7, Weight::from_item(3)).unwrap();
+          b.set_default_transition(2, 8, Weight::from_item(3)).unwrap();
+          b.add_transition(3, 5, 9, Weight::from_item(3)).unwrap();
+          b.add_transition(4, 1, 8, Weight::from_item(3)).unwrap();
+          b.add_transition(4, 5, 9, Weight::from_item(3)).unwrap();
+          b.add_transition(4, 8, 10, Weight::from_item(3)).unwrap();
+          b.add_transition(5, 1, 8, Weight::from_item(3)).unwrap();
+          b.add_transition(5, 5, 9, Weight::from_item(3)).unwrap();
+          b.set_default_transition(6, 10, Weight::from_item(3)).unwrap();
+          b.add_transition(7, neg(1), 11, Weight::from_item(3)).unwrap();
+          b.set_default_transition(8, 3, Weight::from_item(3)).unwrap();
+          b.add_transition(9, neg(5), 1, Weight::from_item(3)).unwrap();
+          b.set_default_transition(10, 5, Weight::from_item(3)).unwrap();
+          b.add_transition(11, 1, 12, Weight::from_item(3)).unwrap();
+          b.add_transition(11, 5, 13, Weight::from_item(3)).unwrap();
+          b.add_transition(11, 8, 14, Weight::from_item(3)).unwrap();
+          b.add_transition(12, neg(1), 15, Weight::from_item(3)).unwrap();
+          b.add_transition(13, neg(5), 15, Weight::from_item(3)).unwrap();
+          b.add_transition(14, neg(8), 15, Weight::from_item(3)).unwrap();
+          b.add_transition(15, neg(4), 16, Weight::from_item(3)).unwrap();
+          b.set_final_weight(16, Weight::from_item(3)).unwrap();
+
+          let u = a.union(&b);
+          DWA::stochastic_validate_union(&a, &b, &u);
+      }
+
+      #[test]
       fn test_concatenate_default_path_to_final() {
           let mut a = DWA::new();
           let s1a = a.add_state();
@@ -5974,9 +6070,37 @@ local_system:
           fn index_mut(&mut self, index: NWAStateID) -> &mut Self::Output { &mut self.0[index] }
       }
 
+      impl Display for NWAStates {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              for (id, state) in self.0.iter().enumerate() {
+                  writeln!(f, "  State {}:", id)?;
+                  if let Some(w) = &state.final_weight {
+                      writeln!(f, "    final_weight: {}", w)?;
+                  }
+                  if let Some((to, w)) = &state.default {
+                      writeln!(f, "    * -> {} (weight: {})", to, w)?;
+                  }
+                  for (on, (to, w)) in &state.transitions {
+                      let char_repr = format_i16_char(*on);
+                      writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+                  }
+                  for (to, w) in &state.epsilons {
+                      writeln!(f, "    ε -> {} (weight: {})", to, w)?;
+                  }
+              }
+              Ok(())
+          }
+      }
+
       #[derive(Clone, Debug, Default, PartialEq, Eq)]
       pub struct NWABody {
           pub start_state: NWAStateID,
+      }
+
+      impl Display for NWABody {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              write!(f, "start: {}", self.start_state)
+          }
       }
 
       #[derive(Clone, Debug, Default)]
@@ -5995,23 +6119,8 @@ local_system:
 
       impl Display for NWA {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "NWA (start: {})", self.body.start_state)?;
-              for (id, state) in self.states.0.iter().enumerate() {
-                  writeln!(f, "  State {}:", id)?;
-                  if let Some(w) = &state.final_weight {
-                      writeln!(f, "    final_weight: {}", w)?;
-                  }
-                  if let Some((to, w)) = &state.default {
-                      writeln!(f, "    * -> {} (weight: {})", to, w)?;
-                  }
-                  for (on, (to, w)) in &state.transitions {
-                      let char_repr = format_i16_char(*on);
-                      writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
-                  }
-                  for (to, w) in &state.epsilons {
-                      writeln!(f, "    ε -> {} (weight: {})", to, w)?;
-                  }
-              }
+              writeln!(f, "NWA ({})", self.body)?;
+              write!(f, "{}", self.states)?;
               Ok(())
           }
       }
@@ -6310,12 +6419,15 @@ local_system:
           /// - Set s.final_weight = None (standard concatenation semantics).
           /// Return body with start = left.start.
           pub fn concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+              println!("Concatenating NWAs with eps_weight={:?}", eps_weight);
+              println!("LEFT:\n{}\nRIGHT:\n{}STATES BEFORE CONCAT:{}", left, right, states);
               if STOCHASTIC_DEBUG {
                   let nwa1 = NWA { states: states.clone(), body: left.clone() };
                   let nwa2 = NWA { states: states.clone(), body: right.clone() };
 
                   let mut states_after_concat = states.clone();
                   let concat_body = Self::internal_concatenate_components(&mut states_after_concat, left, right, eps_weight);
+                  println!("RESULT:\n{}\nSTATES AFTER CONCAT:{}", concat_body, states_after_concat);
                   let concat_nwa = NWA { states: states_after_concat, body: concat_body };
 
                   let mut dwa1 = nwa1.determinize_to_dwa();
@@ -6324,6 +6436,7 @@ local_system:
                   dwa2.simplify();
                   let mut result_dwa = concat_nwa.determinize_to_dwa();
                   result_dwa.simplify();
+
 
                   DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
               }
@@ -8897,7 +9010,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -9840,7 +9953,11 @@ messages:
                       // Accumulate across signatures that have this explicit label
                       let mut acc: HashMap<usize, Weight> = HashMap::new();
                       for (sig_id, gate) in subset.iter() {
-                          if let Some(ref sv) = sig_arena[*sig_id].labeled.get(&lbl) {
+                          let sig = &sig_arena[*sig_id];
+                          // If an explicit transition for the label exists, use it. Otherwise, fall back to the default transition.
+                          let sv_opt = sig.labeled.get(&lbl).or(sig.def.as_ref());
+
+                          if let Some(ref sv) = sv_opt {
                               let comp = stepvec_ptr_to_compiled[&(Arc::as_ptr(sv) as usize)].clone();
                               if gate.is_all_fast() {
                                   for (t_sig, w) in comp.iter() {
@@ -10866,12 +10983,15 @@ messages:
           /// - Set s.final_weight = None (standard concatenation semantics).
           /// Return body with start = left.start.
           pub fn concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+              println!("Concatenating NWAs with eps_weight={:?}", eps_weight);
+              println!("LEFT:\n{}\nRIGHT:\n{}STATES BEFORE CONCAT:{}", left, right, states);
               if STOCHASTIC_DEBUG {
                   let nwa1 = NWA { states: states.clone(), body: left.clone() };
                   let nwa2 = NWA { states: states.clone(), body: right.clone() };
 
                   let mut states_after_concat = states.clone();
                   let concat_body = Self::internal_concatenate_components(&mut states_after_concat, left, right, eps_weight);
+                  println!("RESULT:\n{}\nSTATES AFTER CONCAT:{}", concat_body, states_after_concat);
                   let concat_nwa = NWA { states: states_after_concat, body: concat_body };
 
                   let mut dwa1 = nwa1.determinize_to_dwa();
@@ -10880,6 +11000,7 @@ messages:
                   dwa2.simplify();
                   let mut result_dwa = concat_nwa.determinize_to_dwa();
                   result_dwa.simplify();
+
 
                   DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
               }
@@ -13343,6 +13464,94 @@ messages:
       }
 
       #[test]
+      fn test_union_from_panicked_log() {
+          fn neg(x: i16) -> i16 {
+              i16::MIN + x
+          }
+
+          // --- Build LEFT DWA (A) ---
+          let mut a = DWA::new();
+          for _ in 0..23 { a.add_state(); }
+          assert_eq!(a.states.len(), 24);
+
+          a.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+          a.add_transition(0, 1, 2, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 2, 3, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 3, 4, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 4, 5, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 5, 6, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 7, 7, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 8, 8, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
+          a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
+          a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
+          a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
+          a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
+          a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
+          a.add_transition(5, 1, 15, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(5, 5, 16, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(5, 8, 17, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(6, neg(5), 11, Weight::from_item(0)).unwrap();
+          a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
+          a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
+          a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
+          a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
+          a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
+          a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
+          a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
+          a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
+          a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
+          a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
+          a.set_final_weight(18, Weight::from_item(1)).unwrap();
+          a.set_final_weight(19, Weight::from_item(0)).unwrap();
+          a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
+          a.set_final_weight(21, Weight::from_item(2)).unwrap();
+          a.add_transition(22, neg(2), 13, Weight::from_item(2)).unwrap();
+          a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
+          a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
+
+          // --- Build RIGHT DWA (B) ---
+          let mut b = DWA::new();
+          for _ in 0..16 { b.add_state(); }
+          assert_eq!(b.states.len(), 17);
+
+          b.add_transition(0, 0, 1, Weight::from_item(3)).unwrap();
+          b.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
+          b.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
+          b.add_transition(0, 4, 4, Weight::from_item(3)).unwrap();
+          b.add_transition(0, 7, 5, Weight::from_item(3)).unwrap();
+          b.add_transition(0, 9, 6, Weight::from_item(3)).unwrap();
+          b.add_transition(1, neg(0), 7, Weight::from_item(3)).unwrap();
+          b.set_default_transition(2, 8, Weight::from_item(3)).unwrap();
+          b.add_transition(3, 5, 9, Weight::from_item(3)).unwrap();
+          b.add_transition(4, 1, 8, Weight::from_item(3)).unwrap();
+          b.add_transition(4, 5, 9, Weight::from_item(3)).unwrap();
+          b.add_transition(4, 8, 10, Weight::from_item(3)).unwrap();
+          b.add_transition(5, 1, 8, Weight::from_item(3)).unwrap();
+          b.add_transition(5, 5, 9, Weight::from_item(3)).unwrap();
+          b.set_default_transition(6, 10, Weight::from_item(3)).unwrap();
+          b.add_transition(7, neg(1), 11, Weight::from_item(3)).unwrap();
+          b.set_default_transition(8, 3, Weight::from_item(3)).unwrap();
+          b.add_transition(9, neg(5), 1, Weight::from_item(3)).unwrap();
+          b.set_default_transition(10, 5, Weight::from_item(3)).unwrap();
+          b.add_transition(11, 1, 12, Weight::from_item(3)).unwrap();
+          b.add_transition(11, 5, 13, Weight::from_item(3)).unwrap();
+          b.add_transition(11, 8, 14, Weight::from_item(3)).unwrap();
+          b.add_transition(12, neg(1), 15, Weight::from_item(3)).unwrap();
+          b.add_transition(13, neg(5), 15, Weight::from_item(3)).unwrap();
+          b.add_transition(14, neg(8), 15, Weight::from_item(3)).unwrap();
+          b.add_transition(15, neg(4), 16, Weight::from_item(3)).unwrap();
+          b.set_final_weight(16, Weight::from_item(3)).unwrap();
+
+          let u = a.union(&b);
+          DWA::stochastic_validate_union(&a, &b, &u);
+      }
+
+      #[test]
       fn test_concatenate_default_path_to_final() {
           let mut a = DWA::new();
           let s1a = a.add_state();
@@ -13368,208 +13577,7 @@ messages:
       ```
     metadata:
       filename: src/precompute4/test_weighted_automata.rs
-  - user: |
-      thread 'test_constraint_basic::test_constraint_expression_no_parens' (4776222) panicked at src/precompute4/test_weighted_automata.rs:212:17:
-      Union rejected a word accepted by B.
-      word: [9, 'h', 'r', 1, neg(1), 5, neg(5), neg(0), neg(1), 8, neg(8), neg(4)]
-      B(w): [3]
-      U(w): []
-
-      DWA A:
-      DWA (start: 0)
-        State 0:
-          0 -> 1 (trans_weight: [1])
-          1 -> 2 (trans_weight: [0])
-          2 -> 3 (trans_weight: [1..=2])
-          3 -> 4 (trans_weight: [1..=2])
-          4 -> 5 (trans_weight: [1..=2])
-          5 -> 6 (trans_weight: [0])
-          7 -> 7 (trans_weight: [1..=2])
-          8 -> 8 (trans_weight: [0])
-          9 -> 9 (trans_weight: [1..=2])
-        State 1:
-          neg(0) -> 10 (trans_weight: [1])
-        State 2:
-          neg(1) -> 11 (trans_weight: [0])
-        State 3:
-          * -> 12 (trans_weight: [1])
-          neg(2) -> 13 (trans_weight: [2])
-        State 4:
-          neg(3) -> 13 (trans_weight: [2])
-          5 -> 14 (trans_weight: [1])
-        State 5:
-          1 -> 15 (trans_weight: [1..=2])
-          5 -> 16 (trans_weight: [1..=2])
-          8 -> 17 (trans_weight: [1..=2])
-        State 6:
-          neg(5) -> 11 (trans_weight: [0])
-        State 7:
-          1 -> 15 (trans_weight: [1..=2])
-          5 -> 16 (trans_weight: [1..=2])
-        State 8:
-          neg(8) -> 11 (trans_weight: [0])
-        State 9:
-          * -> 17 (trans_weight: [1..=2])
-        State 10:
-          neg(1) -> 18 (trans_weight: [1])
-        State 11:
-          neg(4) -> 19 (trans_weight: [0])
-        State 12:
-          * -> 20 (trans_weight: [1])
-        State 13:
-          neg(8) -> 21 (trans_weight: [2])
-        State 14:
-          neg(5) -> 1 (trans_weight: [1])
-        State 15:
-          * -> 20 (trans_weight: [1])
-          neg(1) -> 22 (trans_weight: [2])
-        State 16:
-          neg(5) -> 23 (trans_weight: [1..=2])
-        State 17:
-          * -> 7 (trans_weight: [1..=2])
-        State 18:
-          final_weight: [1]
-        State 19:
-          final_weight: [0]
-        State 20:
-          5 -> 14 (trans_weight: [1])
-        State 21:
-          final_weight: [2]
-        State 22:
-          neg(2) -> 13 (trans_weight: [2])
-        State 23:
-          neg(0) -> 10 (trans_weight: [1])
-          neg(3) -> 13 (trans_weight: [2])
-
-
-      DWA B:
-      DWA (start: 0)
-        State 0:
-          0 -> 1 (trans_weight: [3])
-          2 -> 2 (trans_weight: [3])
-          3 -> 3 (trans_weight: [3])
-          4 -> 4 (trans_weight: [3])
-          7 -> 5 (trans_weight: [3])
-          9 -> 6 (trans_weight: [3])
-        State 1:
-          neg(0) -> 7 (trans_weight: [3])
-        State 2:
-          * -> 8 (trans_weight: [3])
-        State 3:
-          5 -> 9 (trans_weight: [3])
-        State 4:
-          1 -> 8 (trans_weight: [3])
-          5 -> 9 (trans_weight: [3])
-          8 -> 10 (trans_weight: [3])
-        State 5:
-          1 -> 8 (trans_weight: [3])
-          5 -> 9 (trans_weight: [3])
-        State 6:
-          * -> 10 (trans_weight: [3])
-        State 7:
-          neg(1) -> 11 (trans_weight: [3])
-        State 8:
-          * -> 3 (trans_weight: [3])
-        State 9:
-          neg(5) -> 1 (trans_weight: [3])
-        State 10:
-          * -> 5 (trans_weight: [3])
-        State 11:
-          1 -> 12 (trans_weight: [3])
-          5 -> 13 (trans_weight: [3])
-          8 -> 14 (trans_weight: [3])
-        State 12:
-          neg(1) -> 15 (trans_weight: [3])
-        State 13:
-          neg(5) -> 15 (trans_weight: [3])
-        State 14:
-          neg(8) -> 15 (trans_weight: [3])
-        State 15:
-          neg(4) -> 16 (trans_weight: [3])
-        State 16:
-          final_weight: [3]
-
-
-      DWA U:
-      DWA (start: 0)
-        State 0:
-          0 -> 1 (trans_weight: [1, 3])
-          1 -> 2 (trans_weight: [0])
-          2 -> 3 (trans_weight: [1..=3])
-          3 -> 4 (trans_weight: [1..=3])
-          4 -> 5 (trans_weight: [1..=3])
-          5 -> 6 (trans_weight: [0])
-          7 -> 7 (trans_weight: [1..=3])
-          8 -> 8 (trans_weight: [0])
-          9 -> 9 (trans_weight: [1..=3])
-        State 1:
-          neg(0) -> 10 (trans_weight: [1, 3])
-        State 2:
-          neg(1) -> 11 (trans_weight: [0])
-        State 3:
-          * -> 12 (trans_weight: [1, 3])
-          neg(2) -> 13 (trans_weight: [2])
-        State 4:
-          neg(3) -> 13 (trans_weight: [2])
-          5 -> 14 (trans_weight: [1, 3])
-        State 5:
-          1 -> 15 (trans_weight: [1..=3])
-          5 -> 16 (trans_weight: [1..=3])
-          8 -> 17 (trans_weight: [1..=3])
-        State 6:
-          neg(5) -> 11 (trans_weight: [0])
-        State 7:
-          1 -> 15 (trans_weight: [1..=3])
-          5 -> 16 (trans_weight: [1..=3])
-        State 8:
-          neg(8) -> 11 (trans_weight: [0])
-        State 9:
-          * -> 17 (trans_weight: [1..=3])
-        State 10:
-          neg(1) -> 18 (trans_weight: [1, 3])
-        State 11:
-          neg(4) -> 19 (trans_weight: [0])
-        State 12:
-          * -> 20 (trans_weight: [1, 3])
-        State 13:
-          neg(8) -> 21 (trans_weight: [2])
-        State 14:
-          neg(5) -> 1 (trans_weight: [1, 3])
-        State 15:
-          * -> 20 (trans_weight: [1, 3])
-          neg(1) -> 22 (trans_weight: [2])
-        State 16:
-          neg(5) -> 23 (trans_weight: [1..=3])
-        State 17:
-          * -> 7 (trans_weight: [1..=3])
-        State 18:
-          final_weight: [1]
-          1 -> 24 (trans_weight: [3])
-          5 -> 25 (trans_weight: [3])
-          8 -> 26 (trans_weight: [3])
-        State 19:
-          final_weight: [0]
-        State 20:
-          5 -> 14 (trans_weight: [1, 3])
-        State 21:
-          final_weight: [2]
-        State 22:
-          neg(2) -> 13 (trans_weight: [2])
-        State 23:
-          neg(0) -> 10 (trans_weight: [1, 3])
-          neg(3) -> 13 (trans_weight: [2])
-        State 24:
-          neg(1) -> 27 (trans_weight: [3])
-        State 25:
-          neg(5) -> 27 (trans_weight: [3])
-        State 26:
-          neg(8) -> 27 (trans_weight: [3])
-        State 27:
-          neg(4) -> 28 (trans_weight: [3])
-        State 28:
-          final_weight: [3]
-    metadata:
-  - user: Add a test for these exact two DWA that reproduces this issue.
+  - user: Implement Display for NWABody and NWAStates.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -13589,264 +13597,164 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on the panic log you provided, it appears there's a bug in the determinization logic for weighted automata, specifically when handling the union of two automata where one has an explicit transition for a character and the other uses a default transition. The union automaton fails to correctly combine these behaviors, leading to rejected words that should be accepted.
+      This task requires implementing the `Display` trait for `NWABody` and `NWAStates` in `src/precompute4/weighted_automata/nwa.rs`, and then updating the existing `Display` implementation for `NWA` to utilize these new implementations.
 
-      Here are the step-by-step instructions to fix the issue and add a regression test.
+      Here are the step-by-step instructions:
 
-      ### Step 1: Correct the Determinization Logic
+      ### Instructions
 
-      The determinization algorithm needs to be adjusted to correctly compute exception edges. When building an exception edge for a character `c`, the current logic only considers NWA states that have an explicit transition on `c`. It should also include contributions from states that would take their default transition for `c`.
+      In `src/precompute4/weighted_automata/nwa.rs`:
 
-      In `src/precompute4/weighted_automata/determinization.rs`, inside the `internal_determinize_to_dwa_fast` function, modify the loop that calculates exception edges:
+      1.  **Implement `Display` for `NWAStates`**: Insert the `impl Display for NWAStates` block after the existing `impl IndexMut<NWAStateID> for NWAStates` block (around line 110). This implementation will iterate over all states and print their details.
 
-      1.  Open the file `src/precompute4/weighted_automata/determinization.rs`.
-      2.  Navigate to the `for lbl in labels` loop within the `while let Some(subset_key) = worklist.pop_front()` loop (around line 644).
-      3.  Inside the `for (sig_id, gate) in subset.iter()` loop, replace the line:
-          ```rust
-                          if let Some(ref sv) = sig_arena[*sig_id].labeled.get(&lbl) {
-          ```
-          with the following block:
-          ```rust
-                          let sig = &sig_arena[*sig_id];
-                          // If an explicit transition for the label exists, use it. Otherwise, fall back to the default transition.
-                          let sv_opt = sig.labeled.get(&lbl).or(sig.def.as_ref());
+      2.  **Implement `Display` for `NWABody`**: Insert the `impl Display for NWABody` block after the `NWABody` struct definition (around line 142). This implementation will print the start state ID.
 
-                          if let Some(ref sv) = sv_opt {
-          ```
-      This change ensures that if an NWA state signature doesn't have an explicit labeled transition, its default transition is used instead, correctly unioning all possible paths.
+      3.  **Update `Display` for `NWA`**: Modify the existing `impl Display for NWA` block (around line 155) to use the new `Display` implementations for `NWABody` and `NWAStates`.
 
-      ### Step 2: Add a Regression Test
+      ```rust
+      // src/precompute4/weighted_automata/nwa.rs
 
-      To ensure this bug does not reappear, add a new test case to `src/precompute4/test_weighted_automata.rs` that replicates the exact conditions from the panic.
+      // ... (lines 107-110)
+      impl IndexMut<NWAStateID> for NWAStates {
+          fn index_mut(&mut self, index: NWAStateID) -> &mut Self::Output { &mut self.0[index] }
+      }
 
-      1.  Open the file `src/precompute4/test_weighted_automata.rs`.
-      2.  Append the following new test function to the end of the file. This test constructs the two complex DWAs from the error log and validates their union.
-
-          ```rust
-          #[test]
-          fn test_union_from_panicked_log() {
-              fn neg(x: i16) -> i16 {
-                  i16::MIN + x
+      // --- INSERT START (Step 1) ---
+      impl Display for NWAStates {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              for (id, state) in self.0.iter().enumerate() {
+                  writeln!(f, "  State {}:", id)?;
+                  if let Some(w) = &state.final_weight {
+                      writeln!(f, "    final_weight: {}", w)?;
+                  }
+                  if let Some((to, w)) = &state.default {
+                      writeln!(f, "    * -> {} (weight: {})", to, w)?;
+                  }
+                  for (on, (to, w)) in &state.transitions {
+                      let char_repr = format_i16_char(*on);
+                      writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+                  }
+                  for (to, w) in &state.epsilons {
+                      writeln!(f, "    ε -> {} (weight: {})", to, w)?;
+                  }
               }
-          
-              // --- Build LEFT DWA (A) ---
-              let mut a = DWA::new();
-              for _ in 0..23 { a.add_state(); }
-              assert_eq!(a.states.len(), 24);
-          
-              a.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-              a.add_transition(0, 1, 2, Weight::from_item(0)).unwrap();
-              a.add_transition(0, 2, 3, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(0, 3, 4, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(0, 4, 5, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(0, 5, 6, Weight::from_item(0)).unwrap();
-              a.add_transition(0, 7, 7, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(0, 8, 8, Weight::from_item(0)).unwrap();
-              a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
-              a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
-              a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
-              a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
-              a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
-              a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
-              a.add_transition(5, 1, 15, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(5, 5, 16, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(5, 8, 17, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(6, neg(5), 11, Weight::from_item(0)).unwrap();
-              a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
-              a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
-              a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
-              a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
-              a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
-              a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
-              a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
-              a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
-              a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
-              a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
-              a.set_final_weight(18, Weight::from_item(1)).unwrap();
-              a.set_final_weight(19, Weight::from_item(0)).unwrap();
-              a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
-              a.set_final_weight(21, Weight::from_item(2)).unwrap();
-              a.add_transition(22, neg(2), 13, Weight::from_item(2)).unwrap();
-              a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
-              a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
-          
-              // --- Build RIGHT DWA (B) ---
-              let mut b = DWA::new();
-              for _ in 0..16 { b.add_state(); }
-              assert_eq!(b.states.len(), 17);
-          
-              b.add_transition(0, 0, 1, Weight::from_item(3)).unwrap();
-              b.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
-              b.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
-              b.add_transition(0, 4, 4, Weight::from_item(3)).unwrap();
-              b.add_transition(0, 7, 5, Weight::from_item(3)).unwrap();
-              b.add_transition(0, 9, 6, Weight::from_item(3)).unwrap();
-              b.add_transition(1, neg(0), 7, Weight::from_item(3)).unwrap();
-              b.set_default_transition(2, 8, Weight::from_item(3)).unwrap();
-              b.add_transition(3, 5, 9, Weight::from_item(3)).unwrap();
-              b.add_transition(4, 1, 8, Weight::from_item(3)).unwrap();
-              b.add_transition(4, 5, 9, Weight::from_item(3)).unwrap();
-              b.add_transition(4, 8, 10, Weight::from_item(3)).unwrap();
-              b.add_transition(5, 1, 8, Weight::from_item(3)).unwrap();
-              b.add_transition(5, 5, 9, Weight::from_item(3)).unwrap();
-              b.set_default_transition(6, 10, Weight::from_item(3)).unwrap();
-              b.add_transition(7, neg(1), 11, Weight::from_item(3)).unwrap();
-              b.set_default_transition(8, 3, Weight::from_item(3)).unwrap();
-              b.add_transition(9, neg(5), 1, Weight::from_item(3)).unwrap();
-              b.set_default_transition(10, 5, Weight::from_item(3)).unwrap();
-              b.add_transition(11, 1, 12, Weight::from_item(3)).unwrap();
-              b.add_transition(11, 5, 13, Weight::from_item(3)).unwrap();
-              b.add_transition(11, 8, 14, Weight::from_item(3)).unwrap();
-              b.add_transition(12, neg(1), 15, Weight::from_item(3)).unwrap();
-              b.add_transition(13, neg(5), 15, Weight::from_item(3)).unwrap();
-              b.add_transition(14, neg(8), 15, Weight::from_item(3)).unwrap();
-              b.add_transition(15, neg(4), 16, Weight::from_item(3)).unwrap();
-              b.set_final_weight(16, Weight::from_item(3)).unwrap();
-          
-              let u = a.union(&b);
-              DWA::stochastic_validate_union(&a, &b, &u);
+              Ok(())
           }
-          ```
+      }
+      // --- INSERT END (Step 1) ---
+
+      #[derive(Clone, Debug, Default, PartialEq, Eq)]
+      pub struct NWABody {
+          pub start_state: NWAStateID,
+      }
+
+      // --- INSERT START (Step 2) ---
+      impl Display for NWABody {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              write!(f, "start: {}", self.start_state)
+          }
+      }
+      // --- INSERT END (Step 2) ---
+
+      #[derive(Clone, Debug, Default)]
+      pub struct NWA {
+      // ... (lines 151-154)
+
+      impl Display for NWA {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              // --- REPLACE START (Step 3) ---
+              writeln!(f, "NWA ({})", self.body)?;
+              write!(f, "{}", self.states)?;
+              // --- REPLACE END (Step 3) ---
+              Ok(())
+          }
+      }
+      ```
 
       ### Git Diffs
 
-      Here are the corresponding git diffs for the changes described above.
-
       ```diff
-      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
-      --- a/src/precompute4/weighted_automata/determinization.rs
-      +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -644,8 +644,11 @@
-                       // Accumulate across signatures that have this explicit label
-                       let mut acc: HashMap<usize, Weight> = HashMap::new();
-                       for (sig_id, gate) in subset.iter() {
-      -                    if let Some(ref sv) = sig_arena[*sig_id].labeled.get(&lbl) {
-      +                    let sig = &sig_arena[*sig_id];
-      +                    // If an explicit transition for the label exists, use it. Otherwise, fall back to the default transition.
-      +                    let sv_opt = sig.labeled.get(&lbl).or(sig.def.as_ref());
-      +
-      +                    if let Some(ref sv) = sv_opt {
-                               let comp = stepvec_ptr_to_compiled[&(Arc::as_ptr(sv) as usize)].clone();
-                               if gate.is_all_fast() {
-                                   for (t_sig, w) in comp.iter() {
-
-      ```
-
-      ```diff
-      diff --git a/src/precompute4/test_weighted_automata.rs b/src/precompute4/test_weighted_automata.rs
-      --- a/src/precompute4/test_weighted_automata.rs
-      +++ b/src/precompute4/test_weighted_automata.rs
-      @@ -700,3 +700,91 @@
-       
-           DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &c, &Weight::all());
+      --- a/src/precompute4/weighted_automata/nwa.rs
+      +++ b/src/precompute4/weighted_automata/nwa.rs
+      @@ -107,11 +107,29 @@
+       impl IndexMut<NWAStateID> for NWAStates {
+           fn index_mut(&mut self, index: NWAStateID) -> &mut Self::Output { &mut self.0[index] }
        }
       +
-      +#[test]
-      +fn test_union_from_panicked_log() {
-      +    fn neg(x: i16) -> i16 {
-      +        i16::MIN + x
+      +impl Display for NWAStates {
+      +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+      +        for (id, state) in self.0.iter().enumerate() {
+      +            writeln!(f, "  State {}:", id)?;
+      +            if let Some(w) = &state.final_weight {
+      +                writeln!(f, "    final_weight: {}", w)?;
+      +            }
+      +            if let Some((to, w)) = &state.default {
+      +                writeln!(f, "    * -> {} (weight: {})", to, w)?;
+      +            }
+      +            for (on, (to, w)) in &state.transitions {
+      +                let char_repr = format_i16_char(*on);
+      +                writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+      +            }
+      +            for (to, w) in &state.epsilons {
+      +                writeln!(f, "    ε -> {} (weight: {})", to, w)?;
+      +            }
+      +        }
+      +        Ok(())
       +    }
-      +
-      +    // --- Build LEFT DWA (A) ---
-      +    let mut a = DWA::new();
-      +    for _ in 0..23 { a.add_state(); }
-      +    assert_eq!(a.states.len(), 24);
-      +
-      +    a.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-      +    a.add_transition(0, 1, 2, Weight::from_item(0)).unwrap();
-      +    a.add_transition(0, 2, 3, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(0, 3, 4, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(0, 4, 5, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(0, 5, 6, Weight::from_item(0)).unwrap();
-      +    a.add_transition(0, 7, 7, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(0, 8, 8, Weight::from_item(0)).unwrap();
-      +    a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
-      +    a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
-      +    a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
-      +    a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
-      +    a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
-      +    a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
-      +    a.add_transition(5, 1, 15, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(5, 5, 16, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(5, 8, 17, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(6, neg(5), 11, Weight::from_item(0)).unwrap();
-      +    a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
-      +    a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
-      +    a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
-      +    a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
-      +    a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
-      +    a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
-      +    a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
-      +    a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
-      +    a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
-      +    a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
-      +    a.set_final_weight(18, Weight::from_item(1)).unwrap();
-      +    a.set_final_weight(19, Weight::from_item(0)).unwrap();
-      +    a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
-      +    a.set_final_weight(21, Weight::from_item(2)).unwrap();
-      +    a.add_transition(22, neg(2), 13, Weight::from_item(2)).unwrap();
-      +    a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
-      +    a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
-      +
-      +    // --- Build RIGHT DWA (B) ---
-      +    let mut b = DWA::new();
-      +    for _ in 0..16 { b.add_state(); }
-      +    assert_eq!(b.states.len(), 17);
-      +
-      +    b.add_transition(0, 0, 1, Weight::from_item(3)).unwrap();
-      +    b.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
-      +    b.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
-      +    b.add_transition(0, 4, 4, Weight::from_item(3)).unwrap();
-      +    b.add_transition(0, 7, 5, Weight::from_item(3)).unwrap();
-      +    b.add_transition(0, 9, 6, Weight::from_item(3)).unwrap();
-      +    b.add_transition(1, neg(0), 7, Weight::from_item(3)).unwrap();
-      +    b.set_default_transition(2, 8, Weight::from_item(3)).unwrap();
-      +    b.add_transition(3, 5, 9, Weight::from_item(3)).unwrap();
-      +    b.add_transition(4, 1, 8, Weight::from_item(3)).unwrap();
-      +    b.add_transition(4, 5, 9, Weight::from_item(3)).unwrap();
-      +    b.add_transition(4, 8, 10, Weight::from_item(3)).unwrap();
-      +    b.add_transition(5, 1, 8, Weight::from_item(3)).unwrap();
-      +    b.add_transition(5, 5, 9, Weight::from_item(3)).unwrap();
-      +    b.set_default_transition(6, 10, Weight::from_item(3)).unwrap();
-      +    b.add_transition(7, neg(1), 11, Weight::from_item(3)).unwrap();
-      +    b.set_default_transition(8, 3, Weight::from_item(3)).unwrap();
-      +    b.add_transition(9, neg(5), 1, Weight::from_item(3)).unwrap();
-      +    b.set_default_transition(10, 5, Weight::from_item(3)).unwrap();
-      +    b.add_transition(11, 1, 12, Weight::from_item(3)).unwrap();
-      +    b.add_transition(11, 5, 13, Weight::from_item(3)).unwrap();
-      +    b.add_transition(11, 8, 14, Weight::from_item(3)).unwrap();
-      +    b.add_transition(12, neg(1), 15, Weight::from_item(3)).unwrap();
-      +    b.add_transition(13, neg(5), 15, Weight::from_item(3)).unwrap();
-      +    b.add_transition(14, neg(8), 15, Weight::from_item(3)).unwrap();
-      +    b.add_transition(15, neg(4), 16, Weight::from_item(3)).unwrap();
-      +    b.set_final_weight(16, Weight::from_item(3)).unwrap();
-      +
-      +    let u = a.union(&b);
-      +    DWA::stochastic_validate_union(&a, &b, &u);
       +}
-
+       
+       #[derive(Clone, Debug, Default, PartialEq, Eq)]
+       pub struct NWABody {
+           pub start_state: NWAStateID,
+       }
+       
+      +impl Display for NWABody {
+      +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+      +        write!(f, "start: {}", self.start_state)
+      +    }
+      +}
+      +
+       #[derive(Clone, Debug, Default)]
+       pub struct NWA {
+           pub states: NWAStates,
+      @@ -124,20 +142,8 @@
+       
+       impl Display for NWA {
+           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+      -        writeln!(f, "NWA (start: {})", self.body.start_state)?;
+      -        for (id, state) in self.states.0.iter().enumerate() {
+      -            writeln!(f, "  State {}:", id)?;
+      -            if let Some(w) = &state.final_weight {
+      -                writeln!(f, "    final_weight: {}", w)?;
+      -            }
+      -            if let Some((to, w)) = &state.default {
+      -                writeln!(f, "    * -> {} (weight: {})", to, w)?;
+      -            }
+      -            for (on, (to, w)) in &state.transitions {
+      -                let char_repr = format_i16_char(*on);
+      -                writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+      -            }
+      -            for (to, w) in &state.epsilons {
+      -                writeln!(f, "    ε -> {} (weight: {})", to, w)?;
+      -            }
+      -        }
+      +        writeln!(f, "NWA ({})", self.body)?;
+      +        write!(f, "{}", self.states)?;
+               Ok(())
+           }
+       }
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/weighted_automata/determinization.rs
-      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/precompute4/test_weighted_automata.rs
-      Applying patch to 'src/precompute4/test_weighted_automata.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/test_weighted_automata.rs.
+      Identified target file: src/precompute4/weighted_automata/nwa.rs
+      Applying patch to 'src/precompute4/weighted_automata/nwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/nwa.rs.
+    metadata:
+  - user: 'Changes committed with message: "feat: Implement Display for NWAStates
+      and NWABody, update NWA Display"'
     metadata:
 ...

@@ -138,9 +138,37 @@ impl IndexMut<NWAStateID> for NWAStates {
     fn index_mut(&mut self, index: NWAStateID) -> &mut Self::Output { &mut self.0[index] }
 }
 
+impl Display for NWAStates {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        for (id, state) in self.0.iter().enumerate() {
+            writeln!(f, "  State {}:", id)?;
+            if let Some(w) = &state.final_weight {
+                writeln!(f, "    final_weight: {}", w)?;
+            }
+            if let Some((to, w)) = &state.default {
+                writeln!(f, "    * -> {} (weight: {})", to, w)?;
+            }
+            for (on, (to, w)) in &state.transitions {
+                let char_repr = format_i16_char(*on);
+                writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+            }
+            for (to, w) in &state.epsilons {
+                writeln!(f, "    ε -> {} (weight: {})", to, w)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NWABody {
     pub start_state: NWAStateID,
+}
+
+impl Display for NWABody {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "start: {}", self.start_state)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -159,23 +187,8 @@ impl NWA {
 
 impl Display for NWA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "NWA (start: {})", self.body.start_state)?;
-        for (id, state) in self.states.0.iter().enumerate() {
-            writeln!(f, "  State {}:", id)?;
-            if let Some(w) = &state.final_weight {
-                writeln!(f, "    final_weight: {}", w)?;
-            }
-            if let Some((to, w)) = &state.default {
-                writeln!(f, "    * -> {} (weight: {})", to, w)?;
-            }
-            for (on, (to, w)) in &state.transitions {
-                let char_repr = format_i16_char(*on);
-                writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
-            }
-            for (to, w) in &state.epsilons {
-                writeln!(f, "    ε -> {} (weight: {})", to, w)?;
-            }
-        }
+        writeln!(f, "NWA ({})", self.body)?;
+        write!(f, "{}", self.states)?;
         Ok(())
     }
 }
