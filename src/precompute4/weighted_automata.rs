@@ -704,6 +704,19 @@ impl DWA {
             return;
         }
 
+        let pb = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(10);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Simplifying DWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
+                    .expect("progress-bar"),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
+        if let Some(p) = &pb { p.set_message("Initial normalize/prune"); }
         Self::normalize_edges_inplace(states);
         Self::prune_unreachable(states, body);
 
@@ -711,25 +724,37 @@ impl DWA {
         let mut passes = 0usize;
         while changed_any && passes < 10 {
             passes += 1;
+            if let Some(p) = &pb { p.inc(1); }
             changed_any = false;
+
+            if let Some(p) = &pb { p.set_message("normalize"); }
             if Self::normalize_edges_inplace(states) {
                 changed_any = true;
             }
+            if let Some(p) = &pb { p.set_message("propagate constraints"); }
             if Self::propagate_and_constrain_weights(states, body) {
                 changed_any = true;
             }
+            if let Some(p) = &pb { p.set_message("propagate future"); }
             if Self::propagate_future_weights(states) {
                 changed_any = true;
             }
+            if let Some(p) = &pb { p.set_message("minimize"); }
             if Self::minimize_partition_refinement(states, body) {
                 changed_any = true;
             }
+            if let Some(p) = &pb { p.set_message("normalize"); }
             if Self::normalize_edges_inplace(states) {
                 changed_any = true;
             }
+            if let Some(p) = &pb { p.set_message("prune"); }
             if Self::prune_unreachable(states, body) {
                 changed_any = true;
             }
+        }
+
+        if let Some(p) = &pb {
+            p.finish_with_message(format!("Simplified to {} states", states.len()));
         }
         crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
     }
