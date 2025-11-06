@@ -87,8 +87,8 @@ impl DWA {
             if let Some(p) = &pb { p.inc(1); }
             changed_any = false;
             Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
-            Self::run_pass(&pb, "propagate constraints", &mut changed_any, || Self::propagate_and_constrain_weights(states, body));
-            Self::run_pass(&pb, "propagate future", &mut changed_any, || Self::propagate_future_weights(states));
+            // Self::run_pass(&pb, "propagate constraints", &mut changed_any, || Self::propagate_and_constrain_weights(states, body));
+            // Self::run_pass(&pb, "propagate future", &mut changed_any, || Self::propagate_future_weights(states));
             Self::run_pass(&pb, "minimize", &mut changed_any, || Self::minimize_partition_refinement(states, body));
             Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
             Self::run_pass(&pb, "prune", &mut changed_any, || Self::prune_unreachable(states, body));
@@ -121,8 +121,8 @@ impl DWA {
             if let Some(p) = &pb { p.inc(1); }
             changed_any = false;
             Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
-            Self::run_pass(&pb, "relax local future", &mut changed_any, || Self::relax_weights_by_local_future(states));
-            Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
+            // Self::run_pass(&pb, "relax local future", &mut changed_any, || Self::relax_weights_by_local_future(states));
+            // Self::run_pass(&pb, "normalize", &mut changed_any, || Self::normalize_edges_inplace(states));
             Self::run_pass(&pb, "prune", &mut changed_any, || Self::prune_unreachable(states, body));
         }
         if let Some(p) = &pb {
