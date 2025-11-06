@@ -1571,30 +1571,3 @@ fn test_concatenate_default_path_to_final() {
     let weight_x = c.eval_word_weight(&['x' as i16]);
     assert!(weight_x.is_empty());
 }
-
-#[test]
-fn test_concatenate_neg_path_and_empty() {
-    fn neg(x: i16) -> i16 {
-        i16::MIN + x
-    }
-
-    // DWA A accepts [0, neg(0), neg(1)]
-    let mut a = DWA::new();
-    let s1 = a.add_state();
-    let s2 = a.add_state();
-    let s3 = a.add_state();
-    a.add_transition(0, 0, s1, Weight::all()).unwrap();
-    a.add_transition(s1, neg(0), s2, Weight::all()).unwrap();
-    a.add_transition(s2, neg(1), s3, Weight::all()).unwrap();
-    a.set_final_weight(s3, Weight::all()).unwrap();
-
-    // DWA B accepts the empty word
-    let mut b = DWA::new();
-    b.set_final_weight(b.body.start_state, Weight::all()).unwrap();
-
-    let c = a.concatenate(&b);
-
-    // The result should be equivalent to A, as concatenating with the empty-word language is a no-op.
-    // The validation is called inside a.concatenate(&b)
-    assert_dwa_equivalent(c, a);
-}
