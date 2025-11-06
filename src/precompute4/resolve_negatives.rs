@@ -72,27 +72,104 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     if let Some(p) = &pb { p.finish_with_message("Done"); }
 }
 
-/// Finds all `A --neg(c)--> B --c--> C` patterns and returns `A --eps--> C` shortcuts to add.
-fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-    let mut epsilons_to_add = Vec::new();
+/// Helper to compute the weighted epsilon closure of a state.
+fn compute_eps_closure(
+    states: &NWAStates,
+    start_node: NWAStateID,
+    extra_epsilons: &HashMap<NWAStateID, Vec<(NWAStateID, Weight)>>,
+) -> HashMap<NWAStateID, Weight> {
+    let mut closure: HashMap<NWAStateID, Weight> = HashMap::new();
+    let mut q = VecDeque::new();
 
-    for a in 0..states.len() {
-        let state_a = &states[a];
-        for (neg_label, (b, w_ab)) in &state_a.transitions {
-            if *neg_label >= 0 { continue; }
-            let c = neg_label.wrapping_sub(i16::MIN);
+    closure.insert(start_node, Weight::all());
+    q.push_back(start_node);
 
-            if *b < states.len() {
-                if let Some((c_target, w_bc)) = states[*b].get_transition(c) {
-                    let new_w = w_ab & w_bc;
-                    if !new_w.is_empty() {
-                        epsilons_to_add.push((a, *c_target, new_w));
-                    }
+    while let Some(u) = q.pop_front() {
+        let u_w = closure.get(&u).unwrap().clone();
+
+        // Original epsilons
+        for (v, w) in &states[u].epsilons {
+            let new_w = &u_w & w;
+            if new_w.is_empty() { continue; }
+            let entry = closure.entry(*v).or_insert_with(Weight::zeros);
+            let old_w = entry.clone();
+            *entry |= &new_w;
+            if *entry != old_w {
+                q.push_back(*v);
+            }
+        }
+        // Extra epsilons found during cancellation fixpoint
+        if let Some(edges) = extra_epsilons.get(&u) {
+            for (v, w) in edges {
+                let new_w = &u_w & w;
+                if new_w.is_empty() { continue; }
+                let entry = closure.entry(*v).or_insert_with(Weight::zeros);
+                let old_w = entry.clone();
+                *entry |= &new_w;
+                if *entry != old_w {
+                    q.push_back(*v);
                 }
             }
         }
     }
-    epsilons_to_add
+    closure
+}
+
+/// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
+/// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
+fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
+    let mut all_new_epsilons: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
+    loop {
+        let mut changed_in_pass = false;
+        let mut pass_epsilons = Vec::new();
+
+        for a in 0..states.len() {
+            let state_a = &states[a];
+            for (neg_label, (b, w_ab)) in &state_a.transitions {
+                if *neg_label >= 0 { continue; }
+                let c = neg_label.wrapping_sub(i16::MIN);
+
+                if *b >= states.len() { continue; }
+
+                let eps_closure_of_b = compute_eps_closure(states, *b, &all_new_epsilons);
+
+                for (b_reachable, w_b_br) in eps_closure_of_b {
+                    if b_reachable >= states.len() { continue; }
+                    if let Some((c_target, w_br_c)) = states[b_reachable].get_transition(c) {
+                        let new_w = w_ab & &w_b_br & w_br_c;
+                        if !new_w.is_empty() {
+                            pass_epsilons.push((a, *c_target, new_w));
+                        }
+                    }
+                }
+            }
+        }
+
+        for (from, to, w) in pass_epsilons {
+            let edges = all_new_epsilons.entry(from).or_default();
+            if let Some((_, existing_w)) = edges.iter_mut().find(|(t, _)| *t == to) {
+                let old_w = existing_w.clone();
+                *existing_w |= &w;
+                if *existing_w != old_w {
+                    changed_in_pass = true;
+                }
+            } else {
+                edges.push((to, w));
+                changed_in_pass = true;
+            }
+        }
+
+        if !changed_in_pass {
+            break;
+        }
+    }
+
+    all_new_epsilons
+        .into_iter()
+        .flat_map(|(from, edges)| {
+            edges.into_iter().map(move |(to, w)| (from, to, w))
+        })
+        .collect()
 }
 
 /// Compute the least fixpoint of final weights propagated backward along all epsilon edges
