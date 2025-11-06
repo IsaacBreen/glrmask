@@ -580,7 +580,7 @@ local_system:
       use super::bitset::SimpleBitset;
       use std::collections::BTreeMap;
 
-      pub(crate) const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
+      pub(crate) const STOCHASTIC_DEBUG: bool = true; // Set to false by default to avoid heavy stochastic validation on large automata
 
       #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
       pub struct I16Map<T> {
@@ -879,6 +879,12 @@ local_system:
                   }
                   // labeled
                   for (_, (v, _)) in states[u].transitions.iter() {
+                      if *v < states.len() && !visited[*v] {
+                          visited[*v] = true;
+                          q.push_back(*v);
+                      }
+                  }
+                  if let Some((v, _)) = &states[u].default {
                       if *v < states.len() && !visited[*v] {
                           visited[*v] = true;
                           q.push_back(*v);
@@ -2936,7 +2942,7 @@ local_system:
       use super::bitset::SimpleBitset;
       use std::collections::BTreeMap;
 
-      pub(crate) const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
+      pub(crate) const STOCHASTIC_DEBUG: bool = true; // Set to false by default to avoid heavy stochastic validation on large automata
 
       #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
       pub struct I16Map<T> {
@@ -3205,19 +3211,35 @@ local_system:
           /// Union of two NWAs (component-level within shared arena):
           /// Construct a new start with epsilon transitions (weight=ALL) to both operands' starts.
           /// Return a body whose start is the new start.
-          pub fn union_components(states: &mut NWAStates, body1: &NWABody, body2: &NWABody) -> NWABody {
+          fn internal_union_components(states: &mut NWAStates, body1: &NWABody, body2: &NWABody) -> NWABody {
               let new_start = states.add_state();
               states.add_epsilon(new_start, body1.start_state, Weight::all());
               states.add_epsilon(new_start, body2.start_state, Weight::all());
               NWABody { start_state: new_start }
           }
 
-          /// Concatenate left then right:
-          /// - For each final state s reachable from left.start that has final_weight F,
-          ///   add an epsilon s --eps-> right.start with weight (F & eps_weight).
-          /// - Set s.final_weight = None (standard concatenation semantics).
-          /// Return body with start = left.start.
-          pub fn concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+          pub fn union_components(states: &mut NWAStates, body1: &NWABody, body2: &NWABody) -> NWABody {
+              if STOCHASTIC_DEBUG {
+                  let nwa1 = NWA { states: states.clone(), body: body1.clone() };
+                  let nwa2 = NWA { states: states.clone(), body: body2.clone() };
+
+                  let mut states_after_union = states.clone();
+                  let union_body = Self::internal_union_components(&mut states_after_union, body1, body2);
+                  let union_nwa = NWA { states: states_after_union, body: union_body };
+
+                  let mut dwa1 = nwa1.determinize_to_dwa();
+                  dwa1.simplify();
+                  let mut dwa2 = nwa2.determinize_to_dwa();
+                  dwa2.simplify();
+                  let mut result_dwa = union_nwa.determinize_to_dwa();
+                  result_dwa.simplify();
+
+                  DWA::stochastic_validate_union(&dwa1, &dwa2, &result_dwa);
+              }
+              Self::internal_union_components(states, body1, body2)
+          }
+
+          fn internal_concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
               // 1) Collect reachable states from left.start
               let mut visited = vec![false; states.len()];
               let mut q = VecDeque::new();
@@ -3261,6 +3283,31 @@ local_system:
               }
 
               NWABody { start_state: left.start_state }
+          }
+          /// Concatenate left then right:
+          /// - For each final state s reachable from left.start that has final_weight F,
+          ///   add an epsilon s --eps-> right.start with weight (F & eps_weight).
+          /// - Set s.final_weight = None (standard concatenation semantics).
+          /// Return body with start = left.start.
+          pub fn concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+              if STOCHASTIC_DEBUG {
+                  let nwa1 = NWA { states: states.clone(), body: left.clone() };
+                  let nwa2 = NWA { states: states.clone(), body: right.clone() };
+
+                  let mut states_after_concat = states.clone();
+                  let concat_body = Self::internal_concatenate_components(&mut states_after_concat, left, right, eps_weight);
+                  let concat_nwa = NWA { states: states_after_concat, body: concat_body };
+
+                  let mut dwa1 = nwa1.determinize_to_dwa();
+                  dwa1.simplify();
+                  let mut dwa2 = nwa2.determinize_to_dwa();
+                  dwa2.simplify();
+                  let mut result_dwa = concat_nwa.determinize_to_dwa();
+                  result_dwa.simplify();
+
+                  DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa);
+              }
+              Self::internal_concatenate_components(states, left, right, eps_weight)
           }
 
           /// Determinize subgraph reachable from body.start_state to DWA
@@ -5355,7 +5402,7 @@ messages:
       use super::bitset::SimpleBitset;
       use std::collections::BTreeMap;
 
-      pub(crate) const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
+      pub(crate) const STOCHASTIC_DEBUG: bool = true; // Set to false by default to avoid heavy stochastic validation on large automata
 
       #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
       pub struct I16Map<T> {
@@ -5659,6 +5706,12 @@ messages:
                   }
                   // labeled
                   for (_, (v, _)) in states[u].transitions.iter() {
+                      if *v < states.len() && !visited[*v] {
+                          visited[*v] = true;
+                          q.push_back(*v);
+                      }
+                  }
+                  if let Some((v, _)) = &states[u].default {
                       if *v < states.len() && !visited[*v] {
                           visited[*v] = true;
                           q.push_back(*v);
@@ -7159,169 +7212,8 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata/determinization.rs
-  - user: |
-      /Users/isaacbreen/.cargo/bin/cargo test --color=always --package sep1 --lib precompute4::test_weighted_automata::test_concatenate_from_debug_log --profile test --no-fail-fast -- --format=json --exact -Z unstable-options --show-output
-      Testing started at 3:56 pm ...
-          Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
-           Running unittests src/lib.rs (target/debug/deps/sep1-8216215debb7bbe7)
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:39: Determinizing NWA with 26 states...
-      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:632: NWA::simplify (26 states -> 13 states) took: 5.04125ms
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:42: NWA simplified to 13 states.
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:44: NWA::determinize_to_dwa took: 14.3945ms
-      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:50: DWA::simplify_components (13 states -> 13 states) took: 3.124125ms
-
-
-      thread 'precompute4::test_weighted_automata::test_concatenate_from_debug_log' (4717367) panicked at src/precompute4/test_weighted_automata.rs:237:25:
-      Concatenation missing expected subset.
-      word_a: [11, 1, 9, neg(9), neg(6), neg(12)]
-      word_b: [12, 6, 9, 8, 4, neg(4), neg(6), neg(12)]
-      word: [11, 1, 9, neg(9), neg(6), neg(12), 12, 6, 9, 8, 4, neg(4), neg(6), neg(12)]
-      A(wA): [0]
-      B(wB): [0]
-      C(wA∘wB): []
-      Expected subset: [0]
-
-      DWA A:
-      DWA (start: 13)
-        State 0:
-          6 -> 1 (trans_weight: ALL)
-          7 -> 4 (trans_weight: ALL)
-          10 -> 5 (trans_weight: ALL)
-          11 -> 6 (trans_weight: ALL)
-          12 -> 3 (trans_weight: ALL)
-        State 1:
-          9 -> 6 (trans_weight: ALL)
-        State 2:
-          0 -> 7 (trans_weight: ALL)
-          4 -> 11 (trans_weight: ALL)
-          9 -> 12 (trans_weight: ALL)
-        State 3:
-          6 -> 1 (trans_weight: ALL)
-        State 4:
-          * -> 1 (trans_weight: ALL)
-        State 5:
-          * -> 6 (trans_weight: ALL)
-        State 6:
-          * -> 2 (trans_weight: ALL)
-        State 7:
-          neg(0) -> 8 (trans_weight: ALL)
-        State 8:
-          neg(6) -> 9 (trans_weight: ALL)
-        State 9:
-          neg(12) -> 10 (trans_weight: ALL)
-        State 10:
-          final_weight: ALL
-        State 11:
-          neg(4) -> 8 (trans_weight: ALL)
-        State 12:
-          neg(9) -> 8 (trans_weight: ALL)
-        State 13:
-          6 -> 1 (trans_weight: [0])
-          7 -> 4 (trans_weight: [0])
-          10 -> 5 (trans_weight: [0])
-          11 -> 6 (trans_weight: [0])
-          12 -> 3 (trans_weight: [0])
-
-
-      DWA B:
-      DWA (start: 13)
-        State 0:
-          6 -> 1 (trans_weight: ALL)
-          7 -> 4 (trans_weight: ALL)
-          10 -> 5 (trans_weight: ALL)
-          11 -> 6 (trans_weight: ALL)
-          12 -> 3 (trans_weight: ALL)
-        State 1:
-          9 -> 6 (trans_weight: ALL)
-        State 2:
-          0 -> 7 (trans_weight: ALL)
-          4 -> 11 (trans_weight: ALL)
-          9 -> 12 (trans_weight: ALL)
-        State 3:
-          6 -> 1 (trans_weight: ALL)
-        State 4:
-          * -> 1 (trans_weight: ALL)
-        State 5:
-          * -> 6 (trans_weight: ALL)
-        State 6:
-          * -> 2 (trans_weight: ALL)
-        State 7:
-          neg(0) -> 8 (trans_weight: ALL)
-        State 8:
-          neg(6) -> 9 (trans_weight: ALL)
-        State 9:
-          neg(12) -> 10 (trans_weight: ALL)
-        State 10:
-          final_weight: ALL
-        State 11:
-          neg(4) -> 8 (trans_weight: ALL)
-        State 12:
-          neg(9) -> 8 (trans_weight: ALL)
-        State 13:
-          6 -> 1 (trans_weight: [0])
-          7 -> 4 (trans_weight: [0])
-          10 -> 5 (trans_weight: [0])
-          11 -> 6 (trans_weight: [0])
-          12 -> 3 (trans_weight: [0])
-
-
-      DWA C:
-      DWA (start: 0)
-        State 0:
-          6 -> 1 (trans_weight: [0])
-          7 -> 2 (trans_weight: [0])
-          10 -> 3 (trans_weight: [0])
-          11 -> 4 (trans_weight: [0])
-          12 -> 5 (trans_weight: [0])
-        State 1:
-          9 -> 4 (trans_weight: [0])
-        State 2:
-          * -> 1 (trans_weight: [0])
-        State 3:
-          * -> 4 (trans_weight: [0])
-        State 4:
-          * -> 6 (trans_weight: [0])
-        State 5:
-          6 -> 1 (trans_weight: [0])
-        State 6:
-          0 -> 7 (trans_weight: [0])
-          4 -> 8 (trans_weight: [0])
-          9 -> 9 (trans_weight: [0])
-        State 7:
-          neg(0) -> 10 (trans_weight: [0])
-        State 8:
-          neg(4) -> 10 (trans_weight: [0])
-        State 9:
-          neg(9) -> 10 (trans_weight: [0])
-        State 10:
-          neg(6) -> 11 (trans_weight: [0])
-        State 11:
-          neg(12) -> 12 (trans_weight: [0])
-        State 12:
-          final_weight: [0]
-
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: sep1::precompute4::test_weighted_automata::<impl sep1::precompute4::weighted_automata::dwa::DWA>::stochastic_validate_concatenate
-                   at ./src/precompute4/test_weighted_automata.rs:237:25
-         3: sep1::precompute4::test_weighted_automata::test_concatenate_from_debug_log
-                   at ./src/precompute4/test_weighted_automata.rs:1549:5
-         4: sep1::precompute4::test_weighted_automata::test_concatenate_from_debug_log::{{closure}}
-                   at ./src/precompute4/test_weighted_automata.rs:1497:37
-         5: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         6: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-      error: test failed, to rerun pass `-p sep1 --lib`
-      error: 1 target failed:
-          `-p sep1 --lib`
-
-      Process finished with exit code 101
+  - user: Make stochastic validation for `concatenate_components` and `union_components`,
+      not just for `concatenate` and `union`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7341,56 +7233,189 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As an AI assistant, I'm here to help you with your code. Based on the test failure you've encountered, it seems there's a bug in the automaton concatenation logic. Specifically, the reachability analysis for finding final states in the first automaton doesn't account for default transitions, leading to incorrect results when such transitions are present.
-
-      Here are the step-by-step instructions to fix the issue, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add stochastic validation for `concatenate_components` and `union_components`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file:** `src/precompute4/weighted_automata/ops.rs`.
+      I will modify `src/precompute4/weighted_automata/ops.rs` to add stochastic validation for the `union_components` and `concatenate_components` methods on `NWA`. This involves extracting the current logic into helper methods and adding validation wrappers that are active when `STOCHASTIC_DEBUG` is enabled.
 
-      2.  **Locate the function:** Find the `concatenate_components` function within the `impl NWA` block.
+      1.  **Open `src/precompute4/weighted_automata/ops.rs`**.
 
-      3.  **Update the reachability loop:** Inside this function, there's a `while` loop that performs a reachability analysis to find all states connected to the start state of the first automaton. This loop currently iterates over epsilon and labeled transitions but misses default transitions. You need to add logic to handle them.
+      2.  **Refactor `union_components`:**
+          *   Just before the `pub fn union_components`, define a new private helper function `internal_union_components` by copying the existing body of `union_components`.
+          *   Replace the implementation of `union_components` with a new one that:
+              *   Checks if `STOCHASTIC_DEBUG` is true.
+              *   If it is, it performs validation by creating NWA representations of the components before the operation, applying the union on a copy of the states, determinizing all three NWAs to DWAs, and then calling `DWA::stochastic_validate_union`.
+              *   Finally, it calls `internal_union_components` on the original `states` to perform the actual operation.
 
-      4.  **Insert the code:** At the end of the `while let Some(u) = q.pop_front()` loop, just before its closing brace `}`, add the following code snippet to traverse default transitions:
+      3.  **Refactor `concatenate_components`:**
+          *   Just before the `pub fn concatenate_components`, define a new private helper function `internal_concatenate_components` by moving the entire body of the existing `concatenate_components` into it.
+          *   Replace the implementation of `concatenate_components` with a new one that follows the same validation pattern as `union_components`, this time calling `DWA::stochastic_validate_concatenate`.
 
-          ```rust
-                      if let Some((v, _)) = &states[u].default {
-                          if *v < states.len() && !visited[*v] {
-                              visited[*v] = true;
-                              q.push_back(*v);
-                          }
-                      }
-          ```
-
-      This change ensures that all reachable states, including those accessed via default transitions, are correctly identified, allowing the concatenation to function as expected.
+      This approach adds the requested validation at the component level while preserving the existing end-to-end validation in `DWA::union` and `DWA::concatenate`.
 
       ### Git Diff
 
-      Here is the git diff for the change. You can apply this patch directly.
+      Here is the git diff for the changes.
 
       ```diff
-      diff --git a/src/precompute4/weighted_automata/ops.rs b/src/precompute4/weighted_automata/ops.rs
       --- a/src/precompute4/weighted_automata/ops.rs
       +++ b/src/precompute4/weighted_automata/ops.rs
-      @@ -257,6 +257,12 @@
-                           q.push_back(*v);
-                       }
-                   }
+      @@ -220,50 +220,90 @@
+           /// Union of two NWAs (component-level within shared arena):
+           /// Construct a new start with epsilon transitions (weight=ALL) to both operands' starts.
+           /// Return a body whose start is the new start.
+      +    fn internal_union_components(states: &mut NWAStates, body1: &NWABody, body2: &NWABody) -> NWABody {
+      +        let new_start = states.add_state();
+      +        states.add_epsilon(new_start, body1.start_state, Weight::all());
+      +        states.add_epsilon(new_start, body2.start_state, Weight::all());
+      +        NWABody { start_state: new_start }
+      +    }
+      +
+           pub fn union_components(states: &mut NWAStates, body1: &NWABody, body2: &NWABody) -> NWABody {
+      -        let new_start = states.add_state();
+      -        states.add_epsilon(new_start, body1.start_state, Weight::all());
+      -        states.add_epsilon(new_start, body2.start_state, Weight::all());
+      -        NWABody { start_state: new_start }
+      -    }
+      -
+      +        if STOCHASTIC_DEBUG {
+      +            let nwa1 = NWA { states: states.clone(), body: body1.clone() };
+      +            let nwa2 = NWA { states: states.clone(), body: body2.clone() };
+      +
+      +            let mut states_after_union = states.clone();
+      +            let union_body = Self::internal_union_components(&mut states_after_union, body1, body2);
+      +            let union_nwa = NWA { states: states_after_union, body: union_body };
+      +
+      +            let mut dwa1 = nwa1.determinize_to_dwa();
+      +            dwa1.simplify();
+      +            let mut dwa2 = nwa2.determinize_to_dwa();
+      +            dwa2.simplify();
+      +            let mut result_dwa = union_nwa.determinize_to_dwa();
+      +            result_dwa.simplify();
+      +
+      +            DWA::stochastic_validate_union(&dwa1, &dwa2, &result_dwa);
+      +        }
+      +        Self::internal_union_components(states, body1, body2)
+      +    }
+      +
+      +    fn internal_concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+      +        // 1) Collect reachable states from left.start
+      +        let mut visited = vec![false; states.len()];
+      +        let mut q = VecDeque::new();
+      +        if left.start_state < states.len() {
+      +            visited[left.start_state] = true;
+      +            q.push_back(left.start_state);
+      +        }
+      +        while let Some(u) = q.pop_front() {
+      +            // eps
+      +            for &(v, _) in &states[u].epsilons {
+      +                if v < states.len() && !visited[v] {
+      +                    visited[v] = true;
+      +                    q.push_back(v);
+      +                }
+      +            }
+      +            // labeled
+      +            for (_, (v, _)) in states[u].transitions.iter() {
+      +                if *v < states.len() && !visited[*v] {
+      +                    visited[*v] = true;
+      +                    q.push_back(*v);
+      +                }
+      +            }
       +            if let Some((v, _)) = &states[u].default {
       +                if *v < states.len() && !visited[*v] {
       +                    visited[*v] = true;
       +                    q.push_back(*v);
       +                }
       +            }
-               }
+      +        }
+      +
+      +        // 2) For each visited final, add epsilon and clear final.
+      +        for sid in 0..states.len() {
+      +            if !visited[sid] { continue; }
+      +            if let Some(fw) = states[sid].final_weight.clone() {
+      +                let w = &fw & eps_weight;
+      +                if !w.is_empty() {
+      +                    states.add_epsilon(sid, right.start_state, w);
+      +                }
+      +                states[sid].final_weight = None;
+      +            }
+      +        }
+      +
+      +        NWABody { start_state: left.start_state }
+      +    }
+           /// Concatenate left then right:
+           /// - For each final state s reachable from left.start that has final_weight F,
+           ///   add an epsilon s --eps-> right.start with weight (F & eps_weight).
+           /// - Set s.final_weight = None (standard concatenation semantics).
+           /// Return body with start = left.start.
+           pub fn concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+      -        // 1) Collect reachable states from left.start
+      -        let mut visited = vec![false; states.len()];
+      -        let mut q = VecDeque::new();
+      -        if left.start_state < states.len() {
+      -            visited[left.start_state] = true;
+      -            q.push_back(left.start_state);
+      -        }
+      -        while let Some(u) = q.pop_front() {
+      -            // eps
+      -            for &(v, _) in &states[u].epsilons {
+      -                if v < states.len() && !visited[v] {
+      -                    visited[v] = true;
+      -                    q.push_back(v);
+      -                }
+      -            }
+      -            // labeled
+      -            for (_, (v, _)) in states[u].transitions.iter() {
+      -                if *v < states.len() && !visited[*v] {
+      -                    visited[*v] = true;
+      -                    q.push_back(*v);
+      -                }
+      -            }
+      -            if let Some((v, _)) = &states[u].default {
+      -                if *v < states.len() && !visited[*v] {
+      -                    visited[*v] = true;
+      -                    q.push_back(*v);
+      -                }
+      -            }
+      -        }
+      -
+      -        // 2) For each visited final, add epsilon and clear final.
+      -        for sid in 0..states.len() {
+      -            if !visited[sid] { continue; }
+      -            if let Some(fw) = states[sid].final_weight.clone() {
+      -                let w = &fw & eps_weight;
+      -                if !w.is_empty() {
+      -                    states.add_epsilon(sid, right.start_state, w);
+      -                }
+      -                states[sid].final_weight = None;
+      -            }
+      -        }
+      -
+      -        NWABody { start_state: left.start_state }
+      +        if STOCHASTIC_DEBUG {
+      +            let nwa1 = NWA { states: states.clone(), body: left.clone() };
+      +            let nwa2 = NWA { states: states.clone(), body: right.clone() };
+      +
+      +            let mut states_after_concat = states.clone();
+      +            let concat_body = Self::internal_concatenate_components(&mut states_after_concat, left, right, eps_weight);
+      +            let concat_nwa = NWA { states: states_after_concat, body: concat_body };
+      +
+      +            let mut dwa1 = nwa1.determinize_to_dwa();
+      +            dwa1.simplify();
+      +            let mut dwa2 = nwa2.determinize_to_dwa();
+      +            dwa2.simplify();
+      +            let mut result_dwa = concat_nwa.determinize_to_dwa();
+      +            result_dwa.simplify();
+      +
+      +            DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa);
+      +        }
+      +        Self::internal_concatenate_components(states, left, right, eps_weight)
+           }
        
-               // 2) For each visited final, add epsilon and clear final.
+           /// Determinize subgraph reachable from body.start_state to DWA
 
       ```
-
-      After applying this fix, the test should pass. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -7401,7 +7426,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/ops.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/ops.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Include default transitions in left
-      automaton reachability for concatenation"'
+  - user: 'Changes committed with message: "dwa: Add stochastic validation for NWA
+      component union and concatenation"'
     metadata:
 ...

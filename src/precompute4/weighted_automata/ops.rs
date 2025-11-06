@@ -213,19 +213,35 @@ impl NWA {
     /// Union of two NWAs (component-level within shared arena):
     /// Construct a new start with epsilon transitions (weight=ALL) to both operands' starts.
     /// Return a body whose start is the new start.
-    pub fn union_components(states: &mut NWAStates, body1: &NWABody, body2: &NWABody) -> NWABody {
+    fn internal_union_components(states: &mut NWAStates, body1: &NWABody, body2: &NWABody) -> NWABody {
         let new_start = states.add_state();
         states.add_epsilon(new_start, body1.start_state, Weight::all());
         states.add_epsilon(new_start, body2.start_state, Weight::all());
         NWABody { start_state: new_start }
     }
 
-    /// Concatenate left then right:
-    /// - For each final state s reachable from left.start that has final_weight F,
-    ///   add an epsilon s --eps-> right.start with weight (F & eps_weight).
-    /// - Set s.final_weight = None (standard concatenation semantics).
-    /// Return body with start = left.start.
-    pub fn concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+    pub fn union_components(states: &mut NWAStates, body1: &NWABody, body2: &NWABody) -> NWABody {
+        if STOCHASTIC_DEBUG {
+            let nwa1 = NWA { states: states.clone(), body: body1.clone() };
+            let nwa2 = NWA { states: states.clone(), body: body2.clone() };
+
+            let mut states_after_union = states.clone();
+            let union_body = Self::internal_union_components(&mut states_after_union, body1, body2);
+            let union_nwa = NWA { states: states_after_union, body: union_body };
+
+            let mut dwa1 = nwa1.determinize_to_dwa();
+            dwa1.simplify();
+            let mut dwa2 = nwa2.determinize_to_dwa();
+            dwa2.simplify();
+            let mut result_dwa = union_nwa.determinize_to_dwa();
+            result_dwa.simplify();
+
+            DWA::stochastic_validate_union(&dwa1, &dwa2, &result_dwa);
+        }
+        Self::internal_union_components(states, body1, body2)
+    }
+
+    fn internal_concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
         // 1) Collect reachable states from left.start
         let mut visited = vec![false; states.len()];
         let mut q = VecDeque::new();
@@ -269,6 +285,31 @@ impl NWA {
         }
 
         NWABody { start_state: left.start_state }
+    }
+    /// Concatenate left then right:
+    /// - For each final state s reachable from left.start that has final_weight F,
+    ///   add an epsilon s --eps-> right.start with weight (F & eps_weight).
+    /// - Set s.final_weight = None (standard concatenation semantics).
+    /// Return body with start = left.start.
+    pub fn concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+        if STOCHASTIC_DEBUG {
+            let nwa1 = NWA { states: states.clone(), body: left.clone() };
+            let nwa2 = NWA { states: states.clone(), body: right.clone() };
+
+            let mut states_after_concat = states.clone();
+            let concat_body = Self::internal_concatenate_components(&mut states_after_concat, left, right, eps_weight);
+            let concat_nwa = NWA { states: states_after_concat, body: concat_body };
+
+            let mut dwa1 = nwa1.determinize_to_dwa();
+            dwa1.simplify();
+            let mut dwa2 = nwa2.determinize_to_dwa();
+            dwa2.simplify();
+            let mut result_dwa = concat_nwa.determinize_to_dwa();
+            result_dwa.simplify();
+
+            DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa);
+        }
+        Self::internal_concatenate_components(states, left, right, eps_weight)
     }
 
     /// Determinize subgraph reachable from body.start_state to DWA
