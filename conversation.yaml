@@ -3073,9 +3073,22 @@ local_system:
               new_id
           }
 
-          pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
+          /// Adds an epsilon transition. If one to the same target already exists,
+          /// unions the weight. Returns true if a change was made (new edge, or weight changed).
+          pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> bool {
               assert!(from < self.len() && to < self.len(), "add_epsilon: state id out of bounds");
+              for (v, old_w) in self.0[from].epsilons.iter_mut() {
+                  if *v == to {
+                      let new_w = &*old_w | &w;
+                      if new_w != *old_w {
+                          *old_w = new_w;
+                          return true;
+                      }
+                      return false;
+                  }
+              }
               self.0[from].epsilons.push((to, w));
+              true
           }
 
           /// Add a labeled transition; if an existing transition on the same label exists,
@@ -5266,8 +5279,9 @@ local_system:
                   if let Some((c_orig_id, w_t_c)) = states[*t].get_transition(p).cloned() {
                       let w = &w_neg & w_b_t & &w_t_c;
                       if !w.is_empty() {
-                          states.add_epsilon(state_id, c_orig_id, w);
-                          changed = true;
+                          if states.add_epsilon(state_id, c_orig_id, w) {
+                              changed = true;
+                          }
                       }
                   }
               }
@@ -10978,5 +10992,151 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Make negative code resolution epsilon-aware
       and improve performance by using NWA simplification in the loop"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/test_resolve_negatives.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/resolve_negatives.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Now it's looping infinitely.
+    metadata:
+  - assistant: |-
+      My apologies for the infinite loop. You've correctly identified the issue. The previous fix was not idempotent; it would repeatedly add the same epsilon transitions on each pass, causing the `changed_in_pass` flag to always be true and preventing the algorithm from terminating.
+
+      The core of the problem is that the `add_epsilon` function would add new transitions without checking if an equivalent one already existed. The fix is to make this operation idempotent: when adding an epsilon transition, we'll first check if one to the same target state already exists. If it does, we'll merge the weights. A "change" will only be registered if a new edge is created or if the merged weight is different from the old one.
+
+      This ensures the process is monotonic and guaranteed to converge to a fixed point, thus resolving the infinite loop.
+
+      Here are the step-by-step instructions to apply the fix.
+
+      ### Step-by-step Instructions
+
+      1.  **Modify `src/precompute4/weighted_automata/nwa.rs`**:
+          -   In the `impl NWAStates`, find the `add_epsilon` function.
+          -   Replace its implementation to check for existing transitions to the same target. If found, union the weights.
+          -   The function must now return a `bool` to indicate whether the NWA was actually changed.
+
+      2.  **Update `src/precompute4/resolve_negatives.rs`**:
+          -   In the `resolve_negative_codes_in_nwa_internal` function, locate the call to `states.add_epsilon`.
+          -   Wrap the call in an `if` statement, using its new boolean return value to only set `changed = true` when the automaton is actually modified.
+
+      ### Git Diffs
+
+      Here are the git diffs that implement the fix.
+
+      ```diff
+      diff --git a/src/precompute4/resolve_negatives.rs b/src/precompute4/resolve_negatives.rs
+      --- a/src/precompute4/resolve_negatives.rs
+      +++ b/src/precompute4/resolve_negatives.rs
+      @@ -141,8 +141,9 @@
+                   if let Some((c_orig_id, w_t_c)) = states[*t].get_transition(p).cloned() {
+                       let w = &w_neg & w_b_t & &w_t_c;
+                       if !w.is_empty() {
+      -                    states.add_epsilon(state_id, c_orig_id, w);
+      -                    changed = true;
+      +                    if states.add_epsilon(state_id, c_orig_id, w) {
+      +                        changed = true;
+      +                    }
+                       }
+                   }
+               }
+
+      ``````diff
+      diff --git a/src/precompute4/weighted_automata/nwa.rs b/src/precompute4/weighted_automata/nwa.rs
+      --- a/src/precompute4/weighted_automata/nwa.rs
+      +++ b/src/precompute4/weighted_automata/nwa.rs
+      @@ -43,9 +43,23 @@
+               new_id
+           }
+       
+      -    pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
+      +    /// Adds an epsilon transition. If one to the same target already exists,
+      +    /// unions the weight. Returns true if a change was made (new edge, or weight changed).
+      +    pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> bool {
+               assert!(from < self.len() && to < self.len(), "add_epsilon: state id out of bounds");
+      -        self.0[from].epsilons.push((to, w));
+      +        for (v, old_w) in self.0[from].epsilons.iter_mut() {
+      +            if *v == to {
+      +                let new_w = &*old_w | &w;
+      +                if new_w != *old_w {
+      +                    *old_w = new_w;
+      +                    return true;
+      +                }
+      +                return false;
+      +            }
+      +        }
+      +        self.0[from].epsilons.push((to, w));
+      +        true
+           }
+       
+           /// Add a labeled transition; if an existing transition on the same label exists,
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/resolve_negatives.rs
+      Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/precompute4/weighted_automata/nwa.rs
+      Applying patch to 'src/precompute4/weighted_automata/nwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/nwa.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Make negative code resolution idempotent
+      and use NWA simplification in the loop"'
     metadata:
 ...

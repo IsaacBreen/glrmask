@@ -142,8 +142,9 @@ fn resolve_negative_codes_in_nwa_internal(
             if let Some((c_orig_id, w_t_c)) = states[*t].get_transition(p).cloned() {
                 let w = &w_neg & w_b_t & &w_t_c;
                 if !w.is_empty() {
-                    states.add_epsilon(state_id, c_orig_id, w);
-                    changed = true;
+                    if states.add_epsilon(state_id, c_orig_id, w) {
+                        changed = true;
+                    }
                 }
             }
         }
