@@ -1,6 +1,7 @@
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::{HashMap, VecDeque};
 
 /// High-level strategy:
 /// - Convert DWA -> NWA.
@@ -62,6 +63,35 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     }
 }
 
+fn compute_weighted_epsilon_closure(
+    start_node: NWAStateID,
+    states: &NWAStates,
+) -> HashMap<NWAStateID, Weight> {
+    let mut closure = HashMap::new();
+    let mut q = VecDeque::new();
+
+    closure.insert(start_node, Weight::all());
+    q.push_back(start_node);
+
+    while let Some(u) = q.pop_front() {
+        let u_weight = closure.get(&u).unwrap().clone();
+        for (v, w_uv) in &states[u].epsilons {
+            let v_new_weight = &u_weight & w_uv;
+            if v_new_weight.is_empty() {
+                continue;
+            }
+
+            let v_old_weight = closure.entry(*v).or_insert_with(Weight::zeros);
+            let combined = &*v_old_weight | &v_new_weight;
+            if combined != *v_old_weight {
+                *v_old_weight = combined;
+                q.push_back(*v);
+            }
+        }
+    }
+    closure
+}
+
 fn resolve_negative_codes_in_nwa_internal(
     state_id: NWAStateID,
     states: &mut NWAStates,
@@ -85,8 +115,12 @@ fn resolve_negative_codes_in_nwa_internal(
     for (neg_code, b_orig_id, w_neg) in negatives {
         let p = neg_code.wrapping_sub(i16::MIN);
 
+        let closure = compute_weighted_epsilon_closure(b_orig_id, states);
+
         // Step 1: Propagate final weight from B into A
-        if let Some(b_final) = states[b_orig_id].final_weight.clone() {
+        // Epsilon-aware: check all states in closure
+        for (t, w_b_t) in &closure {
+            if let Some(b_final) = states[*t].final_weight.clone() {
             let new_a_final = &w_neg & &b_final;
             if !new_a_final.is_empty() {
                 let a_fw_before = states[state_id].final_weight.clone();
@@ -99,24 +133,26 @@ fn resolve_negative_codes_in_nwa_internal(
                     changed = true;
                 }
             }
+            }
         }
 
         // Handle cancellation if B has a positive edge on p
-        if let Some((c_orig_id, w_b_c)) = states[b_orig_id].get_transition(p).cloned() {
-            let w = &w_neg & &w_b_c;
-            if !w.is_empty() {
-                states.add_epsilon(state_id, c_orig_id, w);
-                changed = true;
+        // Epsilon-aware: check all states in closure
+        for (t, w_b_t) in &closure {
+            if let Some((c_orig_id, w_t_c)) = states[*t].get_transition(p).cloned() {
+                let w = &w_neg & w_b_t & &w_t_c;
+                if !w.is_empty() {
+                    states.add_epsilon(state_id, c_orig_id, w);
+                    changed = true;
+                }
             }
         }
 
         // Check if B needs to be split: if it has positive behavior that should not be triggered by the neg path.
-        let b_needs_splitting = {
-            let b_orig = &states[b_orig_id];
-            b_orig.final_weight.is_some()
-                || b_orig.transitions.keys().any(|k| *k >= 0)
-                || b_orig.default.is_some()
-        };
+        let b_needs_splitting = closure.keys().any(|&t| {
+            let t_state = &states[t];
+            t_state.final_weight.is_some() || t_state.transitions.keys().any(|k| *k >= 0) || t_state.default.is_some()
+        });
 
         if b_needs_splitting {
             // Step 2: Copy B and strip positive transitions; also clear final weight in the copy.
