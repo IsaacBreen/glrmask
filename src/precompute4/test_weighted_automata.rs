@@ -1492,3 +1492,59 @@ fn test_simplify_complex_dwa_from_attachment() {
 
     assert_dwa_equivalent(left, simplified);
 }
+
+#[test]
+fn test_concatenate_from_debug_log() {
+    fn neg(x: i16) -> i16 {
+        i16::MIN + x
+    }
+
+    let mut base_dwa = DWA::new();
+    for _ in 0..12 {
+        base_dwa.add_state();
+    }
+    assert_eq!(base_dwa.states.len(), 13);
+
+    // State 0
+    base_dwa.add_transition(0, 6, 1, Weight::all()).unwrap();
+    base_dwa.add_transition(0, 7, 4, Weight::all()).unwrap();
+    base_dwa.add_transition(0, 10, 5, Weight::all()).unwrap();
+    base_dwa.add_transition(0, 11, 6, Weight::all()).unwrap();
+    base_dwa.add_transition(0, 12, 3, Weight::all()).unwrap();
+    // State 1
+    base_dwa.add_transition(1, 9, 6, Weight::all()).unwrap();
+    // State 2
+    base_dwa.add_transition(2, 0, 7, Weight::all()).unwrap();
+    base_dwa.add_transition(2, 4, 11, Weight::all()).unwrap();
+    base_dwa.add_transition(2, 9, 12, Weight::all()).unwrap();
+    // State 3
+    base_dwa.add_transition(3, 6, 1, Weight::all()).unwrap();
+    // State 4
+    base_dwa.set_default_transition(4, 1, Weight::all()).unwrap();
+    // State 5
+    base_dwa.set_default_transition(5, 6, Weight::all()).unwrap();
+    // State 6
+    base_dwa.set_default_transition(6, 2, Weight::all()).unwrap();
+    // State 7
+    base_dwa.add_transition(7, neg(0), 8, Weight::all()).unwrap();
+    // State 8
+    base_dwa.add_transition(8, neg(6), 9, Weight::all()).unwrap();
+    // State 9
+    base_dwa.add_transition(9, neg(12), 10, Weight::all()).unwrap();
+    // State 10
+    base_dwa.set_final_weight(10, Weight::all()).unwrap();
+    // State 11
+    base_dwa.add_transition(11, neg(4), 8, Weight::all()).unwrap();
+    // State 12
+    base_dwa.add_transition(12, neg(9), 8, Weight::all()).unwrap();
+
+    let mut dwa1 = base_dwa.clone();
+    dwa1.apply_weight(&Weight::from_item(0));
+
+    let mut dwa2 = base_dwa.clone();
+    dwa2.apply_weight(&Weight::from_item(0));
+
+    let c = dwa1.concatenate(&dwa2);
+
+    DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &c);
+}
