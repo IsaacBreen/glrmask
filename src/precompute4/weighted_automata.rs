@@ -1542,13 +1542,16 @@ struct StepGroupKey {
 
 impl PartialEq for StepGroupKey {
     fn eq(&self, other: &Self) -> bool {
-        if !Arc::ptr_eq(&self.mask, &other.mask) {
-            return false;
-        }
+        // Fingerprint check is a fast path for inequality.
         if self.fp != other.fp {
             return false;
         }
-        self.w == other.w
+        // Pointer equality is a fast path for equality of the mask.
+        if Arc::ptr_eq(&self.mask, &other.mask) {
+            return self.w == other.w;
+        }
+        // Full check as fallback.
+        self.w == other.w && *self.mask == *other.mask
     }
 }
 impl Eq for StepGroupKey {}
@@ -2337,7 +2340,10 @@ impl NWA {
                     for t in ex_add_map.keys() { modified_targets.insert(*t); }
                     for t in def_sub_map.keys() { modified_targets.insert(*t); }
                     for t in modified_targets {
-                        let base = def_vec_sorted.iter().find(|(tt, _)| *tt == t).map(|(_, w)| w.clone()).unwrap_or_else(Weight::zeros);
+                        let base = match def_vec_sorted.binary_search_by_key(&t, |(tt, _)| *tt) {
+                            Ok(idx) => def_vec_sorted[idx].1.clone(),
+                            Err(_) => Weight::zeros(),
+                        };
                         let sub = def_sub_map.get(&t).cloned().unwrap_or_else(Weight::zeros);
                         let add = ex_add_map.get(&t).cloned().unwrap_or_else(Weight::zeros);
                         let after_sub = if sub.is_empty() { base.clone() } else { &base - &sub };
