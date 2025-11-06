@@ -2976,6 +2976,8 @@ local_system:
       use super::dwa::DWA;
       use super::nwa::NWA;
       use crate::precompute4::weighted_automata::NWAStateID;
+      use crate::profiler::PROGRESS_BAR_ENABLED;
+      use indicatif::{ProgressBar, ProgressStyle};
 
       use std::collections::{HashMap, VecDeque};
       use std::hash::{Hash, Hasher};
@@ -3231,6 +3233,22 @@ local_system:
           let mut q: VecDeque<usize> = VecDeque::new();
           q.push_back(start_id);
 
+          let pb = if PROGRESS_BAR_ENABLED {
+              let p = ProgressBar::new(q.len() as u64);
+              p.set_style(
+                  ProgressStyle::default_bar()
+                      .template(
+                          "{spinner:.green} [Determinizing DWA: {elapsed_precise}] \
+                           [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})",
+                      )
+                      .expect("progress-bar"),
+              );
+              Some(p)
+          } else {
+              None
+          };
+          let mut processed_count = 0;
+
           // Scratch maps reused per determinized state to avoid realloc churn
           // Default accumulator
           let mut def_map: HashMap<NWAStateID, Weight> = HashMap::new();
@@ -3246,6 +3264,12 @@ local_system:
           let mut label_aggs: HashMap<i16, LabelAgg> = HashMap::new();
 
           while let Some(did) = q.pop_front() {
+              processed_count += 1;
+              if let Some(p) = &pb {
+                  p.set_position(processed_count);
+                  p.set_length(subset_to_did.len() as u64);
+              }
+
               let subset = subsets_arena[did].clone();
 
               // 1) Final weight of this DWA state
@@ -3389,6 +3413,10 @@ local_system:
               }
           }
 
+          if let Some(p) = &pb {
+              p.finish_with_message(format!("Determinized to {} states", subset_to_did.len()));
+          }
+
           dwa
       }
   diffs_applied_this_send: true
@@ -3402,7 +3430,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -6072,5 +6100,225 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Rewrite NWA determinization to an aggressively
       optimized, closure-based subset construction"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Bring a progress bar back so we can see what's going on.
+    metadata:
+  - assistant: |-
+      Of course. Re-introducing a progress bar is a good idea for monitoring long-running operations. Here are the instructions to add it back to the determinization process.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file:** `src/precompute4/weighted_automata/determinization.rs`.
+
+      2.  **Add necessary imports:** At the top of the file, alongside the other `use` statements, add the imports for `indicatif` and the `PROGRESS_BAR_ENABLED` constant.
+
+          ```rust
+          use crate::profiler::PROGRESS_BAR_ENABLED;
+          use indicatif::{ProgressBar, ProgressStyle};
+          ```
+
+      3.  **Initialize the progress bar:** In the `determinize_closures_to_dwa` function, find the line where the `q` (worklist) is initialized. Immediately after it, insert the code to create and configure the progress bar.
+
+          ```rust
+          // ... inside determinize_closures_to_dwa
+          let mut q: VecDeque<usize> = VecDeque::new();
+          q.push_back(start_id);
+
+          // INSERT THIS BLOCK
+          let pb = if PROGRESS_BAR_ENABLED {
+              let p = ProgressBar::new(q.len() as u64);
+              p.set_style(
+                  ProgressStyle::default_bar()
+                      .template(
+                          "{spinner:.green} [Determinizing DWA: {elapsed_precise}] \
+                           [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})",
+                      )
+                      .expect("progress-bar"),
+              );
+              Some(p)
+          } else {
+              None
+          };
+          let mut processed_count = 0;
+          // ...
+          ```
+
+      4.  **Update the progress bar in the loop:** Add the update logic at the very beginning of the `while let Some(did) = q.pop_front()` loop.
+
+          ```rust
+          // ...
+          while let Some(did) = q.pop_front() {
+              // INSERT THIS BLOCK
+              processed_count += 1;
+              if let Some(p) = &pb {
+                  p.set_position(processed_count);
+                  p.set_length(subset_to_did.len() as u64);
+              }
+              // ... rest of the loop
+          ```
+
+      5.  **Finalize the progress bar:** After the `while` loop finishes, add the code to display a final summary message.
+
+          ```rust
+          // ... after the while loop
+              }
+          }
+
+          // INSERT THIS BLOCK
+          if let Some(p) = &pb {
+              p.finish_with_message(format!("Determinized to {} states", subset_to_did.len()));
+          }
+
+          dwa
+          }
+          ```
+
+      These changes will restore the progress bar, giving you visibility into the determinization process.
+
+      ### Git Diff
+
+      Here is the git diff that applies these changes:
+
+      ```diff "src/precompute4/weighted_automata/determinization.rs"
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -38,6 +38,8 @@
+       use super::dwa::DWA;
+       use super::nwa::NWA;
+       use crate::precompute4::weighted_automata::NWAStateID;
+      +use crate::profiler::PROGRESS_BAR_ENABLED;
+      +use indicatif::{ProgressBar, ProgressStyle};
+       
+       use std::collections::{HashMap, VecDeque};
+       use std::hash::{Hash, Hasher};
+      @@ -288,6 +290,24 @@
+           let mut q: VecDeque<usize> = VecDeque::new();
+           q.push_back(start_id);
+       
+      +    let pb = if PROGRESS_BAR_ENABLED {
+      +        let p = ProgressBar::new(q.len() as u64);
+      +        p.set_style(
+      +            ProgressStyle::default_bar()
+      +                .template(
+      +                    "{spinner:.green} [Determinizing DWA: {elapsed_precise}] \
+      +                     [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})",
+      +                )
+      +                .expect("progress-bar"),
+      +        );
+      +        Some(p)
+      +    } else {
+      +        None
+      +    };
+      +    let mut processed_count = 0;
+      +
+           // Scratch maps reused per determinized state to avoid realloc churn
+           // Default accumulator
+           let mut def_map: HashMap<NWAStateID, Weight> = HashMap::new();
+      @@ -302,11 +322,17 @@
+           let mut label_aggs: HashMap<i16, LabelAgg> = HashMap::new();
+       
+           while let Some(did) = q.pop_front() {
+      +        processed_count += 1;
+      +        if let Some(p) = &pb {
+      +            p.set_position(processed_count);
+      +            p.set_length(subset_to_did.len() as u64);
+      +        }
+      +
+               let subset = subsets_arena[did].clone();
+       
+               // 1) Final weight of this DWA state
+               let mut final_w: Option<Weight> = None;
+      -        for (s, gate) in &subset.items {
+      +        for (s, gate) in &subset.items {
+                   if let Some(fw) = &nwa.states[*s].final_weight {
+                       let c = gate & fw;
+                       if !c.is_empty() {
+      @@ -321,7 +347,7 @@
+               dwa.states[did].final_weight = final_w;
+       
+               // Edge case: empty subset (shouldn't happen because we prune with fut), but guard anyway.
+      -        if subset.items.is_empty() {
+      +        if subset.items.is_empty() {
+                   continue;
+               }
+       
+      @@ -329,7 +355,7 @@
+               def_map.clear();
+               let mut def_edge_mask = Weight::zeros();
+       
+      -        for (s, gate) in &subset.items {
+      +        for (s, gate) in &subset.items {
+                   if let Some((to, wdef)) = &nwa.states[*s].default {
+                       let g = gate & wdef;
+                       if g.is_empty() {
+      @@ -366,7 +392,7 @@
+               // 3) Aggregate per-label patches: for every exception seen in any source.
+               label_aggs.clear();
+       
+      -        for (s, gate) in &subset.items {
+      +        for (s, gate) in &subset.items {
+                   // For each labeled exception out of s
+                   for (lbl, (to_ex, wex)) in nwa.states[*s].transitions.iter() {
+                       // ADD: exception contributions
+      @@ -441,6 +467,10 @@
+               }
+           }
+       
+      +    if let Some(p) = &pb {
+      +        p.finish_with_message(format!("Determinized to {} states", subset_to_did.len()));
+      +    }
+      +
+           dwa
+       }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Re-enable progress bar for the new closure-based
+      NWA determinization"'
     metadata:
 ...

@@ -48,6 +48,8 @@ use super::common::Weight;
 use super::dwa::DWA;
 use super::nwa::NWA;
 use crate::precompute4::weighted_automata::NWAStateID;
+use crate::profiler::PROGRESS_BAR_ENABLED;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -303,6 +305,22 @@ fn determinize_closures_to_dwa(
     let mut q: VecDeque<usize> = VecDeque::new();
     q.push_back(start_id);
 
+    let pb = if PROGRESS_BAR_ENABLED {
+        let p = ProgressBar::new(q.len() as u64);
+        p.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.green} [Determinizing DWA: {elapsed_precise}] \
+                     [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})",
+                )
+                .expect("progress-bar"),
+        );
+        Some(p)
+    } else {
+        None
+    };
+    let mut processed_count = 0;
+
     // Scratch maps reused per determinized state to avoid realloc churn
     // Default accumulator
     let mut def_map: HashMap<NWAStateID, Weight> = HashMap::new();
@@ -318,6 +336,12 @@ fn determinize_closures_to_dwa(
     let mut label_aggs: HashMap<i16, LabelAgg> = HashMap::new();
 
     while let Some(did) = q.pop_front() {
+        processed_count += 1;
+        if let Some(p) = &pb {
+            p.set_position(processed_count);
+            p.set_length(subset_to_did.len() as u64);
+        }
+
         let subset = subsets_arena[did].clone();
 
         // 1) Final weight of this DWA state
@@ -459,6 +483,10 @@ fn determinize_closures_to_dwa(
                 let _ = dwa.add_transition(did, lbl, target_id, edge_w);
             }
         }
+    }
+
+    if let Some(p) = &pb {
+        p.finish_with_message(format!("Determinized to {} states", subset_to_did.len()));
     }
 
     dwa
