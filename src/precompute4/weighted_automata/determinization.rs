@@ -404,13 +404,12 @@ fn merge_stepvecs_with_gates(
 
     let mut heap: BinaryHeap<Cursor> = BinaryHeap::new();
     let mut lists: Vec<(&[ (NWAStateID, Weight) ], &Weight)> = Vec::with_capacity(inputs.len());
-    for (idx, (arc, gate)) in inputs.iter().enumerate() {
-        if arc.is_empty() {
-            continue;
+    for (arc, gate) in inputs.iter() {
+        if !arc.is_empty() {
+            let list_idx = lists.len();
+            lists.push((arc.as_slice(), *gate));
+            heap.push(Cursor { list_idx, pos: 0, target: arc[0].0 });
         }
-        lists.push((arc.as_slice(), *gate));
-        let t0 = arc[0].0;
-        heap.push(Cursor { list_idx: idx, pos: 0, target: t0 });
     }
     if heap.is_empty() {
         return Arc::new(Vec::new());
