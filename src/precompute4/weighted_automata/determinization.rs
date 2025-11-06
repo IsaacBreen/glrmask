@@ -372,7 +372,13 @@ impl NWA {
         let mut work: VecDeque<usize> = VecDeque::new();
 
         // Create or get structural state (with zero gates); if initial_gates provided, OR them in.
-        let mut ensure_state = |members: Vec<usize>, initial_gates: Option<HashMap<usize, Weight>>| -> usize {
+        fn ensure_state(
+            members: Vec<usize>,
+            initial_gates: Option<HashMap<usize, Weight>>,
+            states: &mut Vec<DetState>,
+            key_to_state: &mut HashMap<MembersKey, usize>,
+            work: &mut VecDeque<usize>,
+        ) -> usize {
             let key = MembersKey::new(members);
             if let Some(id) = key_to_state.get(&key).copied() {
                 // Merge initial_gates into the existing state
@@ -408,7 +414,7 @@ impl NWA {
             key_to_state.insert(key, id);
             work.push_back(id);
             id
-        };
+        }
 
         // Initial state: ε-closure(start) grouped by signature with gates
         let mut init_map: HashMap<usize, Weight> = HashMap::new();
@@ -426,7 +432,7 @@ impl NWA {
             keys.sort_unstable();
             keys
         };
-        let _start_id = ensure_state(init_members, Some(init_map));
+        let _start_id = ensure_state(init_members, Some(init_map), &mut states, &mut key_to_state, &mut work);
 
         // Worklist: propagate weights to a fixpoint
         while let Some(sid) = work.pop_front() {
@@ -457,7 +463,7 @@ impl NWA {
                 let mut def_members: Vec<usize> = def_target_map.keys().copied().collect();
                 def_members.sort_unstable();
                 let def_init = def_target_map; // move
-                let _ = ensure_state(def_members, Some(def_init));
+                let _ = ensure_state(def_members, Some(def_init), &mut states, &mut key_to_state, &mut work);
             }
 
             // Exceptions per label via multiway-merge
@@ -556,7 +562,7 @@ impl NWA {
                 if !base_map.is_empty() {
                     let mut mem: Vec<usize> = base_map.keys().copied().collect();
                     mem.sort_unstable();
-                    let _ = ensure_state(mem, Some(base_map));
+                    let _ = ensure_state(mem, Some(base_map), &mut states, &mut key_to_state, &mut work);
                 }
 
                 // Advance cursors
