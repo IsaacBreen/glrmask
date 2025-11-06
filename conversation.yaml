@@ -938,7 +938,7 @@ local_system:
       use indicatif::{ProgressBar, ProgressStyle};
       use std::cell::Cell;
       use std::collections::{BTreeMap, HashMap, VecDeque};
-      use std::time::Instant;
+      use std::time::{Instant};
 
       /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
       /// This is semantics-preserving; it only reduces the amount of compression performed.
@@ -1525,6 +1525,7 @@ local_system:
           }
 
           pub fn simplify(&mut self) -> bool {
+              let now = Instant::now();
               let initial_n = self.states.len();
               let max_passes = 5;
               let pb = if PROGRESS_BAR_ENABLED {
@@ -1554,6 +1555,7 @@ local_system:
               if let Some(p) = &pb {
                   p.finish_with_message(format!("Simplified to {} states", self.states.len()));
               }
+              crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
               self.states.len() != initial_n
           }
 
@@ -1825,8 +1827,8 @@ local_system:
       use std::collections::hash_map::Entry;
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
       use std::hash::{Hash, Hasher};
-      use std::sync::Arc;
-
+      use std::sync::{Arc};
+      use std::time::Instant;
       impl NWA {
           /// Determinize the subgraph reachable from 'start' to a DWA via a radically simplified, high-performance construction:
           ///
@@ -1847,9 +1849,14 @@ local_system:
           ///   use only explicit sources; default edge contains all sources (both with/without explicit), but at runtime default is ignored where exceptions exist.
           pub fn determinize_to_dwa(&self) -> DWA {
               let mut nwa_clone = self.clone();
+              let now = Instant::now();
+              crate::debug!(4, "Determinizing NWA with {} states...", nwa_clone.states.len());
               // Aggressive but safe simplification before determinization
               nwa_clone.simplify();
-              nwa_clone.internal_determinize_to_dwa_fast()
+              crate::debug!(4, "NWA simplified to {} states.", nwa_clone.states.len());
+              let result = nwa_clone.internal_determinize_to_dwa_fast();
+              crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
+              result
           }
 
           fn internal_determinize_to_dwa_fast(&self) -> DWA {
@@ -2400,6 +2407,7 @@ local_system:
       use crate::profiler::PROGRESS_BAR_ENABLED;
       use indicatif::{ProgressBar, ProgressStyle};
       use std::collections::{HashMap, VecDeque};
+      use std::time::Instant;
 
       /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
       /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
@@ -2420,6 +2428,9 @@ local_system:
       /// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
       ///     DWA, which is the final result.
       pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
+          let now = Instant::now();
+          crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
+
           let pb = if PROGRESS_BAR_ENABLED {
               let p = ProgressBar::new(6);
               p.set_style(
@@ -2434,9 +2445,11 @@ local_system:
 
           if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
           let mut nwa = NWA::from_dwa(dwa);
+          crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
 
           if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(2); }
           let epsilons_to_add = compute_cancellations(&nwa.states);
+          crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
 
           if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(3); }
           let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
@@ -2461,6 +2474,7 @@ local_system:
           for st in &mut nwa.states.0 {
               st.transitions.retain(|k, _| *k >= 0);
           }
+          crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
 
           if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(5); }
           let mut result = nwa.determinize_to_dwa();
@@ -2469,6 +2483,7 @@ local_system:
           *dwa = result;
 
           if let Some(p) = &pb { p.finish_with_message("Done"); }
+          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
       }
 
       /// Helper to compute the weighted epsilon closure of a state.
@@ -2634,6 +2649,7 @@ local_system:
       use range_set_blaze::RangeSetBlaze;
       use std::cell::RefCell;
       use std::collections::{BTreeMap, BTreeSet};
+      use std::time::Instant;
 
       pub type Precomputed4 = DWA;
       use crate::tokenizer::TokenizerStateID;
@@ -2797,13 +2813,16 @@ local_system:
 
       // Public API: precompute4 using NWA-first approach, determinize at the end.
       pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
+          let now_total = Instant::now();
+          let now = Instant::now();
           crate::debug!(5, "Starting precompute4...");
           // 1. Build template DWAs for all terminals.
           let template_dwas = match build_template_dwas(parser) {
               Ok(m) => m,
               Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-              };
+          };
           let ignore_dwa = build_ignore_terminal_dwa();
+          crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
 
           // 2. Set up shared NWA state arena.
           let states_arena = RefCell::new(NWAStates::default());
@@ -2833,6 +2852,7 @@ local_system:
 
           let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
+          let now = Instant::now();
           Trie::special_map_grouped(
               &reversed_trie1_god,
               &traversal_data,
@@ -2896,6 +2916,7 @@ local_system:
                   }
               },
           );
+          crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
 
           // Combine all final NWA bodies into a single NWA
           let mut combined_nwa_states = states_arena.into_inner();
@@ -2912,18 +2933,21 @@ local_system:
               states: combined_nwa_states,
               body: NWABody { start_state: combined_start_state },
           };
+          crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
 
+          let now = Instant::now();
           // Determinize the single combined NWA
           crate::debug!(5, "Determinizing final combined NWA...");
           let mut final_dwa = combined_nwa.determinize_to_dwa();
-          crate::debug!(5, "Determinization produced DWA with {} states. Starting simplification...", final_dwa.states.len());
           final_dwa.simplify();
-          crate::debug!(5, "Simplification finished ({} states).", final_dwa.states.len());
+          crate::debug!(4, "Initial determinize & simplify took: {:?}. Resulting DWA has {} states.", now.elapsed(), final_dwa.states.len());
 
+          let now = Instant::now();
           crate::debug!(5, "Starting resolve_negative_codes_for_all...");
           resolve_negative_codes_in_dwa(&mut final_dwa);
-          crate::debug!(5, "resolve_negative_codes_for_all finished.");
+          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
 
+          crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
           final_dwa
       }
   prev_file_contents:
@@ -5322,6 +5346,51 @@ local_system:
       use std::collections::{HashMap, VecDeque};
       use std::time::Instant;
 
+      pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
+          let pb = if PROGRESS_BAR_ENABLED {
+              let p = ProgressBar::new(3);
+              p.set_style(
+                  ProgressStyle::default_bar()
+                      .template("{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
+                      .expect("progress-bar"),
+              );
+              Some(p)
+          } else {
+              None
+          };
+
+          if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(1); }
+          let epsilons_to_add = compute_cancellations(&nwa.states);
+          crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
+
+          if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(2); }
+          let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
+
+          if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(3); }
+          // Add new epsilons
+          for (from, to, w) in epsilons_to_add {
+              nwa.states.add_epsilon(from, to, w);
+          }
+          // Add propagated final weights
+          for sid in 0..nwa.states.len() {
+              if !final_fix[sid].is_empty() {
+                  let st = &mut nwa.states.0[sid];
+                  if let Some(fw) = &mut st.final_weight {
+                      *fw |= &final_fix[sid];
+                  } else {
+                      st.final_weight = Some(final_fix[sid].clone());
+                  }
+              }
+          }
+          // Remove all negative transitions
+          for st in &mut nwa.states.0 {
+              st.transitions.retain(|k, _| *k >= 0);
+          }
+          crate::debug!(4, "Applied changes to NWA.");
+
+          if let Some(p) = &pb { p.finish_with_message("Done"); }
+      }
+
       /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
       /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
       /// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
@@ -5345,7 +5414,7 @@ local_system:
           crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
 
           let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(6);
+              let p = ProgressBar::new(4);
               p.set_style(
                   ProgressStyle::default_bar()
                       .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
@@ -5360,38 +5429,13 @@ local_system:
           let mut nwa = NWA::from_dwa(dwa);
           crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
 
-          if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(2); }
-          let epsilons_to_add = compute_cancellations(&nwa.states);
-          crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
-
-          if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(3); }
-          let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
-
-          if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(4); }
-          // Add new epsilons
-          for (from, to, w) in epsilons_to_add {
-              nwa.states.add_epsilon(from, to, w);
-          }
-          // Add propagated final weights
-          for sid in 0..nwa.states.len() {
-              if !final_fix[sid].is_empty() {
-                  let st = &mut nwa.states.0[sid];
-                  if let Some(fw) = &mut st.final_weight {
-                      *fw |= &final_fix[sid];
-                  } else {
-                      st.final_weight = Some(final_fix[sid].clone());
-                  }
-              }
-          }
-          // Remove all negative transitions
-          for st in &mut nwa.states.0 {
-              st.transitions.retain(|k, _| *k >= 0);
-          }
+          if let Some(p) = &pb { p.set_message("Resolve negatives in NWA"); p.set_position(2); }
+          resolve_negative_codes_in_nwa(&mut nwa);
           crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
 
-          if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(5); }
+          if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(3); }
           let mut result = nwa.determinize_to_dwa();
-          if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(6); }
+          if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(4); }
           result.simplify();
           *dwa = result;
 
@@ -5555,7 +5599,7 @@ local_system:
       use crate::glr::parser::{ExpectElse, GLRParser};
       use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
       use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
-      use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
+      use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
       use crate::precompute4::utils;
       use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWAStates, NWABody, StateID, Weight};
       use crate::constraint::LLMTokenBV;
@@ -5842,23 +5886,23 @@ local_system:
               combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all());
           }
 
-          let combined_nwa = NWA {
+          let mut combined_nwa = NWA {
               states: combined_nwa_states,
               body: NWABody { start_state: combined_start_state },
           };
           crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
 
           let now = Instant::now();
+          crate::debug!(5, "Starting resolve_negative_codes_in_nwa...");
+          resolve_negative_codes_in_nwa(&mut combined_nwa);
+          crate::debug!(4, "resolve_negative_codes_in_nwa took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+
+          let now = Instant::now();
           // Determinize the single combined NWA
           crate::debug!(5, "Determinizing final combined NWA...");
           let mut final_dwa = combined_nwa.determinize_to_dwa();
           final_dwa.simplify();
-          crate::debug!(4, "Initial determinize & simplify took: {:?}. Resulting DWA has {} states.", now.elapsed(), final_dwa.states.len());
-
-          let now = Instant::now();
-          crate::debug!(5, "Starting resolve_negative_codes_for_all...");
-          resolve_negative_codes_in_dwa(&mut final_dwa);
-          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
+          crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
 
           crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
           final_dwa
@@ -6860,7 +6904,7 @@ messages:
       use indicatif::{ProgressBar, ProgressStyle};
       use std::cell::Cell;
       use std::collections::{BTreeMap, HashMap, VecDeque};
-      use std::time::Instant;
+      use std::time::{Instant};
 
       /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
       /// This is semantics-preserving; it only reduces the amount of compression performed.
@@ -7447,6 +7491,7 @@ messages:
           }
 
           pub fn simplify(&mut self) -> bool {
+              let now = Instant::now();
               let initial_n = self.states.len();
               let max_passes = 5;
               let pb = if PROGRESS_BAR_ENABLED {
@@ -7476,6 +7521,7 @@ messages:
               if let Some(p) = &pb {
                   p.finish_with_message(format!("Simplified to {} states", self.states.len()));
               }
+              crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
               self.states.len() != initial_n
           }
 
@@ -7752,8 +7798,8 @@ messages:
       use std::collections::hash_map::Entry;
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
       use std::hash::{Hash, Hasher};
-      use std::sync::Arc;
-
+      use std::sync::{Arc};
+      use std::time::Instant;
       impl NWA {
           /// Determinize the subgraph reachable from 'start' to a DWA via a radically simplified, high-performance construction:
           ///
@@ -7774,9 +7820,14 @@ messages:
           ///   use only explicit sources; default edge contains all sources (both with/without explicit), but at runtime default is ignored where exceptions exist.
           pub fn determinize_to_dwa(&self) -> DWA {
               let mut nwa_clone = self.clone();
+              let now = Instant::now();
+              crate::debug!(4, "Determinizing NWA with {} states...", nwa_clone.states.len());
               // Aggressive but safe simplification before determinization
               nwa_clone.simplify();
-              nwa_clone.internal_determinize_to_dwa_fast()
+              crate::debug!(4, "NWA simplified to {} states.", nwa_clone.states.len());
+              let result = nwa_clone.internal_determinize_to_dwa_fast();
+              crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
+              result
           }
 
           fn internal_determinize_to_dwa_fast(&self) -> DWA {
@@ -8336,6 +8387,7 @@ messages:
       use crate::profiler::PROGRESS_BAR_ENABLED;
       use indicatif::{ProgressBar, ProgressStyle};
       use std::collections::{HashMap, VecDeque};
+      use std::time::Instant;
 
       /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
       /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
@@ -8356,6 +8408,9 @@ messages:
       /// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
       ///     DWA, which is the final result.
       pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
+          let now = Instant::now();
+          crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
+
           let pb = if PROGRESS_BAR_ENABLED {
               let p = ProgressBar::new(6);
               p.set_style(
@@ -8370,9 +8425,11 @@ messages:
 
           if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
           let mut nwa = NWA::from_dwa(dwa);
+          crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
 
           if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(2); }
           let epsilons_to_add = compute_cancellations(&nwa.states);
+          crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
 
           if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(3); }
           let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
@@ -8397,6 +8454,7 @@ messages:
           for st in &mut nwa.states.0 {
               st.transitions.retain(|k, _| *k >= 0);
           }
+          crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
 
           if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(5); }
           let mut result = nwa.determinize_to_dwa();
@@ -8405,6 +8463,7 @@ messages:
           *dwa = result;
 
           if let Some(p) = &pb { p.finish_with_message("Done"); }
+          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
       }
 
       /// Helper to compute the weighted epsilon closure of a state.
@@ -8575,6 +8634,7 @@ messages:
       use range_set_blaze::RangeSetBlaze;
       use std::cell::RefCell;
       use std::collections::{BTreeMap, BTreeSet};
+      use std::time::Instant;
 
       pub type Precomputed4 = DWA;
       use crate::tokenizer::TokenizerStateID;
@@ -8738,13 +8798,16 @@ messages:
 
       // Public API: precompute4 using NWA-first approach, determinize at the end.
       pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
+          let now_total = Instant::now();
+          let now = Instant::now();
           crate::debug!(5, "Starting precompute4...");
           // 1. Build template DWAs for all terminals.
           let template_dwas = match build_template_dwas(parser) {
               Ok(m) => m,
               Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-              };
+          };
           let ignore_dwa = build_ignore_terminal_dwa();
+          crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
 
           // 2. Set up shared NWA state arena.
           let states_arena = RefCell::new(NWAStates::default());
@@ -8774,6 +8837,7 @@ messages:
 
           let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
+          let now = Instant::now();
           Trie::special_map_grouped(
               &reversed_trie1_god,
               &traversal_data,
@@ -8837,6 +8901,7 @@ messages:
                   }
               },
           );
+          crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
 
           // Combine all final NWA bodies into a single NWA
           let mut combined_nwa_states = states_arena.into_inner();
@@ -8853,18 +8918,21 @@ messages:
               states: combined_nwa_states,
               body: NWABody { start_state: combined_start_state },
           };
+          crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
 
+          let now = Instant::now();
           // Determinize the single combined NWA
           crate::debug!(5, "Determinizing final combined NWA...");
           let mut final_dwa = combined_nwa.determinize_to_dwa();
-          crate::debug!(5, "Determinization produced DWA with {} states. Starting simplification...", final_dwa.states.len());
           final_dwa.simplify();
-          crate::debug!(5, "Simplification finished ({} states).", final_dwa.states.len());
+          crate::debug!(4, "Initial determinize & simplify took: {:?}. Resulting DWA has {} states.", now.elapsed(), final_dwa.states.len());
 
+          let now = Instant::now();
           crate::debug!(5, "Starting resolve_negative_codes_for_all...");
           resolve_negative_codes_in_dwa(&mut final_dwa);
-          crate::debug!(5, "resolve_negative_codes_for_all finished.");
+          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
 
+          crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
           final_dwa
       }
 
@@ -8872,22 +8940,32 @@ messages:
     metadata:
       filename: src/precompute4/full_dwa.rs
   - user: |-
+      ```
+      [DEBUG] 4] src/precompute4/full_dwa.rs:186: Built 109 template DWAs in 1.360396458s
+      Traversing edges: 100%|| 7862/7862 [00:04<00:00, 1711.15it/s]special_map_grouped finished in 4.623028s. Time in step: 4.595021581s, merge: 23.750621ms, process: 144.588µs
+      [DEBUG] 4] src/precompute4/full_dwa.rs:280: Reversed trie traversal (special_map_grouped) took: 4.623058208s
+      [DEBUG] 4] src/precompute4/full_dwa.rs:297: Combined NWA has 1750526 states.
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:39: Determinizing NWA with 1750526 states...
+      ⠁ [Simplifying NWA: 00:00:00] [] 1/5 passes (prune dead ends)grammar-compiler(43189,0x2037c4800) malloc: Failed to allocate segment from range group - out of space
+        [Simplifying NWA: 00:01:09] [] 5/5 passes (Simplified to 1750526 states)[DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:632: NWA::simplify (1750526 states -> 1750526 states) took: 69.44809775s
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:42: NWA simplified to 1750526 states.
+        [Determinizing DWA (fast): 00:01:57] [] 1232588/1232588 (100%, 0s)[DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:44: NWA::determinize_to_dwa took: 275.635002083s
+        [Simplifying DWA (large): 00:00:03] [] 2/2 passes (Simplified to 1232588 states)[DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:50: DWA::simplify_components (1232588 states -> 1232588 states) took: 3.73635425s
+      [DEBUG] 4] src/precompute4/full_dwa.rs:304: Initial determinize & simplify took: 285.205564292s. Resulting DWA has 1232588 states.
+      [DEBUG] 4] src/precompute4/resolve_negatives.rs:27: Resolving negative codes in DWA with 1232588 states...
+      ⠁ [Resolving negative codes: 00:00:00] [] step 1/6 (DWA -> NWA)[DEBUG] 4] src/precompute4/resolve_negatives.rs:43: Converted to NWA with 1232588 states.
+      ⠉ [Resolving negative codes: 00:00:31] [] step 2/6 (Compute cancellations)[DEBUG] 4] src/precompute4/resolve_negatives.rs:47: Computed 368695 new epsilon transitions from cancellations.
+      ⠚ [Resolving negative codes: 00:01:19] [] step 4/6 (Apply changes & remove negatives)[DEBUG] 4] src/precompute4/resolve_negatives.rs:72: Applied changes, NWA has 1232588 states before determinization.
+      ⠒ [Resolving negative codes: 00:01:23] [] step 5/6 (Determinize)[DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:39: Determinizing NWA with 1232588 states...
+        [Simplifying NWA: 00:03:12] [] 5/5 passes (Simplified to 327645 states)[DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:632: NWA::simplify (1232588 states -> 327645 states) took: 192.845863375s
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:42: NWA simplified to 327645 states.
+        [Determinizing DWA (fast): 00:00:24] [] 123922/123922 (100%, 0s)[DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:44: NWA::determinize_to_dwa took: 271.3065025s
+      ⠂ [Resolving negative codes: 00:06:32] [] step 6/6 (Simplify)  [Simplifying DWA (small): 00:00:22] [] 10/10 passes (Simplified to 68477 states)[DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:50: DWA::simplify_components (123922 states -> 68477 states) took: 22.343250917s
+        [Resolving negative codes: 00:07:31] [] step 6/6 (Done)[DEBUG] 4] src/precompute4/resolve_negatives.rs:81: resolve_negative_codes_in_dwa took: 451.438043625s
+      [DEBUG] 4] src/precompute4/full_dwa.rs:309: resolve_negative_codes_in_dwa took: 480.948739s. Final DWA has 68477 states.
+      [DEBUG] 3] src/precompute4/full_dwa.rs:311: Total precompute4 time: 772.139567833s
+      ```
       We need to make this whole pipeline much faster.
-      Actually, I think there's a simple improvement on the table:
-      ```
-      Traversing edges: 100%|█| 7866/7866 [00:04<00:00, 1783.74it/s]special_map_grouped finished in 4.432696416s. Time in step: 4.405988102s, merge: 22.942168ms, process: 143.626µs
-      ⠁ [Simplifying NWA: 00:00:00] [████████████░░░░] 1/5 passes (prune dead ends)grammar-compiler(31495,0x2037c4800) malloc: Failed to allocate segment from range group - out of space
-        [Simplifying NWA: 00:01:05] [██████████] 5/5 passes (Simplified to 1750526 states)  [Determinizing DWA (fast): 00:01:58] [████████████████] 1232588/1232588 (100%, 0s)  [Simplifying DWA (large): 00:00:02] [██] 2/2 passes (Simplified to 1232588 states)[DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:50: DWA::simplify_components (1232588 states -> 1232588 states) took: 2.015157583s
-      ⠒ [Resolving negative codes: 00:00:58] [███████████████░░░] step 5/6 (Determinize)grammar-compiler(31495,0x2037c4800) malloc: Failed to allocate segment from range group - out of space
-        [Simplifying NWA: 00:03:02] [███████████] 5/5 passes (Simplified to 327645 states)⠂ [Resolving negative codes: 00:05:47] [█] step 6/6 (Simplify)  [Simplifying DWA (small): 00:00:23] [██] 10/10 passes (Simplified to 68477 states)[DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:50: DWA::simplify_components (123922 states -> 68477 states) took: 23.363031167s
-        [Resolving negative codes: 00:06:51] [█████] step 6/6 (Done)[DEBUG] 2]
-      ```
-      It seems huge gains come out of src/precompute4/resolve_negatives.rs quite quickly.
-      It's not clear from reading the logs which parts of the pipeline took how long, and how complex it was going into it and coming out of it (e.g. number of states at beginning vs at end).
-      e.g. lots of time-consuming parts of the pipeline don't have pbars covering most of them.
-      I want to make it much clearer what's going on.
-      Add pbars so we can see more of the progress.
-      AND add statements showing important stats (esp total time and achievements, e.g. states before vs states after) so we can see more clearly what each part is contributing.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8907,343 +8985,213 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. I'll add more detailed progress bars and logging to help clarify the performance of each stage in the pipeline. Here are the step-by-step instructions, followed by the git diffs.
+      This is a great observation. The performance logs clearly indicate that the primary bottlenecks are two separate, expensive determinization steps performed on very large non-deterministic automata (NWAs). The key to optimization is to merge these operations and perform only one determinization at the end of the pipeline.
 
-      ### Step-by-Step Instructions
+      My plan is to refactor the logic for resolving negative codes so that it can operate directly on the large, combined NWA *before* it gets determinized for the first time. This will eliminate one full determinization cycle, which should significantly speed up the entire `precompute4` process.
 
-      Here are the edits to improve logging and progress reporting:
+      Here are the step-by-step instructions to apply this optimization:
 
-      **1. File: `src/precompute4/weighted_automata/simplification.rs`**
+      ### Step 1: Refactor Negative Code Resolution
 
-      I'll add timing and a summary log to the NWA simplification process to match the existing DWA simplification logging.
+      First, we'll abstract the core logic for handling negative codes into a new function that operates on an NWA.
 
-      -   At the top of the file, add the import for `Instant`:
-          ```rust
-          use std::time::{Instant};
-          ```
-      -   In the `NWA::simplify` method, add a timer and a final summary log:
-          -   At the beginning of the method, add: `let now = Instant::now();`
-          -   At the end of the method, just before the return statement, add:
-              ```rust
-              crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
-              ```
+      **File:** `src/precompute4/resolve_negatives.rs`
 
-      **2. File: `src/precompute4/weighted_automata/determinization.rs`**
+      1.  **Create `resolve_negative_codes_in_nwa`:** Add a new public function `resolve_negative_codes_in_nwa` that takes a mutable `NWA`.
+      2.  **Move Logic:** Move the logic for computing cancellations, propagating finality, and applying changes from `resolve_negative_codes_in_dwa` into the new `resolve_negative_codes_in_nwa` function. This includes the progress bar for those specific steps.
+      3.  **Update `resolve_negative_codes_in_dwa`:** Modify the existing `resolve_negative_codes_in_dwa` to become a wrapper. It will now:
+          *   Convert the input DWA to an NWA.
+          *   Call the new `resolve_negative_codes_in_nwa` function.
+          *   Determinize and simplify the result.
+          *   Update its progress bar to reflect the new, higher-level steps.
 
-      I'll add logging to the NWA determinization function to report its duration and the effect of the pre-simplification step.
+      ### Step 2: Update the Main `precompute4` Pipeline
 
-      -   At the top of the file, add the import for `Instant`:
-          ```rust
-          use std::time::Instant;
-          ```
-      -   In the `NWA::determinize_to_dwa` method, wrap the logic in a timer and add logs:
-          -   At the beginning of the method, add: `let now = Instant::now();`
-          -   Change the first line from `let mut nwa_clone = self.clone();` to:
-              ```rust
-              crate::debug!(4, "Determinizing NWA with {} states...", self.states.len());
-              let mut nwa_clone = self.clone();
-              ```
-          -   After the `nwa_clone.simplify();` call, add:
-              ```rust
-              crate::debug!(4, "NWA simplified to {} states.", nwa_clone.states.len());
-              ```
-          -   Modify the end of the function to log the total time before returning:
-              ```rust
-              let result = nwa_clone.internal_determinize_to_dwa_fast();
-              crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
-              result
-              ```
+      Next, we'll modify the main `precompute4` function to use our new, more efficient workflow.
 
-      **3. File: `src/precompute4/resolve_negatives.rs`**
+      **File:** `src/precompute4/full_dwa.rs`
 
-      I'll enhance the `resolve_negative_codes_in_dwa` function with detailed logs for each step, showing state counts and timings.
+      1.  **Update Import:** Change the import from `resolve_negative_codes_in_dwa` to `resolve_negative_codes_in_nwa`.
+      2.  **Modify Pipeline:** In the `precompute4` function, after the `combined_nwa` is created:
+          *   Make `combined_nwa` mutable.
+          *   Insert a call to `resolve_negative_codes_in_nwa(&mut combined_nwa)`.
+          *   Remove the final, expensive call to `resolve_negative_codes_in_dwa` that was previously performed on the `final_dwa`.
+          *   Adjust the logging messages to reflect the new pipeline structure.
 
-      -   At the top of the file, add the import for `Instant`:
-          ```rust
-          use std::time::Instant;
-          ```
-      -   In `resolve_negative_codes_in_dwa`, add the following logs:
-          -   At the beginning of the function:
-              ```rust
-              let now = Instant::now();
-              crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
-              ```
-          -   After `let mut nwa = NWA::from_dwa(dwa);`:
-              ```rust
-              crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
-              ```
-          -   After `let epsilons_to_add = compute_cancellations(&nwa.states);`:
-              ```rust
-              crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
-              ```
-          -   After the loop that removes negative transitions:
-              ```rust
-              crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
-              ```
-          -   At the end of the function, before the final brace:
-              ```rust
-              crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-              ```
-
-      **4. File: `src/precompute4/full_dwa.rs`**
-
-      Finally, I'll add high-level timing and logging to the main `precompute4` function to provide an overview of the entire pipeline.
-
-      -   At the top of the file, add the import for `Instant`:
-          ```rust
-          use std::time::Instant;
-          ```
-      -   In the `precompute4` function, add timers and logs for the major stages:
-          -   At the very beginning of the function: `let now_total = Instant::now();`
-          -   Change the start of the function to time the template DWA creation:
-              ```rust
-              let now = Instant::now();
-              crate::debug!(5, "Starting precompute4...");
-              // 1. Build template DWAs for all terminals.
-              let template_dwas = match build_template_dwas(parser) {
-                  Ok(m) => m,
-                  Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-              };
-              let ignore_dwa = build_ignore_dwa();
-              crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
-              ```
-          -   Wrap the `Trie::special_map_grouped` call in a timer:
-              ```rust
-              let now = Instant::now();
-              Trie::special_map_grouped(
-                  // ... existing arguments ...
-              );
-              crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
-              ```
-          -   After creating `combined_nwa`, log its size:
-              ```rust
-              crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
-              ```
-          -   Replace the block for determinization and simplification with a timed version:
-              ```rust
-              let now = Instant::now();
-              // Determinize the single combined NWA
-              crate::debug!(5, "Determinizing final combined NWA...");
-              let mut final_dwa = combined_nwa.determinize_to_dwa();
-              final_dwa.simplify();
-              crate::debug!(4, "Initial determinize & simplify took: {:?}. Resulting DWA has {} states.", now.elapsed(), final_dwa.states.len());
-              ```
-          -   Replace the block for resolving negative codes with a timed version:
-              ```rust
-              let now = Instant::now();
-              crate::debug!(5, "Starting resolve_negative_codes_for_all...");
-              resolve_negative_codes_in_dwa(&mut final_dwa);
-              crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
-              ```
-          -   At the very end of the function, before returning `final_dwa`, add the total time log:
-              ```rust
-              crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
-              ```
+      ---
 
       ### Git Diffs
 
-      Here are the git diffs corresponding to the changes described above.
+      Here are the git diffs to apply these changes.
 
       ```diff
       --- a/src/precompute4/full_dwa.rs
       +++ b/src/precompute4/full_dwa.rs
-      @@ -8,8 +8,8 @@
+      @@ -2,8 +2,8 @@
+       use crate::datastructures::trie::{Trie, Trie2Index};
+       use crate::glr::parser::{ExpectElse, GLRParser};
+       use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
+       use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
+      -use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
+      +use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
+       use crate::precompute4::utils;
+       use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWAStates, NWABody, StateID, Weight};
        use crate::constraint::LLMTokenBV;
-       use range_set_blaze::RangeSetBlaze;
-       use std::cell::RefCell;
-      -use std::collections::{BTreeMap, BTreeSet};
-      -
-      +use std::collections::{BTreeMap, BTreeSet};
-      +use std::time::Instant;
-      +
-       pub type Precomputed4 = DWA;
-       use crate::tokenizer::TokenizerStateID;
+      @@ -283,29 +283,26 @@
+               combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all());
+           }
        
-      @@ -178,13 +178,16 @@
-       
-       // Public API: precompute4 using NWA-first approach, determinize at the end.
-       pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
-      +    let now_total = Instant::now();
-      +    let now = Instant::now();
-           crate::debug!(5, "Starting precompute4...");
-           // 1. Build template DWAs for all terminals.
-           let template_dwas = match build_template_dwas(parser) {
-               Ok(m) => m,
-               Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-      -        };
-      +    };
-           let ignore_dwa = build_ignore_terminal_dwa();
-      +    crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
-       
-           // 2. Set up shared NWA state arena.
-           let states_arena = RefCell::new(NWAStates::default());
-      @@ -208,6 +211,7 @@
-       
-           let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
-       
-      +    let now = Instant::now();
-           Trie::special_map_grouped(
-               &reversed_trie1_god,
-               &traversal_data,
-      @@ -272,6 +276,7 @@
-                   }
-               },
-           );
-      +    crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
-       
-           // Combine all final NWA bodies into a single NWA
-           let mut combined_nwa_states = states_arena.into_inner();
-      @@ -287,19 +292,21 @@
+      -    let combined_nwa = NWA {
+      +    let mut combined_nwa = NWA {
                states: combined_nwa_states,
                body: NWABody { start_state: combined_start_state },
            };
-      -
-      +    crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
+           crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
+       
+           let now = Instant::now();
+      +    crate::debug!(5, "Starting resolve_negative_codes_in_nwa...");
+      +    resolve_negative_codes_in_nwa(&mut combined_nwa);
+      +    crate::debug!(4, "resolve_negative_codes_in_nwa took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
       +
       +    let now = Instant::now();
            // Determinize the single combined NWA
            crate::debug!(5, "Determinizing final combined NWA...");
            let mut final_dwa = combined_nwa.determinize_to_dwa();
-      -    crate::debug!(5, "Determinization produced DWA with {} states. Starting simplification...", final_dwa.states.len());
            final_dwa.simplify();
-      -    crate::debug!(5, "Simplification finished ({} states).", final_dwa.states.len());
+      -    crate::debug!(4, "Initial determinize & simplify took: {:?}. Resulting DWA has {} states.", now.elapsed(), final_dwa.states.len());
       -
-      +    crate::debug!(4, "Initial determinize & simplify took: {:?}. Resulting DWA has {} states.", now.elapsed(), final_dwa.states.len());
-      +
-      +    let now = Instant::now();
-           crate::debug!(5, "Starting resolve_negative_codes_for_all...");
-           resolve_negative_codes_in_dwa(&mut final_dwa);
-      -    crate::debug!(5, "resolve_negative_codes_for_all finished.");
-      -
-      +    crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
-      +
-      +    crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
+      -    let now = Instant::now();
+      -    crate::debug!(5, "Starting resolve_negative_codes_for_all...");
+      -    resolve_negative_codes_in_dwa(&mut final_dwa);
+      -    crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
+      +    crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
+       
+           crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
            final_dwa
        }
 
       ```
-
       ```diff
       --- a/src/precompute4/resolve_negatives.rs
       +++ b/src/precompute4/resolve_negatives.rs
-      @@ -2,7 +2,7 @@
-       use crate::profiler::PROGRESS_BAR_ENABLED;
-       use indicatif::{ProgressBar, ProgressStyle};
+      @@ -5,6 +5,52 @@
        use std::collections::{HashMap, VecDeque};
-      -
-      +use std::time::Instant;
+       use std::time::Instant;
+       
+      +pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
+      +    let pb = if PROGRESS_BAR_ENABLED {
+      +        let p = ProgressBar::new(3);
+      +        p.set_style(
+      +            ProgressStyle::default_bar()
+      +                .template("{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
+      +                .expect("progress-bar"),
+      +        );
+      +        Some(p)
+      +    } else {
+      +        None
+      +    };
+      +
+      +    if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(1); }
+      +    let epsilons_to_add = compute_cancellations(&nwa.states);
+      +    crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
+      +
+      +    if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(2); }
+      +    let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
+      +
+      +    if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(3); }
+      +    // Add new epsilons
+      +    for (from, to, w) in epsilons_to_add {
+      +        nwa.states.add_epsilon(from, to, w);
+      +    }
+      +    // Add propagated final weights
+      +    for sid in 0..nwa.states.len() {
+      +        if !final_fix[sid].is_empty() {
+      +            let st = &mut nwa.states.0[sid];
+      +            if let Some(fw) = &mut st.final_weight {
+      +                *fw |= &final_fix[sid];
+      +            } else {
+      +                st.final_weight = Some(final_fix[sid].clone());
+      +            }
+      +        }
+      +    }
+      +    // Remove all negative transitions
+      +    for st in &mut nwa.states.0 {
+      +        st.transitions.retain(|k, _| *k >= 0);
+      +    }
+      +    crate::debug!(4, "Applied changes to NWA.");
+      +
+      +    if let Some(p) = &pb { p.finish_with_message("Done"); }
+      +}
       +
        /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
        /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
        /// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
-      @@ -22,6 +22,9 @@
-       /// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
-       ///     DWA, which is the final result.
-       pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-      +    let now = Instant::now();
-      +    crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
-      +
+      @@ -24,56 +70,26 @@
+           let now = Instant::now();
+           crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
+       
            let pb = if PROGRESS_BAR_ENABLED {
-               let p = ProgressBar::new(6);
+      -        let p = ProgressBar::new(6);
+      +        let p = ProgressBar::new(4);
                p.set_style(
-      @@ -35,9 +38,11 @@
+                   ProgressStyle::default_bar()
+                       .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
+                       .expect("progress-bar"),
+               );
+               Some(p)
+           } else {
+               None
+           };
        
            if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
            let mut nwa = NWA::from_dwa(dwa);
-      +    crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
+           crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
        
-           if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(2); }
-           let epsilons_to_add = compute_cancellations(&nwa.states);
-      +    crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
-       
-           if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(3); }
-           let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
-      @@ -60,6 +65,7 @@
-           for st in &mut nwa.states.0 {
-               st.transitions.retain(|k, _| *k >= 0);
-           }
-      +    crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
-       
-           if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(5); }
-           let mut result = nwa.determinize_to_dwa();
-      @@ -68,6 +74,7 @@
-           *dwa = result;
-       
-           if let Some(p) = &pb { p.finish_with_message("Done"); }
-      +    crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-       }
-       
-       /// Helper to compute the weighted epsilon closure of a state.
-
-      ```
-
-      ```diff
-      --- a/src/precompute4/weighted_automata/determinization.rs
-      +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -9,8 +9,8 @@
-       use std::collections::hash_map::Entry;
-       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-       use std::hash::{Hash, Hasher};
-      -use std::sync::Arc;
+      -    if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(2); }
+      -    let epsilons_to_add = compute_cancellations(&nwa.states);
+      -    crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
       -
-      +use std::sync::{Arc};
-      +use std::time::Instant;
-       impl NWA {
-           /// Determinize the subgraph reachable from 'start' to a DWA via a radically simplified, high-performance construction:
-           ///
-      @@ -31,10 +31,15 @@
-           ///   use only explicit sources; default edge contains all sources (both with/without explicit), but at runtime default is ignored where exceptions exist.
-           pub fn determinize_to_dwa(&self) -> DWA {
-               let mut nwa_clone = self.clone();
-      +        let now = Instant::now();
-      +        crate::debug!(4, "Determinizing NWA with {} states...", nwa_clone.states.len());
-               // Aggressive but safe simplification before determinization
-               nwa_clone.simplify();
-      -        nwa_clone.internal_determinize_to_dwa_fast()
-      +        crate::debug!(4, "NWA simplified to {} states.", nwa_clone.states.len());
-      +        let result = nwa_clone.internal_determinize_to_dwa_fast();
-      +        crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
-      +        result
-           }
+      -    if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(3); }
+      -    let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
+      -
+      -    if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(4); }
+      -    // Add new epsilons
+      -    for (from, to, w) in epsilons_to_add {
+      -        nwa.states.add_epsilon(from, to, w);
+      -    }
+      -    // Add propagated final weights
+      -    for sid in 0..nwa.states.len() {
+      -        if !final_fix[sid].is_empty() {
+      -            let st = &mut nwa.states.0[sid];
+      -            if let Some(fw) = &mut st.final_weight {
+      -                *fw |= &final_fix[sid];
+      -            } else {
+      -                st.final_weight = Some(final_fix[sid].clone());
+      -            }
+      -        }
+      -    }
+      -    // Remove all negative transitions
+      -    for st in &mut nwa.states.0 {
+      -        st.transitions.retain(|k, _| *k >= 0);
+      -    }
+      +    if let Some(p) = &pb { p.set_message("Resolve negatives in NWA"); p.set_position(2); }
+      +    resolve_negative_codes_in_nwa(&mut nwa);
+           crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
        
-           fn internal_determinize_to_dwa_fast(&self) -> DWA {
-
-      ```
-
-      ```diff
-      --- a/src/precompute4/weighted_automata/simplification.rs
-      +++ b/src/precompute4/weighted_automata/simplification.rs
-      @@ -10,7 +10,7 @@
-       use indicatif::{ProgressBar, ProgressStyle};
-       use std::cell::Cell;
-       use std::collections::{BTreeMap, HashMap, VecDeque};
-      -use std::time::Instant;
-      +use std::time::{Instant};
-       
-       /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
-       /// This is semantics-preserving; it only reduces the amount of compression performed.
-      @@ -641,6 +641,7 @@
-           }
-       
-           pub fn simplify(&mut self) -> bool {
-      +        let now = Instant::now();
-               let initial_n = self.states.len();
-               let max_passes = 5;
-               let pb = if PROGRESS_BAR_ENABLED {
-      @@ -668,6 +669,7 @@
-               if let Some(p) = &pb {
-                   p.finish_with_message(format!("Simplified to {} states", self.states.len()));
-               }
-      +        crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
-               self.states.len() != initial_n
-           }
+      -    if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(5); }
+      +    if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(3); }
+           let mut result = nwa.determinize_to_dwa();
+      -    if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(6); }
+      +    if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(4); }
+           result.simplify();
+           *dwa = result;
        
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 4 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/precompute4/full_dwa.rs
@@ -9254,18 +9202,8 @@ messages:
       Identified target file: src/precompute4/resolve_negatives.rs
       Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/precompute4/weighted_automata/determinization.rs
-      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: src/precompute4/weighted_automata/simplification.rs
-      Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
     metadata:
-  - user: 'Changes committed with message: "Add detailed timing/debug logging to precompute4
-      pipeline stages"'
+  - user: 'Changes committed with message: "Refactor: Merge negative code resolution
+      into main NWA construction to avoid redundant determinization"'
     metadata:
 ...

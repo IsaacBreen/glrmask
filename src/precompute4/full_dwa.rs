@@ -3,7 +3,7 @@ use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
-use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
+use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::precompute4::utils;
 use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWAStates, NWABody, StateID, Weight};
 use crate::constraint::LLMTokenBV;
@@ -290,23 +290,23 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all());
     }
 
-    let combined_nwa = NWA {
+    let mut combined_nwa = NWA {
         states: combined_nwa_states,
         body: NWABody { start_state: combined_start_state },
     };
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
 
     let now = Instant::now();
+    crate::debug!(5, "Starting resolve_negative_codes_in_nwa...");
+    resolve_negative_codes_in_nwa(&mut combined_nwa);
+    crate::debug!(4, "resolve_negative_codes_in_nwa took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+
+    let now = Instant::now();
     // Determinize the single combined NWA
     crate::debug!(5, "Determinizing final combined NWA...");
     let mut final_dwa = combined_nwa.determinize_to_dwa();
     final_dwa.simplify();
-    crate::debug!(4, "Initial determinize & simplify took: {:?}. Resulting DWA has {} states.", now.elapsed(), final_dwa.states.len());
-
-    let now = Instant::now();
-    crate::debug!(5, "Starting resolve_negative_codes_for_all...");
-    resolve_negative_codes_in_dwa(&mut final_dwa);
-    crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
+    crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
 
     crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
     final_dwa

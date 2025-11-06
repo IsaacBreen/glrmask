@@ -4,6 +4,51 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
+pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
+    let pb = if PROGRESS_BAR_ENABLED {
+        let p = ProgressBar::new(3);
+        p.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
+                .expect("progress-bar"),
+        );
+        Some(p)
+    } else {
+        None
+    };
+
+    if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(1); }
+    let epsilons_to_add = compute_cancellations(&nwa.states);
+    crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
+
+    if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(2); }
+    let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
+
+    if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(3); }
+    // Add new epsilons
+    for (from, to, w) in epsilons_to_add {
+        nwa.states.add_epsilon(from, to, w);
+    }
+    // Add propagated final weights
+    for sid in 0..nwa.states.len() {
+        if !final_fix[sid].is_empty() {
+            let st = &mut nwa.states.0[sid];
+            if let Some(fw) = &mut st.final_weight {
+                *fw |= &final_fix[sid];
+            } else {
+                st.final_weight = Some(final_fix[sid].clone());
+            }
+        }
+    }
+    // Remove all negative transitions
+    for st in &mut nwa.states.0 {
+        st.transitions.retain(|k, _| *k >= 0);
+    }
+    crate::debug!(4, "Applied changes to NWA.");
+
+    if let Some(p) = &pb { p.finish_with_message("Done"); }
+}
+
 /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
 /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
 /// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
@@ -27,7 +72,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
 
     let pb = if PROGRESS_BAR_ENABLED {
-        let p = ProgressBar::new(6);
+        let p = ProgressBar::new(4);
         p.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
@@ -42,38 +87,13 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     let mut nwa = NWA::from_dwa(dwa);
     crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
 
-    if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(2); }
-    let epsilons_to_add = compute_cancellations(&nwa.states);
-    crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
-
-    if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(3); }
-    let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
-
-    if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(4); }
-    // Add new epsilons
-    for (from, to, w) in epsilons_to_add {
-        nwa.states.add_epsilon(from, to, w);
-    }
-    // Add propagated final weights
-    for sid in 0..nwa.states.len() {
-        if !final_fix[sid].is_empty() {
-            let st = &mut nwa.states.0[sid];
-            if let Some(fw) = &mut st.final_weight {
-                *fw |= &final_fix[sid];
-            } else {
-                st.final_weight = Some(final_fix[sid].clone());
-            }
-        }
-    }
-    // Remove all negative transitions
-    for st in &mut nwa.states.0 {
-        st.transitions.retain(|k, _| *k >= 0);
-    }
+    if let Some(p) = &pb { p.set_message("Resolve negatives in NWA"); p.set_position(2); }
+    resolve_negative_codes_in_nwa(&mut nwa);
     crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
 
-    if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(5); }
+    if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(3); }
     let mut result = nwa.determinize_to_dwa();
-    if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(6); }
+    if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(4); }
     result.simplify();
     *dwa = result;
 
