@@ -11,13 +11,12 @@ use std::collections::{HashMap, VecDeque};
 /// The process is as follows:
 /// 1.  **Convert to NWA**: The DWA is first converted to an NWA to allow for flexible graph manipulations,
 ///     such as adding epsilon transitions.
-/// 2.  **Resolve Cancellations**: The algorithm identifies all instances of `U --c--> S --neg(c)--> T` sequences.
-///     Each such "cancellation" is resolved by adding a new epsilon transition `U --eps--> T`, which acts as a shortcut.
-///     The weights are combined along the path. Crucially, the `neg(c)` edges that participate in a cancellation
-///     are marked and ignored in the next step.
-/// 3.  **Propagate Finality**: For all remaining (non-cancelled) `neg(c)` edges, finality is propagated backward.
-///     If a state can reach a final state through a path of epsilon and non-cancelled `neg(c)` transitions,
-///     it also becomes final. This is computed using a standard least fixpoint algorithm.
+/// 2.  **Resolve Cancellations**: The algorithm identifies all `A --neg(c)--> B --c--> C` sequences.
+///     Each such "cancellation" is resolved by adding a new epsilon transition `A --eps--> C`, which acts as a shortcut.
+///     The weights are combined along the path.
+/// 3.  **Propagate Finality**: Finality is propagated backward across all `neg(c)` and epsilon transitions (both
+///     original and newly created ones). If a state `A` can reach a final state `F` through a path of such
+///     transitions, `A` inherits finality from `F`. This is computed using a standard least fixpoint algorithm.
 /// 4.  **Apply Changes & Cleanup**: The newly computed final weights are applied to the NWA states. Then, all
 ///     negative-code transitions are removed from the graph, as their semantic effects have been fully resolved.
 /// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
@@ -39,16 +38,17 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     let mut nwa = NWA::from_dwa(dwa);
 
     if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(2); }
-    let (epsilons_to_add, cancelled_negs) = compute_cancellations(&nwa.states);
+    let epsilons_to_add = compute_cancellations(&nwa.states);
 
+    if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(3); }
+    let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
+
+    if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(4); }
+    // Add new epsilons
     for (from, to, w) in epsilons_to_add {
         nwa.states.add_epsilon(from, to, w);
     }
-
-    if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(3); }
-    let final_fix = compute_final_fixpoint_eps_and_neg(&nwa.states, &cancelled_negs);
-
-    if let Some(p) = &pb { p.set_message("Apply weights & remove negatives"); p.set_position(4); }
+    // Add propagated final weights
     for sid in 0..nwa.states.len() {
         if !final_fix[sid].is_empty() {
             let st = &mut nwa.states.0[sid];
@@ -59,7 +59,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
             }
         }
     }
-
+    // Remove all negative transitions
     for st in &mut nwa.states.0 {
         st.transitions.retain(|k, _| *k >= 0);
     }
@@ -72,61 +72,52 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     if let Some(p) = &pb { p.finish_with_message("Done"); }
 }
 
-/// Builds a map of predecessors for each state for efficient lookup.
-fn build_predecessor_map(states: &NWAStates) -> HashMap<NWAStateID, Vec<(NWAStateID, i16, &Weight)>> {
-    let mut preds: HashMap<NWAStateID, Vec<(NWAStateID, i16, &Weight)>> = HashMap::new();
-    for u in 0..states.len() {
-        for (label, (v, w)) in &states[u].transitions {
-            preds.entry(*v).or_default().push((u, *label, w));
-        }
-    }
-    preds
-}
-
-/// Finds all `U --c--> S --neg(c)--> T` patterns and returns epsilon shortcuts to add,
-/// and a set of the (S, neg(c)) edges that were cancelled.
-fn compute_cancellations(states: &NWAStates) -> (Vec<(NWAStateID, NWAStateID, Weight)>, HashMap<(NWAStateID, i16), bool>) {
+/// Finds all `A --neg(c)--> B --c--> C` patterns and returns `A --eps--> C` shortcuts to add.
+fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
     let mut epsilons_to_add = Vec::new();
-    let mut cancelled_negs = HashMap::new();
-    let preds = build_predecessor_map(states);
 
-    for s in 0..states.len() {
-        for (neg_label, (t, w_neg)) in &states[s].transitions {
+    for a in 0..states.len() {
+        let state_a = &states[a];
+        for (neg_label, (b, w_ab)) in &state_a.transitions {
             if *neg_label >= 0 { continue; }
             let c = neg_label.wrapping_sub(i16::MIN);
 
-            if let Some(s_preds) = preds.get(&s) {
-                for (u, pred_label, w_pos) in s_preds {
-                    if *pred_label == c {
-                        let new_w = *w_pos & w_neg;
-                        if !new_w.is_empty() {
-                            epsilons_to_add.push((*u, *t, new_w));
-                            cancelled_negs.insert((s, *neg_label), true);
-                        }
+            if *b < states.len() {
+                if let Some((c_target, w_bc)) = states[*b].get_transition(c) {
+                    let new_w = w_ab & w_bc;
+                    if !new_w.is_empty() {
+                        epsilons_to_add.push((a, *c_target, new_w));
                     }
                 }
             }
         }
     }
-    (epsilons_to_add, cancelled_negs)
+    epsilons_to_add
 }
 
-/// Compute the least fixpoint of final weights propagated backward along epsilon edges
-/// and non-cancelled negative-labeled edges.
-fn compute_final_fixpoint_eps_and_neg(states: &NWAStates, cancelled_negs: &HashMap<(NWAStateID, i16), bool>) -> Vec<Weight> {
+/// Compute the least fixpoint of final weights propagated backward along all epsilon edges
+/// (original and new) and all negative-labeled edges.
+fn compute_final_fixpoint(states: &NWAStates, new_epsilons: &[(NWAStateID, NWAStateID, Weight)]) -> Vec<Weight> {
     let n = states.len();
     let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
     let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
 
+    // Build reverse graph for propagation
     for u in 0..n {
+        // Original epsilons
         for &(v, ref w) in &states[u].epsilons {
             if v < n { rev[v].push((u, w.clone())); }
         }
+        // Negative edges
         for (label, (v, w)) in &states[u].transitions {
-            if *label < 0 && !cancelled_negs.contains_key(&(u, *label)) {
+            if *label < 0 {
                 if *v < n { rev[*v].push((u, w.clone())); }
             }
         }
+    }
+    // New epsilons from cancellations
+    for (u, v, w) in new_epsilons {
+        if *v < n { rev[*v].push((*u, w.clone())); }
     }
 
     let mut q: VecDeque<NWAStateID> = VecDeque::new();
