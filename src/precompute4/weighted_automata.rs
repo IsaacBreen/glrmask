@@ -1537,26 +1537,29 @@ pub struct NWA {
 struct StepGroupKey {
     mask: Arc<Vec<(NWAStateID, Weight)>>,
     w: Weight,
-    fp: u64,
 }
 
 impl PartialEq for StepGroupKey {
     fn eq(&self, other: &Self) -> bool {
-        // Fingerprint check is a fast path for inequality.
-        if self.fp != other.fp {
+        // Fast path for weight inequality using its fingerprint
+        if self.w.fp != other.w.fp {
             return false;
         }
         // Pointer equality is a fast path for equality of the mask.
         if Arc::ptr_eq(&self.mask, &other.mask) {
             return self.w == other.w;
         }
-        // Full check as fallback.
+        // Full content check as fallback.
         self.w == other.w && *self.mask == *other.mask
     }
 }
 impl Eq for StepGroupKey {}
 impl std::hash::Hash for StepGroupKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_usize(Arc::as_ptr(&self.mask) as usize); state.write_u64(self.fp); }
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.w.hash(state);
+        // Arc<T> hashes T by content if T: Hash. Vec<T> hashes by content.
+        self.mask.hash(state);
+    }
 }
 
 impl NWA {
@@ -2175,7 +2178,7 @@ impl NWA {
                 if let Some((to, wdef)) = &self.states[*sid].default {
                     // Group by (mask, wdef)
                     let mask = get_eps_mask(*to, &self.states, &fut, &comp_of, &pure_comp, &comps, &mut eps_cache_state, &mut eps_cache_comp, &mut step_intern);
-                    let key = StepGroupKey { mask, w: wdef.clone(), fp: wdef.fp };
+                    let key = StepGroupKey { mask, w: wdef.clone() };
                     if let Some(acc_w) = def_groups_all.get_mut(&key) {
                         *acc_w |= w_in;
                     } else {
@@ -2231,37 +2234,14 @@ impl NWA {
             // Pattern grouping across labels:
             // Labels that induce the same set of explicit (idx -> StepGroupKey) pairs share the
             // same target subset and edge weight; compute once per class and add edges for all.
-            #[derive(Clone)]
+            #[derive(Clone, Eq, PartialEq, Hash)]
             struct LabelPatternKey {
                 pairs: Vec<(usize, StepGroupKey)>,
-                fp: u64,
             }
             impl LabelPatternKey {
                 fn new(mut pairs: Vec<(usize, StepGroupKey)>) -> Self {
                     pairs.sort_by_key(|(i, _)| *i);
-                    let mut fp = FP_ZERO;
-                    for (i, k) in &pairs {
-                        let ptr = Arc::as_ptr(&k.mask) as usize as u64;
-                        fp = mix3(fp, (*i as u64).wrapping_mul(FP_K1), k.fp.wrapping_mul(FP_K2) ^ ptr.wrapping_mul(FP_K3));
-                    }
-                    LabelPatternKey { pairs, fp }
-                }
-            }
-            impl PartialEq for LabelPatternKey {
-                fn eq(&self, other: &Self) -> bool {
-                    if self.fp != other.fp { return false; }
-                    if self.pairs.len() != other.pairs.len() { return false; }
-                    for (a, b) in self.pairs.iter().zip(other.pairs.iter()) {
-                        if a.0 != b.0 { return false; }
-                        if a.1 != b.1 { return false; }
-                    }
-                    true
-                }
-            }
-            impl Eq for LabelPatternKey {}
-            impl Hash for LabelPatternKey {
-                fn hash<H: Hasher>(&self, state: &mut H) {
-                    state.write_u64(self.fp);
+                    LabelPatternKey { pairs }
                 }
             }
 
@@ -2275,7 +2255,7 @@ impl NWA {
                     let (sid, _w_in) = &subset_vec[idx];
                     if let Some((to, wlbl)) = self.states[*sid].transitions.get(&lbl) {
                         let mask = get_eps_mask(*to, &self.states, &fut, &comp_of, &pure_comp, &comps, &mut eps_cache_state, &mut eps_cache_comp, &mut step_intern);
-                        let key = StepGroupKey { mask, w: wlbl.clone(), fp: wlbl.fp };
+                        let key = StepGroupKey { mask, w: wlbl.clone() };
                         pairs.push((idx, key));
                     }
                 }
@@ -2316,7 +2296,7 @@ impl NWA {
                     if let Some((to, wdef)) = &self.states[*sid].default {
                         if compiled_def_per_idx[*idx].is_none() {
                             let mask = get_eps_mask(*to, &self.states, &fut, &comp_of, &pure_comp, &comps, &mut eps_cache_state, &mut eps_cache_comp, &mut step_intern);
-                            let def_key = StepGroupKey { mask, w: wdef.clone(), fp: wdef.fp };
+                            let def_key = StepGroupKey { mask, w: wdef.clone() };
                             let compiled = compiled_group_for(&def_key, &mut step_intern, &mut compiled_group_cache);
                             compiled_def_per_idx[*idx] = Some(compiled);
                         }
