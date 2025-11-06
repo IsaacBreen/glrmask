@@ -6,7 +6,7 @@ local_system:
     - src/precompute4/weighted_automata/common.rs
     - src/precompute4/weighted_automata/ops.rs
     - src/precompute4/full_dwa.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/precompute4/weighted_automata/mod.rs: |
@@ -1626,8 +1626,9 @@ local_system:
               Ok(())
           }
 
-          /// Adds a transition if it does not already exist for the given `from` state and `on` symbol.
-          /// If a transition already exists, it returns the existing target state ID.
+          /// Adds a transition if it does not already exist for the given `from` state and `on` symbol,
+          /// or merges the weight if it does.
+          /// If a transition already exists, it merges the weight and returns the existing target state ID.
           /// If it does not exist, it adds a new transition to the given `to` state and returns `to`.
           pub fn add_transition_if_missing(
               &mut self,
@@ -1644,8 +1645,45 @@ local_system:
               }
               let from_state = &mut self.states[from];
               if let Some(&existing_to) = from_state.transitions.exceptions.get(&on) {
+                  if let Some(existing_weight) = from_state.trans_weights_exceptions.get_mut(&on) {
+                      *existing_weight |= &weight;
+                  } else {
+                      from_state.trans_weights_exceptions.insert(on, weight);
+                  }
                   return Ok(existing_to);
               }
+              from_state.transitions.exceptions.insert(on, to);
+              from_state.trans_weights_exceptions.insert(on, weight);
+              Ok(to)
+          }
+
+          /// Gets the target of an existing transition or creates a new state and a transition to it.
+          /// If a transition on `on` already exists from `from`, its weight is merged with the given `weight`
+          /// and its target state ID is returned.
+          /// If no such transition exists, a new state is created, a transition from `from` to the new state
+          /// is added with the given `weight`, and the new state's ID is returned.
+          pub fn get_or_add_transition(
+              &mut self,
+              from: StateID,
+              on: i16,
+              weight: Weight,
+          ) -> Result<StateID, DWABuildError> {
+              if from >= self.states.len() {
+                  return Err(DWABuildError::StateOutOfBounds { state: from });
+              }
+
+              if let Some(&existing_to) = self.states[from].transitions.exceptions.get(&on) {
+                  let from_state = &mut self.states[from];
+                  if let Some(existing_weight) = from_state.trans_weights_exceptions.get_mut(&on) {
+                      *existing_weight |= &weight;
+                  } else {
+                      from_state.trans_weights_exceptions.insert(on, weight);
+                  }
+                  return Ok(existing_to);
+              }
+
+              let to = self.add_state();
+              let from_state = &mut self.states[from];
               from_state.transitions.exceptions.insert(on, to);
               from_state.trans_weights_exceptions.insert(on, weight);
               Ok(to)
@@ -2352,16 +2390,9 @@ local_system:
               let neg_shift = utils::encode_negative_i16(shift_state)?;
 
               // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-              let s1_candidate = dwa.add_state();
-              let s1 = dwa.add_transition_if_missing(start, pos_initial, s1_candidate, w_all.clone()).unwrap();
-
-              let s2_candidate = dwa.add_state();
-              let s2 = dwa.add_transition_if_missing(s1, neg_initial, s2_candidate, w_all.clone()).unwrap();
-
-              let s3_candidate = dwa.add_state();
-              let s3 =
-                  dwa.add_transition_if_missing(s2, neg_shift, s3_candidate, w_all.clone()).unwrap();
-
+              let s1 = dwa.get_or_add_transition(start, pos_initial, w_all.clone()).unwrap();
+              let s2 = dwa.get_or_add_transition(s1, neg_initial, w_all.clone()).unwrap();
+              let s3 = dwa.get_or_add_transition(s2, neg_shift, w_all.clone()).unwrap();
               dwa.set_final_weight(s3, w_all.clone()).unwrap();
           }
 
@@ -2416,21 +2447,10 @@ local_system:
                   let neg_shift = utils::encode_negative_i16(shift_state)?;
 
                   // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-                  let s1_candidate = dwa.add_state();
-                  let s1 = dwa
-                      .add_transition_if_missing(src_nt_state, pos_revealed, s1_candidate, w_all.clone())
-                      .unwrap();
-
-                  let s2_candidate = dwa.add_state();
-                  let s2 =
-                      dwa.add_transition_if_missing(s1, neg_revealed, s2_candidate, w_all.clone()).unwrap();
-
-                  let s3_candidate = dwa.add_state();
-                  let s3 = dwa.add_transition_if_missing(s2, neg_goto, s3_candidate, w_all.clone()).unwrap();
-
-                  let s4_candidate = dwa.add_state();
-                  let s4 =
-                      dwa.add_transition_if_missing(s3, neg_shift, s4_candidate, w_all.clone()).unwrap();
+                  let s1 = dwa.get_or_add_transition(src_nt_state, pos_revealed, w_all.clone()).unwrap();
+                  let s2 = dwa.get_or_add_transition(s1, neg_revealed, w_all.clone()).unwrap();
+                  let s3 = dwa.get_or_add_transition(s2, neg_goto, w_all.clone()).unwrap();
+                  let s4 = dwa.get_or_add_transition(s3, neg_shift, w_all.clone()).unwrap();
                   dwa.set_final_weight(s4, w_all.clone()).unwrap();
               }
           }
@@ -4305,5 +4325,244 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor DWA construction to reuse states
       with add_transition_if_missing"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+      --- original version of src/precompute4/weighted_automata/ops.rs
+      +++ current version of src/precompute4/weighted_automata/ops.rs
+      @@ -292,15 +292,12 @@
+           /// - Set s.final_weight = None (standard concatenation semantics).
+           /// Return body with start = left.start.
+           pub fn concatenate_components(states: &mut NWAStates, left: &NWABody, right: &NWABody, eps_weight: &Weight) -> NWABody {
+      -        println!("Concatenating NWAs with eps_weight={:?}", eps_weight);
+      -        println!("LEFT:\n{}\nRIGHT:\n{}\nSTATES BEFORE CONCAT:\n{}", left, right, states);
+               if STOCHASTIC_DEBUG {
+                   let nwa1 = NWA { states: states.clone(), body: left.clone() };
+                   let nwa2 = NWA { states: states.clone(), body: right.clone() };
+       
+                   let mut states_after_concat = states.clone();
+                   let concat_body = Self::internal_concatenate_components(&mut states_after_concat, left, right, eps_weight);
+      -            println!("RESULT:\n{}\nSTATES AFTER CONCAT:\n{}", concat_body, states_after_concat);
+                   let concat_nwa = NWA { states: states_after_concat, body: concat_body };
+       
+                   let mut dwa1 = nwa1.determinize_to_dwa();
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/full_dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Modify it to merge the weights if there's a match.
+      And add a method that makes it even simpler, adding a state if a transition doesn't already exist. Use this instead.
+    metadata:
+  - assistant: |-
+      You've got it. The previous change prevented crashes but was still a bit verbose. Merging weights on existing transitions is more correct, and adding a helper method to create states and transitions together will simplify the construction logic significantly.
+
+      Here are the step-by-step instructions to implement these improvements:
+
+      ### Step 1: Update `add_transition_if_missing` in `dwa.rs`
+
+      I'll modify `add_transition_if_missing` in `src/precompute4/weighted_automata/dwa.rs`. If a transition for the given symbol already exists, instead of just returning, it will now merge the provided `weight` with the existing transition's weight using a bitwise OR operation.
+
+      ### Step 2: Add `get_or_add_transition` method in `dwa.rs`
+
+      Next, I'll add a new, more convenient method called `get_or_add_transition` to `impl DWA`. This function will:
+      1.  Check if a transition on a given symbol exists.
+      2.  If it does, merge the weight and return the existing target state's ID.
+      3.  If it doesn't, create a new state, add a transition to it with the given weight, and return the new state's ID.
+
+      This encapsulates the common pattern of "follow this path, creating it if it doesn't exist."
+
+      ### Step 3: Refactor `full_dwa.rs` to use the new method
+
+      Finally, I'll update `build_template_dwa_from_characterization` in `src/precompute4/full_dwa.rs`. The parts of the code that build simple, linear chains of transitions (`initial_shifts` and `reveal_goto_shift_escapes`) will be refactored to use the new `get_or_add_transition` method. This makes the code much cleaner and easier to read by removing the manual creation of candidate states.
+
+      The more complex logic for `initial_reduces` and `reveal_and_rereduces` will remain unchanged, as it correctly handles cases where a new transition might lead to a pre-existing node or require a new chain of default transitions. It will benefit from the updated weight-merging logic in `add_transition_if_missing`.
+
+      ---
+
+      Here are the git diffs for the changes:
+
+      ```diff
+      diff --git a/src/precompute4/full_dwa.rs b/src/precompute4/full_dwa.rs
+      index 102434b..789139f 100644
+      --- a/src/precompute4/full_dwa.rs
+      +++ b/src/precompute4/full_dwa.rs
+      @@ -58,17 +58,10 @@
+               let neg_initial = utils::encode_negative_i16(initial_state)?;
+               let neg_shift = utils::encode_negative_i16(shift_state)?;
+       
+               // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
+      -        let s1_candidate = dwa.add_state();
+      -        let s1 = dwa.add_transition_if_missing(start, pos_initial, s1_candidate, w_all.clone()).unwrap();
+      -
+      -        let s2_candidate = dwa.add_state();
+      -        let s2 = dwa.add_transition_if_missing(s1, neg_initial, s2_candidate, w_all.clone()).unwrap();
+      -
+      -        let s3_candidate = dwa.add_state();
+      -        let s3 =
+      -            dwa.add_transition_if_missing(s2, neg_shift, s3_candidate, w_all.clone()).unwrap();
+      -
+      +        let s1 = dwa.get_or_add_transition(start, pos_initial, w_all.clone()).unwrap();
+      +        let s2 = dwa.get_or_add_transition(s1, neg_initial, w_all.clone()).unwrap();
+      +        let s3 = dwa.get_or_add_transition(s2, neg_shift, w_all.clone()).unwrap();
+               dwa.set_final_weight(s3, w_all.clone()).unwrap();
+           }
+       
+      @@ -116,22 +109,11 @@
+                   let neg_goto = utils::encode_negative_i16(goto_state)?;
+                   let neg_shift = utils::encode_negative_i16(shift_state)?;
+       
+                   // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
+      -            let s1_candidate = dwa.add_state();
+      -            let s1 = dwa
+      -                .add_transition_if_missing(src_nt_state, pos_revealed, s1_candidate, w_all.clone())
+      -                .unwrap();
+      -
+      -            let s2_candidate = dwa.add_state();
+      -            let s2 =
+      -                dwa.add_transition_if_missing(s1, neg_revealed, s2_candidate, w_all.clone()).unwrap();
+      -
+      -            let s3_candidate = dwa.add_state();
+      -            let s3 = dwa.add_transition_if_missing(s2, neg_goto, s3_candidate, w_all.clone()).unwrap();
+      -
+      -            let s4_candidate = dwa.add_state();
+      -            let s4 =
+      -                dwa.add_transition_if_missing(s3, neg_shift, s4_candidate, w_all.clone()).unwrap();
+      +            let s1 = dwa.get_or_add_transition(src_nt_state, pos_revealed, w_all.clone()).unwrap();
+      +            let s2 = dwa.get_or_add_transition(s1, neg_revealed, w_all.clone()).unwrap();
+      +            let s3 = dwa.get_or_add_transition(s2, neg_goto, w_all.clone()).unwrap();
+      +            let s4 = dwa.get_or_add_transition(s3, neg_shift, w_all.clone()).unwrap();
+                   dwa.set_final_weight(s4, w_all.clone()).unwrap();
+               }
+           }
+
+      ``````diff
+      diff --git a/src/precompute4/weighted_automata/dwa.rs b/src/precompute4/weighted_automata/dwa.rs
+      index 726d56d..3388a10 100644
+      --- a/src/precompute4/weighted_automata/dwa.rs
+      +++ b/src/precompute4/weighted_automata/dwa.rs
+      @@ -328,13 +328,14 @@
+               Ok(())
+           }
+       
+      -    /// Adds a transition if it does not already exist for the given `from` state and `on` symbol.
+      -    /// If a transition already exists, it returns the existing target state ID.
+      +    /// Adds a transition if it does not already exist for the given `from` state and `on` symbol,
+      +    /// or merges the weight if it does.
+      +    /// If a transition already exists, it merges the weight and returns the existing target state ID.
+           /// If it does not exist, it adds a new transition to the given `to` state and returns `to`.
+           pub fn add_transition_if_missing(
+               &mut self,
+               from: StateID,
+               on: i16,
+               to: StateID,
+               weight: Weight,
+           ) -> Result<StateID, DWABuildError> {
+               if from >= self.states.len() {
+                   return Err(DWABuildError::StateOutOfBounds { state: from });
+               }
+               if to >= self.states.len() {
+                   return Err(DWABuildError::StateOutOfBounds { state: to });
+               }
+               let from_state = &mut self.states[from];
+               if let Some(&existing_to) = from_state.transitions.exceptions.get(&on) {
+      -            return Ok(existing_to);
+      +            if let Some(existing_weight) = from_state.trans_weights_exceptions.get_mut(&on) {
+      +                *existing_weight |= &weight;
+      +            } else {
+      +                from_state.trans_weights_exceptions.insert(on, weight);
+      +            }
+      +            return Ok(existing_to);
+               }
+               from_state.transitions.exceptions.insert(on, to);
+               from_state.trans_weights_exceptions.insert(on, weight);
+               Ok(to)
+           }
+       
+      +    /// Gets the target of an existing transition or creates a new state and a transition to it.
+      +    /// If a transition on `on` already exists from `from`, its weight is merged with the given `weight`
+      +    /// and its target state ID is returned.
+      +    /// If no such transition exists, a new state is created, a transition from `from` to the new state
+      +    /// is added with the given `weight`, and the new state's ID is returned.
+      +    pub fn get_or_add_transition(
+      +        &mut self,
+      +        from: StateID,
+      +        on: i16,
+      +        weight: Weight,
+      +    ) -> Result<StateID, DWABuildError> {
+      +        if from >= self.states.len() {
+      +            return Err(DWABuildError::StateOutOfBounds { state: from });
+      +        }
+      +
+      +        if let Some(&existing_to) = self.states[from].transitions.exceptions.get(&on) {
+      +            let from_state = &mut self.states[from];
+      +            if let Some(existing_weight) = from_state.trans_weights_exceptions.get_mut(&on) {
+      +                *existing_weight |= &weight;
+      +            } else {
+      +                from_state.trans_weights_exceptions.insert(on, weight);
+      +            }
+      +            return Ok(existing_to);
+      +        }
+      +
+      +        let to = self.add_state();
+      +        let from_state = &mut self.states[from];
+      +        from_state.transitions.exceptions.insert(on, to);
+      +        from_state.trans_weights_exceptions.insert(on, weight);
+      +        Ok(to)
+      +    }
+      +
+           pub fn set_default_transition(
+               &mut self,
+               from: StateID,
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/full_dwa.rs
+      Applying patch to 'src/precompute4/full_dwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/full_dwa.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/precompute4/weighted_automata/dwa.rs
+      Applying patch to 'src/precompute4/weighted_automata/dwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/dwa.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor DWA construction: Implement weight
+      merging in transition helpers and use get_or_add_transition for robust state
+      sharing."'
     metadata:
 ...

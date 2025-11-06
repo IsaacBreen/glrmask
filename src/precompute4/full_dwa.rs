@@ -43,16 +43,9 @@ fn build_template_dwa_from_characterization(
         let neg_shift = utils::encode_negative_i16(shift_state)?;
 
         // start --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-        let s1_candidate = dwa.add_state();
-        let s1 = dwa.add_transition_if_missing(start, pos_initial, s1_candidate, w_all.clone()).unwrap();
-
-        let s2_candidate = dwa.add_state();
-        let s2 = dwa.add_transition_if_missing(s1, neg_initial, s2_candidate, w_all.clone()).unwrap();
-
-        let s3_candidate = dwa.add_state();
-        let s3 =
-            dwa.add_transition_if_missing(s2, neg_shift, s3_candidate, w_all.clone()).unwrap();
-
+        let s1 = dwa.get_or_add_transition(start, pos_initial, w_all.clone()).unwrap();
+        let s2 = dwa.get_or_add_transition(s1, neg_initial, w_all.clone()).unwrap();
+        let s3 = dwa.get_or_add_transition(s2, neg_shift, w_all.clone()).unwrap();
         dwa.set_final_weight(s3, w_all.clone()).unwrap();
     }
 
@@ -107,21 +100,10 @@ fn build_template_dwa_from_characterization(
             let neg_shift = utils::encode_negative_i16(shift_state)?;
 
             // src --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-            let s1_candidate = dwa.add_state();
-            let s1 = dwa
-                .add_transition_if_missing(src_nt_state, pos_revealed, s1_candidate, w_all.clone())
-                .unwrap();
-
-            let s2_candidate = dwa.add_state();
-            let s2 =
-                dwa.add_transition_if_missing(s1, neg_revealed, s2_candidate, w_all.clone()).unwrap();
-
-            let s3_candidate = dwa.add_state();
-            let s3 = dwa.add_transition_if_missing(s2, neg_goto, s3_candidate, w_all.clone()).unwrap();
-
-            let s4_candidate = dwa.add_state();
-            let s4 =
-                dwa.add_transition_if_missing(s3, neg_shift, s4_candidate, w_all.clone()).unwrap();
+            let s1 = dwa.get_or_add_transition(src_nt_state, pos_revealed, w_all.clone()).unwrap();
+            let s2 = dwa.get_or_add_transition(s1, neg_revealed, w_all.clone()).unwrap();
+            let s3 = dwa.get_or_add_transition(s2, neg_goto, w_all.clone()).unwrap();
+            let s4 = dwa.get_or_add_transition(s3, neg_shift, w_all.clone()).unwrap();
             dwa.set_final_weight(s4, w_all.clone()).unwrap();
         }
     }
