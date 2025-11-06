@@ -1523,7 +1523,6 @@ fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::err
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
     println!("Grammar: {}", grammar_definition);
     let _compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
-    println!("Parser: {}", _compiled_grammar.glr_parser);
 
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
@@ -1541,6 +1540,7 @@ fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::err
         &GrammarConstraintConfig::default(),
         None,
     );
+    println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed1();
     constraint.dump_precomputed3();
     constraint.dump_precomputed4();
