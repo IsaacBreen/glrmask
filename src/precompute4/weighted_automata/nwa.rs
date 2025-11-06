@@ -140,6 +140,7 @@ impl IndexMut<NWAStateID> for NWAStates {
 
 impl Display for NWAStates {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "NWAStates ({} states):", self.0.len())?;
         for (id, state) in self.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
             if let Some(w) = &state.final_weight {
@@ -167,7 +168,7 @@ pub struct NWABody {
 
 impl Display for NWABody {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "start: {}", self.start_state)
+        write!(f, "NWABody (start: {})", self.start_state)
     }
 }
 
@@ -187,8 +188,23 @@ impl NWA {
 
 impl Display for NWA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "NWA ({})", self.body)?;
-        write!(f, "{}", self.states)?;
+        writeln!(f, "NWA (start: {})", self.body.start_state)?;
+        for (id, state) in self.states.0.iter().enumerate() {
+            writeln!(f, "  State {}:", id)?;
+            if let Some(w) = &state.final_weight {
+                writeln!(f, "    final_weight: {}", w)?;
+            }
+            if let Some((to, w)) = &state.default {
+                writeln!(f, "    * -> {} (weight: {})", to, w)?;
+            }
+            for (on, (to, w)) in &state.transitions {
+                let char_repr = format_i16_char(*on);
+                writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+            }
+            for (to, w) in &state.epsilons {
+                writeln!(f, "    ε -> {} (weight: {})", to, w)?;
+            }
+        }
         Ok(())
     }
 }

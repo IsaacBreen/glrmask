@@ -6072,6 +6072,7 @@ local_system:
 
       impl Display for NWAStates {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "NWAStates ({} states):", self.0.len())?;
               for (id, state) in self.0.iter().enumerate() {
                   writeln!(f, "  State {}:", id)?;
                   if let Some(w) = &state.final_weight {
@@ -6099,7 +6100,7 @@ local_system:
 
       impl Display for NWABody {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              write!(f, "start: {}", self.start_state)
+              write!(f, "NWABody (start: {})", self.start_state)
           }
       }
 
@@ -6119,8 +6120,23 @@ local_system:
 
       impl Display for NWA {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              writeln!(f, "NWA ({})", self.body)?;
-              write!(f, "{}", self.states)?;
+              writeln!(f, "NWA (start: {})", self.body.start_state)?;
+              for (id, state) in self.states.0.iter().enumerate() {
+                  writeln!(f, "  State {}:", id)?;
+                  if let Some(w) = &state.final_weight {
+                      writeln!(f, "    final_weight: {}", w)?;
+                  }
+                  if let Some((to, w)) = &state.default {
+                      writeln!(f, "    * -> {} (weight: {})", to, w)?;
+                  }
+                  for (on, (to, w)) in &state.transitions {
+                      let char_repr = format_i16_char(*on);
+                      writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+                  }
+                  for (to, w) in &state.epsilons {
+                      writeln!(f, "    ε -> {} (weight: {})", to, w)?;
+                  }
+              }
               Ok(())
           }
       }
@@ -9010,7 +9026,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -13597,31 +13613,23 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      This task requires implementing the `Display` trait for `NWABody` and `NWAStates` in `src/precompute4/weighted_automata/nwa.rs`, and then updating the existing `Display` implementation for `NWA` to utilize these new implementations.
+      Of course. Here are the step-by-step instructions to implement the `Display` trait for `NWABody` and `NWAStates`, followed by the corresponding git diff.
 
-      Here are the step-by-step instructions:
+      ### Step-by-step Instructions
 
-      ### Instructions
+      I will add `Display` implementations for `NWAStates` and `NWABody` in `src/precompute4/weighted_automata/nwa.rs`. These will allow them to be formatted as strings, which is useful for debugging.
 
-      In `src/precompute4/weighted_automata/nwa.rs`:
+      1.  **Edit `src/precompute4/weighted_automata/nwa.rs`:**
+          *   After the `impl IndexMut<NWAStateID> for NWAStates` block, I will add a new `impl Display for NWAStates` block. This implementation will iterate over all states and print their details, including final weights and transitions.
+          *   After the `pub struct NWABody` definition, I will add a new `impl Display for NWABody` block. This will simply format the body with its start state ID.
 
-      1.  **Implement `Display` for `NWAStates`**: Insert the `impl Display for NWAStates` block after the existing `impl IndexMut<NWAStateID> for NWAStates` block (around line 110). This implementation will iterate over all states and print their details.
+      Here are the code blocks to be added:
 
-      2.  **Implement `Display` for `NWABody`**: Insert the `impl Display for NWABody` block after the `NWABody` struct definition (around line 142). This implementation will print the start state ID.
-
-      3.  **Update `Display` for `NWA`**: Modify the existing `impl Display for NWA` block (around line 155) to use the new `Display` implementations for `NWABody` and `NWAStates`.
-
+      **After `impl IndexMut<NWAStateID> for NWAStates`:**
       ```rust
-      // src/precompute4/weighted_automata/nwa.rs
-
-      // ... (lines 107-110)
-      impl IndexMut<NWAStateID> for NWAStates {
-          fn index_mut(&mut self, index: NWAStateID) -> &mut Self::Output { &mut self.0[index] }
-      }
-
-      // --- INSERT START (Step 1) ---
       impl Display for NWAStates {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              writeln!(f, "NWAStates ({} states):", self.0.len())?;
               for (id, state) in self.0.iter().enumerate() {
                   writeln!(f, "  State {}:", id)?;
                   if let Some(w) = &state.final_weight {
@@ -13641,48 +13649,32 @@ messages:
               Ok(())
           }
       }
-      // --- INSERT END (Step 1) ---
+      ```
 
-      #[derive(Clone, Debug, Default, PartialEq, Eq)]
-      pub struct NWABody {
-          pub start_state: NWAStateID,
-      }
-
-      // --- INSERT START (Step 2) ---
+      **After `pub struct NWABody { ... }`:**
+      ```rust
       impl Display for NWABody {
           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              write!(f, "start: {}", self.start_state)
-          }
-      }
-      // --- INSERT END (Step 2) ---
-
-      #[derive(Clone, Debug, Default)]
-      pub struct NWA {
-      // ... (lines 151-154)
-
-      impl Display for NWA {
-          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-              // --- REPLACE START (Step 3) ---
-              writeln!(f, "NWA ({})", self.body)?;
-              write!(f, "{}", self.states)?;
-              // --- REPLACE END (Step 3) ---
-              Ok(())
+              write!(f, "NWABody (start: {})", self.start_state)
           }
       }
       ```
 
-      ### Git Diffs
+      ### Git Diff
+
+      Here is the git diff to apply these changes:
 
       ```diff
+      diff --git a/src/precompute4/weighted_automata/nwa.rs b/src/precompute4/weighted_automata/nwa.rs
       --- a/src/precompute4/weighted_automata/nwa.rs
       +++ b/src/precompute4/weighted_automata/nwa.rs
-      @@ -107,11 +107,29 @@
-       impl IndexMut<NWAStateID> for NWAStates {
+      @@ -130,11 +130,35 @@
            fn index_mut(&mut self, index: NWAStateID) -> &mut Self::Output { &mut self.0[index] }
        }
-      +
+       
       +impl Display for NWAStates {
       +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+      +        writeln!(f, "NWAStates ({} states):", self.0.len())?;
       +        for (id, state) in self.0.iter().enumerate() {
       +            writeln!(f, "  State {}:", id)?;
       +            if let Some(w) = &state.final_weight {
@@ -13702,7 +13694,7 @@ messages:
       +        Ok(())
       +    }
       +}
-       
+      +
        #[derive(Clone, Debug, Default, PartialEq, Eq)]
        pub struct NWABody {
            pub start_state: NWAStateID,
@@ -13710,39 +13702,14 @@ messages:
        
       +impl Display for NWABody {
       +    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-      +        write!(f, "start: {}", self.start_state)
+      +        write!(f, "NWABody (start: {})", self.start_state)
       +    }
       +}
       +
        #[derive(Clone, Debug, Default)]
        pub struct NWA {
            pub states: NWAStates,
-      @@ -124,20 +142,8 @@
-       
-       impl Display for NWA {
-           fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-      -        writeln!(f, "NWA (start: {})", self.body.start_state)?;
-      -        for (id, state) in self.states.0.iter().enumerate() {
-      -            writeln!(f, "  State {}:", id)?;
-      -            if let Some(w) = &state.final_weight {
-      -                writeln!(f, "    final_weight: {}", w)?;
-      -            }
-      -            if let Some((to, w)) = &state.default {
-      -                writeln!(f, "    * -> {} (weight: {})", to, w)?;
-      -            }
-      -            for (on, (to, w)) in &state.transitions {
-      -                let char_repr = format_i16_char(*on);
-      -                writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
-      -            }
-      -            for (to, w) in &state.epsilons {
-      -                writeln!(f, "    ε -> {} (weight: {})", to, w)?;
-      -            }
-      -        }
-      +        writeln!(f, "NWA ({})", self.body)?;
-      +        write!(f, "{}", self.states)?;
-               Ok(())
-           }
-       }
+
       ```
     metadata:
   - user: |
@@ -13754,7 +13721,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/nwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/nwa.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Implement Display for NWAStates
-      and NWABody, update NWA Display"'
+  - user: 'Changes committed with message: "nwa: Implement Display for NWAStates and
+      NWABody"'
     metadata:
 ...
