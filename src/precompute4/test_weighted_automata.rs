@@ -1550,6 +1550,94 @@ fn test_concatenate_from_debug_log() {
 }
 
 #[test]
+fn test_union_from_panicked_log() {
+    fn neg(x: i16) -> i16 {
+        i16::MIN + x
+    }
+
+    // --- Build LEFT DWA (A) ---
+    let mut a = DWA::new();
+    for _ in 0..23 { a.add_state(); }
+    assert_eq!(a.states.len(), 24);
+
+    a.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+    a.add_transition(0, 1, 2, Weight::from_item(0)).unwrap();
+    a.add_transition(0, 2, 3, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(0, 3, 4, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(0, 4, 5, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(0, 5, 6, Weight::from_item(0)).unwrap();
+    a.add_transition(0, 7, 7, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(0, 8, 8, Weight::from_item(0)).unwrap();
+    a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
+    a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
+    a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
+    a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
+    a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
+    a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
+    a.add_transition(5, 1, 15, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(5, 5, 16, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(5, 8, 17, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(6, neg(5), 11, Weight::from_item(0)).unwrap();
+    a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
+    a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
+    a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
+    a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
+    a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
+    a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
+    a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
+    a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
+    a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
+    a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
+    a.set_final_weight(18, Weight::from_item(1)).unwrap();
+    a.set_final_weight(19, Weight::from_item(0)).unwrap();
+    a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
+    a.set_final_weight(21, Weight::from_item(2)).unwrap();
+    a.add_transition(22, neg(2), 13, Weight::from_item(2)).unwrap();
+    a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
+    a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
+
+    // --- Build RIGHT DWA (B) ---
+    let mut b = DWA::new();
+    for _ in 0..16 { b.add_state(); }
+    assert_eq!(b.states.len(), 17);
+
+    b.add_transition(0, 0, 1, Weight::from_item(3)).unwrap();
+    b.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
+    b.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
+    b.add_transition(0, 4, 4, Weight::from_item(3)).unwrap();
+    b.add_transition(0, 7, 5, Weight::from_item(3)).unwrap();
+    b.add_transition(0, 9, 6, Weight::from_item(3)).unwrap();
+    b.add_transition(1, neg(0), 7, Weight::from_item(3)).unwrap();
+    b.set_default_transition(2, 8, Weight::from_item(3)).unwrap();
+    b.add_transition(3, 5, 9, Weight::from_item(3)).unwrap();
+    b.add_transition(4, 1, 8, Weight::from_item(3)).unwrap();
+    b.add_transition(4, 5, 9, Weight::from_item(3)).unwrap();
+    b.add_transition(4, 8, 10, Weight::from_item(3)).unwrap();
+    b.add_transition(5, 1, 8, Weight::from_item(3)).unwrap();
+    b.add_transition(5, 5, 9, Weight::from_item(3)).unwrap();
+    b.set_default_transition(6, 10, Weight::from_item(3)).unwrap();
+    b.add_transition(7, neg(1), 11, Weight::from_item(3)).unwrap();
+    b.set_default_transition(8, 3, Weight::from_item(3)).unwrap();
+    b.add_transition(9, neg(5), 1, Weight::from_item(3)).unwrap();
+    b.set_default_transition(10, 5, Weight::from_item(3)).unwrap();
+    b.add_transition(11, 1, 12, Weight::from_item(3)).unwrap();
+    b.add_transition(11, 5, 13, Weight::from_item(3)).unwrap();
+    b.add_transition(11, 8, 14, Weight::from_item(3)).unwrap();
+    b.add_transition(12, neg(1), 15, Weight::from_item(3)).unwrap();
+    b.add_transition(13, neg(5), 15, Weight::from_item(3)).unwrap();
+    b.add_transition(14, neg(8), 15, Weight::from_item(3)).unwrap();
+    b.add_transition(15, neg(4), 16, Weight::from_item(3)).unwrap();
+    b.set_final_weight(16, Weight::from_item(3)).unwrap();
+
+    let u = a.union(&b);
+    DWA::stochastic_validate_union(&a, &b, &u);
+}
+
+#[test]
 fn test_concatenate_default_path_to_final() {
     let mut a = DWA::new();
     let s1a = a.add_state();

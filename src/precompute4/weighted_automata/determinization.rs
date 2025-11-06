@@ -514,7 +514,11 @@ impl NWA {
                 // Accumulate across signatures that have this explicit label
                 let mut acc: HashMap<usize, Weight> = HashMap::new();
                 for (sig_id, gate) in subset.iter() {
-                    if let Some(ref sv) = sig_arena[*sig_id].labeled.get(&lbl) {
+                    let sig = &sig_arena[*sig_id];
+                    // If an explicit transition for the label exists, use it. Otherwise, fall back to the default transition.
+                    let sv_opt = sig.labeled.get(&lbl).or(sig.def.as_ref());
+
+                    if let Some(ref sv) = sv_opt {
                         let comp = stepvec_ptr_to_compiled[&(Arc::as_ptr(sv) as usize)].clone();
                         if gate.is_all_fast() {
                             for (t_sig, w) in comp.iter() {
