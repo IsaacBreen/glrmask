@@ -3731,4 +3731,87 @@ mod tests {
         assert_eq!(*dest_idx_c, n1);
         assert_eq!(*ev_c, 30);
     }
+
+    #[test]
+    fn test_reverse_dag_with_shared_node() {
+        type TestTrie = Trie<Option<u32>, i32, String>;
+        let arena = Arena::<TestTrie>::new();
+
+        // Graph similar to a debug output:
+        // 0 -> 1 (key 3)
+        // 0 -> 3 (key 4)
+        // 1 -> 2 (key 3)
+        // 3 -> 1 (key 2)
+        let n0 = Trie2Index::from(arena.insert(Trie::new("n0".to_string())));
+        let n1 = Trie2Index::from(arena.insert(Trie::new("n1".to_string())));
+        let n2 = Trie2Index::from(arena.insert(Trie::new("n2".to_string())));
+        let n3 = Trie2Index::from(arena.insert(Trie::new("n3".to_string())));
+
+        // Add edges
+        {
+            let mut n0_w = n0.write(&arena).unwrap();
+            n0_w.force_insert_to_node(Some(3), 10, n1);
+            n0_w.force_insert_to_node(Some(4), 20, n3);
+        }
+        n1.write(&arena)
+            .unwrap()
+            .force_insert_to_node(Some(3), 30, n2);
+        n3.write(&arena)
+            .unwrap()
+            .force_insert_to_node(Some(2), 40, n1);
+
+        // Reverse the graph
+        let reversed_arena = TestTrie::reverse(&arena, &[n0]);
+
+        // Check the reversed graph
+        // Expected edges:
+        // 1 -> 0 (key 3, val 10)
+        // 3 -> 0 (key 4, val 20)
+        // 2 -> 1 (key 3, val 30)
+        // 1 -> 3 (key 2, val 40)
+
+        // Check node values are preserved
+        assert_eq!(n0.read(&reversed_arena).unwrap().value, "n0");
+        assert_eq!(n1.read(&reversed_arena).unwrap().value, "n1");
+        assert_eq!(n2.read(&reversed_arena).unwrap().value, "n2");
+        assert_eq!(n3.read(&reversed_arena).unwrap().value, "n3");
+
+        // Check reversed edges for n0 (should be a leaf)
+        let rev_n0_r = n0.read(&reversed_arena).unwrap();
+        assert!(rev_n0_r.is_leaf());
+
+        // Check reversed edges for n1
+        let rev_n1_r = n1.read(&reversed_arena).unwrap();
+        assert_eq!(rev_n1_r.children().len(), 2);
+        let (dest_idx_0, ev_0) = rev_n1_r.get(&Some(3)).unwrap().iter().next().unwrap();
+        assert_eq!(*dest_idx_0, n0);
+        assert_eq!(*ev_0, 10);
+        let (dest_idx_3, ev_3) = rev_n1_r.get(&Some(2)).unwrap().iter().next().unwrap();
+        assert_eq!(*dest_idx_3, n3);
+        assert_eq!(*ev_3, 40);
+
+        // Check reversed edges for n2
+        let rev_n2_r = n2.read(&reversed_arena).unwrap();
+        assert_eq!(rev_n2_r.children().len(), 1);
+        let (dest_idx_1, ev_1) = rev_n2_r.get(&Some(3)).unwrap().iter().next().unwrap();
+        assert_eq!(*dest_idx_1, n1);
+        assert_eq!(*ev_1, 30);
+
+        // Check reversed edges for n3
+        let rev_n3_r = n3.read(&reversed_arena).unwrap();
+        assert_eq!(rev_n3_r.children().len(), 1);
+        let (dest_idx_0_from_3, ev_0_from_3) =
+            rev_n3_r.get(&Some(4)).unwrap().iter().next().unwrap();
+        assert_eq!(*dest_idx_0_from_3, n0);
+        assert_eq!(*ev_0_from_3, 20);
+
+        // Check max depths. Original leaf was n2. So new root is n2.
+        // Path: 2 -> 1 -> 3 -> 0.
+        // Path: 2 -> 1 -> 0.
+        // Longest path to n0 is 2->1->3->0.
+        assert_eq!(n2.read(&reversed_arena).unwrap().max_depth, 0);
+        assert_eq!(n1.read(&reversed_arena).unwrap().max_depth, 1);
+        assert_eq!(n3.read(&reversed_arena).unwrap().max_depth, 2);
+        assert_eq!(n0.read(&reversed_arena).unwrap().max_depth, 3);
+    }
 }
