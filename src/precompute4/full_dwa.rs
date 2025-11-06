@@ -203,7 +203,10 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let initial_tokens = LLMTokenBV::max_ones();
     let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = reversed_trie1_roots.iter().map(|&root| (root, (initial_nwa_body.clone(), initial_tokens.clone()))).collect();
     let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &reversed_trie1_roots).expect("Failed to compute traversal data for reversed trie1");
-    let original_trie1_roots_map: BTreeMap<_, _> = precomputed1.iter().map(|(k, v)| (v.clone(), *k)).collect();
+    let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
+    for (k, v) in precomputed1.iter() {
+        original_trie1_roots_map.entry(v.clone()).or_default().push(*k);
+    }
 
     let options = crate::datastructures::trie::PrettyPrintOptions::default()
         .omit_nodes()
@@ -269,8 +272,10 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         |_node_data, node_idx, val| {
             let (nwa_body, tokens) = val;
             if !tokens.is_empty() {
-                if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
-                    final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
+                if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
+                    for tokenizer_state_id in tokenizer_state_ids {
+                        final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
+                    }
                 }
                 Some((nwa_body, tokens)) // continue traversal
             } else {
