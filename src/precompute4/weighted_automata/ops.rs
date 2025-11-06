@@ -248,6 +248,12 @@ impl NWA {
                     q.push_back(*v);
                 }
             }
+            if let Some((v, _)) = &states[u].default {
+                if *v < states.len() && !visited[*v] {
+                    visited[*v] = true;
+                    q.push_back(*v);
+                }
+            }
         }
 
         // 2) For each visited final, add epsilon and clear final.
