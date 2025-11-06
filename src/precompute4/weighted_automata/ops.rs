@@ -4,11 +4,10 @@
 #![allow(clippy::needless_borrow)]
 
 use super::common::{StateID, Weight};
-use super::dwa::{DWA, DWAStates};
-use super::nwa::{NWA, NWABody, NWAStates};
-use crate::precompute4::test_weighted_automata;
-use std::collections::VecDeque;
+use super::dwa::DWA;
+use super::nwa::{NWABody, NWAStates, NWA};
 use crate::precompute4::weighted_automata::NWAStateID;
+use std::collections::VecDeque;
 
 const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
 

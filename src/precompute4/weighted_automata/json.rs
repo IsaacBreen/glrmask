@@ -5,7 +5,7 @@
 
 use super::bitset::SimpleBitset;
 use super::common::{I16Map, StateID, Weight};
-use super::dwa::{DWA, DWABody, DWAState, DWAStates};
+use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
 use std::collections::BTreeMap;

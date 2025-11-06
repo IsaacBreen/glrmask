@@ -5,15 +5,15 @@
 
 use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
 use super::common::{StateID, Weight};
-use super::dwa::{DWA, DWAStates};
-use super::nwa::{NWA, NWAStates};
+use super::dwa::DWA;
+use super::nwa::{NWAStates, NWA};
+use crate::precompute4::weighted_automata::NWAStateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use crate::precompute4::weighted_automata::NWAStateID;
 
 impl NWA {
     /// Determinize the subgraph reachable from 'start' to a DWA via a radically simplified, high-performance construction:

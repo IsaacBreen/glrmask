@@ -13,5 +13,5 @@ pub mod simplification;
 
 pub use self::bitset::SimpleBitset;
 pub use self::common::{format_i16_char, format_pos_code, format_word, I16Map, NWAStateID, StateID, Weight};
-pub use self::dwa::{DWA, DWABody, DWABuildError, DWAState, DWAStates};
-pub use self::nwa::{NWA, NWABody, NWAState, NWAStates};
+pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
+pub use self::nwa::{NWABody, NWAState, NWAStates, NWA};

@@ -3,16 +3,16 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::dwa::{DWA, DWABody, DWAState, DWAStates};
-use super::nwa::{NWA, NWAState, NWAStates};
 use super::common::{StateID, Weight};
+use super::dwa::{DWABody, DWAState, DWAStates, DWA};
+use super::nwa::{NWAState, NWAStates, NWA};
 use crate::precompute4::test_weighted_automata;
+use crate::precompute4::weighted_automata::NWAStateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
-use crate::precompute4::weighted_automata::NWAStateID;
 
 const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
 
