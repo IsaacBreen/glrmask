@@ -5,6 +5,7 @@ pub mod conversion;
 pub mod resolve_negatives;
 mod utils;
 pub mod test_weighted_automata;
+mod test_resolve_negatives;
 
 
 
