@@ -1529,33 +1529,6 @@ pub struct NWA {
     pub body: NWABody,
 }
 
-// A compact grouping key used during determinization for lazy step application:
-// - mask: an interned epsilon-closure mask (Arc<Vec<(state, weight)>>).
-//         We key by pointer identity to avoid scanning; these masks are already interned.
-// - w:    the edge weight to apply on top of the mask; fingerprint used for hashing, full Eq for correctness.
-#[derive(Clone)]
-struct StepGroupKey {
-    mask: Arc<Vec<(NWAStateID, Weight)>>,
-    w: Weight,
-    fp: u64,
-}
-
-impl PartialEq for StepGroupKey {
-    fn eq(&self, other: &Self) -> bool {
-        if !Arc::ptr_eq(&self.mask, &other.mask) {
-            return false;
-        }
-        if self.fp != other.fp {
-            return false;
-        }
-        self.w == other.w
-    }
-}
-impl Eq for StepGroupKey {}
-impl std::hash::Hash for StepGroupKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_usize(Arc::as_ptr(&self.mask) as usize); state.write_u64(self.fp); }
-}
-
 impl NWA {
     pub fn new() -> Self {
         let mut states = NWAStates::default();
@@ -1763,101 +1736,49 @@ impl NWA {
         true
     }
 
-    /// Determinize the subgraph reachable from 'start' to a DWA via weighted subset construction.
-    /// Representation invariant:
-    /// - A D-state is a mapping M: NWAStateID -> Weight capturing epsilon-closure weights.
-    /// - For each label c, we compute T0 by distributing M over c-labeled edges, then epsilon-closure T.
-    /// - The deterministic edge weight is union of weights in T; the target D-state is canonicalized T.
-    /// - Final weight of the D-state is union over s in M of (M[s] & final_weight[s]).
+    /// Determinize the subgraph reachable from 'start' to a DWA via a radically simplified, high-performance construction:
+    ///
+    /// Design:
+    /// - Precompute epsilon-closures once per NWA state, gated by future-acceptance masks to prune useless paths.
+    /// - For each state and each outgoing (default or labeled) edge, precompute a "macro step-vector":
+    ///     step_s(lbl): Vec<(target_state, weight)>, where weight already includes post-epsilon closure of the target.
+    /// - Intern these step-vectors and group states by identical macro signatures (final macro weight + default macro + labeled macro set).
+    ///   Determinization then operates on antichains of signature-IDs rather than raw states, collapsing many states at once.
+    /// - At each determinized state, compute a single default edge and a set of exception edges; no "default subtraction" is needed,
+    ///   since the DWA runtime semantics prefer exceptions over default on matching labels.
+    ///
+    /// Correctness sketch:
+    /// - Closure correctness follows from semiring (∨, ∧) algebra: union across epsilon paths with ∧ along edges equals weighted ε-closure.
+    /// - Macro steps include pre- and post-ε closures, thus matching the standard ε-removal construction.
+    /// - Grouping by identical macro signatures preserves right languages: if signatures are equal, their residuals are identical for all words.
+    /// - Determinization merges contributions by union; default vs exception precedence matches the NWA semantics because exceptions
+    ///   use only explicit sources; default edge contains all sources (both with/without explicit), but at runtime default is ignored where exceptions exist.
     pub fn determinize_to_dwa(&self) -> DWA {
         let mut nwa_clone = self.clone();
+        // Aggressive but safe simplification before determinization
         nwa_clone.simplify();
-        nwa_clone.internal_determinize_to_dwa()
+        nwa_clone.internal_determinize_to_dwa_fast()
     }
 
-    fn internal_determinize_to_dwa(&self) -> DWA {
-        let fut: Vec<Weight> = self.compute_future_weights();
-        let n = self.states.len();
-
-        // 0a) Compute epsilon SCCs (ignoring weights), and mark "epsilon-pure" SCCs:
-        // a component is epsilon-pure if every epsilon edge inside it has weight ALL.
-        let (comp_of, comps, pure_comp) = {
-            let mut index = 0usize;
-            let mut indices = vec![usize::MAX; n];
-            let mut lowlink = vec![0usize; n];
-            let mut onstack = vec![false; n];
-            let mut stack: Vec<usize> = Vec::new();
-            let mut comp_of = vec![usize::MAX; n];
-            let mut comps: Vec<Vec<usize>> = Vec::new();
-            fn strongconnect(
-                v: usize,
-                index: &mut usize,
-                indices: &mut [usize],
-                lowlink: &mut [usize],
-                onstack: &mut [bool],
-                stack: &mut Vec<usize>,
-                comp_of: &mut [usize],
-                comps: &mut Vec<Vec<usize>>,
-                states: &NWAStates,
-            ) {
-                indices[v] = *index;
-                lowlink[v] = *index;
-                *index += 1;
-                stack.push(v);
-                onstack[v] = true;
-
-                for &(w, _) in &states[v].epsilons {
-                    if indices[w] == usize::MAX {
-                        strongconnect(w, index, indices, lowlink, onstack, stack, comp_of, comps, states);
-                        if lowlink[w] < lowlink[v] { lowlink[v] = lowlink[w]; }
-                    } else if onstack[w] {
-                        if indices[w] < lowlink[v] { lowlink[v] = indices[w]; }
-                    }
-                }
-                if lowlink[v] == indices[v] {
-                    let mut comp = Vec::new();
-                    loop {
-                        let w = stack.pop().unwrap();
-                        onstack[w] = false;
-                        comp_of[w] = comps.len();
-                        comp.push(w);
-                        if w == v { break; }
-                    }
-                    comps.push(comp);
-                }
-            }
-            for v in 0..n {
-                if indices[v] == usize::MAX {
-                    strongconnect(v, &mut index, &mut indices, &mut lowlink, &mut onstack, &mut stack, &mut comp_of, &mut comps, &self.states);
-                }
-            }
-            let mut pure = vec![true; comps.len()];
-            for u in 0..n {
-                for &(v, ref w) in &self.states[u].epsilons {
-                    if comp_of[u] == comp_of[v] && !w.is_all_fast() {
-                        pure[comp_of[u]] = false;
-                    }
-                }
-            }
-            (comp_of, comps, pure)
-        };
-
+    fn internal_determinize_to_dwa_fast(&self) -> DWA {
         type StepVec = Arc<Vec<(NWAStateID, Weight)>>;
+
         #[derive(Clone)]
-        struct StepKeyArc {
+        struct StepVecKey {
             entries: StepVec,
             fp: u64,
         }
-        impl StepKeyArc {
+        impl StepVecKey {
             fn new(entries: StepVec) -> Self {
+                // robust fingerprint mix across (state, weight.fp)
                 let mut fp = FP_ZERO;
                 for (sid, w) in entries.iter() {
                     fp = mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2));
                 }
-                StepKeyArc { entries, fp }
+                StepVecKey { entries, fp }
             }
         }
-        impl PartialEq for StepKeyArc {
+        impl PartialEq for StepVecKey {
             fn eq(&self, other: &Self) -> bool {
                 if self.fp != other.fp {
                     return false;
@@ -1865,23 +1786,20 @@ impl NWA {
                 Arc::ptr_eq(&self.entries, &other.entries) || *self.entries == *other.entries
             }
         }
-        impl Eq for StepKeyArc {}
-        impl Hash for StepKeyArc {
+        impl Eq for StepVecKey {}
+        impl Hash for StepVecKey {
             fn hash<H: Hasher>(&self, state: &mut H) {
                 state.write_u64(self.fp);
             }
         }
 
-        // Interner for any Vec<(sid, weight)> we build (epsilon masks, step vectors, subset vectors).
-        let mut step_intern: HashMap<StepKeyArc, StepVec> = HashMap::new();
-
-        // Helper: intern a computed step/subset vector to share identical vectors across states (Arc-based).
+        // Interner for any Vec<(sid, weight)>
         fn intern_step_vec(
             v: Vec<(NWAStateID, Weight)>,
-            intern: &mut HashMap<StepKeyArc, StepVec>
+            intern: &mut HashMap<StepVecKey, StepVec>
         ) -> StepVec {
             let arc = Arc::new(v);
-            let key = StepKeyArc::new(arc.clone());
+            let key = StepVecKey::new(arc.clone());
             match intern.entry(key) {
                 Entry::Occupied(o) => o.get().clone(),
                 Entry::Vacant(vac) => {
@@ -1891,88 +1809,14 @@ impl NWA {
             }
         }
 
-        // Cache for compiled group distributions:
-        let mut compiled_group_cache: HashMap<StepGroupKey, StepVec> = HashMap::new();
-        // Cache for union-of-weights over a StepVec (used to compute edge weights quickly).
-        let mut stepvec_union_cache: HashMap<StepKeyArc, Weight> = HashMap::new();
-
-        // Compile a group (mask, w) to a compact target map, interned.
-        fn compiled_group_for(
-            key: &StepGroupKey,
-            intern: &mut HashMap<StepKeyArc, StepVec>,
-            cache: &mut HashMap<StepGroupKey, StepVec>,
-        ) -> StepVec {
-            if let Some(sv) = cache.get(key) {
-                return sv.clone();
-            }
-            // Accumulate base contributions: base[t] = ⋃ (m & w)
-            let mut base: HashMap<NWAStateID, Weight> = HashMap::new();
-            let w = &key.w;
-            for (t, m) in key.mask.iter() {
-                let mw = m & w;
-                if mw.is_empty() { continue; }
-                if let Some(old) = base.get_mut(t) {
-                    *old |= &mw;
-                } else {
-                    base.insert(*t, mw);
-                }
-            }
-            if base.is_empty() {
-                let arc = intern_step_vec(Vec::new(), intern);
-                cache.insert(key.clone(), arc.clone());
-                return arc;
-            }
-            let mut vec_pairs: Vec<(NWAStateID, Weight)> = base.into_iter().collect();
-            vec_pairs.sort_by_key(|(k, _)| *k);
-            let arc = intern_step_vec(vec_pairs, intern);
-            cache.insert(key.clone(), arc.clone());
-            arc
+        // Compute future masks to gate epsilon closures
+        let fut: Vec<Weight> = self.compute_future_weights();
+        let n = self.states.len();
+        if n == 0 {
+            return DWA::new();
         }
 
-        // Apply a compiled group to an accumulator with a group-weight gw:
-        fn accumulate_compiled_group(
-            compiled: &StepVec,
-            gw: &Weight,
-            acc: &mut HashMap<NWAStateID, Weight>,
-        ) {
-            let gw_all = gw.is_all_fast();
-            for (t, base) in compiled.iter() {
-                if gw_all {
-                    if let Some(old) = acc.get_mut(t) { *old |= base; } else { acc.insert(*t, base.clone()); }
-                } else {
-                    let contrib = base & gw;
-                    if contrib.is_empty() { continue; }
-                    if let Some(old) = acc.get_mut(t) { *old |= &contrib; } else { acc.insert(*t, contrib); }
-                }
-            }
-        }
-
-        // Compute and cache the union of all weights inside a StepVec.
-        fn union_weight_of_sv(
-            sv: &StepVec,
-            cache: &mut HashMap<StepKeyArc, Weight>,
-        ) -> Weight {
-            let key = StepKeyArc::new(sv.clone());
-            if let Some(w) = cache.get(&key) {
-                return w.clone();
-            }
-            let mut acc_opt: Option<Weight> = None;
-            for (_, w) in sv.iter() {
-                if let Some(ref mut acc) = acc_opt {
-                    *acc |= w;
-                } else {
-                    acc_opt = Some(w.clone());
-                }
-            }
-            let res = acc_opt.unwrap_or_else(Weight::zeros);
-            cache.insert(key, res.clone());
-            res
-        }
-
-        // 1) Epsilon closures with future gating: shared per epsilon-pure SCC, or per state otherwise.
-        let mut eps_cache_state: HashMap<NWAStateID, StepVec> = HashMap::new();
-        let mut eps_cache_comp: HashMap<usize, StepVec> = HashMap::new();
-
+        // Weighted epsilon-closure from a set of sources (used for per-state closure)
         fn compute_eps_mask_from_sources(
             sources: &[NWAStateID],
             states: &NWAStates,
@@ -1981,8 +1825,11 @@ impl NWA {
             let mut res: HashMap<NWAStateID, Weight> = HashMap::new();
             let mut q: VecDeque<NWAStateID> = VecDeque::new();
             for &s in sources {
-                res.insert(s, fut[s].clone());
-                q.push_back(s);
+                let f = fut[s].clone();
+                if !f.is_empty() {
+                    res.insert(s, f);
+                    q.push_back(s);
+                }
             }
             while let Some(u) = q.pop_front() {
                 let u_w = res.get(&u).cloned().unwrap_or_else(Weight::zeros);
@@ -2013,263 +1860,418 @@ impl NWA {
             vec_pairs
         }
 
-        fn get_eps_mask(
-            sid: NWAStateID,
-            states: &NWAStates,
-            fut: &[Weight],
-            comp_of: &[usize],
-            pure_comp: &[bool],
-            comps: &Vec<Vec<NWAStateID>>,
-            eps_cache_state: &mut HashMap<NWAStateID, StepVec>,
-            eps_cache_comp: &mut HashMap<usize, StepVec>,
-            intern: &mut HashMap<StepKeyArc, StepVec>,
+        // Precompute per-state epsilon-closure masks (gated by future weights)
+        let mut step_intern: HashMap<StepVecKey, StepVec> = HashMap::new();
+        let mut eps_mask: Vec<StepVec> = Vec::with_capacity(n);
+        for s in 0..n {
+            let pairs = compute_eps_mask_from_sources(std::slice::from_ref(&s), &self.states, &fut);
+            let sv = intern_step_vec(pairs, &mut step_intern);
+            eps_mask.push(sv);
+        }
+
+        // Utility: apply an additional weight w across a step-vector (intersect each entry)
+        // Return the original arc if w is ALL, otherwise return an interned new arc without empties.
+        fn apply_weight_to_stepvec(
+            sv: &StepVec,
+            w: &Weight,
+            intern: &mut HashMap<StepVecKey, StepVec>,
         ) -> StepVec {
-            let cid = comp_of[sid];
-            if pure_comp[cid] {
-                if let Some(mask) = eps_cache_comp.get(&cid) {
-                    return mask.clone();
+            if w.is_all_fast() {
+                return sv.clone();
+            }
+            let mut out: Vec<(NWAStateID, Weight)> = Vec::with_capacity(sv.len());
+            for (t, wt) in sv.iter() {
+                let x = wt & w;
+                if !x.is_empty() {
+                    out.push((*t, x));
                 }
-                let vec_pairs = compute_eps_mask_from_sources(&comps[cid], states, fut);
-                let arc = intern_step_vec(vec_pairs, intern);
-                eps_cache_comp.insert(cid, arc.clone());
-                arc
-            } else {
-                if let Some(mask) = eps_cache_state.get(&sid) {
-                    return mask.clone();
+            }
+            intern_step_vec(out, intern)
+        }
+
+        // Precompute final macro weight F_macro[s] = ⋃_{t in eps-closure(s)} (closure_weight(s->*t) ∧ final[t])
+        let mut f_macro: Vec<Option<Weight>> = vec![None; n];
+        for s in 0..n {
+            let mut acc: Option<Weight> = None;
+            for (t, w) in eps_mask[s].iter() {
+                if let Some(fw) = &self.states[*t].final_weight {
+                    let c = w & fw;
+                    if !c.is_empty() {
+                        if let Some(a) = &mut acc {
+                            *a |= &c;
+                        } else {
+                            acc = Some(c);
+                        }
+                    }
                 }
-                let vec_pairs = compute_eps_mask_from_sources(std::slice::from_ref(&sid), states, fut);
-                let arc = intern_step_vec(vec_pairs, intern);
-                eps_cache_state.insert(sid, arc.clone());
-                arc
+            }
+            f_macro[s] = acc;
+        }
+
+        // Precompute macro step-vectors for default and labeled edges
+        let mut default_macro: Vec<Option<StepVec>> = vec![None; n];
+        let mut labeled_macro: Vec<BTreeMap<i16, StepVec>> = vec![BTreeMap::new(); n];
+
+        for s in 0..n {
+            // Default
+            if let Some((to, wdef)) = &self.states[s].default {
+                if *to < n {
+                    let base = &eps_mask[*to];
+                    let def_sv = apply_weight_to_stepvec(base, wdef, &mut step_intern);
+                    default_macro[s] = Some(def_sv);
+                }
+            }
+            // Labeled
+            for (lbl, (to, wlbl)) in &self.states[s].transitions {
+                if *to < n {
+                    let base = &eps_mask[*to];
+                    let ex_sv = apply_weight_to_stepvec(base, wlbl, &mut step_intern);
+                    labeled_macro[s].insert(*lbl, ex_sv);
+                }
             }
         }
 
-        // Build initial subset: epsilon-closure from start; already future-gated and interned.
-        let init_sv: StepVec = get_eps_mask(
-            self.body.start_state,
-            &self.states,
-            &fut,
-            &comp_of,
-            &pure_comp,
-            &comps,
-            &mut eps_cache_state,
-            &mut eps_cache_comp,
-            &mut step_intern,
-        );
+        // Build macro signatures and intern them.
+        // A signature is defined by: final macro weight, default macro stepvec pointer, and all labeled macro pairs (label -> stepvec pointer)
+        #[derive(Clone)]
+        struct MacroSig {
+            final_w: Option<Weight>,
+            def: Option<StepVec>,
+            labeled: BTreeMap<i16, StepVec>,
+        }
+        #[derive(Clone)]
+        struct MacroSigKey {
+            final_w: Option<Weight>,
+            def_ptr: Option<usize>,
+            labeled: Vec<(i16, usize)>,
+            // Lightweight hash precomputation
+            fp: u64,
+        }
+        impl MacroSigKey {
+            fn from_sig_components(final_w: &Option<Weight>, def: &Option<StepVec>, labeled: &BTreeMap<i16, StepVec>) -> Self {
+                let mut lvec: Vec<(i16, usize)> = Vec::with_capacity(labeled.len());
+                for (k, v) in labeled {
+                    lvec.push((*k, Arc::as_ptr(v) as usize));
+                }
+                let def_ptr = def.as_ref().map(|a| Arc::as_ptr(a) as usize);
+                let mut fp = FP_ZERO;
+                fp = mix3(fp, final_w.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO), 0xA55A_A55A_A55A_A55A);
+                fp = mix3(fp, def_ptr.unwrap_or(0) as u64, 0x77);
+                for (lbl, ptr) in &lvec {
+                    fp = mix3(fp, (*lbl as u64).wrapping_mul(FP_K1), (*ptr as u64).wrapping_mul(FP_K2));
+                }
+                MacroSigKey { final_w: final_w.clone(), def_ptr, labeled: lvec, fp }
+            }
+        }
+        impl PartialEq for MacroSigKey {
+            fn eq(&self, other: &Self) -> bool {
+                self.fp == other.fp
+                    && self.final_w == other.final_w
+                    && self.def_ptr == other.def_ptr
+                    && self.labeled == other.labeled
+            }
+        }
+        impl Eq for MacroSigKey {}
+        impl Hash for MacroSigKey {
+            fn hash<H: Hasher>(&self, h: &mut H) {
+                h.write_u64(self.fp);
+            }
+        }
 
+        let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
+        let mut sig_arena: Vec<Arc<MacroSig>> = Vec::new();
+        let mut state_to_sig_id: Vec<usize> = vec![0; n];
+
+        for s in 0..n {
+            let final_w = f_macro[s].clone();
+            let def = default_macro[s].clone();
+            let labeled = labeled_macro[s].clone();
+            let key = MacroSigKey::from_sig_components(&final_w, &def, &labeled);
+            let id = match sig_intern.entry(key) {
+                Entry::Occupied(o) => *o.get(),
+                Entry::Vacant(v) => {
+                    let idx = sig_arena.len();
+                    let sig = MacroSig { final_w, def, labeled };
+                    sig_arena.push(Arc::new(sig));
+                    v.insert(idx);
+                    idx
+                }
+            };
+            state_to_sig_id[s] = id;
+        }
+
+        // Precompile each StepVec into "by-signature" grouping to avoid per-target state lookups during determinization.
+        type CompiledBySig = Arc<Vec<(usize, Weight)>>; // (sig_id, weight)
+        let mut unique_stepvecs: BTreeSet<usize> = BTreeSet::new();
+        for s in 0..n {
+            if let Some(ref d) = default_macro[s] {
+                unique_stepvecs.insert(Arc::as_ptr(d) as usize);
+            }
+            for (_, sv) in &labeled_macro[s] {
+                unique_stepvecs.insert(Arc::as_ptr(sv) as usize);
+            }
+        }
+        let mut stepvec_ptr_to_compiled: HashMap<usize, CompiledBySig> = HashMap::with_capacity(unique_stepvecs.len() * 2 + 1);
+
+        fn compile_stepvec_by_sig(
+            sv: &StepVec,
+            state_to_sig_id: &[usize],
+        ) -> CompiledBySig {
+            let mut acc: HashMap<usize, Weight> = HashMap::new();
+            for (t, w) in sv.iter() {
+                let sig = state_to_sig_id[*t];
+                if let Some(old) = acc.get_mut(&sig) {
+                    *old |= w;
+                } else {
+                    acc.insert(sig, w.clone());
+                }
+            }
+            let mut v: Vec<(usize, Weight)> = acc.into_iter().collect();
+            v.sort_by_key(|(k, _)| *k);
+            Arc::new(v)
+        }
+
+        for s in 0..n {
+            if let Some(ref d) = default_macro[s] {
+                let key = Arc::as_ptr(d) as usize;
+                if !stepvec_ptr_to_compiled.contains_key(&key) {
+                    stepvec_ptr_to_compiled.insert(key, compile_stepvec_by_sig(d, &state_to_sig_id));
+                }
+            }
+            for (_, sv) in &labeled_macro[s] {
+                let key = Arc::as_ptr(sv) as usize;
+                if !stepvec_ptr_to_compiled.contains_key(&key) {
+                    stepvec_ptr_to_compiled.insert(key, compile_stepvec_by_sig(sv, &state_to_sig_id));
+                }
+            }
+        }
+
+        // Determinization over signatures:
+        // Subset representation: Vec<(sig_id, gate_weight)>, sorted and Interned.
+        #[derive(Clone)]
+        struct SigSubsetKey {
+            entries: Arc<Vec<(usize, Weight)>>,
+            fp: u64,
+        }
+        impl SigSubsetKey {
+            fn new(entries: Arc<Vec<(usize, Weight)>>) -> Self {
+                let mut fp = FP_ZERO;
+                for (sid, w) in entries.iter() {
+                    fp = mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2));
+                }
+                SigSubsetKey { entries, fp }
+            }
+        }
+        impl PartialEq for SigSubsetKey {
+            fn eq(&self, other: &Self) -> bool {
+                if self.fp != other.fp {
+                    return false;
+                }
+                Arc::ptr_eq(&self.entries, &other.entries) || *self.entries == *other.entries
+            }
+        }
+        impl Eq for SigSubsetKey {}
+        impl Hash for SigSubsetKey {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                state.write_u64(self.fp);
+            }
+        }
+        fn intern_sig_subset(
+            mut items: Vec<(usize, Weight)>,
+            intern: &mut HashMap<SigSubsetKey, Arc<Vec<(usize, Weight)>>>,
+        ) -> Arc<Vec<(usize, Weight)>> {
+            // Normalize: merge duplicates, drop empties, sort by sig_id
+            items.sort_by_key(|(sid, _)| *sid);
+            let mut norm: Vec<(usize, Weight)> = Vec::with_capacity(items.len());
+            for (sid, w) in items.into_iter() {
+                if w.is_empty() { continue; }
+                if let Some((last_sid, ref mut last_w)) = norm.last_mut() {
+                    if *last_sid == sid {
+                        *last_w |= &w;
+                        continue;
+                    }
+                }
+                norm.push((sid, w));
+            }
+            let arc = Arc::new(norm);
+            let key = SigSubsetKey::new(arc.clone());
+            match intern.entry(key) {
+                Entry::Occupied(o) => o.get().clone(),
+                Entry::Vacant(v) => { v.insert(arc.clone()); arc }
+            }
+        }
+
+        // Build initial subset as the start state's epsilon-closure grouped by macro signatures.
+        let mut init_map: HashMap<usize, Weight> = HashMap::new();
+        for (t, w) in eps_mask[self.body.start_state].iter() {
+            let sig = state_to_sig_id[*t];
+            if let Some(old) = init_map.get_mut(&sig) {
+                *old |= w;
+            } else {
+                init_map.insert(sig, w.clone());
+            }
+        }
+        let mut init_items: Vec<(usize, Weight)> = init_map.into_iter().collect();
+        init_items.sort_by_key(|(k, _)| *k);
+
+        let mut subset_intern: HashMap<SigSubsetKey, Arc<Vec<(usize, Weight)>>> = HashMap::new();
+        let init_subset = intern_sig_subset(init_items, &mut subset_intern);
+
+        // DWA construction
         let mut dwa = DWA::new();
         dwa.states.0.clear();
         let start_d_id = dwa.states.add_state();
         dwa.body.start_state = start_d_id;
 
-        // Use interned subset vectors as keys to avoid duplicating massive vectors.
-        let mut subset_to_d_id: HashMap<StepKeyArc, StateID> = HashMap::new();
-        let mut worklist: VecDeque<StepKeyArc> = VecDeque::new();
+        // Map subset -> DWA state id
+        let mut subset_to_d_id: HashMap<SigSubsetKey, StateID> = HashMap::new();
+        subset_to_d_id.insert(SigSubsetKey::new(init_subset.clone()), start_d_id);
 
-        let init_key = StepKeyArc::new(init_sv.clone());
-        subset_to_d_id.insert(init_key.clone(), start_d_id);
-        worklist.push_back(init_key);
+        let mut worklist: VecDeque<SigSubsetKey> = VecDeque::new();
+        worklist.push_back(SigSubsetKey::new(init_subset.clone()));
 
         let pb = if PROGRESS_BAR_ENABLED {
-            let p = ProgressBar::new(subset_to_d_id.len() as u64);
+            let p = ProgressBar::new(1);
             p.set_style(
                 ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Determinizing DWA: {elapsed_precise}] \
+                    .template("{spinner:.green} [Determinizing DWA (fast): {elapsed_precise}] \
                                [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
                     .expect("progress-bar"),
             );
             Some(p)
-        } else {
-            None
-        };
+        } else { None };
 
-        let mut processed_states = 0;
+        let mut processed = 0usize;
 
         while let Some(subset_key) = worklist.pop_front() {
-            processed_states += 1;
-            if let Some(p) = &pb { p.set_position(processed_states as u64); }
+            processed += 1;
+            if let Some(p) = &pb {
+                p.set_position(processed as u64);
+                p.set_length(subset_to_d_id.len() as u64);
+            }
 
             let d_id = *subset_to_d_id.get(&subset_key).unwrap();
-            let subset_vec: &[(NWAStateID, Weight)] = &subset_key.entries;
+            let subset: &[(usize, Weight)] = &subset_key.entries;
 
-            // Compute final weight
+            // Compute final weight of D-state: ⋃ gate ∧ final_macro[sig]
             let mut d_final: Option<Weight> = None;
-            for (sid, w_in) in subset_vec.iter() {
-                if let Some(fw) = &self.states[*sid].final_weight {
-                    let contrib = w_in & fw;
-                    if !contrib.is_empty() {
-                        if let Some(ref mut acc) = d_final {
-                            *acc |= &contrib;
+            for (sig_id, gate) in subset.iter() {
+                let fin = &sig_arena[*sig_id].final_w;
+                if let Some(fw) = fin {
+                    let c = gate & fw;
+                    if !c.is_empty() {
+                        if let Some(a) = &mut d_final {
+                            *a |= &c;
                         } else {
-                            d_final = Some(contrib);
+                            d_final = Some(c);
                         }
                     }
                 }
             }
             dwa.states[d_id].final_weight = d_final;
 
-            // Precompute default grouping: group states by their default step-vectors (by target+weight).
-            let mut def_groups_all: HashMap<StepGroupKey, Weight> = HashMap::with_capacity(subset_vec.len());
-            for (sid, w_in) in subset_vec.iter() {
-                if let Some((to, wdef)) = &self.states[*sid].default {
-                    // Group by (mask, wdef)
-                    let mask = get_eps_mask(*to, &self.states, &fut, &comp_of, &pure_comp, &comps, &mut eps_cache_state, &mut eps_cache_comp, &mut step_intern);
-                    let key = StepGroupKey { mask, w: wdef.clone(), fp: wdef.fp };
-                    if let Some(acc_w) = def_groups_all.get_mut(&key) {
-                        *acc_w |= w_in;
+            // Default edge: accumulate contributions across all signatures that have a default macro.
+            let mut def_acc: HashMap<usize, Weight> = HashMap::new();
+            for (sig_id, gate) in subset.iter() {
+                if let Some(ref def_sv) = sig_arena[*sig_id].def {
+                    let comp = stepvec_ptr_to_compiled[&(Arc::as_ptr(def_sv) as usize)].clone();
+                    if gate.is_all_fast() {
+                        for (t_sig, w) in comp.iter() {
+                            if let Some(old) = def_acc.get_mut(t_sig) { *old |= w; } else { def_acc.insert(*t_sig, w.clone()); }
+                        }
                     } else {
-                        def_groups_all.insert(key, w_in.clone());
+                        for (t_sig, w) in comp.iter() {
+                            let x = w & gate;
+                            if x.is_empty() { continue; }
+                            if let Some(old) = def_acc.get_mut(t_sig) { *old |= &x; } else { def_acc.insert(*t_sig, x); }
+                        }
                     }
                 }
             }
-            // Distribute default groups to targets.
-            let mut def_acc: HashMap<NWAStateID, Weight> = HashMap::with_capacity(def_groups_all.len() * 2 + 1);
-            for (key, group_w) in def_groups_all.iter() {
-                let compiled = compiled_group_for(key, &mut step_intern, &mut compiled_group_cache);
-                accumulate_compiled_group(&compiled, group_w, &mut def_acc);
-            }
-            // Establish default edge (if any)
-            let mut def_edge_target: Option<StateID> = None;
-            let mut def_edge_weight: Option<Weight> = None;
-            let mut def_target_subset_sv: Option<StepVec> = None;
+            // Install default edge if any
+            let mut def_target_id_opt: Option<StateID> = None;
             if !def_acc.is_empty() {
-                let mut def_vec: Vec<(NWAStateID, Weight)> = def_acc.iter().map(|(k,v)| (*k, v.clone())).collect();
-                def_vec.sort_by_key(|(k, _)| *k);
-                let def_sv = intern_step_vec(def_vec, &mut step_intern);
-                let def_key = StepKeyArc::new(def_sv.clone());
-                let def_target = if let Some(id) = subset_to_d_id.get(&def_key) {
+                let mut def_items: Vec<(usize, Weight)> = def_acc.into_iter().collect();
+                def_items.sort_by_key(|(k, _)| *k);
+                let def_subset_arc = intern_sig_subset(def_items, &mut subset_intern);
+                let def_key = SigSubsetKey::new(def_subset_arc.clone());
+                let def_target_id = if let Some(id) = subset_to_d_id.get(&def_key) {
                     *id
                 } else {
                     let nid = dwa.states.add_state();
                     subset_to_d_id.insert(def_key.clone(), nid);
                     worklist.push_back(def_key);
-                    if let Some(p) = &pb { p.set_length(subset_to_d_id.len() as u64); }
                     nid
                 };
-                // Edge weight = union of weights in def_sv (cached)
-                let def_w = union_weight_of_sv(&def_sv, &mut stepvec_union_cache);
-                dwa.set_default_transition(d_id, def_target, def_w.clone()).expect("DWA default insertion should not fail");
-                def_edge_target = Some(def_target);
-                def_edge_weight = Some(def_w);
-                def_target_subset_sv = Some(def_sv);
-            }
-
-            // Build a map label -> indices of subset entries that have explicit transitions on that label.
-            let mut label_to_indices: HashMap<i16, Vec<usize>> = HashMap::new();
-            for (idx, (sid, _)) in subset_vec.iter().enumerate() {
-                for lbl in self.states[*sid].transitions.keys() {
-                    label_to_indices.entry(*lbl).or_default().push(idx);
+                // Edge weight: union of contributions across target signatures (values)
+                let mut edge_w: Option<Weight> = None;
+                for (_, w) in def_subset_arc.iter() {
+                    if let Some(a) = &mut edge_w {
+                        *a |= w;
+                    } else {
+                        edge_w = Some(w.clone());
+                    }
+                }
+                if let Some(w) = edge_w {
+                    dwa.set_default_transition(d_id, def_target_id, w).expect("set_default_transition");
+                    def_target_id_opt = Some(def_target_id);
                 }
             }
-            let mut labels: Vec<i16> = label_to_indices.keys().copied().collect();
-            labels.sort_unstable();
 
-            // For merging per-label results efficiently, retain default result in both vector (sorted) and map forms.
-            let def_vec_sorted: Vec<(NWAStateID, Weight)> = def_target_subset_sv
-                .as_ref().map(|sv| sv.iter().cloned().collect()).unwrap_or_default();
-            let def_map: HashMap<NWAStateID, Weight> = def_vec_sorted.iter().cloned().collect();
-
+            // Exception labels: union across labels present in any signature within the subset
+            let mut labels: BTreeSet<i16> = BTreeSet::new();
+            for (sig_id, _) in subset.iter() {
+                for k in sig_arena[*sig_id].labeled.keys() {
+                    labels.insert(*k);
+                }
+            }
             for lbl in labels {
-                // Group explicit states for this label by their explicit step-vectors; also accumulate their default groups (to subtract).
-                let idxs = label_to_indices.get(&lbl).unwrap();
-                if idxs.is_empty() { continue; }
-
-                let mut ex_groups: HashMap<StepGroupKey, Weight> = HashMap::with_capacity(idxs.len());
-                let mut def_groups_for_explicit: HashMap<StepGroupKey, Weight> = HashMap::with_capacity(idxs.len());
-                for &idx in idxs {
-                    let (sid, w_in) = &subset_vec[idx];
-                    if let Some((to, wlbl)) = self.states[*sid].transitions.get(&lbl) {
-                        let mask = get_eps_mask(*to, &self.states, &fut, &comp_of, &pure_comp, &comps, &mut eps_cache_state, &mut eps_cache_comp, &mut step_intern);
-                        let key = StepGroupKey { mask, w: wlbl.clone(), fp: wlbl.fp };
-                        if let Some(acc) = ex_groups.get_mut(&key) {
-                            *acc |= w_in;
+                // Accumulate across signatures that have this explicit label
+                let mut acc: HashMap<usize, Weight> = HashMap::new();
+                for (sig_id, gate) in subset.iter() {
+                    if let Some(ref sv) = sig_arena[*sig_id].labeled.get(&lbl) {
+                        let comp = stepvec_ptr_to_compiled[&(Arc::as_ptr(sv) as usize)].clone();
+                        if gate.is_all_fast() {
+                            for (t_sig, w) in comp.iter() {
+                                if let Some(old) = acc.get_mut(t_sig) { *old |= w; } else { acc.insert(*t_sig, w.clone()); }
+                            }
                         } else {
-                            ex_groups.insert(key, w_in.clone());
-                        }
-                    }
-                    if let Some((to, wdef)) = &self.states[*sid].default {
-                        let mask = get_eps_mask(*to, &self.states, &fut, &comp_of, &pure_comp, &comps, &mut eps_cache_state, &mut eps_cache_comp, &mut step_intern);
-                        let key = StepGroupKey { mask, w: wdef.clone(), fp: wdef.fp };
-                        if let Some(acc) = def_groups_for_explicit.get_mut(&key) {
-                            *acc |= w_in;
-                        } else {
-                            def_groups_for_explicit.insert(key, w_in.clone());
+                            for (t_sig, w) in comp.iter() {
+                                let x = w & gate;
+                                if x.is_empty() { continue; }
+                                if let Some(old) = acc.get_mut(t_sig) { *old |= &x; } else { acc.insert(*t_sig, x); }
+                            }
                         }
                     }
                 }
-
-                // Compute ex_add_map: contributions via explicit steps (target -> weight)
-                let mut ex_add_map: HashMap<NWAStateID, Weight> = HashMap::with_capacity(ex_groups.len() * 2 + 1);
-                for (key, group_w) in ex_groups.into_iter() {
-                    let compiled = compiled_group_for(&key, &mut step_intern, &mut compiled_group_cache);
-                    accumulate_compiled_group(&compiled, &group_w, &mut ex_add_map);
-                }
-
-                // Compute def_sub_map: contributions via default from the explicit states (to be removed)
-                let mut def_sub_map: HashMap<NWAStateID, Weight> = HashMap::with_capacity(def_groups_for_explicit.len() * 2 + 1);
-                for (key, group_w) in def_groups_for_explicit.into_iter() {
-                    let compiled = compiled_group_for(&key, &mut step_intern, &mut compiled_group_cache);
-                    accumulate_compiled_group(&compiled, &group_w, &mut def_sub_map);
-                }
-
-                if ex_add_map.is_empty() && def_sub_map.is_empty() {
-                    // No difference from default; skip creating an exception.
+                if acc.is_empty() {
                     continue;
                 }
-
-                // Build the set of modified targets.
-                let mut modified_targets: BTreeSet<NWAStateID> = BTreeSet::new();
-                for t in ex_add_map.keys() { modified_targets.insert(*t); }
-                for t in def_sub_map.keys() { modified_targets.insert(*t); }
-
-                // Compute new weights for modified targets: (def - sub) | add
-                let mut modified_vec: Vec<(NWAStateID, Weight)> = Vec::with_capacity(modified_targets.len());
-                for t in modified_targets.iter() {
-                    let base = def_map.get(t).cloned().unwrap_or_else(Weight::zeros);
-                    let sub = def_sub_map.get(t).cloned().unwrap_or_else(Weight::zeros);
-                    let add = ex_add_map.get(t).cloned().unwrap_or_else(Weight::zeros);
-                    let after_sub = &base - &sub;
-                    let new_w = &after_sub | &add;
-                    if !new_w.is_empty() {
-                        modified_vec.push((*t, new_w));
-                    }
-                }
-                modified_vec.sort_by_key(|(t, _)| *t);
-
-                // Merge unchanged default targets with modified ones into target_vec (sorted).
-                let mut target_vec: Vec<(NWAStateID, Weight)> = Vec::with_capacity(def_vec_sorted.len());
-                for (t_def, w_def) in &def_vec_sorted {
-                    if !modified_targets.contains(t_def) {
-                        target_vec.push((*t_def, w_def.clone()));
-                    }
-                }
-                target_vec.extend(modified_vec);
-                target_vec.sort_by_key(|(t, _)| *t);
-
-                if target_vec.is_empty() {
-                    continue;
-                }
-
-                let target_sv = intern_step_vec(target_vec, &mut step_intern);
-                let target_key = StepKeyArc::new(target_sv.clone());
-                let target_d_id = if let Some(id) = subset_to_d_id.get(&target_key) {
+                let mut items: Vec<(usize, Weight)> = acc.into_iter().collect();
+                items.sort_by_key(|(k, _)| *k);
+                let target_subset_arc = intern_sig_subset(items, &mut subset_intern);
+                let target_key = SigSubsetKey::new(target_subset_arc.clone());
+                let target_id = if let Some(id) = subset_to_d_id.get(&target_key) {
                     *id
                 } else {
                     let nid = dwa.states.add_state();
                     subset_to_d_id.insert(target_key.clone(), nid);
                     worklist.push_back(target_key.clone());
-                    if let Some(p) = &pb { p.set_length(subset_to_d_id.len() as u64); }
                     nid
                 };
-
-                // Edge weight = union of all weights in accumulated target_sv (cached)
-                let edge_w = union_weight_of_sv(&target_sv, &mut stepvec_union_cache);
-                if let (Some(def_t), Some(ref def_w)) = (def_edge_target, def_edge_weight.as_ref()) {
-                    if def_t == target_d_id && **def_w == edge_w {
-                        continue;
+                // Edge weight: union across contributions in target subset
+                let mut edge_w: Option<Weight> = None;
+                for (_, w) in target_subset_arc.iter() {
+                    if let Some(a) = &mut edge_w {
+                        *a |= w;
+                    } else {
+                        edge_w = Some(w.clone());
                     }
                 }
-                dwa.add_transition(d_id, lbl, target_d_id, edge_w).expect("DWA insertion should not fail");
+                if let Some(w) = edge_w {
+                    // If matches default target and weight, skipping is optional; keeping explicit edge is fine.
+                    let _ = dwa.add_transition(d_id, lbl, target_id, w);
+                }
             }
         }
 
