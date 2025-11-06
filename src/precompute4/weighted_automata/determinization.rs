@@ -1,40 +1,19 @@
 // src/precompute4/weighted_automata/determinization.rs
 //
-// A radically simpler, cache-friendly determinization specialized for:
-// - Large alphabets with default transitions,
-// - Bitset weights where path-combination is intersection (AND) and choice-combination is union (OR),
-// - Epsilon transitions.
+// A new determinization that avoids state explosion by:
+// - Defining determinized states only by the set of contributing macro-signatures (structure),
+//   not by the current gating weights (which are monotone and propagated to a fixpoint).
+// - Propagating weights to those structural states until convergence (worklist), thus merging
+//   all runs that reach the same structural subset instead of creating duplicate states.
+// - Exploiting default transitions: compute a per-state default baseline once, then patch per-label
+//   using only the differences (overrides and exceptions), avoiding per-label recomputation.
+// - Precomputing ε-closures and compiling transition step-vectors once, heavily reusing them.
 //
-// Design goals:
-// - Avoid per-label recomputation wherever possible.
-// - Use numeric IDs and dense vectors instead of pointer-based Arcs for core caches.
-// - Group NWA states into "macro signatures" that are identical w.r.t. determinization (finals + default step + labeled steps).
-// - Compile any step-vector (weighted ε-closed target list) by macro-signature once, and reuse.
-// - For any determinized state (subset of macro-signatures gated by weights), compute:
-//     * A single default target and weight
-//     * Exception patches for labels that actually appear as exceptions in some member signature of the subset,
-//       using a multiway merge over the member signatures' exception maps, not via label maps accumulation.
+// This completely replaces the previous determinization and is designed to avoid building
+// hundreds of thousands of redundant states. It also avoids per-edge mutation during fixpoint;
+// we build the final DWA only after all weights converge.
 //
-// Major correctness notes:
-// - Each "macro signature" captures all that matters about an NWA state to determinization: final-weight after ε-closure,
-//   default step-vector (if any), and the exception step-vectors map.
-// - Determinized states are represented as a compact antichain of (macro_sig_id, Weight). For a fixed macro_sig_id,
-//   only a single weight is kept, and dominated weights are removed by inclusion (w_small ⊆ w_big -> drop w_small).
-// - For any label ℓ, the determinized transition is assembled as:
-//       default_contrib
-//     + (exceptions for ℓ)
-//     - (default-overs for the signatures that have an exception on ℓ)
-//   Both target-subset and the transition-weight are computed using compiled step-vectors-by-signature.
-// - We never add a labeled exception whose (target subset, edge weight) equals the default edge; this avoids
-//   creating spurious exception edges and prevents downstream blowups.
-//
-// Performance notes:
-// - No progress bars; no per-label HashMaps; only a single multiway-merge per determinized state over its
-//   member signatures' exception-label iterators.
-// - Heavy allocations avoided; fast numeric IDs for interning step-vectors and macro-signatures.
-// - Subsets are normalized aggressively (union per signature id + antichain pruning).
-//
-// This code replaces the previous determinization implementation entirely.
+// Semantics preserved for bitset weights with ∧ on path and ∨ over choices.
 
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
@@ -52,41 +31,28 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 impl NWA {
-    /// Determinize to DWA using a compact, ID-based algorithm:
-    /// - Compute ε-closures pruned by future-acceptance masks.
-    /// - Build macro-signatures per NWA-state: final mask, default step-vector, exception step-vectors.
-    /// - Intern step-vectors and compile them "by signature" once (target-signature -> weight).
-    /// - Determinize over weighted sets of macro-signatures (with antichain normalization).
-    /// - For each determinized state:
-    ///     * Compute default target once.
-    ///     * Traverse all exceptions by multiway merge over member signatures' label maps.
-    ///     * For each unique patch (override default ptrs, add exception ptrs) compute patched result once
-    ///       and reuse for all labels sharing the same patch (within this determinized state).
-    ///
-    /// The result is deterministic and semantically equivalent to the original NWA (bitset-weight semantics).
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
 
-        // Make a working copy to simplify in place if needed.
         let mut nwa = self.clone();
-        // Optional: simplify(); keep as-is to preserve semantics, but it's usually beneficial.
+        // Keep as-is; NWA::simplify may reduce epsilon chains, exceptions, etc.
         nwa.simplify();
 
-        let result = nwa.internal_determinize_compact();
+        let result = nwa.determinize_fixpoint_structural();
 
         crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
         result
     }
 
-    fn internal_determinize_compact(&self) -> DWA {
-        // 1) Compute future acceptance masks (prune closure propagation)
+    /// Determinize using structural subset states + weight fixpoint propagation.
+    fn determinize_fixpoint_structural(&self) -> DWA {
         let fut = self.compute_future_weights();
         let n = self.states.len();
         if n == 0 {
             return DWA::new();
         }
 
-        // 2) Weighted ε-closure from a set of sources, pruned by fut[]
+        // Weighted ε-closure from a set of sources, pruned by fut[]
         fn eps_closure_masked(
             sources: &[NWAStateID],
             states: &NWAStates,
@@ -132,36 +98,21 @@ impl NWA {
             v
         }
 
-        // 3) Interned step-vectors
         type StepVecPairs = Vec<(NWAStateID, Weight)>;
 
         #[derive(Clone)]
-        struct StepVecKey {
-            fp: u64,
-            len: usize,
-            // No need to store all content here; equality check is done by scanning candidates;
-            // we still must be careful to avoid heavy clones; We keep an index to the pool on insert.
-        }
-
-        #[derive(Clone)]
         struct StepVecData {
-            pairs: StepVecPairs, // sorted by NWAStateID
-            compiled_by_sig: Vec<(usize, Weight)>, // to be filled post-intern by using state_to_sig_id
+            pairs: StepVecPairs,              // sorted by NWAStateID
+            compiled_by_sig: Vec<(usize, Weight)>, // (macro_sig_id, weight)
             total_mask: Weight,
         }
 
         struct StepVecPool {
-            // Storage
             data: Vec<StepVecData>,
-            // Map from content to id
             map: HashMap<u64, Vec<usize>>, // fp -> candidates
         }
-
         impl StepVecPool {
-            fn new() -> Self {
-                Self { data: Vec::new(), map: HashMap::new() }
-            }
-
+            fn new() -> Self { Self { data: Vec::new(), map: HashMap::new() } }
             fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
                 let mut fp = FP_ZERO;
                 for (sid, w) in pairs.iter() {
@@ -169,13 +120,8 @@ impl NWA {
                 }
                 fp
             }
-
             fn intern(&mut self, mut pairs: StepVecPairs) -> usize {
-                // Drop empties
                 pairs.retain(|(_, w)| !w.is_empty());
-                if pairs.is_empty() {
-                    // We still intern empty to one shared id, so it's ok (distinct empty is fine).
-                }
                 let fp = Self::fingerprint(&pairs);
                 if let Some(list) = self.map.get(&fp) {
                     for &id in list {
@@ -193,65 +139,10 @@ impl NWA {
                 self.map.entry(fp).or_insert_with(Vec::new).push(id);
                 id
             }
-
             fn len(&self) -> usize { self.data.len() }
         }
 
-        // 4) Macro signatures: what matters per NWA state for determinization
-        #[derive(Clone)]
-        struct MacroSig {
-            final_w: Option<Weight>,
-            def: Option<usize>, // stepvec id
-            ex: BTreeMap<i16, usize>, // label -> stepvec id
-        }
-
-        #[derive(Clone)]
-        struct MacroSigKey {
-            fp: u64,
-            final_fp: u64,
-            def_id: Option<usize>,
-            // (label, stepvec_id) in order
-            label_ids: Vec<(i16, usize)>,
-        }
-        impl MacroSigKey {
-            fn from_sig(sig: &MacroSig) -> Self {
-                let mut label_ids: Vec<(i16, usize)> =
-                    sig.ex.iter().map(|(k, &v)| (*k, v)).collect();
-                // Sorted already by BTreeMap iteration order.
-                let final_fp = sig.final_w.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO);
-                let mut fp = FP_ZERO;
-                fp = mix3(fp, final_fp, 0xA55A_A55A_A55A_A55A);
-                fp = mix3(fp, sig.def.map(|x| x as u64).unwrap_or(0), 0x5D);
-                for (lbl, sv) in &label_ids {
-                    fp = mix3(fp, (*lbl as u64).wrapping_mul(FP_K1), (*sv as u64).wrapping_mul(FP_K2));
-                }
-                MacroSigKey { fp, final_fp, def_id: sig.def, label_ids }
-            }
-        }
-        impl PartialEq for MacroSigKey {
-            fn eq(&self, other: &Self) -> bool {
-                self.fp == other.fp
-                    && self.final_fp == other.final_fp
-                    && self.def_id == other.def_id
-                    && self.label_ids == other.label_ids
-            }
-        }
-        impl Eq for MacroSigKey {}
-        impl Hash for MacroSigKey {
-            fn hash<H: Hasher>(&self, state: &mut H) { state.write_u64(self.fp); }
-        }
-
-        // 5) Build ε-closures (masked), final weights, and step-vectors for default and exceptions
-        let mut step_pool = StepVecPool::new();
-
-        // Cache closures for reuse
-        let mut eps_cache: Vec<StepVecPairs> = vec![Vec::new(); n];
-        for s in 0..n {
-            let pairs = eps_closure_masked(std::slice::from_ref(&s), &self.states, &fut);
-            eps_cache[s] = pairs;
-        }
-
-        // Helper: apply an extra weight mask to a closure vector
+        // Apply additional weight to closure pairs, dropping empties
         fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> StepVecPairs {
             if w.is_all_fast() {
                 return base.to_vec();
@@ -266,46 +157,88 @@ impl NWA {
             out
         }
 
-        // For each NWA state, compute macro signature
+        // Macro signatures describe determinization-relevant behavior per NWA state
+        #[derive(Clone)]
+        struct MacroSig {
+            final_w: Option<Weight>,
+            def: Option<usize>,          // stepvec id
+            ex: BTreeMap<i16, usize>,    // label -> stepvec id
+        }
+
+        // Build closures, step-vectors, macro signatures
+        let mut step_pool = StepVecPool::new();
+        let mut eps_cache: Vec<StepVecPairs> = vec![Vec::new(); n];
+        for s in 0..n {
+            eps_cache[s] = eps_closure_masked(std::slice::from_ref(&s), &self.states, &fut);
+        }
+
         let mut sig_arena: Vec<MacroSig> = Vec::with_capacity(n);
-        let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
         let mut state_to_sig_id: Vec<usize> = vec![0; n];
 
+        // We also intern macro signatures structurally (without weights gates), but
+        // we expect fewer unique macro signatures than raw states after simplify.
+        #[derive(Clone)]
+        struct MacroSigKey {
+            fp: u64,
+            final_fp: u64,
+            def_id: Option<usize>,
+            label_ids: Vec<(i16, usize)>,
+        }
+        impl MacroSigKey {
+            fn from(sig: &MacroSig) -> Self {
+                let final_fp = sig.final_w.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO);
+                let mut label_ids: Vec<(i16, usize)> = sig.ex.iter().map(|(k, &v)| (*k, v)).collect();
+                // BTreeMap iter is sorted already
+                let mut fp = FP_ZERO;
+                fp = mix3(fp, final_fp, 0xA55A_A55A_A55A_A55A);
+                fp = mix3(fp, sig.def.map(|x| x as u64).unwrap_or(0), 0x5D_u64);
+                for (lbl, sv) in &label_ids {
+                    fp = mix3(fp, (*lbl as u64).wrapping_mul(FP_K1), (*sv as u64).wrapping_mul(FP_K2));
+                }
+                Self { fp, final_fp, def_id: sig.def, label_ids }
+            }
+        }
+        impl PartialEq for MacroSigKey {
+            fn eq(&self, o: &Self) -> bool {
+                self.fp == o.fp && self.final_fp == o.final_fp && self.def_id == o.def_id && self.label_ids == o.label_ids
+            }
+        }
+        impl Eq for MacroSigKey {}
+        impl Hash for MacroSigKey {
+            fn hash<H: Hasher>(&self, h: &mut H) { h.write_u64(self.fp); }
+        }
+
+        let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
+
         for s in 0..n {
-            // final weight after ε-closure from s
+            // final after ε-closure from s
             let mut final_acc: Option<Weight> = None;
             for (t, w) in eps_cache[s].iter() {
                 if let Some(fw) = &self.states[*t].final_weight {
                     let c = w & fw;
                     if !c.is_empty() {
-                        if let Some(ref mut a) = final_acc {
-                            *a |= &c;
-                        } else {
-                            final_acc = Some(c);
-                        }
+                        if let Some(ref mut a) = final_acc { *a |= &c; } else { final_acc = Some(c); }
                     }
                 }
             }
-
-            let mut def_id: Option<usize> = None;
+            // default stepvec
+            let mut def_id = None;
             if let Some((to, wdef)) = &self.states[s].default {
                 if *to < n {
-                    let base = &eps_cache[*to];
-                    let pairs = apply_weight_to_pairs(base, wdef);
+                    let pairs = apply_weight_to_pairs(&eps_cache[*to], wdef);
                     def_id = Some(step_pool.intern(pairs));
                 }
             }
+            // exception stepvecs
             let mut ex_map: BTreeMap<i16, usize> = BTreeMap::new();
             for (lbl, (to, wlbl)) in &self.states[s].transitions {
                 if *to >= n { continue; }
-                let base = &eps_cache[*to];
-                let pairs = apply_weight_to_pairs(base, wlbl);
+                let pairs = apply_weight_to_pairs(&eps_cache[*to], wlbl);
                 let id = step_pool.intern(pairs);
                 ex_map.insert(*lbl, id);
             }
-
             let sig = MacroSig { final_w: final_acc, def: def_id, ex: ex_map };
-            let key = MacroSigKey::from_sig(&sig);
+            let key = MacroSigKey::from(&sig);
             let sig_id = match sig_intern.entry(key) {
                 Entry::Occupied(o) => *o.get(),
                 Entry::Vacant(v) => {
@@ -317,9 +250,9 @@ impl NWA {
             };
             state_to_sig_id[s] = sig_id;
         }
-        let num_sigs = sig_arena.len();
 
-        // 6) Compile step-vectors by signature and compute their total masks
+        // Compile step-vectors by signature
+        let num_sigs = sig_arena.len();
         for id in 0..step_pool.len() {
             let pairs = &step_pool.data[id].pairs;
             let mut acc: HashMap<usize, Weight> = HashMap::new();
@@ -327,179 +260,88 @@ impl NWA {
                 let sid = state_to_sig_id[*t];
                 match acc.entry(sid) {
                     Entry::Occupied(mut e) => {
-                        let x = e.get_mut();
-                        *x |= w;
+                        let x = e.get_mut(); *x |= w;
                     }
-                    Entry::Vacant(e) => {
-                        e.insert(w.clone());
-                    }
+                    Entry::Vacant(e) => { e.insert(w.clone()); }
                 }
             }
             let mut compiled: Vec<(usize, Weight)> = acc.into_iter().collect();
             compiled.sort_by_key(|(sid, _)| *sid);
-            // total mask
             let mut total = Weight::zeros();
-            for (_, w) in compiled.iter() {
-                total |= w;
-            }
+            for (_, w) in compiled.iter() { total |= w; }
             step_pool.data[id].compiled_by_sig = compiled;
             step_pool.data[id].total_mask = total;
         }
 
-        // 7) Determinization machinery
+        // Determinization with structural states + weight fixpoint
 
-        // Subset representation: vector of (sig_id, weight), sorted by sig_id, unioned per sig_id,
-        // and antichain-minimized (drop dominated weights per sig).
+        // Determinized state: members (macro_sig ids) and current gates per member (union across all runs reached)
         #[derive(Clone)]
-        struct Subset {
-            items: Vec<(usize, Weight)>,
+        struct DetState {
+            members: Vec<usize>,              // sorted unique macro_sig ids
+            pos: HashMap<usize, usize>,       // member sig_id -> index in vectors
+            gates: Vec<Weight>,               // gates per member
+        }
+
+        // Key: members only (no weights)
+        #[derive(Clone)]
+        struct MembersKey {
+            items: Vec<usize>,
             fp: u64,
         }
-        impl Subset {
-            fn new(mut items: Vec<(usize, Weight)>) -> Self {
-                // Merge by sig_id
-                items.sort_by_key(|(sid, _)| *sid);
-                let mut merged: Vec<(usize, Weight)> = Vec::with_capacity(items.len());
-                for (sid, w) in items.into_iter() {
-                    if w.is_empty() { continue; }
-                    if let Some((last_sid, ref mut last_w)) = merged.last_mut() {
-                        if *last_sid == sid {
-                            *last_w |= &w;
-                            continue;
-                        }
-                    }
-                    merged.push((sid, w));
-                }
-                // Antichain per sig_id: remove dominated weights (w_small ⊆ w_big)
-                // Since per sig_id we keep only one item after merging, this is trivial.
+        impl MembersKey {
+            fn new(items: Vec<usize>) -> Self {
+                let mut v = items;
+                v.sort_unstable();
+                v.dedup();
                 let mut fp = FP_ZERO;
-                for (sid, w) in merged.iter() {
-                    fp = mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2));
+                for sid in &v {
+                    fp = mix3(fp, (*sid as u64).wrapping_mul(FP_K1), 0xBEEF_CAFE_1234_5678);
                 }
-                Subset { items: merged, fp }
-            }
-            fn is_empty(&self) -> bool { self.items.is_empty() }
-        }
-        impl PartialEq for Subset {
-            fn eq(&self, other: &Self) -> bool {
-                self.fp == other.fp && self.items == other.items
+                MembersKey { items: v, fp }
             }
         }
-        impl Eq for Subset {}
-        impl Hash for Subset {
-            fn hash<H: Hasher>(&self, state: &mut H) { state.write_u64(self.fp); }
+        impl PartialEq for MembersKey {
+            fn eq(&self, o: &Self) -> bool { self.fp == o.fp && self.items == o.items }
+        }
+        impl Eq for MembersKey {}
+        impl Hash for MembersKey {
+            fn hash<H: Hasher>(&self, h: &mut H) { h.write_u64(self.fp); }
         }
 
-        // Initial subset = ε-closure(start) grouped by signature
-        let mut init_acc: HashMap<usize, Weight> = HashMap::new();
-        for (t, w) in eps_cache[self.body.start_state].iter() {
-            let sid = state_to_sig_id[*t];
-            match init_acc.entry(sid) {
-                Entry::Occupied(mut e) => {
-                    let x = e.get_mut();
-                    *x |= w;
-                }
-                Entry::Vacant(e) => {
-                    e.insert(w.clone());
-                }
-            }
+        struct Builder {
+            sigs: Vec<MacroSig>,
+            step_pool: StepVecPool,
         }
-        let init_items: Vec<(usize, Weight)> = init_acc.into_iter().collect();
-        let init_subset = Subset::new(init_items);
+        let builder = Builder { sigs: sig_arena.clone(), step_pool };
 
-        // Patch key within a single determinized state
-        #[derive(Clone)]
-        struct PatchKey {
-            // sorted by ptr_id
-            ov: Vec<(usize, Weight)>, // def stepvec id -> gate
-            ex: Vec<(usize, Weight)>, // ex stepvec id -> gate
-            fp: u64,
-        }
-        impl PatchKey {
-            fn new(mut ov: Vec<(usize, Weight)>, mut ex: Vec<(usize, Weight)>) -> Self {
-                ov.sort_by_key(|(p, _)| *p);
-                ex.sort_by_key(|(p, _)| *p);
-                let mut fp = FP_ZERO;
-                for (p, w) in &ov {
-                    fp = mix3(fp, (*p as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2));
-                }
-                fp = mix3(fp, 0xDEADBEEF, 0xCAFEBABE);
-                for (p, w) in &ex {
-                    fp = mix3(fp, (*p as u64).wrapping_mul(FP_K2), w.fp.wrapping_mul(FP_K1));
-                }
-                PatchKey { ov, ex, fp }
-            }
-        }
-        impl PartialEq for PatchKey {
-            fn eq(&self, other: &Self) -> bool {
-                self.fp == other.fp && self.ov == other.ov && self.ex == other.ex
-            }
-        }
-        impl Eq for PatchKey {}
-        impl Hash for PatchKey {
-            fn hash<H: Hasher>(&self, state: &mut H) { state.write_u64(self.fp); }
-        }
-
-        // Target cache: subset -> DWA-state ID
-        let mut subset_to_d_id: HashMap<Subset, usize> = HashMap::new();
-
-        // DWA under construction
-        let mut dwa = DWA::new();
-        dwa.states.0.clear();
-        let start_d_id = dwa.states.add_state();
-        dwa.body.start_state = start_d_id;
-
-        subset_to_d_id.insert(init_subset.clone(), start_d_id);
-        let mut work: VecDeque<Subset> = VecDeque::new();
-        work.push_back(init_subset);
-
-        // Prepare convenience closures for stepvec use
-        let step_compiled_by_sig = |sv_id: usize| -> &Vec<(usize, Weight)> {
-            &step_pool.data[sv_id].compiled_by_sig
-        };
-        let step_total_mask = |sv_id: usize| -> &Weight {
-            &step_pool.data[sv_id].total_mask
-        };
-
-        // Utility: accumulate compiled_by_sig with a gate mask into target_acc
+        // Utility: accumulate compiled step-vector into map (sig_id -> weight) gated by 'gate'
         fn accumulate_compiled(
             acc: &mut HashMap<usize, Weight>,
             compiled: &[(usize, Weight)],
             gate: &Weight,
         ) {
             if gate.is_all_fast() {
-                for (t_sig, w) in compiled.iter() {
-                    match acc.entry(*t_sig) {
+                for (sig, w) in compiled.iter() {
+                    match acc.entry(*sig) {
                         Entry::Occupied(mut e) => {
-                            let x = e.get_mut();
-                            *x |= w;
+                            let x = e.get_mut(); *x |= w;
                         }
-                        Entry::Vacant(e) => {
-                            e.insert(w.clone());
-                        }
+                        Entry::Vacant(e) => { e.insert(w.clone()); }
                     }
                 }
             } else {
-                for (t_sig, w) in compiled.iter() {
+                for (sig, w) in compiled.iter() {
                     let x = w & gate;
                     if x.is_empty() { continue; }
-                    match acc.entry(*t_sig) {
+                    match acc.entry(*sig) {
                         Entry::Occupied(mut e) => {
-                            let y = e.get_mut();
-                            *y |= &x;
+                            let y = e.get_mut(); *y |= &x;
                         }
-                        Entry::Vacant(e) => {
-                            e.insert(x);
-                        }
+                        Entry::Vacant(e) => { e.insert(x); }
                     }
                 }
             }
-        }
-
-        // Build normalized subset from target_acc (sig_id -> weight)
-        fn build_subset_from_map(target_acc: HashMap<usize, Weight>) -> Subset {
-            let items: Vec<(usize, Weight)> = target_acc.into_iter().collect();
-            Subset::new(items)
         }
 
         // Multiway-merge cursor across exception maps
@@ -509,116 +351,126 @@ impl NWA {
             gate: Weight,                // gate for the owning signature
             def_ptr: Option<usize>,      // default stepvec id for the owning signature
         }
-
-        // BinaryHeap item (min-heap by label using Reverse)
+        // Min-heap by label using Reverse in Ord
         #[derive(Eq)]
-        struct HeapItem {
-            lbl: i16,
-            idx: usize,
-        }
+        struct HeapItem { lbl: i16, idx: usize }
         impl PartialEq for HeapItem {
-            fn eq(&self, other: &Self) -> bool { self.lbl == other.lbl && self.idx == other.idx }
+            fn eq(&self, o: &Self) -> bool { self.lbl == o.lbl && self.idx == o.idx }
         }
         impl Ord for HeapItem {
-            fn cmp(&self, other: &Self) -> Ordering {
-                // Reverse to get min-heap behavior using BinaryHeap (default is max-heap)
-                other.lbl.cmp(&self.lbl).then_with(|| other.idx.cmp(&self.idx))
+            fn cmp(&self, o: &Self) -> Ordering {
+                o.lbl.cmp(&self.lbl).then_with(|| o.idx.cmp(&self.idx))
             }
         }
         impl PartialOrd for HeapItem {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+            fn partial_cmp(&self, o: &Self) -> Option<Ordering> { Some(self.cmp(o)) }
         }
 
-        while let Some(subset) = work.pop_front() {
-            let d_id = *subset_to_d_id.get(&subset).unwrap();
+        // States and mapping
+        let mut states: Vec<DetState> = Vec::new();
+        let mut key_to_state: HashMap<MembersKey, usize> = HashMap::new();
+        let mut work: VecDeque<usize> = VecDeque::new();
 
-            // Final weight: union over (gate ∧ sig.final)
-            let mut final_acc: Option<Weight> = None;
-            for (sig_id, gate) in subset.items.iter() {
-                if let Some(fw) = &sig_arena[*sig_id].final_w {
-                    let c = gate & fw;
-                    if !c.is_empty() {
-                        if let Some(ref mut a) = final_acc {
-                            *a |= &c;
-                        } else {
-                            final_acc = Some(c);
+        // Create or get structural state (with zero gates); if initial_gates provided, OR them in.
+        let mut ensure_state = |members: Vec<usize>, initial_gates: Option<HashMap<usize, Weight>>| -> usize {
+            let key = MembersKey::new(members);
+            if let Some(id) = key_to_state.get(&key).copied() {
+                // Merge initial_gates into the existing state
+                if let Some(init) = initial_gates {
+                    let st = &mut states[id];
+                    let mut changed = false;
+                    for (sid, w) in init.into_iter() {
+                        if let Some(&pos) = st.pos.get(&sid) {
+                            let before = st.gates[pos].clone();
+                            st.gates[pos] |= &w;
+                            if st.gates[pos] != before { changed = true; }
                         }
+                    }
+                    if changed { work.push_back(id); }
+                }
+                return id;
+            }
+            let items = key.items.clone();
+            let mut pos = HashMap::with_capacity(items.len());
+            for (i, sid) in items.iter().enumerate() {
+                pos.insert(*sid, i);
+            }
+            let mut gates = vec![Weight::zeros(); items.len()];
+            if let Some(init) = initial_gates {
+                for (sid, w) in init.into_iter() {
+                    if let Some(&idx) = pos.get(&sid) {
+                        gates[idx] |= &w;
                     }
                 }
             }
-            dwa.states[d_id].final_weight = final_acc;
+            let id = states.len();
+            states.push(DetState { members: items, pos, gates });
+            key_to_state.insert(key, id);
+            work.push_back(id);
+            id
+        };
 
-            // Default aggregation (per default stepvec id collect gates; then compiled to targets)
-            let mut def_ptr_gate: HashMap<usize, Weight> = HashMap::new();
-            for (sig_id, gate) in subset.items.iter() {
-                if let Some(def_ptr) = sig_arena[*sig_id].def {
-                    match def_ptr_gate.entry(def_ptr) {
+        // Initial state: ε-closure(start) grouped by signature with gates
+        let mut init_map: HashMap<usize, Weight> = HashMap::new();
+        for (t, w) in eps_cache[self.body.start_state].iter() {
+            let sid = state_to_sig_id[*t];
+            match init_map.entry(sid) {
+                Entry::Occupied(mut e) => {
+                    let x = e.get_mut(); *x |= w;
+                }
+                Entry::Vacant(e) => { e.insert(w.clone()); }
+            }
+        }
+        let init_members: Vec<usize> = {
+            let mut keys: Vec<usize> = init_map.keys().copied().collect();
+            keys.sort_unstable();
+            keys
+        };
+        let _start_id = ensure_state(init_members, Some(init_map));
+
+        // Worklist: propagate weights to a fixpoint
+        while let Some(sid) = work.pop_front() {
+            let st_members = states[sid].members.clone();
+            let st_gates = states[sid].gates.clone();
+
+            // Precompute default baseline for this state: sum gates per def_ptr over members
+            let mut def_ptr_total_gate: HashMap<usize, Weight> = HashMap::new();
+            for (i, sig_id) in st_members.iter().enumerate() {
+                if let Some(def_ptr) = builder.sigs[*sig_id].def {
+                    match def_ptr_total_gate.entry(def_ptr) {
                         Entry::Occupied(mut e) => {
-                            let v = e.get_mut();
-                            *v |= gate;
+                            let x = e.get_mut(); *x |= &st_gates[i];
                         }
-                        Entry::Vacant(e) => {
-                            e.insert(gate.clone());
-                        }
+                        Entry::Vacant(e) => { e.insert(st_gates[i].clone()); }
                     }
                 }
             }
+
+            // Default target contributions: accumulate compiled step-vectors
             let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
-            for (ptr, gate) in def_ptr_gate.iter() {
-                let comp = step_compiled_by_sig(*ptr);
+            for (ptr, gate) in def_ptr_total_gate.iter() {
+                let comp = &builder.step_pool.data[*ptr].compiled_by_sig;
                 accumulate_compiled(&mut def_target_map, comp, gate);
             }
-            let def_subset = build_subset_from_map(def_target_map);
-
-            // Default edge weight via total masks
-            let mut def_edge_w = Weight::zeros();
-            for (ptr, gate) in def_ptr_gate.iter() {
-                let mask = step_total_mask(*ptr);
-                let x = gate & mask;
-                def_edge_w |= &x;
+            // Propagate default contributions
+            if !def_target_map.is_empty() {
+                let mut def_members: Vec<usize> = def_target_map.keys().copied().collect();
+                def_members.sort_unstable();
+                let def_init = def_target_map; // move
+                let _ = ensure_state(def_members, Some(def_init));
             }
 
-            let mut def_target_id_opt: Option<usize> = None;
-            if !def_subset.is_empty() && !def_edge_w.is_empty() {
-                // Create/get target DWA state for default
-                let def_target_id = if let Some(id) = subset_to_d_id.get(&def_subset) {
-                    *id
-                } else {
-                    let nid = dwa.states.add_state();
-                    subset_to_d_id.insert(def_subset.clone(), nid);
-                    work.push_back(def_subset.clone());
-                    nid
-                };
-                // Install default edge
-                let _ = dwa.set_default_transition(d_id, def_target_id, def_edge_w.clone());
-                def_target_id_opt = Some(def_target_id);
-            }
-
-            // Early exit if no exceptions in any member signature
-            let mut any_ex = false;
-            for (sig_id, _) in subset.items.iter() {
-                if !sig_arena[*sig_id].ex.is_empty() {
-                    any_ex = true;
-                    break;
-                }
-            }
-            if !any_ex {
-                continue;
-            }
-
-            // Multiway merge over labels
+            // Exceptions per label via multiway-merge
             let mut cursors: Vec<ExCursor> = Vec::new();
-            for (sig_id, gate) in subset.items.iter() {
-                if sig_arena[*sig_id].ex.is_empty() {
-                    continue;
-                }
-                let mut it = sig_arena[*sig_id].ex.iter();
+            for (i, sig_id) in st_members.iter().enumerate() {
+                if builder.sigs[*sig_id].ex.is_empty() { continue; }
+                let mut it = builder.sigs[*sig_id].ex.iter();
                 let first = it.next().map(|(k, v)| (*k, *v));
                 let cur = ExCursor {
                     lbl_iter: it,
                     current: first,
-                    gate: gate.clone(),
-                    def_ptr: sig_arena[*sig_id].def,
+                    gate: st_gates[i].clone(),
+                    def_ptr: builder.sigs[*sig_id].def,
                 };
                 if cur.current.is_some() {
                     cursors.push(cur);
@@ -627,7 +479,6 @@ impl NWA {
             if cursors.is_empty() {
                 continue;
             }
-
             let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
             for (idx, c) in cursors.iter().enumerate() {
                 if let Some((lbl, _)) = c.current {
@@ -635,153 +486,270 @@ impl NWA {
                 }
             }
 
-            // Patch cache within this determinized state
-            let mut patch_cache: HashMap<PatchKey, (Subset, Weight)> = HashMap::new();
-
-            // Process labels in ascending order
             while let Some(HeapItem { lbl, idx }) = heap.pop() {
                 // Collect all cursors at this label
                 let mut idxs = vec![idx];
                 while let Some(top) = heap.peek() {
                     if top.lbl == lbl { idxs.push(heap.pop().unwrap().idx); } else { break; }
                 }
-                // Aggregate overrides/removals and additions by stepvec pointer id
-                let mut ov_map: HashMap<usize, Weight> = HashMap::new(); // default ptrs
-                let mut ex_map: HashMap<usize, Weight> = HashMap::new(); // exception ptrs
+
+                // Aggregate ex_ptr gates and def_ptr overrides for this label
+                let mut ex_map: HashMap<usize, Weight> = HashMap::new(); // ex_ptr -> gate
+                let mut ov_map: HashMap<usize, Weight> = HashMap::new(); // def_ptr -> gate
                 for i in idxs.iter().copied() {
                     if let Some((_l, ex_ptr)) = cursors[i].current {
-                        // add exception contribution
                         match ex_map.entry(ex_ptr) {
-                            Entry::Occupied(mut e) => {
-                                let v = e.get_mut();
-                                *v |= &cursors[i].gate;
-                            }
+                            Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= &cursors[i].gate; }
                             Entry::Vacant(e) => { e.insert(cursors[i].gate.clone()); }
                         }
-                        // add override removal for default (if any)
                         if let Some(def_ptr) = cursors[i].def_ptr {
                             match ov_map.entry(def_ptr) {
-                                Entry::Occupied(mut e) => {
-                                    let v = e.get_mut();
-                                    *v |= &cursors[i].gate;
-                                }
+                                Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= &cursors[i].gate; }
                                 Entry::Vacant(e) => { e.insert(cursors[i].gate.clone()); }
                             }
                         }
                     }
                 }
-                // Normalize patch key
-                let mut ov_list: Vec<(usize, Weight)> = ov_map.into_iter().filter(|(_, w)| !w.is_empty()).collect();
-                let mut ex_list: Vec<(usize, Weight)> = ex_map.into_iter().filter(|(_, w)| !w.is_empty()).collect();
-                if ov_list.is_empty() && ex_list.is_empty() {
-                    // This label does not change anything vs default
-                    // Advance cursors and continue
-                    for i in idxs.iter().copied() {
-                        // advance this cursor
-                        if let Some((_l, _)) = cursors[i].current {
-                            if let Some((k, v)) = cursors[i].lbl_iter.next() {
-                                cursors[i].current = Some((*k, *v));
-                                heap.push(HeapItem { lbl: *k, idx: i });
-                            } else {
-                                cursors[i].current = None;
-                            }
-                        }
-                    }
-                    continue;
+
+                // Build rem_map and add_map
+                let mut rem_map: HashMap<usize, Weight> = HashMap::new();
+                for (ptr, gate) in ov_map.iter() {
+                    let comp = &builder.step_pool.data[*ptr].compiled_by_sig;
+                    accumulate_compiled(&mut rem_map, comp, gate);
+                }
+                let mut add_map: HashMap<usize, Weight> = HashMap::new();
+                for (ptr, gate) in ex_map.iter() {
+                    let comp = &builder.step_pool.data[*ptr].compiled_by_sig;
+                    accumulate_compiled(&mut add_map, comp, gate);
                 }
 
-                let pkey = PatchKey::new(ov_list.clone(), ex_list.clone());
-
-                // Compute patched result (or reuse from patch cache)
-                let (label_subset, label_edge_w) = if let Some((s, w)) = patch_cache.get(&pkey) {
-                    (s.clone(), w.clone())
-                } else {
-                    // Removal/addition by signature accumulation
-                    let mut rem_sig_map: HashMap<usize, Weight> = HashMap::new();
-                    let mut add_sig_map: HashMap<usize, Weight> = HashMap::new();
-
-                    // Edge weight masks
-                    let mut rem_edge_mask = Weight::zeros();
-                    let mut add_edge_mask = Weight::zeros();
-
-                    for (ptr, gate) in ov_list.iter() {
-                        let comp = step_compiled_by_sig(*ptr);
-                        accumulate_compiled(&mut rem_sig_map, comp, gate);
-                        // remove edge mask portion
-                        let m = step_total_mask(*ptr);
-                        let x = gate & m;
-                        rem_edge_mask |= &x;
-                    }
-                    for (ptr, gate) in ex_list.iter() {
-                        let comp = step_compiled_by_sig(*ptr);
-                        accumulate_compiled(&mut add_sig_map, comp, gate);
-                        let m = step_total_mask(*ptr);
-                        let x = gate & m;
-                        add_edge_mask |= &x;
-                    }
-
-                    // Merge default subset with removals and additions
-                    // Build default subset map
-                    let mut label_map: HashMap<usize, Weight> = HashMap::new();
-                    for (sig_id, w) in def_subset.items.iter() {
-                        label_map.insert(*sig_id, w.clone());
-                    }
-                    // Subtract removals
-                    for (sig_id, rw) in rem_sig_map.into_iter() {
-                        if let Some(old) = label_map.get_mut(&sig_id) {
-                            *old -= &rw;
-                            if old.is_empty() {
-                                label_map.remove(&sig_id);
-                            }
-                        }
-                    }
-                    // Add exceptions
-                    for (sig_id, aw) in add_sig_map.into_iter() {
-                        match label_map.entry(sig_id) {
-                            Entry::Occupied(mut e) => {
-                                let v = e.get_mut();
-                                *v |= &aw;
-                            }
-                            Entry::Vacant(e) => {
-                                e.insert(aw);
-                            }
-                        }
-                    }
-
-                    // Normalize to subset
-                    let label_subset = build_subset_from_map(label_map);
-
-                    // Edge weight
-                    let mut label_edge_w = def_edge_w.clone();
-                    label_edge_w -= &rem_edge_mask;
-                    label_edge_w |= &add_edge_mask;
-
-                    patch_cache.insert(pkey.clone(), (label_subset.clone(), label_edge_w.clone()));
-                    (label_subset, label_edge_w)
-                };
-
-                // Skip if label transition equals default (target subset and weight)
-                let same_as_default = if let Some(def_tid) = def_target_id_opt {
-                    // compare subsets and weights
-                    !def_edge_w.is_empty() && label_edge_w == def_edge_w && label_subset == def_subset
-                } else {
-                    false
-                };
-
-                if !same_as_default && !label_subset.is_empty() && !label_edge_w.is_empty() {
-                    // Get/create target DWA state
-                    let target_id = if let Some(id) = subset_to_d_id.get(&label_subset) {
-                        *id
-                    } else {
-                        let nid = dwa.states.add_state();
-                        subset_to_d_id.insert(label_subset.clone(), nid);
-                        work.push_back(label_subset.clone());
-                        nid
-                    };
-                    let _ = dwa.add_transition(d_id, lbl, target_id, label_edge_w);
+                // Compose: label_target_map = def_target_map - rem_map + add_map
+                // We don't have def_target_map here anymore (moved). Recompute it minimally for keys we need:
+                // Instead of recomputing fully, we recompute full baseline again (costly but acceptable
+                // because number of def_ptr per state is typically small). For performance, we just reuse our
+                // precomputed 'def_ptr_total_gate' here.
+                let mut base_map: HashMap<usize, Weight> = HashMap::new();
+                for (ptr, gate) in def_ptr_total_gate.iter() {
+                    let comp = &builder.step_pool.data[*ptr].compiled_by_sig;
+                    accumulate_compiled(&mut base_map, comp, gate);
                 }
 
-                // Advance all cursors for this label
+                // Apply removal
+                for (sig, rw) in rem_map.iter() {
+                    if let Some(old) = base_map.get_mut(sig) {
+                        *old -= rw;
+                        if old.is_empty() {
+                            base_map.remove(sig);
+                        }
+                    }
+                }
+                // Apply additions
+                for (sig, aw) in add_map.iter() {
+                    match base_map.entry(*sig) {
+                        Entry::Occupied(mut e) => {
+                            let v = e.get_mut(); *v |= aw;
+                        }
+                        Entry::Vacant(e) => { e.insert(aw.clone()); }
+                    }
+                }
+
+                if !base_map.is_empty() {
+                    let mut mem: Vec<usize> = base_map.keys().copied().collect();
+                    mem.sort_unstable();
+                    let _ = ensure_state(mem, Some(base_map));
+                }
+
+                // Advance cursors
+                for i in idxs.into_iter() {
+                    if let Some((_l, _)) = cursors[i].current {
+                        if let Some((k, v)) = cursors[i].lbl_iter.next() {
+                            cursors[i].current = Some((*k, *v));
+                            heap.push(HeapItem { lbl: *k, idx: i });
+                        } else {
+                            cursors[i].current = None;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build the final DWA after fixpoint propagation of gates
+        let mut dwa = DWA::new();
+        dwa.states.0.clear();
+        for _ in 0..states.len() { dwa.states.add_state(); }
+
+        // Map: MembersKey -> state id already computed above; keep start id
+        // Find start id
+        let mut start_key_items: Vec<usize> = Vec::new();
+        { // rebuild start key from start state's members
+            let start_state_id = 0usize; // The first ensure_state call created start state and pushed it into states[0], but we didn't save id.
+            // Find by scanning: the state whose gates were initialized from init_map equals earliest inserted.
+            // Conservative: rebuild the key from eps closure and lookup.
+            start_key_items = {
+                let mut v: Vec<usize> = eps_cache[self.body.start_state].iter().map(|(t, _)| state_to_sig_id[*t]).collect();
+                v.sort_unstable(); v.dedup(); v
+            };
+        }
+        let key_start = MembersKey::new(start_key_items.clone());
+        let start_id = *key_to_state.get(&key_start).unwrap_or(&0usize);
+        dwa.body.start_state = start_id;
+
+        // Helper to compute final weight for a structural state
+        let compute_final = |st: &DetState, sigs: &Vec<MacroSig>| -> Option<Weight> {
+            let mut acc: Option<Weight> = None;
+            for (i, sig_id) in st.members.iter().enumerate() {
+                if let Some(fw) = &sigs[*sig_id].final_w {
+                    let c = &st.gates[i] & fw;
+                    if !c.is_empty() {
+                        if let Some(ref mut a) = acc { *a |= &c; } else { acc = Some(c); }
+                    }
+                }
+            }
+            acc
+        };
+
+        // Add edges and finals
+        for sid in 0..states.len() {
+            let st_members = states[sid].members.clone();
+            let st_gates = states[sid].gates.clone();
+
+            // Final weight
+            dwa.states[sid].final_weight = compute_final(&states[sid], &builder.sigs);
+
+            // Precompute default baseline for this state
+            let mut def_ptr_total_gate: HashMap<usize, Weight> = HashMap::new();
+            for (i, sig_id) in st_members.iter().enumerate() {
+                if let Some(def_ptr) = builder.sigs[*sig_id].def {
+                    match def_ptr_total_gate.entry(def_ptr) {
+                        Entry::Occupied(mut e) => { let x = e.get_mut(); *x |= &st_gates[i]; }
+                        Entry::Vacant(e) => { e.insert(st_gates[i].clone()); }
+                    }
+                }
+            }
+
+            let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+            let mut def_edge_w = Weight::zeros();
+            for (ptr, gate) in def_ptr_total_gate.iter() {
+                let comp = &builder.step_pool.data[*ptr].compiled_by_sig;
+                accumulate_compiled(&mut def_target_map, comp, gate);
+                let m = &builder.step_pool.data[*ptr].total_mask;
+                let x = gate & m;
+                def_edge_w |= &x;
+            }
+            if !def_target_map.is_empty() && !def_edge_w.is_empty() {
+                let mut mem: Vec<usize> = def_target_map.keys().copied().collect();
+                mem.sort_unstable();
+                let def_key = MembersKey::new(mem);
+                if let Some(&to_id) = key_to_state.get(&def_key) {
+                    let _ = dwa.set_default_transition(sid, to_id, def_edge_w);
+                }
+            }
+
+            // Exceptions: multiway-merge
+            let mut cursors: Vec<ExCursor> = Vec::new();
+            for (i, sig_id) in st_members.iter().enumerate() {
+                if builder.sigs[*sig_id].ex.is_empty() { continue; }
+                let mut it = builder.sigs[*sig_id].ex.iter();
+                let first = it.next().map(|(k, v)| (*k, *v));
+                let cur = ExCursor {
+                    lbl_iter: it,
+                    current: first,
+                    gate: st_gates[i].clone(),
+                    def_ptr: builder.sigs[*sig_id].def,
+                };
+                if cur.current.is_some() { cursors.push(cur); }
+            }
+            if cursors.is_empty() { continue; }
+            let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
+            for (idx, c) in cursors.iter().enumerate() {
+                if let Some((lbl, _)) = c.current {
+                    heap.push(HeapItem { lbl, idx });
+                }
+            }
+
+            while let Some(HeapItem { lbl, idx }) = heap.pop() {
+                let mut idxs = vec![idx];
+                while let Some(top) = heap.peek() {
+                    if top.lbl == lbl { idxs.push(heap.pop().unwrap().idx); } else { break; }
+                }
+
+                let mut ex_map: HashMap<usize, Weight> = HashMap::new();
+                let mut ov_map: HashMap<usize, Weight> = HashMap::new();
+                for i in idxs.iter().copied() {
+                    if let Some((_l, ex_ptr)) = cursors[i].current {
+                        match ex_map.entry(ex_ptr) {
+                            Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= &cursors[i].gate; }
+                            Entry::Vacant(e) => { e.insert(cursors[i].gate.clone()); }
+                        }
+                        if let Some(def_ptr) = cursors[i].def_ptr {
+                            match ov_map.entry(def_ptr) {
+                                Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= &cursors[i].gate; }
+                                Entry::Vacant(e) => { e.insert(cursors[i].gate.clone()); }
+                            }
+                        }
+                    }
+                }
+
+                // Build base map (default baseline) and edge mask baseline
+                let mut base_map: HashMap<usize, Weight> = HashMap::new();
+                let mut base_edge_w = Weight::zeros();
+                for (ptr, gate) in def_ptr_total_gate.iter() {
+                    let comp = &builder.step_pool.data[*ptr].compiled_by_sig;
+                    accumulate_compiled(&mut base_map, comp, gate);
+                    let m = &builder.step_pool.data[*ptr].total_mask;
+                    let x = gate & m;
+                    base_edge_w |= &x;
+                }
+
+                // Removals
+                let mut rem_map: HashMap<usize, Weight> = HashMap::new();
+                let mut rem_edge_w = Weight::zeros();
+                for (ptr, gate) in ov_map.iter() {
+                    let comp = &builder.step_pool.data[*ptr].compiled_by_sig;
+                    accumulate_compiled(&mut rem_map, comp, gate);
+                    let m = &builder.step_pool.data[*ptr].total_mask;
+                    let x = gate & m;
+                    rem_edge_w |= &x;
+                }
+                for (sig, rw) in rem_map.iter() {
+                    if let Some(old) = base_map.get_mut(sig) {
+                        *old -= rw;
+                        if old.is_empty() { base_map.remove(sig); }
+                    }
+                }
+                let mut edge_w = base_edge_w;
+                edge_w -= &rem_edge_w;
+
+                // Additions
+                let mut add_map: HashMap<usize, Weight> = HashMap::new();
+                let mut add_edge_w = Weight::zeros();
+                for (ptr, gate) in ex_map.iter() {
+                    let comp = &builder.step_pool.data[*ptr].compiled_by_sig;
+                    accumulate_compiled(&mut add_map, comp, gate);
+                    let m = &builder.step_pool.data[*ptr].total_mask;
+                    let x = gate & m;
+                    add_edge_w |= &x;
+                }
+                for (sig, aw) in add_map.into_iter() {
+                    match base_map.entry(sig) {
+                        Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= &aw; }
+                        Entry::Vacant(e) => { e.insert(aw); }
+                    }
+                }
+                edge_w |= &add_edge_w;
+
+                if edge_w.is_empty() || base_map.is_empty() {
+                    // No effective labeled edge
+                } else {
+                    let mut mem: Vec<usize> = base_map.keys().copied().collect();
+                    mem.sort_unstable();
+                    let ex_key = MembersKey::new(mem);
+                    if let Some(&to_id) = key_to_state.get(&ex_key) {
+                        let _ = dwa.add_transition(sid, lbl, to_id, edge_w);
+                    }
+                }
+
+                // Advance cursors
                 for i in idxs.into_iter() {
                     if let Some((_l, _)) = cursors[i].current {
                         if let Some((k, v)) = cursors[i].lbl_iter.next() {
