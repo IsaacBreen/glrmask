@@ -23,7 +23,7 @@ use std::collections::{HashMap, VecDeque};
 ///     DWA, which is the final result.
 pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     let pb = if PROGRESS_BAR_ENABLED {
-        let p = ProgressBar::new(5);
+        let p = ProgressBar::new(6);
         p.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
@@ -64,8 +64,9 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         st.transitions.retain(|k, _| *k >= 0);
     }
 
-    if let Some(p) = &pb { p.set_message("Determinize & simplify"); p.set_position(5); }
+    if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(5); }
     let mut result = nwa.determinize_to_dwa();
+    if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(6); }
     result.simplify();
     *dwa = result;
 
