@@ -361,6 +361,7 @@ fn test_constraint_expression_simplified_06_11_25() {
         &GrammarConstraintConfig::default(),
         None,
     );
+    println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed1();
     constraint.dump_precomputed3();
     constraint.dump_precomputed4();
@@ -372,6 +373,7 @@ fn test_constraint_expression_simplified_06_11_25() {
 
     // Commit "(i"
     state.commit_bytes(b"i");
+    state.print_gss();
     let mask = state.get_mask();
     assert_eq!(mask, HybridBitset::from_iter(vec![0]));
 }
