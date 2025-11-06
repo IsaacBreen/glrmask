@@ -3,7 +3,7 @@ use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
-use crate::precompute4::resolve_negatives::resolve_negative_codes_for_all;
+use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
 use crate::precompute4::utils;
 use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWAStates, NWABody, StateID, Weight};
 use crate::constraint::LLMTokenBV;
@@ -11,7 +11,7 @@ use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub type Precomputed4 = BTreeMap<TokenizerStateID, DWA>;
+pub type Precomputed4 = DWA;
 use crate::tokenizer::TokenizerStateID;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,7 +172,7 @@ fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<
 }
 
 // Public API: precompute4 using NWA-first approach, determinize at the end.
-pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> Precomputed4 {
+pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
     crate::debug!(5, "Starting precompute4...");
     // 1. Build template DWAs for all terminals.
     let template_dwas = match build_template_dwas(parser) {
@@ -273,21 +273,32 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
     );
 
-    // Determinize each final NWA subgraph into a DWA
-    let final_nwa_states = states_arena.into_inner();
-    let mut final_dwas = BTreeMap::new();
+    // Combine all final NWA bodies into a single NWA
+    let mut combined_nwa_states = states_arena.into_inner();
+    let combined_start_state = combined_nwa_states.add_state();
+
     for (tok_id, body) in final_bodies {
-        crate::debug!(5, "Determinizing final NWA subgraph for tokenizer state {:?} (start: {})...", tok_id, body.start_state);
-        let mut new_dwa = NWA::determinize_components(&final_nwa_states, &body);
-        crate::debug!(5, "Determinization produced DWA with {} states. Starting simplification...", new_dwa.states.len());
-        new_dwa.simplify();
-        crate::debug!(5, "Simplification finished ({} states).", new_dwa.states.len());
-        final_dwas.insert(tok_id, new_dwa);
+        // Add a transition from the new combined start state to the start of the NWA for this tokenizer state.
+        // The label is the tokenizer state ID.
+        let label = tok_id.0 as i16;
+        combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all());
     }
 
+    let combined_nwa = NWA {
+        states: combined_nwa_states,
+        body: NWABody { start_state: combined_start_state },
+    };
+
+    // Determinize the single combined NWA
+    crate::debug!(5, "Determinizing final combined NWA...");
+    let mut final_dwa = combined_nwa.determinize_to_dwa();
+    crate::debug!(5, "Determinization produced DWA with {} states. Starting simplification...", final_dwa.states.len());
+    final_dwa.simplify();
+    crate::debug!(5, "Simplification finished ({} states).", final_dwa.states.len());
+
     crate::debug!(5, "Starting resolve_negative_codes_for_all...");
-    resolve_negative_codes_for_all(&mut final_dwas);
+    resolve_negative_codes_in_dwa(&mut final_dwa);
     crate::debug!(5, "resolve_negative_codes_for_all finished.");
 
-    final_dwas
+    final_dwa
 }

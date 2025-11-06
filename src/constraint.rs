@@ -1424,7 +1424,7 @@ impl GrammarConstraint {
                 precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
-                precomputed4: BTreeMap::new(),
+                precomputed4: DWA::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -1466,7 +1466,7 @@ impl GrammarConstraint {
                 precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
-                precomputed4: BTreeMap::new(),
+                precomputed4: DWA::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -1530,25 +1530,19 @@ impl GrammarConstraint {
         // );
         let precompute3_vocab_before = precompute3_vocab.clone();
         let (mut precomputed3, trie3_god, precomputed4) = if config.run_precompute4 {
-            let precomputed4_dwas = precompute4(&parser, &precomputed1, &trie1_god);
-            let trie3_god = Trie3GodWrapper::new();
-            let mut precomputed3 = BTreeMap::new();
+            let precomputed4_dwa = precompute4(&parser, &precomputed1, &trie1_god);
             let max_parser_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
 
-            for (sid, dwa) in &precomputed4_dwas {
-                let root = crate::precompute4::conversion::dwa_to_precompute3(
-                    dwa,
-                    &trie3_god,
-                    internal_max_llm_token,
-                    max_parser_state_id,
-                );
-                precomputed3.insert(*sid, root);
-            }
-            
+            let (mut precomputed3, trie3_god) = crate::precompute4::conversion::dwa_to_precompute3(
+                &precomputed4_dwa,
+                internal_max_llm_token,
+                max_parser_state_id,
+            );
+
             let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
             optimize_trie3_size(&mut precomputed3, &trie3_god, &config.trie3, max_state_id, internal_max_llm_token, &mut precompute3_vocab, &parser);
 
-            (precomputed3, trie3_god, precomputed4_dwas)
+            (precomputed3, trie3_god, precomputed4_dwa)
         } else {
             let (p3, t3g) = Self::precompute3(
                 &precomputed1,
@@ -1557,7 +1551,7 @@ impl GrammarConstraint {
                 config,
                 &mut precompute3_vocab,
             );
-            (p3, t3g, BTreeMap::new())
+            (p3, t3g, DWA::new())
         };
 
         // After precompute3, vocab may have changed due to optimizations. Remap other structures that use internal LLM token IDs.
@@ -1889,25 +1883,19 @@ impl GrammarConstraint {
         );
         let precompute3_vocab_before = precompute3_vocab.clone();
         let (mut precomputed3, trie3_god, precomputed4) = if config.run_precompute4 {
-            let precomputed4_dwas = precompute4(&parser, &precomputed1, &trie1_god);
-            let trie3_god = Trie3GodWrapper::new();
-            let mut precomputed3 = BTreeMap::new();
+            let precomputed4_dwa = precompute4(&parser, &precomputed1, &trie1_god);
             let max_parser_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
 
-            for (sid, dwa) in &precomputed4_dwas {
-                let root = crate::precompute4::conversion::dwa_to_precompute3(
-                    dwa,
-                    &trie3_god,
-                    internal_max_llm_token,
-                    max_parser_state_id,
-                );
-                precomputed3.insert(*sid, root);
-            }
+            let (mut precomputed3, trie3_god) = crate::precompute4::conversion::dwa_to_precompute3(
+                &precomputed4_dwa,
+                internal_max_llm_token,
+                max_parser_state_id,
+            );
 
             let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
             optimize_trie3_size(&mut precomputed3, &trie3_god, &config.trie3, max_state_id, internal_max_llm_token, &mut precompute3_vocab, &parser);
 
-            (precomputed3, trie3_god, precomputed4_dwas)
+            (precomputed3, trie3_god, precomputed4_dwa)
         } else {
             let (p3, t3g) = Self::precompute3(
                 &precomputed1,
@@ -1916,7 +1904,7 @@ impl GrammarConstraint {
                 config,
                 &mut precompute3_vocab,
             );
-            (p3, t3g, BTreeMap::new())
+            (p3, t3g, DWA::new())
         };
 
         // After precompute3, vocab may have changed due to optimizations. Remap other structures that use internal LLM token IDs.
@@ -2977,11 +2965,8 @@ impl GrammarConstraint {
     }
 
     pub fn dump_precomputed4(&self) {
-        println!("\n--- Precomputed4 Trie3 ---");
-        for (sid, root) in &self.precomputed4 {
-            println!("\nTokenizer State ID: {}", sid.0);
-            println!("{}", root);
-        }
+        println!("\n--- Precomputed4 DWA ---");
+        println!("{}", self.precomputed4);
     }
 
     pub fn all_internal_llm_tokens_bitset_precompute0(&self) -> LLMTokenBV {

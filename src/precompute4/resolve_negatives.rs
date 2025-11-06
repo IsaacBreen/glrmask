@@ -1,12 +1,8 @@
 use crate::precompute4::full_dwa::Precomputed4;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, NWABody, StateID, Weight};
+use crate::profiler::PROGRESS_BAR_ENABLED;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::BTreeMap;
-
-pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
-    for (_sid, dwa) in precomputed4.iter_mut() {
-        resolve_negative_codes_in_dwa(dwa);
-    }
-}
 
 /// High-level strategy:
 /// - Convert DWA -> NWA (default transitions become epsilons).
@@ -18,9 +14,22 @@ pub fn resolve_negative_codes_for_all(precomputed4: &mut Precomputed4) {
 /// - Repeat until a pass makes no change; determinize back to DWA and simplify.
 /// This is correctness-first; performance will be improved later.
 pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
+    let pb = if PROGRESS_BAR_ENABLED {
+        let p = ProgressBar::new(1);
+        p.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
+                .expect("progress-bar"),
+        );
+        Some(p)
+    } else {
+        None
+    };
+
     // Convert to NWA
     crate::debug!(3, "Initial DWA: {}", dwa);
     let mut nwa = NWA::from_dwa(dwa);
+    let mut passes = 0;
     loop {
         let mut changed_in_pass = false;
 
@@ -30,6 +39,13 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
             if changed {
                 changed_in_pass = true;
             }
+        }
+
+        passes += 1;
+        if let Some(p) = &pb {
+            p.set_length(passes as u64);
+            p.set_position(passes as u64);
+            p.set_message(if changed_in_pass { "changes made" } else { "stable" });
         }
 
         if !changed_in_pass {
