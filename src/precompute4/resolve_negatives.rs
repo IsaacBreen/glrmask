@@ -3,27 +3,28 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, VecDeque};
 
-/// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite:
-/// - Convert DWA -> NWA (preserves default transitions and weights).
-/// - For every negative-labeled edge A --neg(p,w_neg)--> B:
-///     1) Compute ε-closure of B (weighted), and for every t in closure:
-///        if t has a transition on p (or default), say t --p,w_p--> C,
-///        add ε-edge A --ε, (w_neg ∧ w(B⇒t) ∧ w_p)--> C.  (Cancellation of neg(p) with p across ε)
-///     2) We will later split B (per incoming neg-edge) to a canonical "negative-only" copy B⁻ (no default, no positive-labeled edges, no final),
-///        and retarget A --neg(p)--> B⁻. We share one B⁻ per original state B.
-/// - After inserting all cancellation ε-edges, compute the least fixpoint of "final weights" propagated
-///   along ε-edges and negative-labeled edges backward (union over paths with ∧ along edges).
-///   This collapses all multi-pass determinization effects into one pass.
-/// - Split/retarget negative edges using the updated final closure and ε-closure shape:
-///     For A --neg(p)--> B, if B is final under the computed closure, or if B's ε-closure provides any
-///     positive/default transitions, retarget to B⁻; otherwise keep it.
-/// - Finally determinize back to DWA and simplify.
+/// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
+/// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
+/// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
+/// correctly represents the language defined by these complex interactions.
 ///
-/// This construction is equivalent to the previous iterative algorithm with interleaved determinization passes,
-/// but runs in near-linear time in the size of the NWA subgraph involved in negative-code resolution.
+/// The process is as follows:
+/// 1.  **Convert to NWA**: The DWA is first converted to an NWA to allow for flexible graph manipulations,
+///     such as adding epsilon transitions.
+/// 2.  **Resolve Cancellations**: The algorithm identifies all instances of `U --c--> S --neg(c)--> T` sequences.
+///     Each such "cancellation" is resolved by adding a new epsilon transition `U --eps--> T`, which acts as a shortcut.
+///     The weights are combined along the path. Crucially, the `neg(c)` edges that participate in a cancellation
+///     are marked and ignored in the next step.
+/// 3.  **Propagate Finality**: For all remaining (non-cancelled) `neg(c)` edges, finality is propagated backward.
+///     If a state can reach a final state through a path of epsilon and non-cancelled `neg(c)` transitions,
+///     it also becomes final. This is computed using a standard least fixpoint algorithm.
+/// 4.  **Apply Changes & Cleanup**: The newly computed final weights are applied to the NWA states. Then, all
+///     negative-code transitions are removed from the graph, as their semantic effects have been fully resolved.
+/// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
+///     DWA, which is the final result.
 pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     let pb = if PROGRESS_BAR_ENABLED {
-        let p = ProgressBar::new(4);
+        let p = ProgressBar::new(5);
         p.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
@@ -34,199 +35,100 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
         None
     };
 
-    // 0) Convert to NWA for easier local rewrites
     if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
     let mut nwa = NWA::from_dwa(dwa);
 
-    // 1) Scan negative edges once, compute ε-cancellations via ε-closure, cache per-target results.
-    if let Some(p) = &pb { p.set_message("Scan negatives, build ε-cancellations"); p.set_position(2); }
-    let (neg_edges, eps_cancellations, b_has_pos_or_default_in_eps) = compute_cancellations_and_shape(&nwa.states);
+    if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(2); }
+    let (epsilons_to_add, cancelled_negs) = compute_cancellations(&nwa.states);
 
-    // Add all created ε-cancellation edges in one batch.
-    for (from, to, w) in eps_cancellations {
-        if !w.is_empty() {
-            nwa.states.add_epsilon(from, to, w);
-        }
+    for (from, to, w) in epsilons_to_add {
+        nwa.states.add_epsilon(from, to, w);
     }
 
-    // 2) Compute final-weight fixpoint along ε-edges and negative-labeled edges (no labeled positives/defaults).
-    if let Some(p) = &pb { p.set_message("Compute final-weight fixpoint (ε + neg)"); p.set_position(3); }
-    let final_fix = compute_final_fixpoint_eps_and_neg(&nwa.states, &neg_edges);
+    if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(3); }
+    let final_fix = compute_final_fixpoint_eps_and_neg(&nwa.states, &cancelled_negs);
 
-    // Install updated finals
+    if let Some(p) = &pb { p.set_message("Apply weights & remove negatives"); p.set_position(4); }
     for sid in 0..nwa.states.len() {
-        let f = &final_fix[sid];
-        if f.is_empty() {
-            nwa.states.0[sid].final_weight = None;
-        } else {
-            nwa.states.0[sid].final_weight = Some(f.clone());
+        if !final_fix[sid].is_empty() {
+            let st = &mut nwa.states.0[sid];
+            if let Some(fw) = &mut st.final_weight {
+                *fw |= &final_fix[sid];
+            } else {
+                st.final_weight = Some(final_fix[sid].clone());
+            }
         }
     }
 
-    // 3) Split/retarget: for each negative edge A --neg(p)--> B,
-    // if B is "problematic" (final under fixpoint OR has positive/default in its ε-closure),
-    // retarget to a canonical negative-only copy B⁻ that strips positive/default/final.
-    if let Some(p) = &pb { p.set_message("Split/retarget negatives to negative-only copies"); p.set_position(4); }
-    retarget_negatives_to_negative_only(&mut nwa.states, &neg_edges, &final_fix, &b_has_pos_or_default_in_eps);
+    for st in &mut nwa.states.0 {
+        st.transitions.retain(|k, _| *k >= 0);
+    }
 
-    // 4) Determinize back to DWA and simplify
+    if let Some(p) = &pb { p.set_message("Determinize & simplify"); p.set_position(5); }
     let mut result = nwa.determinize_to_dwa();
     result.simplify();
     *dwa = result;
 
-    if let Some(p) = &pb {
-        p.finish_with_message("Done");
-    }
+    if let Some(p) = &pb { p.finish_with_message("Done"); }
 }
 
-/// A negative-labeled edge (from, neg_label, to, weight).
-#[derive(Clone)]
-struct NegEdge {
-    from: NWAStateID,
-    neg_label: i16, // < 0
-    to: NWAStateID,
-    weight: Weight,
-}
-
-/// Compute all negative edges, ε-cancellation edges to add, and a per-target flag
-/// "does ε-closure(target) expose any positive/default transitions".
-fn compute_cancellations_and_shape(
-    states: &NWAStates,
-) -> (Vec<NegEdge>, Vec<(NWAStateID, NWAStateID, Weight)>, Vec<bool>) {
-    let n = states.len();
-
-    // 1) Collect all negative edges once.
-    let mut neg_edges: Vec<NegEdge> = Vec::new();
-    for from in 0..n {
-        let st = &states.0[from];
-        for (lbl, (to, w)) in &st.transitions {
-            if *lbl < 0 {
-                neg_edges.push(NegEdge {
-                    from,
-                    neg_label: *lbl,
-                    to: *to,
-                    weight: w.clone(),
-                });
-            }
+/// Builds a map of predecessors for each state for efficient lookup.
+fn build_predecessor_map(states: &NWAStates) -> HashMap<NWAStateID, Vec<(NWAStateID, i16, &Weight)>> {
+    let mut preds: HashMap<NWAStateID, Vec<(NWAStateID, i16, &Weight)>> = HashMap::new();
+    for u in 0..states.len() {
+        for (label, (v, w)) in &states[u].transitions {
+            preds.entry(*v).or_default().push((u, *label, w));
         }
     }
-
-    // 2) For each unique target B of a negative edge, compute ε-closure(B) and memoize.
-    // Also decide whether ε-closure(B) exposes any positive/default transitions.
-    let mut eps_closure_cache: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
-    let mut has_pos_or_default_in_eps: Vec<bool> = vec![false; n];
-
-    let mut eps_cancellations: Vec<(NWAStateID, NWAStateID, Weight)> = Vec::new();
-
-    for edge in &neg_edges {
-        let b = edge.to;
-        let p = edge.neg_label.wrapping_sub(i16::MIN); // positive counterpart
-
-        // ε-closure of B (weighted), with memoization
-        let closure = eps_closure_cache.entry(b).or_insert_with(|| compute_eps_closure(states, b));
-
-        // Compute cancellation edges: For each t in ε-closure(B), if t has p (or default), add ε A -> target with the gated weight.
-        let mut closure_exposes_pos_or_default = false;
-        for (t, w_bt) in closure.iter() {
-            // Check t's positive/default availability
-            let t_state = &states[*t];
-            let (maybe_to, maybe_w) = if let Some((to2, w2)) = t_state.transitions.get(&p) {
-                (Some(*to2), Some(w2))
-            } else if let Some((to_def, w_def)) = &t_state.default {
-                (Some(*to_def), Some(w_def))
-            } else {
-                (None, None)
-            };
-            if maybe_to.is_some() {
-                closure_exposes_pos_or_default = true;
-            }
-
-            // Cancellation epsilon addition
-            if let (Some(to_target), Some(w_p)) = (maybe_to, maybe_w) {
-                let w = (&edge.weight & w_bt) & w_p;
-                if !w.is_empty() {
-                    eps_cancellations.push((edge.from, to_target, w));
-                }
-            }
-        }
-
-        if closure_exposes_pos_or_default {
-            has_pos_or_default_in_eps[b] = true;
-        }
-    }
-
-    (neg_edges, eps_cancellations, has_pos_or_default_in_eps)
+    preds
 }
 
-/// Compute weighted ε-closure from a start state:
-/// Return Vec of (target, weight), containing at least (start, ALL).
-fn compute_eps_closure(states: &NWAStates, start: NWAStateID) -> Vec<(NWAStateID, Weight)> {
-    let mut map: HashMap<NWAStateID, Weight> = HashMap::new();
-    let mut q: VecDeque<NWAStateID> = VecDeque::new();
+/// Finds all `U --c--> S --neg(c)--> T` patterns and returns epsilon shortcuts to add,
+/// and a set of the (S, neg(c)) edges that were cancelled.
+fn compute_cancellations(states: &NWAStates) -> (Vec<(NWAStateID, NWAStateID, Weight)>, HashMap<(NWAStateID, i16), bool>) {
+    let mut epsilons_to_add = Vec::new();
+    let mut cancelled_negs = HashMap::new();
+    let preds = build_predecessor_map(states);
 
-    // Identity
-    map.insert(start, Weight::all());
-    q.push_back(start);
+    for s in 0..states.len() {
+        for (neg_label, (t, w_neg)) in &states[s].transitions {
+            if *neg_label >= 0 { continue; }
+            let c = neg_label.wrapping_sub(i16::MIN);
 
-    while let Some(u) = q.pop_front() {
-        let wu = map.get(&u).cloned().unwrap_or_else(Weight::zeros);
-        if wu.is_empty() {
-            continue;
-        }
-        for &(v, ref we) in &states[u].epsilons {
-            let add = &wu & we;
-            if add.is_empty() {
-                continue;
-            }
-            match map.get_mut(&v) {
-                Some(old) => {
-                    let joined = &*old | &add;
-                    if &joined != old {
-                        *old = joined;
-                        q.push_back(v);
+            if let Some(s_preds) = preds.get(&s) {
+                for (u, pred_label, w_pos) in s_preds {
+                    if *pred_label == c {
+                        let new_w = *w_pos & w_neg;
+                        if !new_w.is_empty() {
+                            epsilons_to_add.push((*u, *t, new_w));
+                            cancelled_negs.insert((s, *neg_label), true);
+                        }
                     }
                 }
-                None => {
-                    map.insert(v, add);
-                    q.push_back(v);
-                }
             }
         }
     }
-
-    let mut out: Vec<(NWAStateID, Weight)> = map.into_iter().collect();
-    out.sort_by_key(|(sid, _)| *sid);
-    out
+    (epsilons_to_add, cancelled_negs)
 }
 
-/// Compute the least fixpoint of final weights propagated backward along:
-/// - ε-edges (u --ε,w--> v contributes final[u] ⊇ final[v] ∧ w)
-/// - negative edges (u --neg,w--> v contributes final[u] ⊇ final[v] ∧ w)
-///
-/// The graph is given by current NWA states plus the set of negative edges (which are still present as labeled transitions).
-fn compute_final_fixpoint_eps_and_neg(states: &NWAStates, neg_edges: &[NegEdge]) -> Vec<Weight> {
+/// Compute the least fixpoint of final weights propagated backward along epsilon edges
+/// and non-cancelled negative-labeled edges.
+fn compute_final_fixpoint_eps_and_neg(states: &NWAStates, cancelled_negs: &HashMap<(NWAStateID, i16), bool>) -> Vec<Weight> {
     let n = states.len();
     let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-
-    // Reverse adjacency across ε-edges and negative edges only.
     let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
 
-    // ε-edges
     for u in 0..n {
         for &(v, ref w) in &states[u].epsilons {
-            if v < n {
-                rev[v].push((u, w.clone()));
+            if v < n { rev[v].push((u, w.clone())); }
+        }
+        for (label, (v, w)) in &states[u].transitions {
+            if *label < 0 && !cancelled_negs.contains_key(&(u, *label)) {
+                if *v < n { rev[*v].push((u, w.clone())); }
             }
         }
     }
-    // Negative edges
-    for e in neg_edges {
-        if e.to < n {
-            rev[e.to].push((e.from, e.weight.clone()));
-        }
-    }
 
-    // Initialize with current finals
     let mut q: VecDeque<NWAStateID> = VecDeque::new();
     for s in 0..n {
         if let Some(ref fw) = states[s].final_weight {
@@ -237,82 +139,18 @@ fn compute_final_fixpoint_eps_and_neg(states: &NWAStates, neg_edges: &[NegEdge])
         }
     }
 
-    // Reverse-propagate until fixpoint
     while let Some(v) = q.pop_front() {
         let fv = fut[v].clone();
-        if fv.is_empty() {
-            continue;
-        }
+        if fv.is_empty() { continue; }
         for &(u, ref w_uv) in &rev[v] {
             let add = &fv & w_uv;
-            if add.is_empty() {
-                continue;
-            }
+            if add.is_empty() { continue; }
             let old = &fut[u];
-            // If add has any bits not already in fut[u], update.
             if (&add & old) != add {
                 fut[u] |= &add;
                 q.push_back(u);
             }
         }
     }
-
     fut
-}
-
-/// Retarget negative edges A --neg--> B to a canonical "negative-only" copy B⁻ when required:
-/// Condition per original algorithm's eventual fixpoint:
-///  - B is final under the computed final-fixpoint, or
-///  - ε-closure(B) exposes any positive/default transitions.
-///
-/// The canonical B⁻ is built once per original B and re-used.
-/// B⁻ has: no final, no default, and only negative-labeled transitions (ε-edges preserved).
-fn retarget_negatives_to_negative_only(
-    states: &mut NWAStates,
-    neg_edges: &[NegEdge],
-    final_fix: &[Weight],
-    has_pos_or_default_in_eps: &[bool],
-) {
-    let n = states.len();
-
-    // Map original-B -> B_neg_only (canonical copy)
-    let mut neg_only_map: HashMap<NWAStateID, NWAStateID> = HashMap::new();
-    let mut needs_split_cache: HashMap<NWAStateID, bool> = HashMap::new();
-
-    for e in neg_edges {
-        if e.from >= n {
-            continue;
-        }
-        if e.neg_label >= 0 {
-            continue;
-        }
-
-        let needs_split = *needs_split_cache.entry(e.to).or_insert_with(|| {
-            let b_has_final = !final_fix[e.to].is_empty();
-            let b_has_pos_or_def = has_pos_or_default_in_eps.get(e.to).copied().unwrap_or(false);
-            b_has_final || b_has_pos_or_def
-        });
-
-        if !needs_split {
-            continue; // No change
-        }
-
-        let neg_only_target_id = *neg_only_map.entry(e.to).or_insert_with(|| {
-            // Create a copy and strip to negative-only
-            let new_id = states.copy_state(e.to);
-            {
-                let st = &mut states.0[new_id];
-                st.final_weight = None;
-                st.default = None;
-                st.transitions.retain(|k, _| *k < 0);
-                // keep epsilons as-is (per original algorithm)
-            }
-            new_id
-        });
-
-        // Update the (from, neg_label) transition target to neg_only_target_id, if still present
-        if let Some((ref mut to_mut, _w)) = states.0[e.from].transitions.get_mut(&e.neg_label) {
-            *to_mut = neg_only_target_id;
-        }
-    }
 }
