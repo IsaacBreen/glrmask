@@ -353,6 +353,11 @@ impl DWA {
                 continue; // nothing to absorb
             }
 
+            // This transformation is only valid if there are incoming edges to absorb the weight.
+            if def_preds[v].is_empty() && ex_preds[v].is_empty() {
+                continue;
+            }
+
             // Intersect incoming default edges
             for &p in &def_preds[v] {
                 if let Some(w) = states[p].trans_weight_default.as_mut() {
@@ -375,6 +380,7 @@ impl DWA {
             }
             // Make the sink final weight ALL to enable merging
             states[v].final_weight = Some(Weight::all());
+            changed = true; // This is a change since fw is not ALL.
         }
         changed
     }
