@@ -82,9 +82,6 @@ impl DWA {
             if let Some(p) = &pb { p.set_message("normalize".to_string()); }
             changed_any |= Self::normalize_edges_inplace(states);
 
-            if let Some(p) = &pb { p.set_message("absorb sink finals".to_string()); }
-            changed_any |= Self::absorb_sink_finals_into_incoming(states);
-
             if large {
                 // Fast relaxation to expose more compression opportunities
                 if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
@@ -312,79 +309,6 @@ impl DWA {
         any_weight_changed
     }
 
-    /// Absorb final weights of sink states (no outgoing edges) into incoming edges.
-    /// For each sink v with final_weight F (non-empty, not ALL):
-    ///   - For every incoming edge e: u -> v, set weight(e) := weight(e) ∧ F.
-    ///   - Set final_weight[v] := ALL.
-    /// This preserves semantics (any accepted word ending in v has its weight gated by F either way)
-    /// and enables merging of multiple structurally identical sinks that previously differed only by final_weight.
-    pub fn absorb_sink_finals_into_incoming(states: &mut DWAStates) -> bool {
-        let n = states.len();
-        if n == 0 {
-            return false;
-        }
-        // Build reverse adjacency: for each target v, collect predecessors
-        let mut def_preds: Vec<Vec<StateID>> = vec![Vec::new(); n];
-        let mut ex_preds: Vec<Vec<(StateID, i16)>> = vec![Vec::new(); n];
-        for p in 0..n {
-            if let Some(d) = states[p].transitions.default {
-                if d < n {
-                    def_preds[d].push(p);
-                }
-            }
-            for (ch, &tgt) in states[p].transitions.exceptions.iter() {
-                if tgt < n {
-                    ex_preds[tgt].push((p, *ch));
-                }
-            }
-        }
-
-        let mut changed = false;
-        for v in 0..n {
-            // Sink = no outgoing edges (no default and no exceptions)
-            if states[v].transitions.default.is_some() || !states[v].transitions.exceptions.is_empty() {
-                continue;
-            }
-            let fw = match &states[v].final_weight {
-                Some(w) if !w.is_empty() => w.clone(),
-                _ => continue,
-            };
-            if fw.is_all_fast() {
-                continue; // nothing to absorb
-            }
-
-            // This transformation is only valid if there are incoming edges to absorb the weight.
-            if def_preds[v].is_empty() && ex_preds[v].is_empty() {
-                continue;
-            }
-
-            // Intersect incoming default edges
-            for &p in &def_preds[v] {
-                if let Some(w) = states[p].trans_weight_default.as_mut() {
-                    let new_w = &*w & &fw;
-                    if new_w != *w {
-                        *w = new_w;
-                        changed = true;
-                    }
-                }
-            }
-            // Intersect incoming exception edges
-            for &(p, ch) in &ex_preds[v] {
-                if let Some(w) = states[p].trans_weights_exceptions.get_mut(&ch) {
-                    let new_w = &*w & &fw;
-                    if new_w != *w {
-                        *w = new_w;
-                        changed = true;
-                    }
-                }
-            }
-            // Make the sink final weight ALL to enable merging
-            states[v].final_weight = Some(Weight::all());
-            changed = true; // This is a change since fw is not ALL.
-        }
-        changed
-    }
-
     pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
         let mut changed = false;
         for st in &mut states.0 {
@@ -459,29 +383,20 @@ impl DWA {
         for (pid, members) in &groups {
             let rep = members[0];
             let rep_state = &states[rep];
+            let def_cls = rep_state.transitions.default.map(|d| part[d]);
 
             let mut st = DWAState::default();
             st.state_weight = rep_state.state_weight.clone();
             st.final_weight = rep_state.final_weight.clone();
 
-            // Structure: union of all transitions from all members.
-            // The signature check ensures that for any given character, all members that have a
-            // transition on it will transition to the same partition.
-            let any_member_def_cls = members.iter().find_map(|&m| states[m].transitions.default.map(|d| part[d]));
-            st.transitions.default = any_member_def_cls.map(|_| Some(0)).flatten();
-
-            let mut all_exceptions = BTreeMap::new();
-            for &old in members {
-                for (ch, &tgt) in &states[old].transitions.exceptions {
-                    let cls = part[tgt];
-                    if any_member_def_cls.map_or(true, |dc| dc != cls) {
-                        // The signature check guarantees that if multiple members have a transition
-                        // on `ch`, they all go to the same partition `cls`.
-                        all_exceptions.insert(*ch, 0);
-                    }
+            // Structure: keep default if present, and exceptions that differ from default class
+            st.transitions.default = def_cls.map(|_| Some(0)).flatten();
+            for (ch, tgt) in &rep_state.transitions.exceptions {
+                let cls = part[*tgt];
+                if def_cls.map_or(true, |dc| dc != cls) {
+                    st.transitions.exceptions.insert(*ch, 0);
                 }
             }
-            st.transitions.exceptions = all_exceptions;
 
             // Aggregate weights (union) across members: default and per-label exceptions
             if st.transitions.default.is_some() {
