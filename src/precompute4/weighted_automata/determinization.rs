@@ -1,21 +1,3 @@
-// src/precompute4/weighted_automata/determinization.rs
-//
-// A simpler determinization that keeps the same semantics and performance characteristics:
-// - Determinized states are defined by sets of macro-signatures (structural behavior).
-// - We compute ε-closures once and reuse them.
-// - For each NWA state, we precompute "steps": default and per-label exceptions as ε-closed
-//   sets with their weights; steps are interned to avoid duplication.
-// - Steps are compiled by macro-signature, so all computations operate on compact signature IDs.
-// - Determinization uses a worklist to propagate "gates" (weights) to a fixpoint.
-// - For each determinized state, we compute one default transition baseline and override it
-//   on labels that have exceptions in any member signature. This avoids per-label recomputation
-//   and preserves defaults efficiently.
-//
-// Semantics preserved for bitset weights with ∧ on path and ∨ over choices.
-
-#![allow(dead_code)]
-#![allow(clippy::needless_borrow)]
-
 use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
 use super::common::Weight;
 use super::dwa::DWA;
