@@ -527,6 +527,9 @@ impl NWA {
 
             // --- 3. Update the current node's transitions. ---
             // This phase only mutates `nodes[idx]`.
+            // First, clone the gates we need to read, to avoid conflicting with the mutable borrow below.
+            let current_gates = nodes[idx].gates.clone();
+
             let node = &mut nodes[idx];
             node.default_target_idx = None;
             node.default_mask = None;
@@ -546,7 +549,7 @@ impl NWA {
 
             // Recompute final weight for this node from its current gates.
             let mut final_acc: Option<Weight> = None;
-            for (sig_id, gate) in &nodes[idx].gates {
+            for (sig_id, gate) in &current_gates {
                 if let Some(fw) = &sigs[*sig_id].final_w {
                     let x = gate & fw;
                     if !x.is_empty() {

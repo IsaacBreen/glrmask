@@ -5916,6 +5916,9 @@ local_system:
 
                   // --- 3. Update the current node's transitions. ---
                   // This phase only mutates `nodes[idx]`.
+                  // First, clone the gates we need to read, to avoid conflicting with the mutable borrow below.
+                  let current_gates = nodes[idx].gates.clone();
+
                   let node = &mut nodes[idx];
                   node.default_target_idx = None;
                   node.default_mask = None;
@@ -5935,7 +5938,7 @@ local_system:
 
                   // Recompute final weight for this node from its current gates.
                   let mut final_acc: Option<Weight> = None;
-                  for (sig_id, gate) in &nodes[idx].gates {
+                  for (sig_id, gate) in &current_gates {
                       if let Some(fw) = &sigs[*sig_id].final_w {
                           let x = gate & fw;
                           if !x.is_empty() {
@@ -11655,6 +11658,127 @@ messages:
        
                    if let Some(p) = &pb_discover {
                        p.set_length(nodes.len() as u64);
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor NWA determinization fixpoint
+      to resolve borrow checker errors in state discovery loop"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/bitset.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |+
+      error[E0502]: cannot borrow `nodes` as immutable because it is also borrowed as mutable
+         --> src/precompute4/weighted_automata/determinization.rs:549:36
+          |
+      530 |             let node = &mut nodes[idx];
+          |                             ----- mutable borrow occurs here
+      ...
+      549 |             for (sig_id, gate) in &nodes[idx].gates {
+          |                                    ^^^^^ immutable borrow occurs here
+      ...
+      561 |             node.final_weight = final_acc;
+          |             ----------------- mutable borrow later used here
+
+    metadata:
+  - assistant: |-
+      You've run into a classic Rust borrow checker issue where a mutable borrow conflicts with a later immutable borrow of the same data. The fix is to separate the read operation from the write operations to ensure the borrows don't overlap.
+
+      Here are the step-by-step instructions to resolve the compilation error, followed by the git diff.
+
+      ### Step-by-Step Instructions
+
+      The error occurs in the main `while` loop of the `det_fixpoint` function in `src/precompute4/weighted_automata/determinization.rs`. The compiler correctly identifies that you are holding a mutable borrow on `nodes[idx]` (via the `node` variable) while trying to read from `nodes[idx].gates` to compute the final weight.
+
+      1.  **File to Edit**: `src/precompute4/weighted_automata/determinization.rs`
+      2.  **Locate the Code**: Find the section labeled `--- 3. Update the current node's transitions. ---` inside the `while let Some(idx) = work.pop_front()` loop.
+      3.  **The Fix**:
+          *   Before you create the mutable borrow `let node = &mut nodes[idx];`, you need to read the data you'll need later. In this case, it's the `gates` map.
+          *   Insert a new line to clone the `gates` from `nodes[idx]` into a new local variable, for example: `let current_gates = nodes[idx].gates.clone();`.
+          *   Later, when you recompute the `final_weight`, change the `for` loop to iterate over this new `current_gates` variable instead of trying to read from `nodes[idx].gates`.
+
+      This change satisfies the borrow checker because the immutable data (`gates`) is copied *before* the mutable borrow is taken, so there is no longer a conflict.
+
+      ### Git Patch
+
+      Here is the git diff to apply the fix.
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -527,6 +527,9 @@
+       
+                   // --- 3. Update the current node's transitions. ---
+                   // This phase only mutates `nodes[idx]`.
+      +            // First, clone the gates we need to read, to avoid conflicting with the mutable borrow below.
+      +            let current_gates = nodes[idx].gates.clone();
+      +
+                   let node = &mut nodes[idx];
+                   node.default_target_idx = None;
+                   node.default_mask = None;
+      @@ -544,7 +547,7 @@
+       
+                   // Recompute final weight for this node from its current gates.
+                   let mut final_acc: Option<Weight> = None;
+      -            for (sig_id, gate) in &nodes[idx].gates {
+      +            for (sig_id, gate) in &current_gates {
+                       if let Some(fw) = &sigs[*sig_id].final_w {
+                           let x = gate & fw;
+                           if !x.is_empty() {
 
       ```
     metadata:
