@@ -19,7 +19,10 @@ statement ::=
   | declaration_statement
   | if_statement
   | iteration_statement
+  | switch_statement
+  | try_statement
   | function_declaration
+  | class_declaration
   | return_statement
   | break_statement
   | continue_statement
@@ -33,7 +36,8 @@ declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list 
 variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 variable_declaration ::= binding_pattern ( '=' expression )? ;
 
-binding_pattern ::= IDENTIFIER ;
+// Binding Patterns (Simplified Destructuring)
+binding_pattern ::= IDENTIFIER ; // SIMPLIFIED: Removed object and array patterns.
 
 if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
@@ -44,13 +48,26 @@ iteration_statement ::=
   | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
   ;
 
+switch_statement ::= 'switch' '(' expression ')' '{' case_clause* ( default_clause case_clause* )? '}' ;
+case_clause ::= 'case' expression ':' statement_list? ;
+default_clause ::= 'default' ':' statement_list? ;
+
+try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
+catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
+finally_clause ::= 'finally' block ;
+
 function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
 parameter_list ::= formal_parameter ( ',' formal_parameter )* ;
-formal_parameter ::= binding_pattern ( '=' expression )? ;
+formal_parameter ::= binding_pattern ( '=' expression )? ; // With default values
 
 return_statement ::= 'return' expression? ';'? ;
-break_statement ::= 'break' ';'? ;
-continue_statement ::= 'continue' ';'? ;
+break_statement ::= 'break' ';'? ; // No labels
+continue_statement ::= 'continue' ';'? ; // No labels
+
+class_declaration ::= 'class' IDENTIFIER ( 'extends' expression )? class_body ;
+class_body ::= '{' class_member* '}' ;
+class_member ::= method_definition ';'? ;
+method_definition ::= IDENTIFIER '(' parameter_list? ')' block ; // Includes constructor
 
 // --- Expressions (Intermediate Precedence Hierarchy) ---
 expression ::= assignment_expression ;
@@ -113,8 +130,11 @@ member_expression ::=
 
 primary_expression ::=
     'this'
+  | 'super'
   | IDENTIFIER
   | literal
+  // | array_literal // REMOVED
+  // | object_literal // REMOVED
   | function_expression
   | '(' expression ')'
   ;
@@ -127,6 +147,7 @@ literal ::=
   | 'true' | 'false'
   | NUMERIC_LITERAL
   | STRING_LITERAL
+  // | template_literal // REMOVED
   ;
 
 // Simplified regex-style definitions for terminals
