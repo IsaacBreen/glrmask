@@ -29,6 +29,7 @@ pub fn dwa_to_precompute3(
             &trie3_god,
             internal_max_llm_token,
             max_parser_state_id,
+            weight,
         );
         precomputed3.insert(tokenizer_state_id, trie3_root);
     }
@@ -42,6 +43,7 @@ fn convert_dwa_subgraph(
     trie3_god: &Trie3GodWrapper,
     internal_max_llm_token: usize,
     max_parser_state_id: usize,
+    start_weight: Weight,
 ) -> PrecomputeNode3Index {
     let mut dwa_state_to_trie_node: BTreeMap<StateID, PrecomputeNode3Index> = BTreeMap::new();
     let all_parser_states = StateIDBV::ones(max_parser_state_id + 1);
@@ -62,9 +64,13 @@ fn convert_dwa_subgraph(
 
         // Edge to the shared end node for final states
         if let Some(final_weight) = &dwa_state.final_weight {
-            let final_weight_bv = LLMTokenBV::from(final_weight.rsb.clone());
-            if !final_weight_bv.is_empty() {
-                let edge_key = (0, final_weight_bv); // pop 0
+            let mut weight = final_weight.clone();
+            if dwa_id == start_dwa_id {
+                weight &= &start_weight;
+            }
+            let weight_bv = LLMTokenBV::from(weight.rsb);
+            if !weight_bv.is_empty() {
+                let edge_key = (0, weight_bv); // pop 0
                 let edge_val = all_parser_states.clone();
                 trie3_god.insert_edge_simple(src_trie_node, end_node, edge_key, edge_val);
             }
@@ -80,12 +86,15 @@ fn convert_dwa_subgraph(
             let parser_state_id = char_code as usize;
             handled_exceptions.insert(parser_state_id);
 
-            let trans_weight = dwa_state.trans_weights_exceptions.get(&char_code).cloned().unwrap_or_else(Weight::zeros);
-            let trans_weight_bv = LLMTokenBV::from(trans_weight.rsb.clone());
+            let mut weight = dwa_state.trans_weights_exceptions.get(&char_code).cloned().unwrap_or_else(Weight::zeros);
+            if dwa_id == start_dwa_id {
+                weight &= &start_weight;
+            }
+            let weight_bv = LLMTokenBV::from(weight.rsb);
 
-            if !trans_weight_bv.is_empty() {
+            if !weight_bv.is_empty() {
                 let target_trie_node = get_or_create_trie_node(target_dwa_id, &mut q, &mut dwa_state_to_trie_node, trie3_god);
-                let edge_key = (pop_len as isize, trans_weight_bv); // pop 1
+                let edge_key = (pop_len as isize, weight_bv); // pop 1
                 let mut edge_val = StateIDBV::zeros();
                 edge_val.insert(parser_state_id);
                 trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
@@ -93,12 +102,15 @@ fn convert_dwa_subgraph(
         }
 
         if let Some(target_dwa_id) = dwa_state.transitions.default {
-            let trans_weight = dwa_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
-            let trans_weight_bv = LLMTokenBV::from(trans_weight.rsb.clone());
+            let mut weight = dwa_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+            if dwa_id == start_dwa_id {
+                weight &= &start_weight;
+            }
+            let weight_bv = LLMTokenBV::from(weight.rsb);
 
-            if !trans_weight_bv.is_empty() {
+            if !weight_bv.is_empty() {
                 let target_trie_node = get_or_create_trie_node(target_dwa_id, &mut q, &mut dwa_state_to_trie_node, trie3_god);
-                let edge_key = (pop_len as isize, trans_weight_bv); // pop 1
+                let edge_key = (pop_len as isize, weight_bv); // pop 1
                 let edge_val = &all_parser_states - &handled_exceptions;
                 if !edge_val.is_empty() {
                     trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
