@@ -407,7 +407,8 @@ impl NWA {
             }
             let node_gates = nodes[idx].gates.clone();
 
-            // Aggregate gates by default/exception step id to avoid per-member/per-label loops.
+            // --- 1. Compute all target maps from the current node's gates. ---
+            // This phase is read-only with respect to `nodes`.
             let mut def_groups: HashMap<usize, Weight> = HashMap::new(); // step_id -> gate union
             let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new(); // lbl -> (ex_step_id -> gate union)
             let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new(); // lbl -> (def_step_id -> gate union of members that DO have an ex on lbl)
@@ -429,11 +430,56 @@ impl NWA {
                 }
             }
 
-            // Helper: intern or reuse a target by its MembersKey; union gates and requeue on change.
-            let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
-                if map.is_empty() {
-                    return None;
+            let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
+
+            // Default map
+            let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+            for (def_step, g) in &def_groups {
+                if !g.is_empty() {
+                    accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
                 }
+            }
+            if !def_target_map.is_empty() {
+                target_maps.insert(None, def_target_map);
+            }
+
+            // Exception maps
+            for (lbl, ex_groups) in &ex_groups_by_label {
+                let mut map: HashMap<usize, Weight> = HashMap::new();
+                if !def_groups.is_empty() {
+                    if let Some(def_exers) = def_exers_by_label.get(lbl) {
+                        for (def_step, total_g) in &def_groups {
+                            let g_exers = def_exers.get(def_step).cloned().unwrap_or_else(Weight::zeros);
+                            let mut g_nonex = total_g.clone();
+                            if !g_exers.is_empty() {
+                                g_nonex -= &g_exers;
+                            }
+                            if !g_nonex.is_empty() {
+                                accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
+                            }
+                        }
+                    } else {
+                        for (def_step, g) in &def_groups {
+                            if !g.is_empty() {
+                                accumulate(&mut map, &compiled_steps[*def_step].by_sig, g);
+                            }
+                        }
+                    }
+                }
+                for (ex_step, g_ex) in ex_groups {
+                    if !g_ex.is_empty() {
+                        accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+                    }
+                }
+                if !map.is_empty() {
+                    target_maps.insert(Some(*lbl), map);
+                }
+            }
+
+            // --- 2. Resolve target maps to node indices, creating nodes if necessary. ---
+            // This phase can mutate `nodes` by pushing to it.
+            let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
+            for (label, map) in target_maps {
                 let key = MembersKey::new(map.keys().copied().collect());
                 let target_idx = match key_to_idx.entry(key.clone()) {
                     Entry::Occupied(o) => *o.get(),
@@ -457,9 +503,9 @@ impl NWA {
                         new_idx
                     }
                 };
-                // Union gates into the target and re-enqueue if changed
+
                 let mut any_change = false;
-                for (sig_id, weight) in map {
+                for (sig_id, weight) in &map {
                     let entry = nodes[target_idx].gates.entry(*sig_id).or_insert_with(Weight::zeros);
                     let new_w = &*entry | weight;
                     if new_w != *entry {
@@ -471,66 +517,30 @@ impl NWA {
                     in_queue[target_idx] = true;
                     work.push_back(target_idx);
                 }
-                Some(target_idx)
-            };
 
-            // 1) Default transition: accumulate once from def_groups.
-            let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
-            for (def_step, g) in &def_groups {
-                if !g.is_empty() {
-                    accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
+                let mut mask = Weight::zeros();
+                for (_, w) in &map {
+                    mask |= w;
                 }
+                resolved_transitions.insert(label, (target_idx, mask));
             }
-            let def_mask = {
-                let mut m = Weight::zeros();
-                for (_, w) in &def_target_map {
-                    m |= w;
-                }
-                m
-            };
-            nodes[idx].default_target_idx = intern_target(&def_target_map);
-            nodes[idx].default_mask = if nodes[idx].default_target_idx.is_some() { Some(def_mask) } else { None };
 
-            // 2) Exception transitions per label (only those labels that have any exception).
-            nodes[idx].exception_targets.clear();
-            nodes[idx].exception_masks.clear();
-            for (lbl, ex_groups) in &ex_groups_by_label {
-                let mut map: HashMap<usize, Weight> = HashMap::new();
-                // Default contribution from members that DO NOT have an exception on this label:
-                if !def_groups.is_empty() {
-                    if let Some(def_exers) = def_exers_by_label.get(lbl) {
-                        for (def_step, total_g) in &def_groups {
-                            let g_exers = def_exers.get(def_step).cloned().unwrap_or_else(Weight::zeros);
-                            let mut g_nonex = total_g.clone();
-                            if !g_exers.is_empty() {
-                                g_nonex -= &g_exers;
-                            }
-                            if !g_nonex.is_empty() {
-                                accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
-                            }
-                        }
-                    } else {
-                        // No exers on this label => identical to default
-                        for (def_step, g) in &def_groups {
-                            if !g.is_empty() {
-                                accumulate(&mut map, &compiled_steps[*def_step].by_sig, g);
-                            }
-                        }
-                    }
-                }
-                // Exception contribution from members that do have an exception on this label:
-                for (ex_step, g_ex) in ex_groups {
-                    if !g_ex.is_empty() {
-                        accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
-                    }
-                }
-                if let Some(tidx) = intern_target(&map) {
-                    let mut mask = Weight::zeros();
-                    for (_, w) in &map {
-                        mask |= w;
-                    }
-                    nodes[idx].exception_targets.insert(*lbl, tidx);
-                    nodes[idx].exception_masks.insert(*lbl, mask);
+            // --- 3. Update the current node's transitions. ---
+            // This phase only mutates `nodes[idx]`.
+            let node = &mut nodes[idx];
+            node.default_target_idx = None;
+            node.default_mask = None;
+            node.exception_targets.clear();
+            node.exception_masks.clear();
+
+            if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
+                node.default_target_idx = Some(target_idx);
+                node.default_mask = Some(mask);
+            }
+            for (label, (target_idx, mask)) in resolved_transitions {
+                if let Some(lbl) = label {
+                    node.exception_targets.insert(lbl, target_idx);
+                    node.exception_masks.insert(lbl, mask);
                 }
             }
 
@@ -548,7 +558,7 @@ impl NWA {
                     }
                 }
             }
-            nodes[idx].final_weight = final_acc;
+            node.final_weight = final_acc;
 
             if let Some(p) = &pb_discover {
                 p.set_length(nodes.len() as u64);

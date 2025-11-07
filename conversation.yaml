@@ -8,7 +8,7 @@ local_system:
     - src/precompute4/weighted_automata/ops.rs
     - src/precompute4/weighted_automata/simplification.rs
     - src/precompute4/weighted_automata/determinization.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/precompute4/weighted_automata/mod.rs: |
@@ -5796,7 +5796,8 @@ local_system:
                   }
                   let node_gates = nodes[idx].gates.clone();
 
-                  // Aggregate gates by default/exception step id to avoid per-member/per-label loops.
+                  // --- 1. Compute all target maps from the current node's gates. ---
+                  // This phase is read-only with respect to `nodes`.
                   let mut def_groups: HashMap<usize, Weight> = HashMap::new(); // step_id -> gate union
                   let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new(); // lbl -> (ex_step_id -> gate union)
                   let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new(); // lbl -> (def_step_id -> gate union of members that DO have an ex on lbl)
@@ -5818,11 +5819,56 @@ local_system:
                       }
                   }
 
-                  // Helper: intern or reuse a target by its MembersKey; union gates and requeue on change.
-                  let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
-                      if map.is_empty() {
-                          return None;
+                  let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
+
+                  // Default map
+                  let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+                  for (def_step, g) in &def_groups {
+                      if !g.is_empty() {
+                          accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
                       }
+                  }
+                  if !def_target_map.is_empty() {
+                      target_maps.insert(None, def_target_map);
+                  }
+
+                  // Exception maps
+                  for (lbl, ex_groups) in &ex_groups_by_label {
+                      let mut map: HashMap<usize, Weight> = HashMap::new();
+                      if !def_groups.is_empty() {
+                          if let Some(def_exers) = def_exers_by_label.get(lbl) {
+                              for (def_step, total_g) in &def_groups {
+                                  let g_exers = def_exers.get(def_step).cloned().unwrap_or_else(Weight::zeros);
+                                  let mut g_nonex = total_g.clone();
+                                  if !g_exers.is_empty() {
+                                      g_nonex -= &g_exers;
+                                  }
+                                  if !g_nonex.is_empty() {
+                                      accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
+                                  }
+                              }
+                          } else {
+                              for (def_step, g) in &def_groups {
+                                  if !g.is_empty() {
+                                      accumulate(&mut map, &compiled_steps[*def_step].by_sig, g);
+                                  }
+                              }
+                          }
+                      }
+                      for (ex_step, g_ex) in ex_groups {
+                          if !g_ex.is_empty() {
+                              accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+                          }
+                      }
+                      if !map.is_empty() {
+                          target_maps.insert(Some(*lbl), map);
+                      }
+                  }
+
+                  // --- 2. Resolve target maps to node indices, creating nodes if necessary. ---
+                  // This phase can mutate `nodes` by pushing to it.
+                  let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
+                  for (label, map) in target_maps {
                       let key = MembersKey::new(map.keys().copied().collect());
                       let target_idx = match key_to_idx.entry(key.clone()) {
                           Entry::Occupied(o) => *o.get(),
@@ -5846,9 +5892,9 @@ local_system:
                               new_idx
                           }
                       };
-                      // Union gates into the target and re-enqueue if changed
+
                       let mut any_change = false;
-                      for (sig_id, weight) in map {
+                      for (sig_id, weight) in &map {
                           let entry = nodes[target_idx].gates.entry(*sig_id).or_insert_with(Weight::zeros);
                           let new_w = &*entry | weight;
                           if new_w != *entry {
@@ -5860,66 +5906,30 @@ local_system:
                           in_queue[target_idx] = true;
                           work.push_back(target_idx);
                       }
-                      Some(target_idx)
-                  };
 
-                  // 1) Default transition: accumulate once from def_groups.
-                  let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
-                  for (def_step, g) in &def_groups {
-                      if !g.is_empty() {
-                          accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
+                      let mut mask = Weight::zeros();
+                      for (_, w) in &map {
+                          mask |= w;
                       }
+                      resolved_transitions.insert(label, (target_idx, mask));
                   }
-                  let def_mask = {
-                      let mut m = Weight::zeros();
-                      for (_, w) in &def_target_map {
-                          m |= w;
-                      }
-                      m
-                  };
-                  nodes[idx].default_target_idx = intern_target(&def_target_map);
-                  nodes[idx].default_mask = if nodes[idx].default_target_idx.is_some() { Some(def_mask) } else { None };
 
-                  // 2) Exception transitions per label (only those labels that have any exception).
-                  nodes[idx].exception_targets.clear();
-                  nodes[idx].exception_masks.clear();
-                  for (lbl, ex_groups) in &ex_groups_by_label {
-                      let mut map: HashMap<usize, Weight> = HashMap::new();
-                      // Default contribution from members that DO NOT have an exception on this label:
-                      if !def_groups.is_empty() {
-                          if let Some(def_exers) = def_exers_by_label.get(lbl) {
-                              for (def_step, total_g) in &def_groups {
-                                  let g_exers = def_exers.get(def_step).cloned().unwrap_or_else(Weight::zeros);
-                                  let mut g_nonex = total_g.clone();
-                                  if !g_exers.is_empty() {
-                                      g_nonex -= &g_exers;
-                                  }
-                                  if !g_nonex.is_empty() {
-                                      accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
-                                  }
-                              }
-                          } else {
-                              // No exers on this label => identical to default
-                              for (def_step, g) in &def_groups {
-                                  if !g.is_empty() {
-                                      accumulate(&mut map, &compiled_steps[*def_step].by_sig, g);
-                                  }
-                              }
-                          }
-                      }
-                      // Exception contribution from members that do have an exception on this label:
-                      for (ex_step, g_ex) in ex_groups {
-                          if !g_ex.is_empty() {
-                              accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
-                          }
-                      }
-                      if let Some(tidx) = intern_target(&map) {
-                          let mut mask = Weight::zeros();
-                          for (_, w) in &map {
-                              mask |= w;
-                          }
-                          nodes[idx].exception_targets.insert(*lbl, tidx);
-                          nodes[idx].exception_masks.insert(*lbl, mask);
+                  // --- 3. Update the current node's transitions. ---
+                  // This phase only mutates `nodes[idx]`.
+                  let node = &mut nodes[idx];
+                  node.default_target_idx = None;
+                  node.default_mask = None;
+                  node.exception_targets.clear();
+                  node.exception_masks.clear();
+
+                  if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
+                      node.default_target_idx = Some(target_idx);
+                      node.default_mask = Some(mask);
+                  }
+                  for (label, (target_idx, mask)) in resolved_transitions {
+                      if let Some(lbl) = label {
+                          node.exception_targets.insert(lbl, target_idx);
+                          node.exception_masks.insert(lbl, mask);
                       }
                   }
 
@@ -5937,7 +5947,7 @@ local_system:
                           }
                       }
                   }
-                  nodes[idx].final_weight = final_acc;
+                  node.final_weight = final_acc;
 
                   if let Some(p) = &pb_discover {
                       p.set_length(nodes.len() as u64);
@@ -6078,7 +6088,7 @@ local_system:
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: simple
+  prev_apply_mode: git-llm
   default_end_line:
 system:
   message: |-
@@ -6087,7 +6097,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -6096,7 +6106,7 @@ system:
     - gf
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: simple
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -11200,5 +11210,464 @@ messages:
       Assigned block to src/precompute4/weighted_automata/determinization.rs based on explicit fence path.
       Remaining unassigned blocks: 0, Available files: 7
       --- Phase 6: Applying changes to assigned files ---
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/bitset.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --message-format=json-diagnostic-rendered-ansi --no-run --package sep1 --lib precompute4::test_weighted_automata::test_union_from_debug_log --profile test
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0499]: cannot borrow `nodes` as mutable more than once at a time
+         --> src/precompute4/weighted_automata/determinization.rs:491:13
+          |
+      433 |             let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
+          |                                     ----------------------------------------------- first mutable borrow occurs here
+      ...
+      442 |                         nodes.push(CompositionNode {
+          |                         ----- first borrow occurs due to use of `nodes` in closure
+      ...
+      491 |             nodes[idx].default_target_idx = intern_target(&def_target_map);
+          |             ^^^^^ second mutable borrow occurs here
+      ...
+      527 |                 if let Some(tidx) = intern_target(&map) {
+          |                                     ------------- first borrow later used here
+
+      error[E0499]: cannot borrow `nodes` as mutable more than once at a time
+         --> src/precompute4/weighted_automata/determinization.rs:492:13
+          |
+      433 |             let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
+          |                                     ----------------------------------------------- first mutable borrow occurs here
+      ...
+      442 |                         nodes.push(CompositionNode {
+          |                         ----- first borrow occurs due to use of `nodes` in closure
+      ...
+      492 |             nodes[idx].default_mask = if nodes[idx].default_target_idx.is_some() { Some(def_mask) } else { None };
+          |             ^^^^^ second mutable borrow occurs here
+      ...
+      527 |                 if let Some(tidx) = intern_target(&map) {
+          |                                     ------------- first borrow later used here
+
+      error[E0502]: cannot borrow `nodes` as immutable because it is also borrowed as mutable
+         --> src/precompute4/weighted_automata/determinization.rs:492:42
+          |
+      433 |             let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
+          |                                     ----------------------------------------------- mutable borrow occurs here
+      ...
+      442 |                         nodes.push(CompositionNode {
+          |                         ----- first borrow occurs due to use of `nodes` in closure
+      ...
+      492 |             nodes[idx].default_mask = if nodes[idx].default_target_idx.is_some() { Some(def_mask) } else { None };
+          |                                          ^^^^^ immutable borrow occurs here
+      ...
+      527 |                 if let Some(tidx) = intern_target(&map) {
+          |                                     ------------- mutable borrow later used here
+
+      error[E0499]: cannot borrow `nodes` as mutable more than once at a time
+         --> src/precompute4/weighted_automata/determinization.rs:495:13
+          |
+      433 |             let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
+          |                                     ----------------------------------------------- first mutable borrow occurs here
+      ...
+      442 |                         nodes.push(CompositionNode {
+          |                         ----- first borrow occurs due to use of `nodes` in closure
+      ...
+      495 |             nodes[idx].exception_targets.clear();
+          |             ^^^^^ second mutable borrow occurs here
+      ...
+      527 |                 if let Some(tidx) = intern_target(&map) {
+          |                                     ------------- first borrow later used here
+
+      error[E0499]: cannot borrow `nodes` as mutable more than once at a time
+         --> src/precompute4/weighted_automata/determinization.rs:496:13
+          |
+      433 |             let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
+          |                                     ----------------------------------------------- first mutable borrow occurs here
+      ...
+      442 |                         nodes.push(CompositionNode {
+          |                         ----- first borrow occurs due to use of `nodes` in closure
+      ...
+      496 |             nodes[idx].exception_masks.clear();
+          |             ^^^^^ second mutable borrow occurs here
+      ...
+      527 |                 if let Some(tidx) = intern_target(&map) {
+          |                                     ------------- first borrow later used here
+
+      error[E0499]: cannot borrow `nodes` as mutable more than once at a time
+         --> src/precompute4/weighted_automata/determinization.rs:532:21
+          |
+      433 |             let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
+          |                                     ----------------------------------------------- first mutable borrow occurs here
+      ...
+      442 |                         nodes.push(CompositionNode {
+          |                         ----- first borrow occurs due to use of `nodes` in closure
+      ...
+      527 |                 if let Some(tidx) = intern_target(&map) {
+          |                                     ------------- first borrow later used here
+      ...
+      532 |                     nodes[idx].exception_targets.insert(*lbl, tidx);
+          |                     ^^^^^ second mutable borrow occurs here
+
+      error[E0499]: cannot borrow `nodes` as mutable more than once at a time
+         --> src/precompute4/weighted_automata/determinization.rs:533:21
+          |
+      433 |             let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
+          |                                     ----------------------------------------------- first mutable borrow occurs here
+      ...
+      442 |                         nodes.push(CompositionNode {
+          |                         ----- first borrow occurs due to use of `nodes` in closure
+      ...
+      527 |                 if let Some(tidx) = intern_target(&map) {
+          |                                     ------------- first borrow later used here
+      ...
+      533 |                     nodes[idx].exception_masks.insert(*lbl, mask);
+          |                     ^^^^^ second mutable borrow occurs here
+
+      Some errors have detailed explanations: E0499, E0502.
+      For more information about an error, try `rustc --explain E0499`.
+      error: could not compile `sep1` (lib test) due to 7 previous errors
+      Process finished with exit code 101
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Dealing with borrow checker errors, especially in complex algorithms involving collections, can be tricky. The core issue here is that the logic was attempting to modify an element of the `nodes` vector while also calling a function that might resize the `nodes` vector, which is not allowed by Rust's safety rules.
+
+      Here are the step-by-step instructions to refactor the code and resolve the compilation errors, followed by the git diff to apply the changes.
+
+      ### Step-by-Step Instructions
+
+      The goal is to restructure the main processing loop in `determinize_to_dwa` to respect Rust's borrow checker rules. We will achieve this by separating the process into distinct phases:
+
+      1.  **Phase 1: Compute Target Maps (Read-Only)**
+          -   Inside the `while let Some(idx) = work.pop_front()` loop, we will first calculate all potential target compositions (as `HashMap`s of signature IDs to weights). This involves reading from `nodes[idx]` but does not modify the global `nodes` vector. We'll store these computed maps temporarily.
+
+      2.  **Phase 2: Resolve Targets and Mutate Global State**
+          -   Next, we'll iterate through the temporarily stored target maps.
+          -   For each map, we will perform the "interning" logic: find an existing `CompositionNode` or create a new one. This is the only phase where the `nodes` vector is allowed to grow (via `nodes.push(...)`).
+          -   We will update the `gates` of the target nodes and re-queue them if their gates have changed.
+          -   The results of this phase—the final target index and transition weight mask for each label—will be stored in another temporary collection.
+
+      3.  **Phase 3: Update Current Node (Write-Only to `nodes[idx]`)**
+          -   After all target nodes have been found or created and the global `nodes` vector is stable for this iteration, we will get a mutable reference to `nodes[idx]`.
+          -   We will then update its transition fields (`default_target_idx`, `exception_targets`, etc.) using the resolved data from the previous phase.
+
+      This strict separation of phases ensures that we never hold a reference to an element (`&mut nodes[idx]`) while simultaneously performing an operation that could invalidate that reference (like `nodes.push(...)`).
+
+      ### Git Patch
+
+      Here is the git diff to apply these changes to `src/precompute4/weighted_automata/determinization.rs`.
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -415,123 +415,134 @@
+               work.push_back(start_idx);
+       
+               while let Some(idx) = work.pop_front() {
+                   in_queue[idx] = false;
+                   if let Some(p) = &pb_discover {
+                       p.inc(1);
+                       p.set_length(nodes.len() as u64);
+                   }
+                   let node_gates = nodes[idx].gates.clone();
+       
+      -            // Aggregate gates by default/exception step id to avoid per-member/per-label loops.
+      +            // --- 1. Compute all target maps from the current node's gates. ---
+      +            // This phase is read-only with respect to `nodes`.
+                   let mut def_groups: HashMap<usize, Weight> = HashMap::new(); // step_id -> gate union
+                   let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new(); // lbl -> (ex_step_id -> gate union)
+                   let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new(); // lbl -> (def_step_id -> gate union of members that DO have an ex on lbl)
+       
+                   for (sig_id, gate) in &node_gates {
+                       if let Some(def_id) = sigs[*sig_id].def {
+                           let e = def_groups.entry(def_id).or_insert_with(Weight::zeros);
+                           *e |= gate;
+                       }
+                       for (lbl, ex_step) in sigs[*sig_id].ex.iter() {
+                           let ex_map = ex_groups_by_label.entry(*lbl).or_insert_with(HashMap::new);
+                           let e = ex_map.entry(*ex_step).or_insert_with(Weight::zeros);
+                           *e |= gate;
+                           if let Some(def_id) = sigs[*sig_id].def {
+                               let dmap = def_exers_by_label.entry(*lbl).or_insert_with(HashMap::new);
+                               let ed = dmap.entry(def_id).or_insert_with(Weight::zeros);
+                               *ed |= gate;
+                           }
+                       }
+                   }
+       
+      -            // Helper: intern or reuse a target by its MembersKey; union gates and requeue on change.
+      -            let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
+      -                if map.is_empty() {
+      -                    return None;
+      -                }
+      -                let key = MembersKey::new(map.keys().copied().collect());
+      -                let target_idx = match key_to_idx.entry(key.clone()) {
+      -                    Entry::Occupied(o) => *o.get(),
+      -                    Entry::Vacant(v) => {
+      -                        let new_idx = nodes.len();
+      -                        nodes.push(CompositionNode {
+      -                            key,
+      -                            final_weight: None,
+      -                            default_target_idx: None,
+      -                            default_mask: None,
+      -                            exception_targets: BTreeMap::new(),
+      -                            exception_masks: BTreeMap::new(),
+      -                            gates: HashMap::new(),
+      -                        });
+      -                        if new_idx >= in_queue.len() {
+      -                            in_queue.resize(new_idx + 1, false);
+      -                        }
+      -                        v.insert(new_idx);
+      -                        work.push_back(new_idx);
+      -                        in_queue[new_idx] = true;
+      -                        new_idx
+      -                    }
+      -                };
+      -                // Union gates into the target and re-enqueue if changed
+      -                let mut any_change = false;
+      -                for (sig_id, weight) in map {
+      -                    let entry = nodes[target_idx].gates.entry(*sig_id).or_insert_with(Weight::zeros);
+      -                    let new_w = &*entry | weight;
+      -                    if new_w != *entry {
+      -                        *entry = new_w;
+      -                        any_change = true;
+      -                    }
+      -                }
+      -                if any_change && !in_queue[target_idx] {
+      -                    in_queue[target_idx] = true;
+      -                    work.push_back(target_idx);
+      -                }
+      -                Some(target_idx)
+      -            };
+      -
+      -            // 1) Default transition: accumulate once from def_groups.
+      +            let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
+      +
+      +            // Default map
+                   let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+                   for (def_step, g) in &def_groups {
+                       if !g.is_empty() {
+                           accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
+                       }
+                   }
+      -            let def_mask = {
+      -                let mut m = Weight::zeros();
+      -                for (_, w) in &def_target_map {
+      -                    m |= w;
+      -                }
+      -                m
+      -            };
+      -            nodes[idx].default_target_idx = intern_target(&def_target_map);
+      -            nodes[idx].default_mask = if nodes[idx].default_target_idx.is_some() { Some(def_mask) } else { None };
+      -
+      -            // 2) Exception transitions per label (only those labels that have any exception).
+      -            nodes[idx].exception_targets.clear();
+      -            nodes[idx].exception_masks.clear();
+      +            if !def_target_map.is_empty() {
+      +                target_maps.insert(None, def_target_map);
+      +            }
+      +
+      +            // Exception maps
+                   for (lbl, ex_groups) in &ex_groups_by_label {
+                       let mut map: HashMap<usize, Weight> = HashMap::new();
+      -                // Default contribution from members that DO NOT have an exception on this label:
+                       if !def_groups.is_empty() {
+                           if let Some(def_exers) = def_exers_by_label.get(lbl) {
+                               for (def_step, total_g) in &def_groups {
+                                   let g_exers = def_exers.get(def_step).cloned().unwrap_or_else(Weight::zeros);
+                                   let mut g_nonex = total_g.clone();
+                                   if !g_exers.is_empty() {
+                                       g_nonex -= &g_exers;
+                                   }
+                                   if !g_nonex.is_empty() {
+                                       accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
+                                   }
+                               }
+                           } else {
+      -                        // No exers on this label => identical to default
+                               for (def_step, g) in &def_groups {
+                                   if !g.is_empty() {
+                                       accumulate(&mut map, &compiled_steps[*def_step].by_sig, g);
+                                   }
+                               }
+                           }
+                       }
+      -                // Exception contribution from members that do have an exception on this label:
+                       for (ex_step, g_ex) in ex_groups {
+                           if !g_ex.is_empty() {
+                               accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+                           }
+                       }
+      -                if let Some(tidx) = intern_target(&map) {
+      -                    let mut mask = Weight::zeros();
+      -                    for (_, w) in &map {
+      -                        mask |= w;
+      -                    }
+      -                    nodes[idx].exception_targets.insert(*lbl, tidx);
+      -                    nodes[idx].exception_masks.insert(*lbl, mask);
+      -                }
+      -            }
+      -
+      -            // Recompute final weight for this node from its current gates.
+      +                if !map.is_empty() {
+      +                    target_maps.insert(Some(*lbl), map);
+      +                }
+      +            }
+      +
+      +            // --- 2. Resolve target maps to node indices, creating nodes if necessary. ---
+      +            // This phase can mutate `nodes` by pushing to it.
+      +            let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
+      +            for (label, map) in target_maps {
+      +                let key = MembersKey::new(map.keys().copied().collect());
+      +                let target_idx = match key_to_idx.entry(key.clone()) {
+      +                    Entry::Occupied(o) => *o.get(),
+      +                    Entry::Vacant(v) => {
+      +                        let new_idx = nodes.len();
+      +                        nodes.push(CompositionNode {
+      +                            key,
+      +                            final_weight: None,
+      +                            default_target_idx: None,
+      +                            default_mask: None,
+      +                            exception_targets: BTreeMap::new(),
+      +                            exception_masks: BTreeMap::new(),
+      +                            gates: HashMap::new(),
+      +                        });
+      +                        if new_idx >= in_queue.len() {
+      +                            in_queue.resize(new_idx + 1, false);
+      +                        }
+      +                        v.insert(new_idx);
+      +                        work.push_back(new_idx);
+      +                        in_queue[new_idx] = true;
+      +                        new_idx
+      +                    }
+      +                };
+      +
+      +                let mut any_change = false;
+      +                for (sig_id, weight) in &map {
+      +                    let entry = nodes[target_idx].gates.entry(*sig_id).or_insert_with(Weight::zeros);
+      +                    let new_w = &*entry | weight;
+      +                    if new_w != *entry {
+      +                        *entry = new_w;
+      +                        any_change = true;
+      +                    }
+      +                }
+      +                if any_change && !in_queue[target_idx] {
+      +                    in_queue[target_idx] = true;
+      +                    work.push_back(target_idx);
+      +                }
+      +
+      +                let mut mask = Weight::zeros();
+      +                for (_, w) in &map {
+      +                    mask |= w;
+      +                }
+      +                resolved_transitions.insert(label, (target_idx, mask));
+      +            }
+      +
+      +            // --- 3. Update the current node's transitions. ---
+      +            // This phase only mutates `nodes[idx]`.
+      +            let node = &mut nodes[idx];
+      +            node.default_target_idx = None;
+      +            node.default_mask = None;
+      +            node.exception_targets.clear();
+      +            node.exception_masks.clear();
+      +
+      +            if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
+      +                node.default_target_idx = Some(target_idx);
+      +                node.default_mask = Some(mask);
+      +            }
+      +            for (label, (target_idx, mask)) in resolved_transitions {
+      +                if let Some(lbl) = label {
+      +                    node.exception_targets.insert(lbl, target_idx);
+      +                    node.exception_masks.insert(lbl, mask);
+      +                }
+      +            }
+      +
+      +            // Recompute final weight for this node from its current gates.
+                   let mut final_acc: Option<Weight> = None;
+                   for (sig_id, gate) in &nodes[idx].gates {
+                       if let Some(fw) = &sigs[*sig_id].final_w {
+      @@ -545,7 +656,7 @@
+                           }
+                       }
+                   }
+      -            nodes[idx].final_weight = final_acc;
+      +            node.final_weight = final_acc;
+       
+                   if let Some(p) = &pb_discover {
+                       p.set_length(nodes.len() as u64);
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor NWA determinization fixpoint
+      to resolve borrow checker errors in state discovery loop"'
     metadata:
 ...
