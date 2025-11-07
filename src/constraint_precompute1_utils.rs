@@ -1652,7 +1652,7 @@ fn prune_on_no_terminal_follow_trie1(
                 Some(t) => Some(BTreeSet::from([*t])),
                 None => pred_set.clone(),
             };
-            dest_map.keys().map(move |&dest_idx| (dest_idx, next_pred_set.clone()))
+            dest_map.keys().map(move |&dest_idx| (dest_idx, next_pred_set.clone())).collect::<Vec<_>>()
         },
         // merge closure
         |existing_set, new_set| match (existing_set, new_set) {
