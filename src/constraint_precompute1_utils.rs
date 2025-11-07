@@ -694,8 +694,10 @@ fn break_cycles_trie1(
 
         // 1. Create a copy of each node in the SCC.
         let copies: HashMap<_, _> = scc_nodes.iter().map(|v| {
-            let v_guard = v.read(trie1_god).unwrap();
-            let v_copy_idx = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(v_guard.value.clone())));
+            let value_clone = {
+                v.read(trie1_god).unwrap().value.clone()
+            };
+            let v_copy_idx = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(value_clone)));
             (*v, v_copy_idx)
         }).collect();
 
