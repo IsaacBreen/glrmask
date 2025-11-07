@@ -100,6 +100,9 @@ impl SimpleBitset {
     pub fn contains(&self, index: usize) -> bool {
         self.rsb.contains(index)
     }
+    pub fn max_item(&self) -> Option<usize> {
+        self.rsb.iter().last()
+    }
     /// Iterate over items, truncated by `max` to prevent accidental ALL iteration.
     pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> {
         (&self.rsb & &RangeSetBlaze::from_iter([0..=max])).into_iter()
