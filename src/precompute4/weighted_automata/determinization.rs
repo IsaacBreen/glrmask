@@ -49,7 +49,23 @@ impl NWA {
     }
 
     fn determinize_by_bits(&self) -> DWA {
-        let num_bits = Weight::all().len();
+        let mut num_bits = 0;
+
+        for state in &self.states.0 {
+            if let Some(w) = &state.final_weight {
+                num_bits = num_bits.max(w.max_item().unwrap_or(0) + 1);
+            }
+            for (_on, (_to, w)) in &state.transitions {
+                num_bits = num_bits.max(w.max_item().unwrap_or(0) + 1);
+            }
+            for (_to, w) in &state.epsilons {
+                num_bits = num_bits.max(w.max_item().unwrap_or(0) + 1);
+            }
+            if let Some((_to, w)) = &state.default {
+                num_bits = num_bits.max(w.max_item().unwrap_or(0) + 1);
+            }
+        }
+
         if num_bits == 0 {
             return DWA::new();
         }
