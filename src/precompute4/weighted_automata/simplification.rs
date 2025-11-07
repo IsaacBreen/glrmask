@@ -82,6 +82,9 @@ impl DWA {
             if let Some(p) = &pb { p.set_message("normalize".to_string()); }
             changed_any |= Self::normalize_edges_inplace(states);
 
+            if let Some(p) = &pb { p.set_message("relax final".to_string()); }
+            changed_any |= Self::relax_redundant_final_weights(states, body);
+
             if large {
                 // Fast relaxation to expose more compression opportunities
                 if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
@@ -251,6 +254,61 @@ impl DWA {
         }
 
         any_weight_changed
+    }
+
+    pub fn relax_redundant_final_weights(states: &mut DWAStates, body: &DWABody) -> bool {
+        let n = states.len();
+        if n == 0 {
+            return false;
+        }
+
+        // 1. Compute reachable weights at each state.
+        let mut reachable_weights = vec![Weight::zeros(); n];
+        let mut worklist = VecDeque::new();
+
+        if body.start_state >= n {
+            return false;
+        }
+        reachable_weights[body.start_state] = Weight::all();
+        worklist.push_back(body.start_state);
+
+        while let Some(u) = worklist.pop_front() {
+            let u_rw = reachable_weights[u].clone();
+            if u_rw.is_empty() {
+                continue;
+            }
+            let u_state = &states[u];
+
+            let gated_u_rw = if let Some(sw) = &u_state.state_weight {
+                &u_rw & sw
+            } else {
+                u_rw
+            };
+
+            for (_lbl, v, edge_w) in u_state.iter_edges() {
+                if v >= n { continue; }
+                let new_v_rw = &gated_u_rw & edge_w;
+                if new_v_rw.is_empty() { continue; }
+                let old_v_rw = &reachable_weights[v];
+
+                if !new_v_rw.is_subset_of(old_v_rw) {
+                    reachable_weights[v] |= &new_v_rw;
+                    worklist.push_back(v);
+                }
+            }
+        }
+
+        // 2. If reachable_weight[s] is a subset of final_weight[s], relax final_weight[s] to all().
+        let mut changed = false;
+        for i in 0..n {
+            if let Some(fw) = states[i].final_weight.as_mut() {
+                if !fw.is_all_fast() && reachable_weights[i].is_subset_of(fw) {
+                    *fw = Weight::all();
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     /// Fast, single-pass local relaxation:
