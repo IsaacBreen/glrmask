@@ -21,7 +21,7 @@ use std::time::Instant;
 
 /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
 /// This is semantics-preserving; it only reduces the amount of compression performed.
-const LARGE_AUTOMATON_THRESHOLD: usize = 200_000;
+const LARGE_AUTOMATON_THRESHOLD: usize = 20_000_000;
 
 thread_local! {
     static IN_SIMPLIFY_CHECK: Cell<bool> = Cell::new(false);
