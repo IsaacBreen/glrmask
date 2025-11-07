@@ -4766,20 +4766,29 @@ local_system:
               for (pid, members) in &groups {
                   let rep = members[0];
                   let rep_state = &states[rep];
-                  let def_cls = rep_state.transitions.default.map(|d| part[d]);
 
                   let mut st = DWAState::default();
                   st.state_weight = rep_state.state_weight.clone();
                   st.final_weight = rep_state.final_weight.clone();
 
-                  // Structure: keep default if present, and exceptions that differ from default class
-                  st.transitions.default = def_cls.map(|_| Some(0)).flatten();
-                  for (ch, tgt) in &rep_state.transitions.exceptions {
-                      let cls = part[*tgt];
-                      if def_cls.map_or(true, |dc| dc != cls) {
-                          st.transitions.exceptions.insert(*ch, 0);
+                  // Structure: union of all transitions from all members.
+                  // The signature check ensures that for any given character, all members that have a
+                  // transition on it will transition to the same partition.
+                  let any_member_def_cls = members.iter().find_map(|&m| states[m].transitions.default.map(|d| part[d]));
+                  st.transitions.default = any_member_def_cls.map(|_| Some(0)).flatten();
+
+                  let mut all_exceptions = BTreeMap::new();
+                  for &old in members {
+                      for (ch, &tgt) in &states[old].transitions.exceptions {
+                          let cls = part[tgt];
+                          if any_member_def_cls.map_or(true, |dc| dc != cls) {
+                              // The signature check guarantees that if multiple members have a transition
+                              // on `ch`, they all go to the same partition `cls`.
+                              all_exceptions.insert(*ch, 0);
+                          }
                       }
                   }
+                  st.transitions.exceptions = all_exceptions;
 
                   // Aggregate weights (union) across members: default and per-label exceptions
                   if st.transitions.default.is_some() {
@@ -9339,5 +9348,278 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix DWA sink final weight absorption to
       respect incoming edges and correctly track changes"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/bitset.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+      --- original version of src/precompute4/weighted_automata/common.rs
+      +++ current version of src/precompute4/weighted_automata/common.rs
+      @@ -6,7 +6,7 @@
+       use super::bitset::SimpleBitset;
+       use std::collections::BTreeMap;
+       
+      -pub(crate) const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
+      +pub(crate) const STOCHASTIC_DEBUG: bool = true; // Set to false by default to avoid heavy stochastic validation on large automata
+       
+       #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
+       pub struct I16Map<T> {
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      thread 'test_constraint_basic::test_ignore_token' (7337185) panicked at src/precompute4/test_weighted_automata.rs:336:13:
+      assertion `left == right` failed: Per-edge weight mismatch on char 0 at (a:0, b:0): a.edge_weight=ALL vs b.edge_weight=[1..=18446744073709551615]
+
+      DWA A:
+      DWA (start: 0)
+        State 0:
+          final_weight: [3]
+          0 -> 1 (trans_weight: ALL)
+          2 -> 2 (trans_weight: ALL)
+        State 1:
+          neg(0) -> 3 (trans_weight: ALL)
+        State 2:
+          neg(2) -> 4 (trans_weight: ALL)
+        State 3:
+          neg(1) -> 5 (trans_weight: [0, 2])
+        State 4:
+          neg(0) -> 6 (trans_weight: ALL)
+        State 5:
+          final_weight: ALL
+        State 6:
+          final_weight: [1]
+          0 -> 1 (trans_weight: ALL)
+
+
+      DWA B:
+      DWA (start: 0)
+        State 0:
+          final_weight: [3]
+          0 -> 1 (trans_weight: [1..=18446744073709551615])
+          2 -> 2 (trans_weight: ALL)
+        State 1:
+          neg(0) -> 3 (trans_weight: ALL)
+        State 2:
+          neg(2) -> 4 (trans_weight: ALL)
+        State 3:
+          neg(1) -> 5 (trans_weight: [0, 2])
+        State 4:
+          neg(0) -> 6 (trans_weight: ALL)
+        State 5:
+          final_weight: ALL
+        State 6:
+          final_weight: [1]
+          0 -> 1 (trans_weight: [0..=1, 3..=18446744073709551615])
+
+        left: SimpleBitset(ALL)
+       right: 1..=18446744073709551615
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::test_weighted_automata::assert_dwa_equivalent
+                   at ./src/precompute4/test_weighted_automata.rs:336:13
+         5: sep1::precompute4::weighted_automata::simplification::<impl sep1::precompute4::weighted_automata::dwa::DWA>::simplify
+                   at ./src/precompute4/weighted_automata/simplification.rs:39:13
+         6: sep1::precompute4::weighted_automata::ops::<impl sep1::precompute4::weighted_automata::nwa::NWA>::union_components
+                   at ./src/precompute4/weighted_automata/ops.rs:237:24
+         7: sep1::precompute4::full_dwa::precompute4::{{closure}}
+                   at ./src/precompute4/full_dwa.rs:278:22
+         8: sep1::datastructures::trie::Trie<EK,EV,T>::special_map_grouped::{{closure}}
+                   at ./src/datastructures/trie.rs:2071:47
+         9: std::collections::hash::map::Entry<K,V>::and_modify
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:2459:17
+        10: sep1::datastructures::trie::Trie<EK,EV,T>::special_map_grouped
+                   at ./src/datastructures/trie.rs:2071:30
+        11: sep1::precompute4::full_dwa::precompute4
+                   at ./src/precompute4/full_dwa.rs:232:5
+        12: sep1::constraint::GrammarConstraint::new_with_config_and_precompute0_cache
+                   at ./src/constraint.rs:1886:36
+        13: sep1::constraint::GrammarConstraint::new_from_grammar_definition
+                   at ./src/constraint.rs:1135:20
+        14: sep1::test_constraint_basic::test_ignore_token
+                   at ./src/test_constraint_basic.rs:702:22
+        15: sep1::test_constraint_basic::test_ignore_token::{{closure}}
+                   at ./src/test_constraint_basic.rs:678:23
+        16: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+        17: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+    metadata:
+  - assistant: |-
+      This panic indicates that the `simplify` method is producing a DWA that is not equivalent to the original. The error message points to an edge weight changing from `ALL` to a more restrictive set, which suggests an incorrect intersection or a loss of information during one of the simplification passes.
+
+      The root cause is a bug in `DWA::minimize_partition_refinement`. When reconstructing a merged state from a partition of old states, it was only considering the transitions present in the *first* state of the partition (the "representative"). If other states in the same partition had transitions that the representative lacked, those transitions were dropped entirely from the new merged state. This loss of transitions is an incorrect transformation that can lead to the observed weight mismatches.
+
+      The fix is to ensure that the reconstructed state includes the union of all transitions from *all* member states in the partition, not just the representative.
+
+      ### Step-by-step instructions
+
+      1.  **Open the file `src/precompute4/weighted_automata/simplification.rs`**.
+      2.  **Navigate to the `DWA::minimize_partition_refinement` function.**
+      3.  **Locate the state reconstruction logic inside the `for (pid, members) in &groups` loop.**
+      4.  **Replace the logic that builds the new state's transition structure.** Instead of just inspecting `rep_state`, iterate over all `members` of the partition to collect the complete set of default and exception transitions. The signature check during partitioning already guarantees that all members are structurally compatible, so we can safely union their transition sets.
+
+      Here is the section to be replaced:
+
+      ```rust
+      // --- This is the old, incorrect code ---
+                  let rep = members[0];
+                  let rep_state = &states[rep];
+                  let def_cls = rep_state.transitions.default.map(|d| part[d]);
+
+                  let mut st = DWAState::default();
+                  st.state_weight = rep_state.state_weight.clone();
+                  st.final_weight = rep_state.final_weight.clone();
+
+                  // Structure: keep default if present, and exceptions that differ from default class
+                  st.transitions.default = def_cls.map(|_| Some(0)).flatten();
+                  for (ch, tgt) in &rep_state.transitions.exceptions {
+                      let cls = part[*tgt];
+                      if def_cls.map_or(true, |dc| dc != cls) {
+                          st.transitions.exceptions.insert(*ch, 0);
+                      }
+                  }
+      ```
+
+      And here is the new, correct code:
+
+      ```rust
+      // --- This is the new, correct code ---
+                  let rep = members[0];
+                  let rep_state = &states[rep];
+
+                  let mut st = DWAState::default();
+                  st.state_weight = rep_state.state_weight.clone();
+                  st.final_weight = rep_state.final_weight.clone();
+
+                  // Structure: union of all transitions from all members.
+                  // The signature check ensures that for any given character, all members that have a
+                  // transition on it will transition to the same partition.
+                  let any_member_def_cls = members.iter().find_map(|&m| states[m].transitions.default.map(|d| part[d]));
+                  st.transitions.default = any_member_def_cls.map(|_| Some(0)).flatten();
+
+                  let mut all_exceptions = BTreeMap::new();
+                  for &old in members {
+                      for (ch, &tgt) in &states[old].transitions.exceptions {
+                          let cls = part[tgt];
+                          if any_member_def_cls.map_or(true, |dc| dc != cls) {
+                              // The signature check guarantees that if multiple members have a transition
+                              // on `ch`, they all go to the same partition `cls`.
+                              all_exceptions.insert(*ch, 0);
+                          }
+                      }
+                  }
+                  st.transitions.exceptions = all_exceptions;
+      ```
+
+      This change correctly constructs the new state's transition structure by combining information from all states being merged, preserving the automaton's semantics.
+
+      ### Git diff
+
+      Here is the git patch to apply the fix.
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/simplification.rs b/src/precompute4/weighted_automata/simplification.rs
+      --- a/src/precompute4/weighted_automata/simplification.rs
+      +++ b/src/precompute4/weighted_automata/simplification.rs
+      @@ -457,18 +457,27 @@
+               for (pid, members) in &groups {
+                   let rep = members[0];
+                   let rep_state = &states[rep];
+      -            let def_cls = rep_state.transitions.default.map(|d| part[d]);
+       
+                   let mut st = DWAState::default();
+                   st.state_weight = rep_state.state_weight.clone();
+                   st.final_weight = rep_state.final_weight.clone();
+       
+      -            // Structure: keep default if present, and exceptions that differ from default class
+      -            st.transitions.default = def_cls.map(|_| Some(0)).flatten();
+      -            for (ch, tgt) in &rep_state.transitions.exceptions {
+      -                let cls = part[*tgt];
+      -                if def_cls.map_or(true, |dc| dc != cls) {
+      -                    st.transitions.exceptions.insert(*ch, 0);
+      +            // Structure: union of all transitions from all members.
+      +            // The signature check ensures that for any given character, all members that have a
+      +            // transition on it will transition to the same partition.
+      +            let any_member_def_cls = members.iter().find_map(|&m| states[m].transitions.default.map(|d| part[d]));
+      +            st.transitions.default = any_member_def_cls.map(|_| Some(0)).flatten();
+      +
+      +            let mut all_exceptions = BTreeMap::new();
+      +            for &old in members {
+      +                for (ch, &tgt) in &states[old].transitions.exceptions {
+      +                    let cls = part[tgt];
+      +                    if any_member_def_cls.map_or(true, |dc| dc != cls) {
+      +                        // The signature check guarantees that if multiple members have a transition
+      +                        // on `ch`, they all go to the same partition `cls`.
+      +                        all_exceptions.insert(*ch, 0);
+      +                    }
+                       }
+                   }
+      +            st.transitions.exceptions = all_exceptions;
+       
+                   // Aggregate weights (union) across members: default and per-label exceptions
+                   if st.transitions.default.is_some() {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/simplification.rs
+      Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix DWA minimization to correctly union
+      transitions from all merged states"'
     metadata:
 ...

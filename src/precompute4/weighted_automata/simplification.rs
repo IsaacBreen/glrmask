@@ -459,20 +459,29 @@ impl DWA {
         for (pid, members) in &groups {
             let rep = members[0];
             let rep_state = &states[rep];
-            let def_cls = rep_state.transitions.default.map(|d| part[d]);
 
             let mut st = DWAState::default();
             st.state_weight = rep_state.state_weight.clone();
             st.final_weight = rep_state.final_weight.clone();
 
-            // Structure: keep default if present, and exceptions that differ from default class
-            st.transitions.default = def_cls.map(|_| Some(0)).flatten();
-            for (ch, tgt) in &rep_state.transitions.exceptions {
-                let cls = part[*tgt];
-                if def_cls.map_or(true, |dc| dc != cls) {
-                    st.transitions.exceptions.insert(*ch, 0);
+            // Structure: union of all transitions from all members.
+            // The signature check ensures that for any given character, all members that have a
+            // transition on it will transition to the same partition.
+            let any_member_def_cls = members.iter().find_map(|&m| states[m].transitions.default.map(|d| part[d]));
+            st.transitions.default = any_member_def_cls.map(|_| Some(0)).flatten();
+
+            let mut all_exceptions = BTreeMap::new();
+            for &old in members {
+                for (ch, &tgt) in &states[old].transitions.exceptions {
+                    let cls = part[tgt];
+                    if any_member_def_cls.map_or(true, |dc| dc != cls) {
+                        // The signature check guarantees that if multiple members have a transition
+                        // on `ch`, they all go to the same partition `cls`.
+                        all_exceptions.insert(*ch, 0);
+                    }
                 }
             }
+            st.transitions.exceptions = all_exceptions;
 
             // Aggregate weights (union) across members: default and per-label exceptions
             if st.transitions.default.is_some() {
