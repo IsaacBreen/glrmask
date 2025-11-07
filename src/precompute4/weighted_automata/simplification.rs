@@ -686,6 +686,7 @@ impl NWA {
             if let Some(p) = &pb { p.inc(1); }
             changed = false;
             Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
+            Self::run_pass(&pb, "unify final states", &mut changed, || self.unify_final_states());
             Self::run_pass(&pb, "dedup epsilons", &mut changed, || self.dedup_epsilon_edges());
             Self::run_pass(&pb, "bypass ε-chains", &mut changed, || self.bypass_trivial_epsilon_chains());
             Self::run_pass(&pb, "collapse SCCs", &mut changed, || self.collapse_all_weight_epsilon_sccs());
@@ -1009,6 +1010,36 @@ impl NWA {
             }
         }
         changed
+    }
+
+    /// Consolidate all final states into a single new final state.
+    /// For each state `s` with `final_weight` `w`, add an ε-transition from `s` to a new
+    /// final state `F` with weight `w`, and then clear `s.final_weight`. `F` will have
+    /// `final_weight = ALL`.
+    fn unify_final_states(&mut self) -> bool {
+        let final_states: Vec<(NWAStateID, Weight)> = self
+            .states
+            .0
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.final_weight.clone().map(|w| (i, w)))
+            .collect();
+
+        if final_states.len() <= 1 {
+            return false;
+        }
+
+        let new_final_id = self.states.add_state();
+        self.states[new_final_id].final_weight = Some(Weight::all());
+
+        for (sid, weight) in final_states {
+            if !weight.is_empty() {
+                self.states.add_epsilon(sid, new_final_id, weight);
+            }
+            self.states[sid].final_weight = None;
+        }
+
+        true
     }
 
     /// Bypass trivial ε-chains: if a state s
