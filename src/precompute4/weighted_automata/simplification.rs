@@ -378,6 +378,13 @@ impl DWA {
                     }
                 }
             }
+            // Preserve original final weight in state_weight to prevent bad merges.
+            if let Some(sw) = states[v].state_weight.as_mut() {
+                *sw &= &fw;
+            } else {
+                states[v].state_weight = Some(fw);
+            }
+
             // Make the sink final weight ALL to enable merging
             states[v].final_weight = Some(Weight::all());
             changed = true; // This is a change since fw is not ALL.
