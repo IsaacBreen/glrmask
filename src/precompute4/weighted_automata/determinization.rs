@@ -105,7 +105,7 @@ impl NWA {
         );
 
         while let Some(dwa_id) = worklist.pop_front() {
-            let product_state = &dwa_id_to_product_state[dwa_id];
+            let product_state = dwa_id_to_product_state[dwa_id].clone();
 
             // Collect all exception labels from all component DFA states.
             let mut labels = BTreeSet::new();
