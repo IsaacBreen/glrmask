@@ -191,14 +191,7 @@ impl NWA {
             None
         };
         for s in 0..n {
-            // Final weight accumulated through ε-closure
-            let final_acc = eps_cache[s].iter().fold(Weight::zeros(), |mut acc, (t, w)| {
-                if let Some(fw) = &self.states[*t].final_weight {
-                    acc |= &(w & fw);
-                }
-                acc
-            });
-            let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
+            let final_acc = self.states[s].final_weight.clone();
 
             // Default steps: collect step ids
             let mut def_steps: Vec<usize> = Vec::new();
@@ -479,17 +472,9 @@ impl NWA {
                     }
                 }
             }
-            if !remove.is_empty() {
-                for k in remove {
-                    map.remove(&k);
-                }
-                changed = true;
-            }
-            changed
         }
 
-        // --- Phase 1: Discover all reachable compositions and their transitions (monotone worklist) ---
-        #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+        #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
         struct MembersKey(Vec<usize>);
 
         impl MembersKey {
@@ -506,7 +491,7 @@ impl NWA {
             }
         }
 
-        #[derive(Clone, Debug)]
+        #[derive(Clone)]
         struct CompositionNode {
             key: MembersKey,
             final_weight: Option<Weight>,
