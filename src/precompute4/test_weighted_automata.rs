@@ -1,6 +1,7 @@
 use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, Weight, format_word};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
 
 // --- Stochastic validation controls and RNG ---
 const VALIDATION_SAMPLES: usize = 32;
@@ -1505,4 +1506,86 @@ fn test_concatenate_default_path_to_final() {
     // Word "x" should not be accepted by C.
     let weight_x = c.eval_word_weight(&['x' as i16]);
     assert!(weight_x.is_empty());
+}
+
+#[test]
+fn test_simplify() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    let s3 = d.add_state();
+    let s4 = d.add_state();
+    let s5 = d.add_state();
+    let s6 = d.add_state();
+    let s7 = d.add_state();
+    let s8 = d.add_state();
+    let s9 = d.add_state();
+    let s10 = d.add_state();
+    let s11 = d.add_state();
+    let s12 = d.add_state();
+    let s13 = d.add_state();
+
+    let w_all = Weight::all(); // Corresponds to [0..=2] in the dump
+    let w_1_2 = Weight::from_iter(1..=2);
+
+    // State 0 (start)
+    d.add_transition(d.body.start_state, 0, s1, w_all.clone()).unwrap();
+    d.add_transition(d.body.start_state, 1, s2, w_all.clone()).unwrap();
+
+    // State 1
+    d.add_transition(s1, 0, s3, w_1_2.clone()).unwrap();
+    d.add_transition(s1, 3, s4, w_1_2.clone()).unwrap();
+    d.add_transition(s1, 7, s5, w_all.clone()).unwrap();
+    d.add_transition(s1, 10, s6, w_all.clone()).unwrap();
+    d.add_transition(s1, 12, s7, w_all.clone()).unwrap();
+    d.add_transition(s1, 13, s5, w_all.clone()).unwrap();
+
+    // State 2
+    d.add_transition(s2, 0, s8, w_all.clone()).unwrap();
+    d.add_transition(s2, 3, s9, w_all.clone()).unwrap();
+    d.add_transition(s2, 7, s8, w_all.clone()).unwrap();
+    d.add_transition(s2, 10, s10, w_all.clone()).unwrap();
+    d.add_transition(s2, 12, s11, w_all.clone()).unwrap();
+    d.add_transition(s2, 13, s8, w_all.clone()).unwrap();
+
+    // State 3
+    d.set_final_weight(s3, w_1_2.clone()).unwrap();
+
+    // State 4
+    d.add_transition(s4, 7, s3, w_1_2.clone()).unwrap();
+    d.add_transition(s4, 13, s3, w_1_2.clone()).unwrap();
+
+    // State 5
+    d.set_final_weight(s5, w_all.clone()).unwrap();
+
+    // State 6
+    d.set_default_transition(s6, s12, w_all.clone()).unwrap();
+
+    // State 7
+    d.set_default_transition(s7, s6, w_all.clone()).unwrap();
+
+    // State 8
+    d.set_final_weight(s8, w_all.clone()).unwrap();
+
+    // State 9
+    d.add_transition(s9, 7, s8, w_all.clone()).unwrap();
+    d.add_transition(s9, 13, s8, w_all.clone()).unwrap();
+
+    // State 10
+    d.set_default_transition(s10, s13, w_all.clone()).unwrap();
+
+    // State 11
+    d.set_default_transition(s11, s10, w_all.clone()).unwrap();
+
+    // State 12
+    d.add_transition(s12, 13, s5, w_all.clone()).unwrap();
+
+    // State 13
+    d.add_transition(s13, 13, s8, w_all.clone()).unwrap();
+
+    // Since there are no negative codes, the DWA should not be changed.
+    let expected = d.clone();
+    resolve_negative_codes_in_dwa(&mut d);
+
+    stochastic_equivalence_test(d, expected);
 }
