@@ -699,7 +699,7 @@ fn break_cycles_trie1(
             (*v, v_copy_idx)
         }).collect();
 
-        type SpanningTreeEdge = (PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>);
+        type SpanningTreeEdge = (PrecomputeNode1Index, PrecomputeNode1Index);
 
         // 2. Find a spanning tree of the SCC subgraph to preserve connectivity in the copied component.
         let mut spanning_tree_edges = BTreeSet::<SpanningTreeEdge>::new();
@@ -718,7 +718,7 @@ fn break_cycles_trie1(
                 for (ek, v, _) in child_edges {
                     if scc_nodes_set.contains(v) && visited.insert(*v) {
                         q.push_back(*v);
-                        spanning_tree_edges.insert((u, *v, *ek));
+                        spanning_tree_edges.insert((u, *v));
                     }
                 }
             }
@@ -737,7 +737,7 @@ fn break_cycles_trie1(
                         let v_copy = copies[&v];
                         modifications.push(Modification::RemoveEdge(*u, ek.clone(), v));
                         modifications.push(Modification::AddEdge(*u, ek.clone(), v_copy, bv.clone()));
-                        if spanning_tree_edges.contains(&(*u, v, ek)) {
+                        if spanning_tree_edges.contains(&(*u, v)) {
                             modifications.push(Modification::AddEdge(u_copy, ek, v_copy, bv));
                         }
                     } else { // Exit edge
