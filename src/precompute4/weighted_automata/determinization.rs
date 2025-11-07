@@ -11,6 +11,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
+// Determinization guardrails:
+// - Maximum number of composition nodes to create. Past this, we collapse new targets
+//   into a single overflow node which conservatively over-approximates behavior.
+const DET_STATE_BUDGET: usize = 250_000;
+const DET_ENABLE_OVERFLOW: bool = true;
+
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
@@ -255,6 +261,9 @@ impl NWA {
         let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
         let mut work: VecDeque<usize> = VecDeque::new();
 
+        let mut in_queue: Vec<bool> = Vec::new();
+        let mut overflow_idx: Option<usize> = None;
+
         let pb_discover = if PROGRESS_BAR_ENABLED { Some(ProgressBar::new(0).with_style(ProgressStyle::default_bar().template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Discovering states)").unwrap())) } else { None };
 
         // Create the initial state
@@ -275,82 +284,162 @@ impl NWA {
         let start_idx = 0;
         key_to_idx.insert(init_key.clone(), start_idx);
         nodes.push(CompositionNode { key: init_key, final_weight: None, default_target_idx: None, exception_targets: BTreeMap::new(), gates: init_map });
+        in_queue.push(true);
         work.push_back(start_idx);
 
         while let Some(idx) = work.pop_front() {
+            in_queue[idx] = false;
             if let Some(p) = &pb_discover { p.inc(1); p.set_length(nodes.len() as u64); }
             let node_gates = nodes[idx].gates.clone();
 
             // Compute all possible target compositions from this node
-            let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new(); // None for default
-            let mut all_ex_labels = BTreeSet::new();
-
+            // Build default target map once (if any)
+            let mut def_map: HashMap<usize, Weight> = HashMap::new();
             for (sig_id, gate) in &node_gates {
                 if let Some(def_id) = sigs[*sig_id].def {
-                    accumulate(target_maps.entry(None).or_default(), &compiled_steps[def_id].by_sig, gate);
+                    accumulate(&mut def_map, &compiled_steps[def_id].by_sig, gate);
                 }
+            }
+            // Gather all exception labels present among members
+            let mut all_ex_labels = BTreeSet::new();
+            for (sig_id, _) in &node_gates {
                 for lbl in sigs[*sig_id].ex.keys() {
                     all_ex_labels.insert(*lbl);
                 }
             }
 
-            for lbl in all_ex_labels {
-                let mut ex_map = target_maps.get(&None).cloned().unwrap_or_default();
-                for (sig_id, gate) in &node_gates {
-                    if let Some(ex_id) = sigs[*sig_id].ex.get(&lbl) {
-                        // Subtract default contribution if it exists
-                        if let Some(def_id) = sigs[*sig_id].def {
-                            for (tsig, w) in &compiled_steps[def_id].by_sig {
-                                let share = w & gate;
-                                if let Some(old) = ex_map.get_mut(tsig) {
-                                    *old -= &share;
-                                    if old.is_empty() { ex_map.remove(tsig); }
-                                }
-                            }
-                        }
-                        // Add exception contribution
-                        accumulate(&mut ex_map, &compiled_steps[*ex_id].by_sig, gate);
-                    }
-                }
-                target_maps.insert(Some(lbl), ex_map);
-            }
+            // Reset transitions from this node; we will recompute them
+            nodes[idx].default_target_idx = None;
+            nodes[idx].exception_targets.clear();
 
-            // For each target composition, ensure a node exists and update gates
-            for (label, map) in target_maps {
-                if map.is_empty() { continue; }
-                let key = MembersKey::new(map.keys().copied().collect());
-                let target_idx = match key_to_idx.entry(key.clone()) {
-                    Entry::Occupied(o) => *o.get(),
-                    Entry::Vacant(v) => {
-                        let new_idx = nodes.len();
-                        nodes.push(CompositionNode { key, final_weight: None, default_target_idx: None, exception_targets: BTreeMap::new(), gates: HashMap::new() });
-                        work.push_back(new_idx);
-                        v.insert(new_idx);
-                        new_idx
-                    }
-                };
-                // Update gates in target node
-                for (sig_id, weight) in map {
-                    let gate = nodes[target_idx].gates.entry(sig_id).or_insert_with(Weight::zeros);
-                    *gate |= &weight;
+            // Helper to intern or overflow a target map, update gates, and return its index
+            let mut intern_target = |map: &HashMap<usize, Weight>,
+                                     nodes: &mut Vec<CompositionNode>,
+                                     key_to_idx: &mut HashMap<MembersKey, usize>,
+                                     in_queue: &mut Vec<bool>,
+                                     work: &mut VecDeque<usize>,
+                                     overflow_idx: &mut Option<usize>,
+                                     sigs_len: usize| -> usize {
+                if map.is_empty() {
+                    return usize::MAX;
                 }
-                // Set transition link
-                if let Some(lbl) = label {
-                    nodes[idx].exception_targets.insert(lbl, target_idx);
-                } else {
+                let key = MembersKey::new(map.keys().copied().collect());
+                if let Some(&tidx) = key_to_idx.get(&key) {
+                    return tidx;
+                }
+                if DET_ENABLE_OVERFLOW && nodes.len() >= DET_STATE_BUDGET {
+                    // Create overflow node if missing
+                    if overflow_idx.is_none() {
+                        let all: Vec<usize> = (0..sigs_len).collect();
+                        let ov_key = MembersKey::new(all);
+                        let new_idx = nodes.len();
+                        nodes.push(CompositionNode {
+                            key: ov_key.clone(),
+                            final_weight: None,
+                            default_target_idx: None,
+                            exception_targets: BTreeMap::new(),
+                            gates: HashMap::new(),
+                        });
+                        key_to_idx.insert(ov_key, new_idx);
+                        if new_idx >= in_queue.len() { in_queue.resize(new_idx + 1, false); }
+                        *overflow_idx = Some(new_idx);
+                    }
+                    return overflow_idx.unwrap();
+                }
+                // Create a fresh node
+                let new_idx = nodes.len();
+                nodes.push(CompositionNode {
+                    key: key.clone(),
+                    final_weight: None,
+                    default_target_idx: None,
+                    exception_targets: BTreeMap::new(),
+                    gates: HashMap::new(),
+                });
+                key_to_idx.insert(key, new_idx);
+                if new_idx >= in_queue.len() { in_queue.resize(new_idx + 1, false); }
+                new_idx
+            };
+
+            // 1) Default transition (if any)
+            if !def_map.is_empty() {
+                let target_idx = intern_target(&def_map, &mut nodes, &mut key_to_idx, &mut in_queue, &mut work, &mut overflow_idx, sigs.len());
+                if target_idx != usize::MAX {
+                    // Update gates in target node and enqueue if changed
+                    let mut any_change = false;
+                    for (sig_id, weight) in &def_map {
+                        let entry = nodes[target_idx].gates.entry(*sig_id).or_insert_with(Weight::zeros);
+                        let new_w = &*entry | weight;
+                        if new_w != *entry {
+                            *entry = new_w;
+                            any_change = true;
+                        }
+                    }
+                    if any_change && !in_queue[target_idx] {
+                        in_queue[target_idx] = true;
+                        work.push_back(target_idx);
+                    }
                     nodes[idx].default_target_idx = Some(target_idx);
                 }
             }
+
+            // 2) Exception transitions per label (built from scratch without cloning def_map)
+            for lbl in all_ex_labels {
+                let mut map: HashMap<usize, Weight> = HashMap::new();
+                for (sig_id, gate) in &node_gates {
+                    if let Some(ex_id) = sigs[*sig_id].ex.get(&lbl) {
+                        accumulate(&mut map, &compiled_steps[*ex_id].by_sig, gate);
+                    } else if let Some(def_id) = sigs[*sig_id].def {
+                        accumulate(&mut map, &compiled_steps[def_id].by_sig, gate);
+                    }
+                }
+                if map.is_empty() {
+                    continue;
+                }
+                let target_idx = intern_target(&map, &mut nodes, &mut key_to_idx, &mut in_queue, &mut work, &mut overflow_idx, sigs.len());
+                if target_idx != usize::MAX {
+                    let mut any_change = false;
+                    for (sig_id, weight) in &map {
+                        let entry = nodes[target_idx].gates.entry(*sig_id).or_insert_with(Weight::zeros);
+                        let new_w = &*entry | weight;
+                        if new_w != *entry {
+                            *entry = new_w;
+                            any_change = true;
+                        }
+                    }
+                    if any_change && !in_queue[target_idx] {
+                        in_queue[target_idx] = true;
+                        work.push_back(target_idx);
+                    }
+                    nodes[idx].exception_targets.insert(lbl, target_idx);
+                }
+            }
+
+            // Recompute final weight for this node based on its (possibly updated) gates
+            let mut final_acc: Option<Weight> = None;
+            for (sig_id, gate) in &nodes[idx].gates {
+                if let Some(fw) = &sigs[*sig_id].final_w {
+                    let x = gate & fw;
+                    if !x.is_empty() {
+                        if let Some(ref mut a) = final_acc { *a |= &x; } else { final_acc = Some(x); }
+                    }
+                }
+            }
+            nodes[idx].final_weight = final_acc;
+
+            // Ensure progress bar length reflects latest node count
+            if let Some(p) = &pb_discover { p.set_length(nodes.len() as u64); }
         }
         if let Some(p) = pb_discover { p.finish_with_message(format!("Discovered {} compositions", nodes.len())); }
 
-        // Compute final weights for all discovered nodes
+        // Final pass: ensure final weights are consistent (already computed in loop; recompute defensively)
         for node in &mut nodes {
             let mut final_acc: Option<Weight> = None;
             for (sig_id, gate) in &node.gates {
                 if let Some(fw) = &sigs[*sig_id].final_w {
                     let x = gate & fw;
-                    if !x.is_empty() { if let Some(ref mut a) = final_acc { *a |= &x; } else { final_acc = Some(x); } }
+                    if !x.is_empty() {
+                        if let Some(ref mut a) = final_acc { *a |= &x; } else { final_acc = Some(x); }
+                    }
                 }
             }
             node.final_weight = final_acc;
