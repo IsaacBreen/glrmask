@@ -258,182 +258,8 @@ local_system:
           }
       }
 
-      pub fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
-          // Strategy:
-          // 1) Simplify both automata to obtain canonical, minimized, and normalized forms
-          //    (unreachable pruned, sink-like states collapsed, redundant exceptions removed),
-          //    while aggregating edge/default weights as unions across merged states.
-          // 2) Perform a BFS isomorphism test from the start states. For each matched pair:
-          //    - Compare state weights and final weights (None treated as zeros).
-          //    - Compare default transition weights (None treated as zeros).
-          //    - For each character in the union of exception keys, compare per-edge weights
-          //      (falling back to default if exception weight absent).
-          //    - Ensure default and per-exception targets correspond under the evolving bijection.
-          // 3) Verify that all states reachable in `b` are matched by some state of `a`.
-
-          // DWA::propagate_and_constrain_weights(&mut a.states, &mut a.body);
-          // DWA::propagate_future_weights(&mut a.states);
-          // a.simplify();
-          // DWA::propagate_and_constrain_weights(&mut b.states, &mut b.body);
-          // DWA::propagate_future_weights(&mut b.states);
-          // b.simplify();
-
-          // Helper: convert Option<Weight> to Weight (None => zeros).
-          fn opt_w_to_w(ow: &Option<Weight>) -> Weight {
-              ow.clone().unwrap_or_else(Weight::zeros)
-          }
-
-          // Map a-state -> b-state and its inverse to ensure a bijection.
-          let mut map_ab: HashMap<usize, usize> = HashMap::new();
-          let mut map_ba: HashMap<usize, BTreeSet<usize>> = HashMap::new();
-          let mut q: VecDeque<(usize, usize)> = VecDeque::new();
-
-          assert!(
-              !a.states.is_empty() && !b.states.is_empty(),
-              "Automata should have at least one state after simplification.\n\nDWA A:\n{}\n\nDWA B:\n{}",
-              a, b
-          );
-
-          let start_a = a.body.start_state;
-          let start_b = b.body.start_state;
-          map_ab.insert(start_a, start_b);
-          map_ba.entry(start_b).or_default().insert(start_a);
-          q.push_back((start_a, start_b));
-
-          // Lookup per-edge weight for a specific character in a given state:
-          // - If an exception weight is present, use it.
-          // - Else, use the default weight (or zeros if absent).
-          let edge_weight = |st: &DWAState, ch: i16| -> Weight {
-              if let Some(w) = st.trans_weights_exceptions.get(&ch) {
-                  w.clone()
-              } else {
-                  opt_w_to_w(&st.trans_weight_default)
-              }
-          };
-
-          while let Some((ia, ib)) = q.pop_front() {
-              let sa = &a.states[ia];
-              let sb = &b.states[ib];
-
-              // Compare default transition weights (None considered zeros).
-              let dwa = opt_w_to_w(&sa.trans_weight_default);
-              let dwb = opt_w_to_w(&sb.trans_weight_default);
-              assert_eq!(
-                  dwa, dwb,
-                  "Default transition weight mismatch at (a:{}, b:{}): a.def_weight={} vs b.def_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                  ia, ib, dwa, dwb, a, b
-              );
-
-              // Union of exception keys; after simplify(), both representations should be normalized,
-              // but we compute the union to be robust.
-              let keys_a: BTreeSet<i16> = sa.transitions.exceptions.keys().cloned().collect();
-              let keys_b: BTreeSet<i16> = sb.transitions.exceptions.keys().cloned().collect();
-              let all_keys: BTreeSet<i16> = keys_a.union(&keys_b).cloned().collect();
-
-              // Compare and enqueue per-exception transitions.
-              let def_a = sa.transitions.default;
-              let def_b = sb.transitions.default;
-
-              for ch in all_keys {
-                  let ta = sa.transitions.exceptions.get(&ch).copied().or(def_a);
-                  let tb = sb.transitions.exceptions.get(&ch).copied().or(def_b);
-
-                  let wa = edge_weight(sa, ch);
-                  let wb = edge_weight(sb, ch);
-                  assert_eq!(
-                      wa, wb,
-                      "Per-edge weight mismatch on char {} at (a:{}, b:{}): a.edge_weight={} vs b.edge_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                      ch, ia, ib, wa, wb, a, b
-                  );
-
-                  match (ta, tb) {
-                      (Some(ta_id), Some(tb_id)) => {
-                          if let Some(&mapped) = map_ab.get(&ta_id) {
-                              assert_eq!(
-                                  mapped, tb_id,
-                                  "Transition mismatch on char {} from (a:{}, b:{}): a-target {} is already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                                  ch, ia, ib, ta_id, mapped, tb_id, a, b
-                              );
-                          } else {
-                              map_ab.insert(ta_id, tb_id);
-                              map_ba.entry(tb_id).or_default().insert(ta_id);
-                              q.push_back((ta_id, tb_id));
-                          }
-                      }
-                      (None, None) => { /* Both lack transition for this char; fine. */ }
-                      _ => {
-                          panic!(
-                              "Presence mismatch for transition on char {} at (a:{}, b:{}): a-target={:?}, b-target={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                              ch, ia, ib, ta, tb, a, b
-                          );
-                      }
-                  }
-              }
-
-              // Compare and enqueue default transitions.
-              match (def_a, def_b) {
-                  (Some(ta_id), Some(tb_id)) => {
-                      if let Some(&mapped) = map_ab.get(&ta_id) {
-                          assert_eq!(
-                              mapped, tb_id,
-                              "Default transition mismatch from (a:{}, b:{}): a-target {} already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                              ia, ib, ta_id, mapped, tb_id, a, b
-                          );
-                      } else {
-                          map_ab.insert(ta_id, tb_id);
-                          map_ba.entry(tb_id).or_default().insert(ta_id);
-                          q.push_back((ta_id, tb_id));
-                      }
-                  }
-                  (None, None) => { /* No default on either side; fine. */ }
-                  _ => {
-                      panic!(
-                          "Default transition presence mismatch at (a:{}, b:{}): a.default={:?}, b.default={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                          ia, ib, def_a, def_b, a, b
-                      );
-                  }
-              }
-          }
-
-          // After establishing the state mapping, verify that the union of final weights
-          // for all `a` states mapping to a given `b` state is equal to the final weight
-          // of that `b` state. This handles cases where `a` is an unminimized version of `b`.
-          for (ib, ias) in &map_ba {
-              let mut union_fa = Weight::zeros();
-              for &ia in ias {
-                  union_fa |= &opt_w_to_w(&a.states[ia].final_weight);
-              }
-              let fb = opt_w_to_w(&b.states[*ib].final_weight);
-              assert_eq!(
-                  union_fa, fb,
-                  "Aggregated final weight mismatch for b-state {} (a-states: {:?}): union(a)={}, b={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                  ib, ias, union_fa, fb, a, b
-              );
-          }
-
-          // Ensure we've covered all states reachable from b.start.
-          let mut reachable_b: HashSet<usize> = HashSet::new();
-          let mut qb: VecDeque<usize> = VecDeque::new();
-          reachable_b.insert(b.body.start_state);
-          qb.push_back(b.body.start_state);
-          while let Some(u) = qb.pop_front() {
-              if let Some(d) = b.states[u].transitions.default {
-                  if reachable_b.insert(d) {
-                      qb.push_back(d);
-                  }
-              }
-              for &v in b.states[u].transitions.exceptions.values() {
-                  if reachable_b.insert(v) {
-                      qb.push_back(v);
-                  }
-              }
-          }
-          let mapped_b: HashSet<usize> = map_ab.values().cloned().collect();
-          assert_eq!(
-              mapped_b, reachable_b,
-              "Reachable-state mismatch in `b`: matched set = {:?}, reachable set = {:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-              mapped_b, reachable_b, a, b
-          );
+      pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
+          todo!()
       }
 
       #[test]
@@ -546,7 +372,7 @@ local_system:
           expected.set_final_weight(s_b, Weight::from_item(2)).unwrap();
 
           let u = d1.union(&d2);
-          assert_dwa_equivalent(u, expected);
+          stochastic_equivalence_test(u, expected);
       }
 
       #[test]
@@ -566,7 +392,7 @@ local_system:
           expected.set_final_weight(s_b, Weight::from_item(3)).unwrap();
 
           let u = d1.union(&d2);
-          assert_dwa_equivalent(u, expected);
+          stochastic_equivalence_test(u, expected);
       }
 
       #[test]
@@ -575,7 +401,7 @@ local_system:
           let d2 = dwa_accepts_char('b', Weight::from_iter([2, 3]));
           let c = d1.concatenate(&d2);
           let expected = dwa_from_str("ab", Weight::from_item(2));
-          assert_dwa_equivalent(c, expected);
+          stochastic_equivalence_test(c, expected);
       }
 
       #[test]
@@ -642,7 +468,7 @@ local_system:
               .set_final_weight(s, Weight::from_iter(vec![1, 2]))
               .unwrap();
 
-          assert_dwa_equivalent(u, expected);
+          stochastic_equivalence_test(u, expected);
       }
 
       #[test]
@@ -717,7 +543,7 @@ local_system:
           b.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
           b.add_transition(0, 2, s1b, Weight::from_item(0)).unwrap();
 
-          assert_dwa_equivalent(a, b);
+          stochastic_equivalence_test(a, b);
       }
 
       #[test]
@@ -741,7 +567,7 @@ local_system:
           let mut expected = DWA::new();
           expected.set_final_weight(expected.body.start_state, Weight::from_item(1)).unwrap();
 
-          assert_dwa_equivalent(c, expected);
+          stochastic_equivalence_test(c, expected);
       }
 
       #[test]
@@ -771,7 +597,7 @@ local_system:
 
           a.simplify();
 
-          assert_dwa_equivalent(a, b);
+          stochastic_equivalence_test(a, b);
       }
 
       #[test]
@@ -1362,7 +1188,7 @@ local_system:
           let u = d1.union(&d2);
 
           // The union of two identical automata should be equivalent to the original.
-          assert_dwa_equivalent(u, d1);
+          stochastic_equivalence_test(u, d1);
       }
 
       #[test]
@@ -1497,7 +1323,7 @@ local_system:
           let mut simplified = left.clone();
           simplified.simplify();
 
-          assert_dwa_equivalent(left, simplified);
+          stochastic_equivalence_test(left, simplified);
       }
 
       #[test]
@@ -1921,174 +1747,32 @@ local_system:
           }
       }
 
-      pub fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
-          // Strategy:
-          // 1) Simplify both automata to obtain canonical, minimized, and normalized forms
-          //    (unreachable pruned, sink-like states collapsed, redundant exceptions removed),
-          //    while aggregating edge/default weights as unions across merged states.
-          // 2) Perform a BFS isomorphism test from the start states. For each matched pair:
-          //    - Compare state weights and final weights (None treated as zeros).
-          //    - Compare default transition weights (None treated as zeros).
-          //    - For each character in the union of exception keys, compare per-edge weights
-          //      (falling back to default if exception weight absent).
-          //    - Ensure default and per-exception targets correspond under the evolving bijection.
-          // 3) Verify that all states reachable in `b` are matched by some state of `a`.
-
-          // DWA::propagate_and_constrain_weights(&mut a.states, &mut a.body);
-          // DWA::propagate_future_weights(&mut a.states);
+      pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
           a.simplify();
-          // DWA::propagate_and_constrain_weights(&mut b.states, &mut b.body);
-          // DWA::propagate_future_weights(&mut b.states);
           b.simplify();
 
-          // Helper: convert Option<Weight> to Weight (None => zeros).
-          fn opt_w_to_w(ow: &Option<Weight>) -> Weight {
-              ow.clone().unwrap_or_else(Weight::zeros)
-          }
-
-          // Map a-state -> b-state and its inverse to ensure a bijection.
-          let mut map_ab: HashMap<usize, usize> = HashMap::new();
-          let mut map_ba: HashMap<usize, BTreeSet<usize>> = HashMap::new();
-          let mut q: VecDeque<(usize, usize)> = VecDeque::new();
-
-          assert!(
-              !a.states.is_empty() && !b.states.is_empty(),
-              "Automata should have at least one state after simplification.\n\nDWA A:\n{}\n\nDWA B:\n{}",
-              a, b
-          );
-
-          let start_a = a.body.start_state;
-          let start_b = b.body.start_state;
-          map_ab.insert(start_a, start_b);
-          map_ba.entry(start_b).or_default().insert(start_a);
-          q.push_back((start_a, start_b));
-
-          // Lookup per-edge weight for a specific character in a given state:
-          // - If an exception weight is present, use it.
-          // - Else, use the default weight (or zeros if absent).
-          let edge_weight = |st: &DWAState, ch: i16| -> Weight {
-              if let Some(w) = st.trans_weights_exceptions.get(&ch) {
-                  w.clone()
-              } else {
-                  opt_w_to_w(&st.trans_weight_default)
-              }
-          };
-
-          while let Some((ia, ib)) = q.pop_front() {
-              let sa = &a.states[ia];
-              let sb = &b.states[ib];
-
-              let fwa = opt_w_to_w(&sa.final_weight);
-              let fwb = opt_w_to_w(&sb.final_weight);
-              assert_eq!(
-                  fwa, fwb,
-                  "Final weight mismatch at (a:{}, b:{}): a.final_weight={} vs b.final_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                  ia, ib, fwa, fwb, a, b
-              );
-
-              // Compare default transition weights (None considered zeros).
-              let dwa = opt_w_to_w(&sa.trans_weight_default);
-              let dwb = opt_w_to_w(&sb.trans_weight_default);
-              assert_eq!(
-                  dwa, dwb,
-                  "Default transition weight mismatch at (a:{}, b:{}): a.def_weight={} vs b.def_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                  ia, ib, dwa, dwb, a, b
-              );
-
-              // Union of exception keys; after simplify(), both representations should be normalized,
-              // but we compute the union to be robust.
-              let keys_a: BTreeSet<i16> = sa.transitions.exceptions.keys().cloned().collect();
-              let keys_b: BTreeSet<i16> = sb.transitions.exceptions.keys().cloned().collect();
-              let all_keys: BTreeSet<i16> = keys_a.union(&keys_b).cloned().collect();
-
-              // Compare and enqueue per-exception transitions.
-              let def_a = sa.transitions.default;
-              let def_b = sb.transitions.default;
-
-              for ch in all_keys {
-                  let ta = sa.transitions.exceptions.get(&ch).copied().or(def_a);
-                  let tb = sb.transitions.exceptions.get(&ch).copied().or(def_b);
-
-                  let wa = edge_weight(sa, ch);
-                  let wb = edge_weight(sb, ch);
+          let mut rng = SimpleRng::from_time();
+          for _ in 0..VALIDATION_SAMPLES {
+              // Sample from A, check against B
+              if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                  let wb = b.eval_word_weight(&w);
                   assert_eq!(
                       wa, wb,
-                      "Per-edge weight mismatch on char {} at (a:{}, b:{}): a.edge_weight={} vs b.edge_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                      ch, ia, ib, wa, wb, a, b
+                      "Equivalence fail: A(w) != B(w) for word from A.\nword: {}\nA(w): {}\nB(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                      format_word(&w), wa, wb, a, b
                   );
-
-                  match (ta, tb) {
-                      (Some(ta_id), Some(tb_id)) => {
-                          if let Some(&mapped) = map_ab.get(&ta_id) {
-                              assert_eq!(
-                                  mapped, tb_id,
-                                  "Transition mismatch on char {} from (a:{}, b:{}): a-target {} is already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                                  ch, ia, ib, ta_id, mapped, tb_id, a, b
-                              );
-                          } else {
-                              map_ab.insert(ta_id, tb_id);
-                              map_ba.entry(tb_id).or_default().insert(ta_id);
-                              q.push_back((ta_id, tb_id));
-                          }
-                      }
-                      (None, None) => { /* Both lack transition for this char; fine. */ }
-                      _ => {
-                          panic!(
-                              "Presence mismatch for transition on char {} at (a:{}, b:{}): a-target={:?}, b-target={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                              ch, ia, ib, ta, tb, a, b
-                          );
-                      }
-                  }
               }
 
-              // Compare and enqueue default transitions.
-              match (def_a, def_b) {
-                  (Some(ta_id), Some(tb_id)) => {
-                      if let Some(&mapped) = map_ab.get(&ta_id) {
-                          assert_eq!(
-                              mapped, tb_id,
-                              "Default transition mismatch from (a:{}, b:{}): a-target {} already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                              ia, ib, ta_id, mapped, tb_id, a, b
-                          );
-                      } else {
-                          map_ab.insert(ta_id, tb_id);
-                          map_ba.entry(tb_id).or_default().insert(ta_id);
-                          q.push_back((ta_id, tb_id));
-                      }
-                  }
-                  (None, None) => { /* No default on either side; fine. */ }
-                  _ => {
-                      panic!(
-                          "Default transition presence mismatch at (a:{}, b:{}): a.default={:?}, b.default={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                          ia, ib, def_a, def_b, a, b
-                      );
-                  }
+              // Sample from B, check against A
+              if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                  let wa = a.eval_word_weight(&w);
+                  assert_eq!(
+                      wb, wa,
+                      "Equivalence fail: B(w) != A(w) for word from B.\nword: {}\nB(w): {}\nA(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                      format_word(&w), wb, wa, a, b
+                  );
               }
           }
-
-          // Ensure we've covered all states reachable from b.start.
-          let mut reachable_b: HashSet<usize> = HashSet::new();
-          let mut qb: VecDeque<usize> = VecDeque::new();
-          reachable_b.insert(b.body.start_state);
-          qb.push_back(b.body.start_state);
-          while let Some(u) = qb.pop_front() {
-              if let Some(d) = b.states[u].transitions.default {
-                  if reachable_b.insert(d) {
-                      qb.push_back(d);
-                  }
-              }
-              for &v in b.states[u].transitions.exceptions.values() {
-                  if reachable_b.insert(v) {
-                      qb.push_back(v);
-                  }
-              }
-          }
-          let mapped_b: HashSet<usize> = map_ab.values().cloned().collect();
-          assert_eq!(
-              mapped_b, reachable_b,
-              "Reachable-state mismatch in `b`: matched set = {:?}, reachable set = {:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-              mapped_b, reachable_b, a, b
-          );
       }
 
       #[test]
@@ -2201,7 +1885,7 @@ local_system:
           expected.set_final_weight(s_b, Weight::from_item(2)).unwrap();
 
           let u = d1.union(&d2);
-          assert_dwa_equivalent(u, expected);
+          stochastic_equivalence_test(u, expected);
       }
 
       #[test]
@@ -2221,7 +1905,7 @@ local_system:
           expected.set_final_weight(s_b, Weight::from_item(3)).unwrap();
 
           let u = d1.union(&d2);
-          assert_dwa_equivalent(u, expected);
+          stochastic_equivalence_test(u, expected);
       }
 
       #[test]
@@ -2230,7 +1914,7 @@ local_system:
           let d2 = dwa_accepts_char('b', Weight::from_iter([2, 3]));
           let c = d1.concatenate(&d2);
           let expected = dwa_from_str("ab", Weight::from_item(2));
-          assert_dwa_equivalent(c, expected);
+          stochastic_equivalence_test(c, expected);
       }
 
       #[test]
@@ -2297,7 +1981,7 @@ local_system:
               .set_final_weight(s, Weight::from_iter(vec![1, 2]))
               .unwrap();
 
-          assert_dwa_equivalent(u, expected);
+          stochastic_equivalence_test(u, expected);
       }
 
       #[test]
@@ -2372,7 +2056,7 @@ local_system:
           b.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
           b.add_transition(0, 2, s1b, Weight::from_item(0)).unwrap();
 
-          assert_dwa_equivalent(a, b);
+          stochastic_equivalence_test(a, b);
       }
 
       #[test]
@@ -2396,7 +2080,7 @@ local_system:
           let mut expected = DWA::new();
           expected.set_final_weight(expected.body.start_state, Weight::from_item(1)).unwrap();
 
-          assert_dwa_equivalent(c, expected);
+          stochastic_equivalence_test(c, expected);
       }
 
       #[test]
@@ -2426,7 +2110,7 @@ local_system:
 
           a.simplify();
 
-          assert_dwa_equivalent(a, b);
+          stochastic_equivalence_test(a, b);
       }
 
       #[test]
@@ -3017,7 +2701,7 @@ local_system:
           let u = d1.union(&d2);
 
           // The union of two identical automata should be equivalent to the original.
-          assert_dwa_equivalent(u, d1);
+          stochastic_equivalence_test(u, d1);
       }
 
       #[test]
@@ -3152,7 +2836,7 @@ local_system:
           let mut simplified = left.clone();
           simplified.simplify();
 
-          assert_dwa_equivalent(left, simplified);
+          stochastic_equivalence_test(left, simplified);
       }
 
       #[test]
@@ -3618,182 +3302,8 @@ messages:
           }
       }
 
-      pub fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
-          // Strategy:
-          // 1) Simplify both automata to obtain canonical, minimized, and normalized forms
-          //    (unreachable pruned, sink-like states collapsed, redundant exceptions removed),
-          //    while aggregating edge/default weights as unions across merged states.
-          // 2) Perform a BFS isomorphism test from the start states. For each matched pair:
-          //    - Compare state weights and final weights (None treated as zeros).
-          //    - Compare default transition weights (None treated as zeros).
-          //    - For each character in the union of exception keys, compare per-edge weights
-          //      (falling back to default if exception weight absent).
-          //    - Ensure default and per-exception targets correspond under the evolving bijection.
-          // 3) Verify that all states reachable in `b` are matched by some state of `a`.
-
-          // DWA::propagate_and_constrain_weights(&mut a.states, &mut a.body);
-          // DWA::propagate_future_weights(&mut a.states);
-          // a.simplify();
-          // DWA::propagate_and_constrain_weights(&mut b.states, &mut b.body);
-          // DWA::propagate_future_weights(&mut b.states);
-          // b.simplify();
-
-          // Helper: convert Option<Weight> to Weight (None => zeros).
-          fn opt_w_to_w(ow: &Option<Weight>) -> Weight {
-              ow.clone().unwrap_or_else(Weight::zeros)
-          }
-
-          // Map a-state -> b-state and its inverse to ensure a bijection.
-          let mut map_ab: HashMap<usize, usize> = HashMap::new();
-          let mut map_ba: HashMap<usize, BTreeSet<usize>> = HashMap::new();
-          let mut q: VecDeque<(usize, usize)> = VecDeque::new();
-
-          assert!(
-              !a.states.is_empty() && !b.states.is_empty(),
-              "Automata should have at least one state after simplification.\n\nDWA A:\n{}\n\nDWA B:\n{}",
-              a, b
-          );
-
-          let start_a = a.body.start_state;
-          let start_b = b.body.start_state;
-          map_ab.insert(start_a, start_b);
-          map_ba.entry(start_b).or_default().insert(start_a);
-          q.push_back((start_a, start_b));
-
-          // Lookup per-edge weight for a specific character in a given state:
-          // - If an exception weight is present, use it.
-          // - Else, use the default weight (or zeros if absent).
-          let edge_weight = |st: &DWAState, ch: i16| -> Weight {
-              if let Some(w) = st.trans_weights_exceptions.get(&ch) {
-                  w.clone()
-              } else {
-                  opt_w_to_w(&st.trans_weight_default)
-              }
-          };
-
-          while let Some((ia, ib)) = q.pop_front() {
-              let sa = &a.states[ia];
-              let sb = &b.states[ib];
-
-              // Compare default transition weights (None considered zeros).
-              let dwa = opt_w_to_w(&sa.trans_weight_default);
-              let dwb = opt_w_to_w(&sb.trans_weight_default);
-              assert_eq!(
-                  dwa, dwb,
-                  "Default transition weight mismatch at (a:{}, b:{}): a.def_weight={} vs b.def_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                  ia, ib, dwa, dwb, a, b
-              );
-
-              // Union of exception keys; after simplify(), both representations should be normalized,
-              // but we compute the union to be robust.
-              let keys_a: BTreeSet<i16> = sa.transitions.exceptions.keys().cloned().collect();
-              let keys_b: BTreeSet<i16> = sb.transitions.exceptions.keys().cloned().collect();
-              let all_keys: BTreeSet<i16> = keys_a.union(&keys_b).cloned().collect();
-
-              // Compare and enqueue per-exception transitions.
-              let def_a = sa.transitions.default;
-              let def_b = sb.transitions.default;
-
-              for ch in all_keys {
-                  let ta = sa.transitions.exceptions.get(&ch).copied().or(def_a);
-                  let tb = sb.transitions.exceptions.get(&ch).copied().or(def_b);
-
-                  let wa = edge_weight(sa, ch);
-                  let wb = edge_weight(sb, ch);
-                  assert_eq!(
-                      wa, wb,
-                      "Per-edge weight mismatch on char {} at (a:{}, b:{}): a.edge_weight={} vs b.edge_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                      ch, ia, ib, wa, wb, a, b
-                  );
-
-                  match (ta, tb) {
-                      (Some(ta_id), Some(tb_id)) => {
-                          if let Some(&mapped) = map_ab.get(&ta_id) {
-                              assert_eq!(
-                                  mapped, tb_id,
-                                  "Transition mismatch on char {} from (a:{}, b:{}): a-target {} is already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                                  ch, ia, ib, ta_id, mapped, tb_id, a, b
-                              );
-                          } else {
-                              map_ab.insert(ta_id, tb_id);
-                              map_ba.entry(tb_id).or_default().insert(ta_id);
-                              q.push_back((ta_id, tb_id));
-                          }
-                      }
-                      (None, None) => { /* Both lack transition for this char; fine. */ }
-                      _ => {
-                          panic!(
-                              "Presence mismatch for transition on char {} at (a:{}, b:{}): a-target={:?}, b-target={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                              ch, ia, ib, ta, tb, a, b
-                          );
-                      }
-                  }
-              }
-
-              // Compare and enqueue default transitions.
-              match (def_a, def_b) {
-                  (Some(ta_id), Some(tb_id)) => {
-                      if let Some(&mapped) = map_ab.get(&ta_id) {
-                          assert_eq!(
-                              mapped, tb_id,
-                              "Default transition mismatch from (a:{}, b:{}): a-target {} already mapped to b-target {}, but encountered b-target {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                              ia, ib, ta_id, mapped, tb_id, a, b
-                          );
-                      } else {
-                          map_ab.insert(ta_id, tb_id);
-                          map_ba.entry(tb_id).or_default().insert(ta_id);
-                          q.push_back((ta_id, tb_id));
-                      }
-                  }
-                  (None, None) => { /* No default on either side; fine. */ }
-                  _ => {
-                      panic!(
-                          "Default transition presence mismatch at (a:{}, b:{}): a.default={:?}, b.default={:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                          ia, ib, def_a, def_b, a, b
-                      );
-                  }
-              }
-          }
-
-          // After establishing the state mapping, verify that the union of final weights
-          // for all `a` states mapping to a given `b` state is equal to the final weight
-          // of that `b` state. This handles cases where `a` is an unminimized version of `b`.
-          for (ib, ias) in &map_ba {
-              let mut union_fa = Weight::zeros();
-              for &ia in ias {
-                  union_fa |= &opt_w_to_w(&a.states[ia].final_weight);
-              }
-              let fb = opt_w_to_w(&b.states[*ib].final_weight);
-              assert_eq!(
-                  union_fa, fb,
-                  "Aggregated final weight mismatch for b-state {} (a-states: {:?}): union(a)={}, b={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                  ib, ias, union_fa, fb, a, b
-              );
-          }
-
-          // Ensure we've covered all states reachable from b.start.
-          let mut reachable_b: HashSet<usize> = HashSet::new();
-          let mut qb: VecDeque<usize> = VecDeque::new();
-          reachable_b.insert(b.body.start_state);
-          qb.push_back(b.body.start_state);
-          while let Some(u) = qb.pop_front() {
-              if let Some(d) = b.states[u].transitions.default {
-                  if reachable_b.insert(d) {
-                      qb.push_back(d);
-                  }
-              }
-              for &v in b.states[u].transitions.exceptions.values() {
-                  if reachable_b.insert(v) {
-                      qb.push_back(v);
-                  }
-              }
-          }
-          let mapped_b: HashSet<usize> = map_ab.values().cloned().collect();
-          assert_eq!(
-              mapped_b, reachable_b,
-              "Reachable-state mismatch in `b`: matched set = {:?}, reachable set = {:?}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-              mapped_b, reachable_b, a, b
-          );
+      pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
+          todo!()
       }
 
       #[test]
@@ -3906,7 +3416,7 @@ messages:
           expected.set_final_weight(s_b, Weight::from_item(2)).unwrap();
 
           let u = d1.union(&d2);
-          assert_dwa_equivalent(u, expected);
+          stochastic_equivalence_test(u, expected);
       }
 
       #[test]
@@ -3926,7 +3436,7 @@ messages:
           expected.set_final_weight(s_b, Weight::from_item(3)).unwrap();
 
           let u = d1.union(&d2);
-          assert_dwa_equivalent(u, expected);
+          stochastic_equivalence_test(u, expected);
       }
 
       #[test]
@@ -3935,7 +3445,7 @@ messages:
           let d2 = dwa_accepts_char('b', Weight::from_iter([2, 3]));
           let c = d1.concatenate(&d2);
           let expected = dwa_from_str("ab", Weight::from_item(2));
-          assert_dwa_equivalent(c, expected);
+          stochastic_equivalence_test(c, expected);
       }
 
       #[test]
@@ -4002,7 +3512,7 @@ messages:
               .set_final_weight(s, Weight::from_iter(vec![1, 2]))
               .unwrap();
 
-          assert_dwa_equivalent(u, expected);
+          stochastic_equivalence_test(u, expected);
       }
 
       #[test]
@@ -4077,7 +3587,7 @@ messages:
           b.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
           b.add_transition(0, 2, s1b, Weight::from_item(0)).unwrap();
 
-          assert_dwa_equivalent(a, b);
+          stochastic_equivalence_test(a, b);
       }
 
       #[test]
@@ -4101,7 +3611,7 @@ messages:
           let mut expected = DWA::new();
           expected.set_final_weight(expected.body.start_state, Weight::from_item(1)).unwrap();
 
-          assert_dwa_equivalent(c, expected);
+          stochastic_equivalence_test(c, expected);
       }
 
       #[test]
@@ -4131,7 +3641,7 @@ messages:
 
           a.simplify();
 
-          assert_dwa_equivalent(a, b);
+          stochastic_equivalence_test(a, b);
       }
 
       #[test]
@@ -4722,7 +4232,7 @@ messages:
           let u = d1.union(&d2);
 
           // The union of two identical automata should be equivalent to the original.
-          assert_dwa_equivalent(u, d1);
+          stochastic_equivalence_test(u, d1);
       }
 
       #[test]
@@ -4857,7 +4367,7 @@ messages:
           let mut simplified = left.clone();
           simplified.simplify();
 
-          assert_dwa_equivalent(left, simplified);
+          stochastic_equivalence_test(left, simplified);
       }
 
       #[test]
@@ -5030,7 +4540,7 @@ messages:
       ```
     metadata:
       filename: src/precompute4/test_weighted_automata.rs
-  - user: src/precompute4/test_weighted_automata.rs
+  - user: Implement stochastic_equivalence_test
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5050,113 +4560,92 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course! Here are the step-by-step instructions to modify the file, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to implement `stochastic_equivalence_test`, followed by the corresponding git diff.
 
-      ### Step-by-step Instructions
+      ### Instructions
 
-      I'll guide you through the necessary changes to `src/precompute4/test_weighted_automata.rs` to improve the DWA equivalence check.
+      1.  Open the file `src/precompute4/test_weighted_automata.rs`.
+      2.  Navigate to the `stochastic_equivalence_test` function, which is currently empty except for a `todo!()` macro.
+      3.  Replace the body of this function with the logic for stochastic equivalence testing. The new implementation will:
+          *   Simplify both input automata, `a` and `b`, to reduce their complexity and state space.
+          *   Create a random number generator to sample paths.
+          *   In a loop, perform the following checks:
+              1.  Sample accepted words from automaton `a` and assert that automaton `b` produces an identical weight for each word.
+              2.  Sample accepted words from automaton `b` and assert that automaton `a` produces an identical weight for each word.
+          *   The assertions include detailed messages to help with debugging in case of failure.
 
-      1.  **Open `src/precompute4/test_weighted_automata.rs`**.
+      Here is the code to replace the `todo!()`:
 
-      2.  Navigate to the `assert_dwa_equivalent` function, which starts around line 314.
+      ```rust
+          a.simplify();
+          b.simplify();
 
-      3.  **Enable simplification:** Inside this function, you'll find commented-out calls to `simplify()`. Uncomment them to ensure both automata are in a canonical form before comparison.
-
-          *   Around line 325, change `// a.simplify();` to `a.simplify();`.
-          *   Around line 328, change `// b.simplify();` to `b.simplify();`.
-
-      4.  **Add a final weight check inside the main loop:** To fail faster and simplify the logic, we'll check for final weight equality for each pair of states being compared. Inside the `while let Some((ia, ib)) = q.pop_front()` loop, just after the `let sb = &b.states[ib];` line (around line 369), insert the following code:
-
-          ```rust
-              let fwa = opt_w_to_w(&sa.final_weight);
-              let fwb = opt_w_to_w(&sb.final_weight);
-              assert_eq!(
-                  fwa, fwb,
-                  "Final weight mismatch at (a:{}, b:{}): a.final_weight={} vs b.final_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                  ia, ib, fwa, fwb, a, b
-              );
-          ```
-
-      5.  **Remove the redundant final weight check:** Now that final weights are checked within the loop, the aggregated check at the end of the function is no longer necessary. Delete the entire `for` loop that starts around line 453, including its preceding comment. The block to remove looks like this:
-
-          ```rust
-          // After establishing the state mapping, verify that the union of final weights
-          // for all `a` states mapping to a given `b` state is equal to the final weight
-          // of that `b` state. This handles cases where `a` is an unminimized version of `b`.
-          for (ib, ias) in &map_ba {
-              let mut union_fa = Weight::zeros();
-              for &ia in ias {
-                  union_fa |= &opt_w_to_w(&a.states[ia].final_weight);
+          let mut rng = SimpleRng::from_time();
+          for _ in 0..VALIDATION_SAMPLES {
+              // Sample from A, check against B
+              if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                  let wb = b.eval_word_weight(&w);
+                  assert_eq!(
+                      wa, wb,
+                      "Equivalence fail: A(w) != B(w) for word from A.\nword: {}\nA(w): {}\nB(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                      format_word(&w), wa, wb, a, b
+                  );
               }
-              let fb = opt_w_to_w(&b.states[*ib].final_weight);
-              assert_eq!(
-                  union_fa, fb,
-                  "Aggregated final weight mismatch for b-state {} (a-states: {:?}): union(a)={}, b={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                  ib, ias, union_fa, fb, a, b
-              );
-          }
-          ```
 
-      After applying these changes, the `assert_dwa_equivalent` function will be more robust and correct.
+              // Sample from B, check against A
+              if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+                  let wa = a.eval_word_weight(&w);
+                  assert_eq!(
+                      wb, wa,
+                      "Equivalence fail: B(w) != A(w) for word from B.\nword: {}\nB(w): {}\nA(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                      format_word(&w), wb, wa, a, b
+                  );
+              }
+          }
+      ```
 
       ### Git Diff
 
-      Here is the git diff for the changes described above:
+      Here is the git patch to apply these changes:
 
       ```diff
+      diff --git a/src/precompute4/test_weighted_automata.rs b/src/precompute4/test_weighted_automata.rs
+      index 893340e..992a71f 100644
       --- a/src/precompute4/test_weighted_automata.rs
       +++ b/src/precompute4/test_weighted_automata.rs
-      @@ -322,11 +322,11 @@
+      @@ -298,7 +298,29 @@
+       }
        
-           // DWA::propagate_and_constrain_weights(&mut a.states, &mut a.body);
-           // DWA::propagate_future_weights(&mut a.states);
-      -    // a.simplify();
+       pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
+      -    todo!()
       +    a.simplify();
-           // DWA::propagate_and_constrain_weights(&mut b.states, &mut b.body);
-           // DWA::propagate_future_weights(&mut b.states);
-      -    // b.simplify();
       +    b.simplify();
-       
-           // Helper: convert Option<Weight> to Weight (None => zeros).
-           fn opt_w_to_w(ow: &Option<Weight>) -> Weight {
-      @@ -366,6 +366,15 @@
-               let sa = &a.states[ia];
-               let sb = &b.states[ib];
-       
-      +        let fwa = opt_w_to_w(&sa.final_weight);
-      +        let fwb = opt_w_to_w(&sb.final_weight);
-      +        assert_eq!(
-      +            fwa, fwb,
-      +            "Final weight mismatch at (a:{}, b:{}): a.final_weight={} vs b.final_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-      +            ia, ib, fwa, fwb, a, b
-      +        );
       +
-               // Compare default transition weights (None considered zeros).
-               let dwa = opt_w_to_w(&sa.trans_weight_default);
-               let dwb = opt_w_to_w(&sb.trans_weight_default);
-      @@ -449,24 +458,6 @@
-               }
-           }
+      +    let mut rng = SimpleRng::from_time();
+      +    for _ in 0..VALIDATION_SAMPLES {
+      +        // Sample from A, check against B
+      +        if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+      +            let wb = b.eval_word_weight(&w);
+      +            assert_eq!(
+      +                wa, wb,
+      +                "Equivalence fail: A(w) != B(w) for word from A.\nword: {}\nA(w): {}\nB(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +                format_word(&w), wa, wb, a, b
+      +            );
+      +        }
+      +
+      +        // Sample from B, check against A
+      +        if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+      +            let wa = a.eval_word_weight(&w);
+      +            assert_eq!(
+      +                wb, wa,
+      +                "Equivalence fail: B(w) != A(w) for word from B.\nword: {}\nB(w): {}\nA(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+      +                format_word(&w), wb, wa, a, b
+      +            );
+      +        }
+      +    }
+       }
        
-      -    // After establishing the state mapping, verify that the union of final weights
-      -    // for all `a` states mapping to a given `b` state is equal to the final weight
-      -    // of that `b` state. This handles cases where `a` is an unminimized version of `b`.
-      -    for (ib, ias) in &map_ba {
-      -        let mut union_fa = Weight::zeros();
-      -        for &ia in ias {
-      -            union_fa |= &opt_w_to_w(&a.states[ia].final_weight);
-      -        }
-      -        let fb = opt_w_to_w(&b.states[*ib].final_weight);
-      -        assert_eq!(
-      -            union_fa, fb,
-      -            "Aggregated final weight mismatch for b-state {} (a-states: {:?}): union(a)={}, b={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-      -            ib, ias, union_fa, fb, a, b
-      -        );
-      -    }
-      -
-           // Ensure we've covered all states reachable from b.start.
-           let mut reachable_b: HashSet<usize> = HashSet::new();
-           let mut qb: VecDeque<usize> = VecDeque::new();
+       #[test]
 
       ```
     metadata:
@@ -5169,7 +4658,7 @@ messages:
       Applying patch to 'src/precompute4/test_weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/test_weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Improve DWA equivalence check by enabling
-      simplification and checking final weights during state traversal"'
+  - user: 'Changes committed with message: "test: Implement stochastic_equivalence_test
+      for weighted automata"'
     metadata:
 ...

@@ -252,7 +252,28 @@ impl DWA {
 }
 
 pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
-    todo!()
+    let mut rng = SimpleRng::from_time();
+    for _ in 0..VALIDATION_SAMPLES {
+        // Sample from A, check against B
+        if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+            let wb = b.eval_word_weight(&w);
+            assert_eq!(
+                wa, wb,
+                "Equivalence fail: A(w) != B(w) for word from A.\nword: {}\nA(w): {}\nB(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                format_word(&w), wa, wb, a, b
+            );
+        }
+
+        // Sample from B, check against A
+        if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
+            let wa = a.eval_word_weight(&w);
+            assert_eq!(
+                wb, wa,
+                "Equivalence fail: B(w) != A(w) for word from B.\nword: {}\nB(w): {}\nA(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                format_word(&w), wb, wa, a, b
+            );
+        }
+    }
 }
 
 #[test]
