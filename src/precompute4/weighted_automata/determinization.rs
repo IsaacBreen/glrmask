@@ -318,8 +318,7 @@ impl NWA {
         struct DetState {
             members: Vec<usize>,              // macro_sig ids, sorted
             pos: HashMap<usize, usize>,       // macro_sig_id -> index
-            gates: Vec<Weight>,               // current gates per member (monotone growing)
-            done: Vec<Weight>,                // already-propagated portion per member (subset of gates[i])
+            gates: Vec<Weight>,               // gates per member
         }
 
         #[derive(Clone, Eq, PartialEq, Hash)]
@@ -375,9 +374,7 @@ impl NWA {
                 }
             }
             let id = states.len();
-            // 'done' starts at zero; we will propagate only deltas = gates - done
-            let done = vec![Weight::zeros(); items.len()];
-            states.push(DetState { members: items, pos, gates, done });
+            states.push(DetState { members: items, pos, gates });
             map.insert(key, id);
             work.push_back(id);
             id
@@ -452,38 +449,13 @@ impl NWA {
                 p.set_message(format!("states: {}, queue: {}", states.len(), work.len()));
             }
 
-            // Snapshot current members/gates/done for delta computation
-            let members = states[sid].members.clone();
-            let gates = states[sid].gates.clone();
-            let prev_done = states[sid].done.clone();
+            let st = states[sid].clone();
 
-            // Compute per-member delta = gates - done; only propagate deltas
-            let mut deltas: Vec<Weight> = vec![Weight::zeros(); members.len()];
-            let mut idxs_delta: Vec<usize> = Vec::new();
-            for i in 0..members.len() {
-                let mut d = gates[i].clone();
-                d -= &prev_done[i];
-                if !d.is_empty() {
-                    deltas[i] = d;
-                    idxs_delta.push(i);
-                }
-            }
-            if idxs_delta.is_empty() {
-                // Nothing new to propagate from this state
-                continue;
-            }
-
-            // Default baseline: accumulate defaults only for delta parts
+            // Default baseline: accumulate all members' defaults
             let mut baseline: HashMap<usize, Weight> = HashMap::new();
-            for &i in &idxs_delta {
-                let sig_id = members[i];
-                if let Some(def_id) = sigs[sig_id].def {
-                    // Early mask filter: if delta ∧ step-mask is empty, skip
-                    let gate_eff = &deltas[i] & &compiled_steps[def_id].mask;
-                    if gate_eff.is_empty() {
-                        continue;
-                    }
-                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &gate_eff);
+            for (i, sig_id) in st.members.iter().enumerate() {
+                if let Some(def_id) = sigs[*sig_id].def {
+                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
                 }
             }
             if !baseline.is_empty() {
@@ -491,16 +463,10 @@ impl NWA {
                 let _ = ensure_state(mem, Some(baseline.clone()), &mut states, &mut key_to_state, &mut work);
             }
 
-            // Labels that appear as exceptions in members having non-empty delta (and whose ex-step mask intersects the delta)
+            // Labels that appear as exceptions in any member
             let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-            for &i in &idxs_delta {
-                let sig_id = members[i];
-                for (lbl, ex_id) in &sigs[sig_id].ex {
-                    // Only consider this label if the exception step has any overlap with the delta
-                    let gate_ex = &deltas[i] & &compiled_steps[*ex_id].mask;
-                    if gate_ex.is_empty() {
-                        continue;
-                    }
+            for (i, sig_id) in st.members.iter().enumerate() {
+                for (lbl, _) in &sigs[*sig_id].ex {
                     label_groups.entry(*lbl).or_default().push(i);
                 }
             }
@@ -511,14 +477,23 @@ impl NWA {
                 let mut cur_map = baseline.clone();
 
                 for i in idxs.iter().copied() {
-                    let sig_id = members[i];
-                    // Remove defaults for this member (corresponding only to the delta part for defaults)
+                    let sig_id = st.members[i];
+                    let gate = &st.gates[i];
+                    // Remove defaults for this member (if any)
                     if let Some(def_id) = sigs[sig_id].def {
                         let comp = &compiled_steps[def_id].by_sig;
-                        let gate_def = &deltas[i] & &compiled_steps[def_id].mask;
-                        if !gate_def.is_empty() {
+                        if gate.is_all_fast() {
                             for (tsig, w) in comp {
-                                let share = w & &gate_def;
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= w;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        } else {
+                            for (tsig, w) in comp {
+                                let share = w & gate;
                                 if share.is_empty() {
                                     continue;
                                 }
@@ -531,14 +506,10 @@ impl NWA {
                             }
                         }
                     }
-                    // Remove defaults for this member (if any)
                     // Add exception
                     if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
                         let comp = &compiled_steps[ex_id].by_sig;
-                        let gate_ex = &deltas[i] & &compiled_steps[ex_id].mask;
-                        if !gate_ex.is_empty() {
-                            accumulate(&mut cur_map, comp, &gate_ex);
-                        }
+                        accumulate(&mut cur_map, comp, gate);
                     }
                 }
 
@@ -547,9 +518,6 @@ impl NWA {
                     let _ = ensure_state(mem, Some(cur_map), &mut states, &mut key_to_state, &mut work);
                 }
             }
-
-            // Mark all current gate bits as processed for this state
-            states[sid].done = gates;
         }
         if let Some(p) = pb_det {
             p.finish_with_message(format!("Determinized to {} states", states.len()));
