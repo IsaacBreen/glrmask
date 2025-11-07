@@ -21,6 +21,8 @@ use super::common::Weight;
 use super::dwa::DWA;
 use super::nwa::{NWAStates, NWA};
 use crate::precompute4::weighted_automata::NWAStateID;
+use crate::profiler::PROGRESS_BAR_ENABLED;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -174,9 +176,27 @@ impl NWA {
         }
 
         // Precompute ε-closure from each NWA state and build macro signatures.
+        let pb_eps = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(n as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
+                    .expect("progress-bar style"),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
         let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
         for s in 0..n {
             eps_cache[s] = eps_closure_masked(std::slice::from_ref(&s), &self.states, &fut);
+            if let Some(p) = &pb_eps {
+                p.inc(1);
+            }
+        }
+        if let Some(p) = pb_eps {
+            p.finish_with_message("ε-closures done");
         }
 
         let mut step_pool = StepPool::new();
@@ -184,6 +204,18 @@ impl NWA {
         let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
         let mut state_to_sig_id: Vec<usize> = vec![0; n];
         let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
+
+        let pb_sigs = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(n as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Macro signatures)")
+                    .expect("progress-bar style"),
+            );
+            Some(p)
+        } else {
+            None
+        };
 
         for s in 0..n {
             // Final weight from ε-closure
@@ -231,9 +263,27 @@ impl NWA {
                 }
             };
             state_to_sig_id[s] = sig_id;
+            if let Some(p) = &pb_sigs {
+                p.inc(1);
+            }
+        }
+        if let Some(p) = pb_sigs {
+            p.finish_with_message("Macro signatures done");
         }
 
         // Compile steps by macro-signature
+        let pb_compile = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(step_pool.len() as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Compile steps)")
+                    .expect("progress-bar style"),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
         let mut compiled_steps: Vec<CompiledStep> = vec![
             CompiledStep { by_sig: Vec::new(), mask: Weight::zeros() };
             step_pool.len()
@@ -255,6 +305,12 @@ impl NWA {
                 mask |= w;
             }
             compiled_steps[id] = CompiledStep { by_sig, mask };
+            if let Some(p) = &pb_compile {
+                p.inc(1);
+            }
+        }
+        if let Some(p) = pb_compile {
+            p.finish_with_message("Compile steps done");
         }
 
         // Determinization worklist
@@ -371,9 +427,28 @@ impl NWA {
             }
         }
 
+        let pb_det = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(0); // Length is unknown, will be updated
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({msg})")
+                    .expect("progress-bar style"),
+            );
+            p.set_message("Starting...");
+            Some(p)
+        } else {
+            None
+        };
+
         // Fixpoint propagation: ensure all reachable determinized states are created and
         // their gates saturated.
         while let Some(sid) = work.pop_front() {
+            if let Some(p) = &pb_det {
+                p.inc(1);
+                p.set_length(states.len() as u64);
+                p.set_message(format!("states: {}, queue: {}", states.len(), work.len()));
+            }
+
             let st = states[sid].clone();
 
             // Default baseline: accumulate all members' defaults
@@ -444,6 +519,9 @@ impl NWA {
                 }
             }
         }
+        if let Some(p) = pb_det {
+            p.finish_with_message(format!("Determinized to {} states", states.len()));
+        }
 
         // Build final DWA
         let mut dwa = DWA::new();
@@ -465,6 +543,18 @@ impl NWA {
                 }
             }
             acc
+        };
+
+        let pb_build = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(states.len() as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Build DWA)")
+                    .expect("progress-bar style"),
+            );
+            Some(p)
+        } else {
+            None
         };
 
         // Emit edges
@@ -558,6 +648,12 @@ impl NWA {
                     let _ = dwa.add_transition(sid, lbl, to_id, mask);
                 }
             }
+            if let Some(p) = &pb_build {
+                p.inc(1);
+            }
+        }
+        if let Some(p) = pb_build {
+            p.finish_with_message("Build DWA done");
         }
 
         dwa
