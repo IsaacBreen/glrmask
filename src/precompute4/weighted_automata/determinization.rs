@@ -219,7 +219,35 @@ impl NWA {
 
         // Helper to accumulate weights for a target state composition.
         fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
-            if gate.is_all_fast() { for (sid, w) in compiled.iter() { match dst.entry(*sid) { Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= w; } Entry::Vacant(e) => { e.insert(w.clone()); } } } } else { for (sid, w) in compiled.iter() { let x = w & gate; if x.is_empty() { continue; } match dst.entry(*sid) { Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= &x; } Entry::Vacant(e) => { e.insert(x); } } } }
+            if gate.is_all_fast() {
+                for (sid, w) in compiled.iter() {
+                    match dst.entry(*sid) {
+                        Entry::Occupied(mut e) => {
+                            let v = e.get_mut();
+                            *v |= w;
+                        }
+                        Entry::Vacant(e) => {
+                            e.insert(w.clone());
+                        }
+                    }
+                }
+            } else {
+                for (sid, w) in compiled.iter() {
+                    let x = w & gate;
+                    if x.is_empty() {
+                        continue;
+                    }
+                    match dst.entry(*sid) {
+                        Entry::Occupied(mut e) => {
+                            let v = e.get_mut();
+                            *v |= &x;
+                        }
+                        Entry::Vacant(e) => {
+                            e.insert(x);
+                        }
+                    }
+                }
+            }
         }
 
         // --- Phase 1: Discover all reachable compositions and their transitions ---
@@ -233,7 +261,15 @@ impl NWA {
         let mut init_map: HashMap<usize, Weight> = HashMap::new();
         for (t, w) in eps_cache[self.body.start_state].iter() {
             let sid = state_to_sig_id[*t];
-            match init_map.entry(sid) { Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= w; } Entry::Vacant(e) => { e.insert(w.clone()); } }
+            match init_map.entry(sid) {
+                Entry::Occupied(mut e) => {
+                    let v = e.get_mut();
+                    *v |= w;
+                }
+                Entry::Vacant(e) => {
+                    e.insert(w.clone());
+                }
+            }
         }
         let init_key = MembersKey::new(init_map.keys().copied().collect());
         let start_idx = 0;
@@ -390,21 +426,21 @@ impl NWA {
             }
         }
 
+        let compute_edge_weight = |target_idx: usize, nodes: &Vec<CompositionNode>| -> Weight {
+            let mut mask = Weight::zeros();
+            for w in nodes[target_idx].gates.values() { mask |= w; }
+            mask
+        };
+
         for i in 0..num_nodes {
             let from_part = partitions[i];
             let from_dwa_id = *part_to_dwa_id.get(&from_part).unwrap();
             let node = &nodes[i];
 
-            let compute_edge_weight = |target_idx: usize| -> Weight {
-                let mut mask = Weight::zeros();
-                for w in nodes[target_idx].gates.values() { mask |= w; }
-                mask
-            };
-
             if let Some(def_idx) = node.default_target_idx {
                 let to_part = partitions[def_idx];
                 let to_dwa_id = *part_to_dwa_id.get(&to_part).unwrap();
-                let weight = compute_edge_weight(def_idx);
+                let weight = compute_edge_weight(def_idx, &nodes);
                 if !weight.is_empty() {
                     if let Some(w) = dwa.states[from_dwa_id].trans_weight_default.as_mut() {
                         *w |= &weight;
@@ -417,7 +453,7 @@ impl NWA {
             for (lbl, ex_idx) in &node.exception_targets {
                 let to_part = partitions[*ex_idx];
                 let to_dwa_id = *part_to_dwa_id.get(&to_part).unwrap();
-                let weight = compute_edge_weight(*ex_idx);
+                let weight = compute_edge_weight(*ex_idx, &nodes);
                 if !weight.is_empty() {
                     if let Some(w) = dwa.states[from_dwa_id].trans_weights_exceptions.get_mut(lbl) {
                         *w |= &weight;

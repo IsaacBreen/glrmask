@@ -1023,54 +1023,57 @@ impl NWA {
             return false;
         }
 
-        // Map partition id -> new state id
+        // Build mapping from partition id to new state id
         let mut pid_to_new: HashMap<usize, usize> = HashMap::new();
-        let mut new_states: Vec<NWAState> = Vec::with_capacity(groups.len());
-        for (pid, members) in &groups {
-            let rep = members[0];
-            let mut st = self.states[rep].clone();
-
-            // Fix targets to new partition ids
-            // Default
-            if let Some((to, w)) = st.default.clone() {
-                let cls = part[to];
-                st.default = Some((*pid_to_new.entry(cls).or_insert_with(|| {
-                    groups.keys().position(|k| *k == cls).unwrap()
-                }), w));
-            }
-            // Labeled transitions
-            let trans = st.transitions.clone();
-            st.transitions.clear();
-            for (lbl, (to, w)) in trans {
-                let cls = part[to];
-                st.transitions.insert(lbl, (cls, w));
-            }
-            // Epsilons (aggregate after class remap)
-            let eps = st.epsilons.clone();
-            st.epsilons.clear();
-            for (to, w) in eps {
-                let cls = part[to];
-                st.epsilons.push((cls, w));
-            }
-
-            pid_to_new.insert(*pid, new_states.len());
-            new_states.push(st);
+        for (pid, _) in &groups {
+            let new_id = pid_to_new.len();
+            pid_to_new.insert(*pid, new_id);
         }
 
-        // Rewrite class ids in edges to actual new state ids and deduplicate ε-edges
-        for st in &mut new_states {
-            // Default
-            if let Some((cls, w)) = &st.default.clone() {
-                st.default = Some((*pid_to_new.get(cls).expect("missing class"), w.clone()));
+        // Build new states using class ids first
+        let mut new_states: Vec<NWAState> = vec![NWAState::default(); groups.len()];
+        for (pid, members) in &groups {
+            let rep = members[0];
+            let rep_state = &self.states[rep];
+
+            let new_id = *pid_to_new.get(pid).expect("missing pid");
+            let st = &mut new_states[new_id];
+
+            st.final_weight = rep_state.final_weight.clone();
+
+            // Default as class id
+            if let Some((to, w)) = &rep_state.default {
+                let cls = part[*to];
+                st.default = Some((cls, w.clone()));
             }
-            // Labeled
+
+            // Labeled transitions as class ids
+            for (lbl, (to, w)) in &rep_state.transitions {
+                let cls = part[*to];
+                st.transitions.insert(*lbl, (cls, w.clone()));
+            }
+
+            // Epsilons aggregated by class
+            let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
+            for (to, w) in &rep_state.epsilons {
+                let cls = part[*to];
+                let e = eps_map.entry(cls).or_insert_with(Weight::zeros);
+                *e |= w;
+            }
+            st.epsilons = eps_map.into_iter().collect();
+        }
+
+        // Remap class ids to actual new state ids and dedup ε-edges
+        for st in &mut new_states {
+            if let Some((cls, w)) = st.default.clone() {
+                st.default = Some((*pid_to_new.get(&cls).expect("missing class"), w));
+            }
             let trans = st.transitions.clone();
             st.transitions.clear();
             for (lbl, (cls, w)) in trans {
                 let to_new = *pid_to_new.get(&cls).expect("missing class");
                 st.transitions.insert(lbl, (to_new, w));
             }
-            // Epsilons
             let eps = st.epsilons.clone();
             st.epsilons.clear();
             let mut acc: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
