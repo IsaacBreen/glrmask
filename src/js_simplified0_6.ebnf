@@ -17,6 +17,15 @@ statement_list ::= statement+ ;
 statement ::=
     block
   | declaration_statement
+  | if_statement
+  | iteration_statement
+  | switch_statement
+  | try_statement
+  | function_declaration
+  | class_declaration
+  | return_statement
+  | break_statement
+  | continue_statement
   | expression_statement
   ;
 
@@ -28,10 +37,37 @@ variable_declaration_list ::= variable_declaration ( ',' variable_declaration )*
 variable_declaration ::= binding_pattern ( '=' expression )? ;
 
 // Binding Patterns (Simplified Destructuring)
-binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
-object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ','? '}' ;
-property_binding ::= IDENTIFIER | IDENTIFIER ':' binding_pattern ; // Shorthand and aliased properties
-array_binding_pattern ::= '[' ( binding_pattern ( ',' binding_pattern )* )? ','? ']' ; // No elision
+binding_pattern ::= IDENTIFIER ; // SIMPLIFIED: Removed object and array patterns.
+
+if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
+
+iteration_statement ::=
+    'while' '(' expression ')' statement
+  | 'do' statement 'while' '(' expression ')' ';'
+  | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
+  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
+  ;
+
+switch_statement ::= 'switch' '(' expression ')' '{' case_clause* ( default_clause case_clause* )? '}' ;
+case_clause ::= 'case' expression ':' statement_list? ;
+default_clause ::= 'default' ':' statement_list? ;
+
+try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
+catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
+finally_clause ::= 'finally' block ;
+
+function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
+parameter_list ::= formal_parameter ( ',' formal_parameter )* ;
+formal_parameter ::= binding_pattern ( '=' expression )? ; // With default values
+
+return_statement ::= 'return' expression? ';'? ;
+break_statement ::= 'break' ';'? ; // No labels
+continue_statement ::= 'continue' ';'? ; // No labels
+
+class_declaration ::= 'class' IDENTIFIER ( 'extends' expression )? class_body ;
+class_body ::= '{' class_member* '}' ;
+class_member ::= method_definition ';'? ;
+method_definition ::= IDENTIFIER '(' parameter_list? ')' block ; // Includes constructor
 
 // --- Expressions (Intermediate Precedence Hierarchy) ---
 expression ::= assignment_expression ;
@@ -44,8 +80,6 @@ assignment_expression ::=
 
 arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
 arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
-parameter_list ::= formal_parameter ( ',' formal_parameter )* ;
-formal_parameter ::= binding_pattern ( '=' expression )? ;
 
 conditional_expression ::=
     logical_or_expression ( '?' expression ':' expression )?
@@ -99,8 +133,8 @@ primary_expression ::=
   | 'super'
   | IDENTIFIER
   | literal
-  | array_literal
-  | object_literal
+  // | array_literal // REMOVED
+  // | object_literal // REMOVED
   | function_expression
   | '(' expression ')'
   ;
@@ -108,28 +142,13 @@ primary_expression ::=
 function_expression ::= 'function' IDENTIFIER? '(' parameter_list? ')' block ;
 
 // --- Literals and Primitives (Intermediate set) ---
-array_literal ::= '[' ( spread_element ( ',' spread_element )* )? ','? ']' ;
-
-object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
-property_assignment ::=
-    property_name ':' expression      // Key-value pair
-  | IDENTIFIER                        // Shorthand property
-  | '...' expression                  // Spread syntax
-  | IDENTIFIER '(' parameter_list? ')' block // Method definition
-  ;
-property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ; // With computed properties
-
 literal ::=
     'null'
   | 'true' | 'false'
   | NUMERIC_LITERAL
   | STRING_LITERAL
-  | template_literal
+  // | template_literal // REMOVED
   ;
-
-template_literal ::= '`' ( TEMPLATE_CHARS | template_substitution )* '`' ;
-TEMPLATE_CHARS ::= ( [^`\\$] | '\\' . | '$' [^{] )+ ; // Chars until ` or ${
-template_substitution ::= '${' expression '}' ;
 
 // Simplified regex-style definitions for terminals
 NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ( ('e'|'E') ('+'|'-')? [0-9]+ )? ;
