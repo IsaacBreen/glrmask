@@ -398,21 +398,23 @@ fn merge_nodes_trie1(
         if let Some(rep_idx) = rep_of_class[cid] {
             let sample_dense = prev_class.iter().position(|&c| c == cid).unwrap();
             let sample_idx = old_of[sample_dense];
-            let sample_guard = sample_idx.read(trie1_god).unwrap();
 
-            let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
-            
-            for (ek, dm) in sample_guard.children() {
-                for (v_idx, bv) in dm {
-                    if let Some(v_rep) = node_to_rep.get(v_idx) {
-                        new_children.entry(*ek)
-                            .or_default()
-                            .entry(*v_rep)
-                            .and_modify(|e| *e |= bv)
-                            .or_insert_with(|| bv.clone());
+            let new_children = {
+                let sample_guard = sample_idx.read(trie1_god).unwrap();
+                let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
+                for (ek, dm) in sample_guard.children() {
+                    for (v_idx, bv) in dm {
+                        if let Some(v_rep) = node_to_rep.get(v_idx) {
+                            new_children.entry(*ek)
+                                .or_default()
+                                .entry(*v_rep)
+                                .and_modify(|e| *e |= bv)
+                                .or_insert_with(|| bv.clone());
+                        }
                     }
                 }
-            }
+                new_children
+            }; // sample_guard is dropped here
 
             let mut w = rep_idx.write(trie1_god).expect("write");
             *w.children_mut() = new_children;
