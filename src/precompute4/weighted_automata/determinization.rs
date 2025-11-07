@@ -25,7 +25,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
@@ -122,6 +122,9 @@ impl NWA {
             raw: Vec<Vec<(NWAStateID, Weight)>>,
             map: HashMap<u64, Vec<usize>>,
         }
+        // =======================================================================================
+        // FIX: Added back the `impl StepPool` block with the missing `len` method and fixed syntax
+        // =======================================================================================
         impl StepPool {
             fn new() -> Self {
                 Self { raw: Vec::new(), map: HashMap::new() }
@@ -135,7 +138,7 @@ impl NWA {
             }
             fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
                 pairs.retain(|(_, w)| !w.is_empty());
-                let fp = Self.fingerprint(&pairs);
+                let fp = Self::fingerprint(&pairs); // Corrected syntax: Self::
                 if let Some(cands) = self.map.get(&fp) {
                     for &id in cands {
                         if self.raw[id].len() == pairs.len() && self.raw[id] == pairs {
@@ -148,6 +151,7 @@ impl NWA {
                 self.map.entry(fp).or_default().push(id);
                 id
             }
+            fn len(&self) -> usize { self.raw.len() } // Added missing method
         }
 
         // (MacroSig and related structs remain the same)
@@ -345,7 +349,6 @@ impl NWA {
             partitions[i] = *canon.entry(nodes[i].final_weight.clone()).or_insert(next_id);
         }
 
-        use std::collections::BTreeSet;
         loop {
             let mut changed = false;
             let mut next_partitions = vec![0; num_nodes];
