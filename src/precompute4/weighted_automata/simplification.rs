@@ -59,7 +59,7 @@ impl DWA {
             let p = ProgressBar::new(max_passes as u64);
             p.set_style(
                 ProgressStyle::default_bar()
-                    .template("{spinner:.green} [".to_owned() + title + ": {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
+                    .template(&("{spinner:.green} [".to_owned() + title + ": {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})"))
                     .expect("progress-bar"),
             );
             Some(p)
