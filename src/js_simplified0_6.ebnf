@@ -37,8 +37,12 @@ binding_pattern ::= IDENTIFIER ;
 
 if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
-// SIMPLIFIED iteration_statement
-iteration_statement ::= 'while' '(' expression ')' statement ;
+iteration_statement ::=
+    'while' '(' expression ')' statement
+  | 'do' statement 'while' '(' expression ')' ';'
+  | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
+  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
+  ;
 
 function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
 parameter_list ::= formal_parameter ( ',' formal_parameter )* ;
