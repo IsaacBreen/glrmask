@@ -1,12 +1,9 @@
 // src/precompute4/weighted_automata/simplification.rs
 //
-// A streamlined, semantics-preserving simplification pipeline for DWA and NWA.
-// Key ideas retained:
-// - DWA: normalize edges, prune unreachable, optionally relax weights for large automata,
-//   or partition-refinement minimization for small automata.
-// - NWA: a sequence of local normalizations and structural compressions.
-//
-// This version reduces scaffolding and focuses on clear, composable passes.
+// Simplified structure with the same core passes and behavior:
+// - One core simplification loop parameterized for small/large DWAs.
+// - Helpers to normalize edges, prune unreachable, relax edge weights, and minimize via partition refinement.
+// - NWA simplification kept feature-complete with light refactoring for clarity.
 
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
@@ -16,11 +13,14 @@ use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use crate::precompute4::test_weighted_automata;
 use crate::precompute4::weighted_automata::NWAStateID;
+use crate::profiler::PROGRESS_BAR_ENABLED;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::time::Instant;
 
-/// For very large DWAs, skip heavy minimization to guarantee fast simplification.
-/// This preserves semantics; it only reduces compression depth.
+/// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
+/// This is semantics-preserving; it only reduces the amount of compression performed.
 const LARGE_AUTOMATON_THRESHOLD: usize = 200_000;
 
 thread_local! {
@@ -30,52 +30,79 @@ thread_local! {
 impl DWA {
     pub fn simplify(&mut self) {
         let is_checking = IN_SIMPLIFY_CHECK.with(|c| c.get());
-        let before = if !is_checking && STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
+        let before_simplify = if !is_checking && STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
 
         Self::simplify_components(&mut self.states, &mut self.body);
 
-        if let Some(prev) = before {
+        if let Some(before) = before_simplify {
             IN_SIMPLIFY_CHECK.with(|c| c.set(true));
-            test_weighted_automata::assert_dwa_equivalent(prev, self.clone());
+            test_weighted_automata::assert_dwa_equivalent(before, self.clone());
             IN_SIMPLIFY_CHECK.with(|c| c.set(false));
         }
     }
 
     pub fn simplify_components(states: &mut DWAStates, body: &mut DWABody) {
+        let now = Instant::now();
+        let initial_len = states.len();
         if states.0.is_empty() {
             return;
         }
         let large = states.len() > LARGE_AUTOMATON_THRESHOLD;
         Self::simplify_core(states, body, large);
+        crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
     }
 
     fn simplify_core(states: &mut DWAStates, body: &mut DWABody, large: bool) {
+        let max_passes: usize = if large { 2 } else { 50 };
+        let pb = if PROGRESS_BAR_ENABLED {
+            let title = if large { "Simplifying DWA (large)" } else { "Simplifying DWA (small)" };
+            let p = ProgressBar::new(max_passes as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [".to_owned() + title + ": {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
+                    .expect("progress-bar"),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
         // Initial normalize + prune
+        if let Some(p) = &pb { p.set_message("normalize/prune".to_string()); }
         let _ = Self::normalize_edges_inplace(states);
         let _ = Self::prune_unreachable(states, body);
 
-        let max_passes: usize = if large { 2 } else { 50 };
         let mut changed_any = true;
         let mut passes = 0usize;
         while changed_any && passes < max_passes {
             passes += 1;
+            if let Some(p) = &pb { p.inc(1); }
             changed_any = false;
 
+            if let Some(p) = &pb { p.set_message("normalize".to_string()); }
             changed_any |= Self::normalize_edges_inplace(states);
 
             if large {
                 // Fast relaxation to expose more compression opportunities
+                if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
                 changed_any |= Self::relax_weights_by_local_future(states);
             } else {
+                if let Some(p) = &pb { p.set_message("minimize".to_string()); }
                 changed_any |= Self::minimize_partition_refinement(states, body);
             }
 
+            if let Some(p) = &pb { p.set_message("normalize".to_string()); }
             changed_any |= Self::normalize_edges_inplace(states);
+
+            if let Some(p) = &pb { p.set_message("prune".to_string()); }
             changed_any |= Self::prune_unreachable(states, body);
+        }
+
+        if let Some(p) = &pb {
+            p.finish_with_message(format!("Simplified to {} states", states.len()));
         }
     }
 
-    /// Compute reachable masks forward and constrain final weights accordingly.
     pub fn propagate_and_constrain_weights(states: &mut DWAStates, body: &mut DWABody) -> bool {
         let n = states.len();
         if n == 0 {
@@ -134,7 +161,6 @@ impl DWA {
         changed
     }
 
-    /// Backward compute per-state "future" masks and relax edge weights accordingly.
     pub fn propagate_future_weights(states: &mut DWAStates) -> bool {
         let n = states.len();
         if n == 0 {
@@ -187,10 +213,11 @@ impl DWA {
             }
         }
 
-        // Precompute complements to avoid recomputing !future_weights[v]
+        // Precompute complements to avoid recomputing !future_weights[v] many times
         let not_future: Vec<Weight> = future_weights.iter().map(|w| !w).collect();
 
-        // Relax edge weights using S[v] = ¬F[v] (sound).
+        // 2. Update edge weights. An edge weight W can be relaxed to W | !future_weight(target)
+        // because any bits not in future_weight(target) would be filtered out anyway.
         let mut any_weight_changed = false;
         for i in 0..n {
             let st = &mut states[i];
@@ -229,7 +256,8 @@ impl DWA {
     /// Fast, single-pass local relaxation:
     /// For each state v, compute an upper bound U[v] on future acceptance:
     ///     U[v] = (state_weight[v] if present else ALL) ∧ (final_weight[v] ∪ default_weight[v] ∪ ⋃ exception_weights[v])
-    /// Then S[v] = ¬U[v] ⊆ ¬F[v], so for each edge u→v we can set weight(u→v) := weight(u→v) ∪ S[v].
+    /// Then S[v] = ¬U[v] ⊆ ¬F[v], so for each edge u→v we can safely set weight(u→v) := weight(u→v) ∪ S[v].
+    /// This preserves semantics and is O(E) per pass.
     pub fn relax_weights_by_local_future(states: &mut DWAStates) -> bool {
         let n = states.len();
         if n == 0 {
@@ -281,8 +309,6 @@ impl DWA {
         any_weight_changed
     }
 
-    /// Normalize: remove exception edges that go to the same target as default;
-    /// drop weights for non-existent exception edges.
     pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
         let mut changed = false;
         for st in &mut states.0 {
@@ -293,8 +319,7 @@ impl DWA {
             changed |= st.transitions.exceptions.len() != before;
 
             let before_w = st.trans_weights_exceptions.len();
-            st.trans_weights_exceptions
-                .retain(|ch, _| st.transitions.exceptions.contains_key(ch));
+            st.trans_weights_exceptions.retain(|ch, _| st.transitions.exceptions.contains_key(ch));
             changed |= st.trans_weights_exceptions.len() != before_w;
         }
         changed
@@ -323,8 +348,7 @@ impl DWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: HashMap<(Option<Weight>, Option<Weight>, Option<usize>, Vec<(i16, usize)>), usize> =
-                HashMap::new();
+            let mut sig2pid: HashMap<(Option<Weight>, Option<Weight>, Option<usize>, Vec<(i16, usize)>), usize> = HashMap::new();
 
             for i in 0..n {
                 let st = &states[i];
@@ -431,7 +455,6 @@ impl DWA {
         true
     }
 
-    /// Remove dead/unreachable structure.
     pub fn prune_unreachable(states: &mut DWAStates, body: &mut DWABody) -> bool {
         if states.0.is_empty() {
             return false;
@@ -525,33 +548,52 @@ impl DWA {
 
 impl NWA {
     fn run_pass(
+        pb: &Option<ProgressBar>,
+        msg: &str,
         changed_any: &mut bool,
         mut pass: impl FnMut() -> bool,
     ) {
+        if let Some(p) = pb {
+            p.set_message(msg.to_string());
+        }
         if pass() {
             *changed_any = true;
         }
     }
 
     pub fn simplify(&mut self) -> bool {
+        let now = Instant::now();
         let initial_n = self.states.len();
         let max_passes = 12;
+        let pb = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(max_passes as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Simplifying NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
+                    .expect("progress-bar"),
+            );
+            Some(p)
+        } else {
+            None
+        };
 
         let mut changed = true;
         let mut passes = 0;
         while changed && passes < max_passes {
             passes += 1;
+            if let Some(p) = &pb { p.inc(1); }
             changed = false;
-
-            Self::run_pass(&mut changed, || self.normalize_edges_inplace());
-            Self::run_pass(&mut changed, || self.dedup_epsilon_edges());
-            Self::run_pass(&mut changed, || self.bypass_trivial_epsilon_chains());
-            Self::run_pass(&mut changed, || self.collapse_all_weight_epsilon_sccs());
-            Self::run_pass(&mut changed, || self.prune_unreachable());
-            Self::run_pass(&mut changed, || self.prune_dead_ends());
-            Self::run_pass(&mut changed, || self.merge_equivalent_states_partition());
-            Self::run_pass(&mut changed, || self.normalize_edges_inplace());
+            Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
+            Self::run_pass(&pb, "dedup epsilons", &mut changed, || self.dedup_epsilon_edges());
+            Self::run_pass(&pb, "bypass ε-chains", &mut changed, || self.bypass_trivial_epsilon_chains());
+            Self::run_pass(&pb, "collapse SCCs", &mut changed, || self.collapse_all_weight_epsilon_sccs());
+            Self::run_pass(&pb, "prune unreachable", &mut changed, || self.prune_unreachable());
+            Self::run_pass(&pb, "prune dead ends", &mut changed, || self.prune_dead_ends());
+            Self::run_pass(&pb, "merge equivalent", &mut changed, || self.merge_equivalent_states_partition());
+            Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
         }
+        if let Some(p) = &pb { p.finish_with_message(format!("Simplified to {} states", self.states.len())); }
+        crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
         self.states.len() != initial_n
     }
 
@@ -989,21 +1031,21 @@ impl NWA {
             let mut st = self.states[rep].clone();
 
             // Fix targets to new partition ids
-            // Default (store class placeholder for now)
+            // Default
             if let Some((to, w)) = st.default.clone() {
                 let cls = part[to];
                 st.default = Some((*pid_to_new.entry(cls).or_insert_with(|| {
                     groups.keys().position(|k| *k == cls).unwrap()
                 }), w));
             }
-            // Labeled transitions (store class placeholders)
+            // Labeled transitions
             let trans = st.transitions.clone();
             st.transitions.clear();
             for (lbl, (to, w)) in trans {
                 let cls = part[to];
                 st.transitions.insert(lbl, (cls, w));
             }
-            // Epsilons (store class placeholders)
+            // Epsilons (aggregate after class remap)
             let eps = st.epsilons.clone();
             st.epsilons.clear();
             for (to, w) in eps {

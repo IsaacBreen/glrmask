@@ -1,18 +1,17 @@
 // src/precompute4/weighted_automata/determinization.rs
 //
-// A compact determinization that keeps the same semantics and performance characteristics:
-// - ε-closures are precomputed once and masked by future-acceptance weights.
-// - Each NWA state is summarized by a macro-signature: final weight, default step, and
-//   per-label steps, where steps are ε-closed target sets with weights.
-// - Steps are interned (with a fast fingerprint) and then compiled by macro-signature,
-//   giving compact "compiled steps": (macro_sig_id -> weight) lists.
-// - Determinized states are sets of macro-signatures with per-member "gates" (weights).
-//   We saturate gates via a simple worklist.
-// - For each determinized state, we compute a default baseline from members' default steps,
-//   then per-label maps override the baseline for signatures that have exceptions.
-// - Transitions carry unioned weights; finals carry the union of (gate ∧ member-final).
+// A simpler determinization that keeps the same semantics and performance characteristics:
+// - Determinized states are defined by sets of macro-signatures (structural behavior).
+// - We compute ε-closures once and reuse them.
+// - For each NWA state, we precompute "steps": default and per-label exceptions as ε-closed
+//   sets with their weights; steps are interned to avoid duplication.
+// - Steps are compiled by macro-signature, so all computations operate on compact signature IDs.
+// - Determinization uses a worklist to propagate "gates" (weights) to a fixpoint.
+// - For each determinized state, we compute one default transition baseline and override it
+//   on labels that have exceptions in any member signature. This avoids per-label recomputation
+//   and preserves defaults efficiently.
 //
-// This version is deliberately concise without sacrificing behavior.
+// Semantics preserved for bitset weights with ∧ on path and ∨ over choices.
 
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
@@ -25,13 +24,21 @@ use crate::precompute4::weighted_automata::NWAStateID;
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
+        let now = Instant::now();
+
         let mut nwa = self.clone();
-        // Keep NWA in a tidy form to reduce determinization work.
+        // Keep as-is; NWA::simplify reduces epsilon chains and prunes unreachable parts.
         nwa.simplify();
-        nwa.det_fixpoint()
+
+        let result = nwa.det_fixpoint();
+
+        crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
+        result
     }
 
     fn det_fixpoint(&self) -> DWA {
@@ -49,7 +56,6 @@ impl NWA {
         ) -> Vec<(NWAStateID, Weight)> {
             let mut out: HashMap<NWAStateID, Weight> = HashMap::new();
             let mut q: VecDeque<NWAStateID> = VecDeque::new();
-
             for &s in sources {
                 if s >= states.len() {
                     continue;
@@ -60,7 +66,6 @@ impl NWA {
                     q.push_back(s);
                 }
             }
-
             while let Some(u) = q.pop_front() {
                 let base = out.get(&u).cloned().unwrap_or_else(Weight::zeros);
                 if base.is_empty() {
@@ -94,13 +99,12 @@ impl NWA {
                     }
                 }
             }
-
             let mut v: Vec<(NWAStateID, Weight)> = out.into_iter().collect();
             v.sort_by_key(|(sid, _)| *sid);
             v
         }
 
-        // Apply extra weight to (state, weight) pairs, dropping empty results.
+        // Apply additional weight to closure pairs, dropping empties
         fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
             if w.is_all_fast() {
                 return base.to_vec();
@@ -152,13 +156,14 @@ impl NWA {
         #[derive(Clone)]
         struct CompiledStep {
             by_sig: Vec<(usize, Weight)>, // macro_sig_id -> weight
+            mask: Weight,                 // union of weights over by_sig
         }
 
         #[derive(Clone)]
         struct MacroSig {
             final_w: Option<Weight>,
-            def: Option<usize>,           // step id (raw; compiled later)
-            ex: BTreeMap<i16, usize>,     // label -> step id (raw; compiled later)
+            def: Option<usize>,            // step id (raw; compiled later)
+            ex: BTreeMap<i16, usize>,      // label -> step id (raw; compiled later)
         }
 
         #[derive(Clone, Hash, Eq, PartialEq)]
@@ -228,9 +233,9 @@ impl NWA {
             state_to_sig_id[s] = sig_id;
         }
 
-        // Compile raw steps by macro-signature
+        // Compile steps by macro-signature
         let mut compiled_steps: Vec<CompiledStep> = vec![
-            CompiledStep { by_sig: Vec::new() };
+            CompiledStep { by_sig: Vec::new(), mask: Weight::zeros() };
             step_pool.len()
         ];
         for id in 0..step_pool.len() {
@@ -245,14 +250,18 @@ impl NWA {
             }
             let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
             by_sig.sort_by_key(|(sid, _)| *sid);
-            compiled_steps[id] = CompiledStep { by_sig };
+            let mut mask = Weight::zeros();
+            for (_, w) in &by_sig {
+                mask |= w;
+            }
+            compiled_steps[id] = CompiledStep { by_sig, mask };
         }
 
         // Determinization worklist
         #[derive(Clone)]
         struct DetState {
-            members: Vec<usize>,              // macro_sig ids, sorted and unique
-            pos: HashMap<usize, usize>,       // macro_sig_id -> index in gates
+            members: Vec<usize>,              // macro_sig ids, sorted
+            pos: HashMap<usize, usize>,       // macro_sig_id -> index
             gates: Vec<Weight>,               // gates per member
         }
 
@@ -284,12 +293,14 @@ impl NWA {
                         if let Some(&idx) = st.pos.get(&sid) {
                             let before = st.gates[idx].clone();
                             st.gates[idx] |= &w;
-                        if st.gates[idx] != before {
+                            if st.gates[idx] != before {
                                 changed = true;
                             }
                         }
                     }
-                    if changed { work.push_back(id); }
+                    if changed {
+                        work.push_back(id);
+                    }
                 }
                 return id;
             }
@@ -313,71 +324,7 @@ impl NWA {
             id
         }
 
-        // Helper: merge (compiled step) into a destination map under a gate.
-        fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
-            if gate.is_all_fast() {
-                for (sid, w) in compiled.iter() {
-                    match dst.entry(*sid) {
-                        Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= w; }
-                        Entry::Vacant(e) => { e.insert(w.clone()); }
-                    }
-                }
-            } else {
-                for (sid, w) in compiled.iter() {
-                    let x = w & gate;
-                    if x.is_empty() { continue; }
-                    match dst.entry(*sid) {
-                        Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= &x; }
-                        Entry::Vacant(e) => { e.insert(x); }
-                    }
-                }
-            }
-        }
-
-        // Helper: subtract (compiled step) from a destination map under a gate.
-        fn subtract(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
-            if gate.is_all_fast() {
-                for (sid, w) in compiled.iter() {
-                    if let Some(old) = dst.get_mut(sid) {
-                        *old -= w;
-                        if old.is_empty() { dst.remove(sid); }
-                    }
-                }
-            } else {
-                for (sid, w) in compiled.iter() {
-                    let x = w & gate;
-                    if x.is_empty() { continue; }
-                    if let Some(old) = dst.get_mut(sid) {
-                        *old -= &x;
-                        if old.is_empty() { dst.remove(sid); }
-                    }
-                }
-            }
-        }
-
-        // Build baseline (default) successor map for a determinized state.
-        fn build_baseline_map(st: &DetState, sigs: &[MacroSig], compiled_steps: &[CompiledStep]) -> HashMap<usize, Weight> {
-            let mut baseline: HashMap<usize, Weight> = HashMap::new();
-            for (i, sig_id) in st.members.iter().enumerate() {
-                if let Some(def_id) = sigs[*sig_id].def {
-                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
-                }
-            }
-            baseline
-        }
-
-        // Build a map label -> member indices of st that have exceptions on that label.
-        fn label_groups(st: &DetState, sigs: &[MacroSig]) -> BTreeMap<i16, Vec<usize>> {
-            let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-            for (i, sig_id) in st.members.iter().enumerate() {
-                for (lbl, _) in &sigs[*sig_id].ex {
-                    label_groups.entry(*lbl).or_default().push(i);
-                }
-            }
-            label_groups
-        }
-
-        // Initial determinized state from ε-closure(start)
+        // Initial determinized state: ε-closure(start) grouped by macro signature
         let mut init_map: HashMap<usize, Weight> = HashMap::new();
         for (t, w) in eps_cache[self.body.start_state].iter() {
             let sid = state_to_sig_id[*t];
@@ -397,31 +344,97 @@ impl NWA {
         let mut work: VecDeque<usize> = VecDeque::new();
         let start_id = ensure_state(init_members, Some(init_map), &mut states, &mut key_to_state, &mut work);
 
-        // Fixpoint propagation
+        // Helper: accumulate compiled step to a map with gate
+        fn accumulate(
+            dst: &mut HashMap<usize, Weight>,
+            compiled: &[(usize, Weight)],
+            gate: &Weight,
+        ) {
+            if gate.is_all_fast() {
+                for (sid, w) in compiled.iter() {
+                    match dst.entry(*sid) {
+                        Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= w; }
+                        Entry::Vacant(e) => { e.insert(w.clone()); }
+                    }
+                }
+            } else {
+                for (sid, w) in compiled.iter() {
+                    let x = w & gate;
+                    if x.is_empty() {
+                        continue;
+                    }
+                    match dst.entry(*sid) {
+                        Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= &x; }
+                        Entry::Vacant(e) => { e.insert(x); }
+                    }
+                }
+            }
+        }
+
+        // Fixpoint propagation: ensure all reachable determinized states are created and
+        // their gates saturated.
         while let Some(sid) = work.pop_front() {
             let st = states[sid].clone();
 
-            // Default baseline
-            let baseline = build_baseline_map(&st, &sigs, &compiled_steps);
+            // Default baseline: accumulate all members' defaults
+            let mut baseline: HashMap<usize, Weight> = HashMap::new();
+            for (i, sig_id) in st.members.iter().enumerate() {
+                if let Some(def_id) = sigs[*sig_id].def {
+                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+                }
+            }
             if !baseline.is_empty() {
                 let mem: Vec<usize> = baseline.keys().copied().collect();
                 let _ = ensure_state(mem, Some(baseline.clone()), &mut states, &mut key_to_state, &mut work);
             }
 
-            // Labels
-            for (lbl, idxs) in label_groups(&st, &sigs) {
+            // Labels that appear as exceptions in any member
+            let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+            for (i, sig_id) in st.members.iter().enumerate() {
+                for (lbl, _) in &sigs[*sig_id].ex {
+                    label_groups.entry(*lbl).or_default().push(i);
+                }
+            }
+
+            // For each label: override baseline by removing default parts for members that have
+            // exceptions at this label and add exception parts.
+            for (lbl, idxs) in label_groups {
                 let mut cur_map = baseline.clone();
-                for i in idxs {
+
+                for i in idxs.iter().copied() {
                     let sig_id = st.members[i];
                     let gate = &st.gates[i];
-
-                    // Remove default part for this member (if any)
+                    // Remove defaults for this member (if any)
                     if let Some(def_id) = sigs[sig_id].def {
-                        subtract(&mut cur_map, &compiled_steps[def_id].by_sig, gate);
+                        let comp = &compiled_steps[def_id].by_sig;
+                        if gate.is_all_fast() {
+                            for (tsig, w) in comp {
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= w;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        } else {
+                            for (tsig, w) in comp {
+                                let share = w & gate;
+                                if share.is_empty() {
+                                    continue;
+                                }
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= &share;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        }
                     }
-                    // Add exception part
+                    // Add exception
                     if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
-                        accumulate(&mut cur_map, &compiled_steps[ex_id].by_sig, gate);
+                        let comp = &compiled_steps[ex_id].by_sig;
+                        accumulate(&mut cur_map, comp, gate);
                     }
                 }
 
@@ -440,7 +453,7 @@ impl NWA {
         }
         dwa.body.start_state = start_id;
 
-        // Helper: compute final weight for a determinized state
+        // Helper: compute final weight
         let compute_final = |st: &DetState| -> Option<Weight> {
             let mut acc: Option<Weight> = None;
             for (i, sig_id) in st.members.iter().enumerate() {
@@ -454,15 +467,20 @@ impl NWA {
             acc
         };
 
-        // Emit edges and finals
+        // Emit edges
         for sid in 0..states.len() {
             let st = states[sid].clone();
 
             // Final
             dwa.states[sid].final_weight = compute_final(&st);
 
-            // Default baseline
-            let baseline = build_baseline_map(&st, &sigs, &compiled_steps);
+            // Build default baseline
+            let mut baseline: HashMap<usize, Weight> = HashMap::new();
+            for (i, sig_id) in st.members.iter().enumerate() {
+                if let Some(def_id) = sigs[*sig_id].def {
+                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+                }
+            }
             if !baseline.is_empty() {
                 let mut mask = Weight::zeros();
                 for (_, w) in &baseline {
@@ -479,24 +497,60 @@ impl NWA {
             }
 
             // Labels
-            for (lbl, idxs) in label_groups(&st, &sigs) {
+            let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+            for (i, sig_id) in st.members.iter().enumerate() {
+                for (lbl, _) in &sigs[*sig_id].ex {
+                    label_groups.entry(*lbl).or_default().push(i);
+                }
+            }
+            for (lbl, idxs) in label_groups {
                 let mut cur_map = baseline.clone();
-                for i in idxs {
+                // Remove defaults for members that have an exception on this label, then add ex
+                for i in idxs.iter().copied() {
                     let sig_id = st.members[i];
                     let gate = &st.gates[i];
                     if let Some(def_id) = sigs[sig_id].def {
-                        subtract(&mut cur_map, &compiled_steps[def_id].by_sig, gate);
+                        let comp = &compiled_steps[def_id].by_sig;
+                        if gate.is_all_fast() {
+                            for (tsig, w) in comp {
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= w;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        } else {
+                            for (tsig, w) in comp {
+                                let share = w & gate;
+                                if share.is_empty() {
+                                    continue;
+                                }
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= &share;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        }
                     }
                     if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
-                        accumulate(&mut cur_map, &compiled_steps[ex_id].by_sig, gate);
+                        let comp = &compiled_steps[ex_id].by_sig;
+                        accumulate(&mut cur_map, comp, gate);
                     }
                 }
 
-                if cur_map.is_empty() { continue; }
+                if cur_map.is_empty() {
+                    continue;
+                }
                 let mut mask = Weight::zeros();
-                for (_, w) in &cur_map { mask |= w; }
-                if mask.is_empty() { continue; }
-
+                for (_, w) in &cur_map {
+                    mask |= w;
+                }
+                if mask.is_empty() {
+                    continue;
+                }
                 let mut mem: Vec<usize> = cur_map.keys().copied().collect();
                 mem.sort_unstable();
                 let key = MembersKey::new(mem);
