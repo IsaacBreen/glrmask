@@ -50,7 +50,7 @@ impl Default for Trie1Config {
             prune_nodes_not_reaching_end: true,
             prune_dead_paths: true,
             gc: true,
-            minimize_dummy_penalty: false,
+            minimize_dummy_penalty: true,
             canonicalize_end_nodes: true,
         }
     }
