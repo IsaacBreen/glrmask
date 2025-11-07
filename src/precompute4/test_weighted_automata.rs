@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // --- Stochastic validation controls and RNG ---
-const VALIDATION_SAMPLES: usize = 32;
-const VALIDATION_MAX_STEPS: usize = 12;
-const SAMPLING_TRIES: usize = 100;
+const VALIDATION_SAMPLES: usize = 128;
+const VALIDATION_MAX_STEPS: usize = 128;
+const SAMPLING_TRIES: usize = 250;
 
 #[derive(Clone, Debug)]
 struct SimpleRng(u64);
