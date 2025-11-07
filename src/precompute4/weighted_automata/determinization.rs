@@ -244,6 +244,44 @@ impl NWA {
         in_queue[start_idx] = true;
         work.push_back(start_idx);
 
+        fn intern_target_helper(
+            map: &HashMap<usize, Weight>,
+            nodes: &mut Vec<CompositionNode>,
+            key_to_idx: &mut HashMap<MembersKey, usize>,
+            in_queue: &mut Vec<bool>,
+            work: &mut VecDeque<usize>,
+        ) -> Option<usize> {
+            if map.is_empty() { return None; }
+            let key = MembersKey::new(map.keys().copied().collect());
+            let target_idx = match key_to_idx.entry(key.clone()) {
+                Entry::Occupied(o) => *o.get(),
+                Entry::Vacant(v) => {
+                    let new_idx = nodes.len();
+                    nodes.push(CompositionNode { key, final_weight: None, default_target_idx: None, exception_targets: BTreeMap::new(), gates: HashMap::new() });
+                    if new_idx >= in_queue.len() { in_queue.resize(new_idx + 1, false); }
+                    v.insert(new_idx);
+                    work.push_back(new_idx);
+                    in_queue[new_idx] = true;
+                    new_idx
+                }
+            };
+            // Union gates into the target and re-enqueue if changed
+            let mut any_change = false;
+            for (sig_id, weight) in map {
+                let entry = nodes[target_idx].gates.entry(*sig_id).or_insert_with(Weight::zeros);
+                let new_w = &*entry | weight;
+                if new_w != *entry {
+                    *entry = new_w;
+                    any_change = true;
+                }
+            }
+            if any_change && !in_queue[target_idx] {
+                in_queue[target_idx] = true;
+                work.push_back(target_idx);
+            }
+            Some(target_idx)
+        }
+
         while let Some(idx) = work.pop_front() {
             in_queue[idx] = false;
             if let Some(p) = &pb_discover { p.inc(1); p.set_length(nodes.len() as u64); }
@@ -271,39 +309,6 @@ impl NWA {
                 }
             }
 
-            // Helper: intern or reuse a target by its MembersKey; union gates and requeue on change.
-            let mut intern_target = |map: &HashMap<usize, Weight>| -> Option<usize> {
-                if map.is_empty() { return None; }
-                let key = MembersKey::new(map.keys().copied().collect());
-                let target_idx = match key_to_idx.entry(key.clone()) {
-                    Entry::Occupied(o) => *o.get(),
-                    Entry::Vacant(v) => {
-                        let new_idx = nodes.len();
-                        nodes.push(CompositionNode { key, final_weight: None, default_target_idx: None, exception_targets: BTreeMap::new(), gates: HashMap::new() });
-                        if new_idx >= in_queue.len() { in_queue.resize(new_idx + 1, false); }
-                        v.insert(new_idx);
-                        work.push_back(new_idx);
-                        in_queue[new_idx] = true;
-                        new_idx
-                    }
-                };
-                // Union gates into the target and re-enqueue if changed
-                let mut any_change = false;
-                for (sig_id, weight) in map {
-                    let entry = nodes[target_idx].gates.entry(*sig_id).or_insert_with(Weight::zeros);
-                    let new_w = &*entry | weight;
-                    if new_w != *entry {
-                        *entry = new_w;
-                        any_change = true;
-                    }
-                }
-                if any_change && !in_queue[target_idx] {
-                    in_queue[target_idx] = true;
-                    work.push_back(target_idx);
-                }
-                Some(target_idx)
-            };
-
             // 1) Default transition: accumulate once from def_groups.
             let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
             for (def_step, g) in &def_groups {
@@ -311,7 +316,7 @@ impl NWA {
                     accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
                 }
             }
-            nodes[idx].default_target_idx = intern_target(&def_target_map);
+            nodes[idx].default_target_idx = intern_target_helper(&def_target_map, &mut nodes, &mut key_to_idx, &mut in_queue, &mut work);
 
             // 2) Exception transitions per label (only those labels that have any exception).
             for (lbl, ex_groups) in &ex_groups_by_label {
@@ -342,7 +347,7 @@ impl NWA {
                         accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
                     }
                 }
-                if let Some(tidx) = intern_target(&map) {
+                if let Some(tidx) = intern_target_helper(&map, &mut nodes, &mut key_to_idx, &mut in_queue, &mut work) {
                     nodes[idx].exception_targets.insert(*lbl, tidx);
                 }
             }
