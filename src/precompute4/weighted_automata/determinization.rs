@@ -489,7 +489,7 @@ impl NWA {
         }
 
         // --- Phase 1: Discover all reachable compositions and their transitions (monotone worklist) ---
-        #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+        #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
         struct MembersKey(Vec<usize>);
 
         impl MembersKey {
@@ -506,7 +506,7 @@ impl NWA {
             }
         }
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         struct CompositionNode {
             key: MembersKey,
             final_weight: Option<Weight>,
@@ -628,37 +628,31 @@ impl NWA {
             in_queue[idx] = false;
 
             // 5.a) Prune current gates by subsumption; if key changes, canonicalize node.
-            let mut need_redirect = false;
-            {
-                let gates = &mut nodes[idx].gates;
-                if prune_map_inplace(gates, &effects) {
-                    let new_key = MembersKey::of_map_keys(gates);
-                    if new_key != nodes[idx].key {
-                        // Intern canonical node with new key
-                        let target_idx = intern_by_key(new_key, &mut nodes, &mut key_to_idx, &mut in_queue, &mut work);
-                        // Merge gates into canonical target
-                        let mut any_change = false;
-                        for (sig, w) in gates.clone() {
-                            let entry = nodes[target_idx].gates.entry(sig).or_insert_with(Weight::zeros);
-                            let nw = &*entry | &w;
-                            if nw != *entry {
-                                *entry = nw;
-                                any_change = true;
-                            }
-                        }
-                        if any_change && !in_queue[target_idx] {
-                            in_queue[target_idx] = true;
-                            work.push_back(target_idx);
-                        }
-                        nodes[idx].redirect = Some(target_idx);
-                        need_redirect = true;
+            let gates_pruned = prune_map_inplace(&mut nodes[idx].gates, &effects);
+            let key_changed = gates_pruned && MembersKey::of_map_keys(&nodes[idx].gates) != nodes[idx].key;
+
+            if key_changed {
+                let gates_clone = nodes[idx].gates.clone();
+                let new_key = MembersKey::of_map_keys(&gates_clone);
+
+                let target_idx = intern_by_key(new_key, &mut nodes, &mut key_to_idx, &mut in_queue, &mut work);
+
+                let mut any_change = false;
+                for (sig, w) in gates_clone {
+                    let entry = nodes[target_idx].gates.entry(sig).or_insert_with(Weight::zeros);
+                    let nw = &*entry | &w;
+                    if nw != *entry {
+                        *entry = nw;
+                        any_change = true;
                     }
                 }
-            }
-            if need_redirect {
+                if any_change && !in_queue[target_idx] {
+                    in_queue[target_idx] = true;
+                    work.push_back(target_idx);
+                }
+                nodes[idx].redirect = Some(target_idx);
                 continue;
             }
-
             let node_gates = nodes[idx].gates.clone();
             if node_gates.is_empty() {
                 // No contributions -> no transitions; final is None
@@ -703,14 +697,19 @@ impl NWA {
             nodes[idx].exception_targets.clear();
 
             // Helper: prune a target map, intern, union gates, and enqueue on change; returns canonical target index
-            let mut process_target_map = |map: &mut HashMap<usize, Weight>| -> Option<usize> {
+            let mut process_target_map = |map: &mut HashMap<usize, Weight>,
+                                          nodes: &mut Vec<CompositionNode>,
+                                          key_to_idx: &mut HashMap<MembersKey, usize>,
+                                          in_queue: &mut Vec<bool>,
+                                          work: &mut VecDeque<usize>|
+             -> Option<usize> {
                 // Subsumption prune on the target gates
                 let _ = prune_map_inplace(map, &effects);
                 if map.is_empty() {
                     return None;
                 }
                 let key = MembersKey::of_map_keys(map);
-                let target_idx = intern_by_key(key, &mut nodes, &mut key_to_idx, &mut in_queue, &mut work);
+                let target_idx = intern_by_key(key, nodes, key_to_idx, in_queue, work);
                 let mut any_change = false;
                 // Union gates into target
                 for (sig_id, weight) in map.iter() {
@@ -735,7 +734,7 @@ impl NWA {
                     accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
                 }
             }
-            if let Some(tidx) = process_target_map(&mut def_target_map) {
+            if let Some(tidx) = process_target_map(&mut def_target_map, &mut nodes, &mut key_to_idx, &mut in_queue, &mut work) {
                 nodes[idx].default_target_idx = Some(tidx);
             }
 
@@ -773,7 +772,7 @@ impl NWA {
                     }
                 }
 
-                if let Some(tidx) = process_target_map(&mut map) {
+                if let Some(tidx) = process_target_map(&mut map, &mut nodes, &mut key_to_idx, &mut in_queue, &mut work) {
                     nodes[idx].exception_targets.insert(*lbl, tidx);
                 }
             }
@@ -859,7 +858,8 @@ impl NWA {
         let mut init_map: HashMap<u64, usize> = HashMap::new();
         for i in 0..num_nodes {
             let fp = nodes[i].final_weight.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO);
-            let pid = *init_map.entry(fp).or_insert_with(|| init_map.len());
+            let len = init_map.len();
+            let pid = *init_map.entry(fp).or_insert_with(|| len);
             partitions[i] = pid;
         }
 
