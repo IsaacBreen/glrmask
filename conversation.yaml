@@ -44,13 +44,13 @@ local_system:
       #[derive(Debug, Clone)]
       pub struct TrieTraversalData {
           /// The nodes reachable from the roots, in a fixed order.
-          nodes: Vec<Trie2Index>,
+          pub(crate) nodes: Vec<Trie2Index>,
           /// A map from a node's `usize` index to its position in the `nodes` vector.
           pos_of_u: HashMap<usize, usize>,
           /// A map from a node's position in `nodes` to its SCC ID.
           comp_id: Vec<usize>,
           /// The list of SCCs. Each inner vector contains node positions.
-          sccs: Vec<Vec<usize>>,
+          pub(crate) sccs: Vec<Vec<usize>>,
           /// The topologically sorted list of SCC IDs.
           topo: Vec<usize>,
       }
@@ -3850,6 +3850,7 @@ local_system:
 
       pub struct Trie1Config {
           pub enabled: bool,
+          pub break_cycles: bool,
           pub early_flatten_epsilon: bool,
           pub minimize_by_signature: bool,
           pub merge_equivalent_llm_tokens: bool,
@@ -3865,6 +3866,7 @@ local_system:
           fn default() -> Self {
               Self {
                   enabled: true,
+                  break_cycles: false,
                   early_flatten_epsilon: true,
                   minimize_by_signature: true,
                   merge_equivalent_llm_tokens: true,
@@ -3882,6 +3884,7 @@ local_system:
           pub fn off() -> Self {
               Self {
                   enabled: false,
+                  break_cycles: false,
                   early_flatten_epsilon: false,
                   minimize_by_signature: false,
                   merge_equivalent_llm_tokens: false,
@@ -4439,6 +4442,11 @@ local_system:
           }
 
           // === Pass 4: Final Minimization and GC ===
+          // Break cycles before final minimization passes that might be confused by them.
+          if config.break_cycles {
+              break_cycles_trie1(precomputed1, trie1_god);
+          }
+
           if config.minimize_by_signature {
               merge_nodes_trie1(precomputed1, trie1_god);
           }
@@ -4459,6 +4467,119 @@ local_system:
           let mut stats = PrecomputeStats::default();
           crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
           crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
+      }
+
+      /// Breaks structural cycles in the Trie1 graph by "unrolling" strongly connected components.
+      /// This makes the graph a DAG, which can be simpler for some analysis tools.
+      /// The transformation preserves token-aware paths, relying on the property that no single
+      /// LLM token can traverse a cycle.
+      fn break_cycles_trie1(
+          roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+          trie1_god: &Trie1GodWrapper,
+      ) {
+          crate::debug!(2, "Breaking cycles in Trie1...");
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          if roots_vec.is_empty() {
+              return;
+          }
+
+          let traversal_data = match Trie::compute_traversal_data(trie1_god, &roots_vec) {
+              Some(data) => data,
+              None => return,
+          };
+
+          let all_nodes_vec = &traversal_data.nodes;
+          let sccs = &traversal_data.sccs;
+
+          #[derive(Debug)]
+          enum Modification {
+              AddEdge(PrecomputeNode1Index, Option<GrammarTokenID>, PrecomputeNode1Index, LLMTokenBV),
+              RemoveEdge(PrecomputeNode1Index, Option<GrammarTokenID>, PrecomputeNode1Index),
+          }
+          let mut modifications = Vec::new();
+
+          for scc_node_positions in sccs {
+              let is_trivial_scc = if scc_node_positions.len() == 1 {
+                  let pos = scc_node_positions[0];
+                  let u_idx = all_nodes_vec[pos];
+                  let u_guard = u_idx.read(trie1_god).unwrap();
+                  !u_guard.children().values().any(|dm| dm.contains_key(&u_idx))
+              } else {
+                  scc_node_positions.len() < 2
+              };
+
+              if is_trivial_scc {
+                  continue;
+              }
+
+              let scc_nodes: HashSet<PrecomputeNode1Index> = scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
+              crate::debug!(3, "Breaking cycles in SCC of size {}", scc_nodes.len());
+
+              // 1. Create a copy of each node in the SCC.
+              let copies: HashMap<_, _> = scc_nodes.iter().map(|v| {
+                  let v_guard = v.read(trie1_god).unwrap();
+                  let v_copy_idx = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(v_guard.value.clone())));
+                  (*v, v_copy_idx)
+              }).collect();
+
+              // 2. Find a spanning tree of the SCC subgraph to preserve connectivity in the copied component.
+              let mut spanning_tree_edges = HashSet::new();
+              let mut q = VecDeque::new();
+              let mut visited = HashSet::new();
+              if let Some(start_node) = scc_nodes.iter().next() {
+                  q.push_back(*start_node);
+                  visited.insert(*start_node);
+
+                  while let Some(u) = q.pop_front() {
+                      let u_guard = u.read(trie1_god).unwrap();
+                      // Iterate children in a deterministic order for deterministic spanning tree
+                      let mut child_edges: Vec<_> = u_guard.children().iter().flat_map(|(ek, dm)| dm.iter().map(move |(v, bv)| (ek, v, bv))).collect();
+                      child_edges.sort_by_key(|(ek, v, _)| (*ek, *v));
+
+                      for (_, v, _) in child_edges {
+                          if scc_nodes.contains(v) && visited.insert(*v) {
+                              q.push_back(*v);
+                              spanning_tree_edges.insert((u, *v));
+                          }
+                      }
+                  }
+              }
+
+              // 3. Schedule edge modifications.
+              for u in &scc_nodes {
+                  let u_copy = copies[u];
+                  let u_guard = u.read(trie1_god).unwrap();
+                  let children_snapshot = u_guard.children().clone();
+                  drop(u_guard);
+
+                  for (ek, dm) in children_snapshot {
+                      for (v, bv) in dm {
+                          if scc_nodes.contains(&v) { // Internal edge
+                              let v_copy = copies[&v];
+                              modifications.push(Modification::RemoveEdge(*u, ek.clone(), v));
+                              modifications.push(Modification::AddEdge(*u, ek.clone(), v_copy, bv.clone()));
+                              if spanning_tree_edges.contains(&(*u, v)) {
+                                  modifications.push(Modification::AddEdge(u_copy, ek, v_copy, bv));
+                              }
+                          } else { // Exit edge
+                              modifications.push(Modification::AddEdge(u_copy, ek, v, bv));
+                          }
+                      }
+                  }
+              }
+          }
+
+          // 4. Apply all scheduled modifications.
+          for m in modifications {
+              match m {
+                  Modification::AddEdge(u, ek, v, bv) => {
+                      trie1_god.insert_edge_simple(u, v, ek, bv);
+                  }
+                  Modification::RemoveEdge(u, ek, v) => {
+                      trie1_god.remove_edge(u, v, &ek);
+                  }
+              }
+          }
       }
 
       fn simplify_none_edges_to_former_end_nodes_trie1(
@@ -5326,65 +5447,38 @@ local_system:
           ignore_terminal_id: Option<TerminalID>,
       ) {
           crate::debug!(2, "Pruning Trie1 based on terminal follow sets.");
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          if roots_vec.is_empty() {
-              return;
-          }
 
-          // Use special_map_grouped which correctly handles cycles by iterating within SCCs.
-          let traversal_data = match Trie::compute_traversal_data(trie1_god, &roots_vec) {
-              Some(data) => data,
-              None => return, // Empty graph
-          };
-
-          let initial_nodes_and_values: Vec<_> = roots
-              .values()
-              .map(|root_idx| (*root_idx, None)) // Start with None, meaning "unconstrained"
+          let initial_nodes_and_values: Vec<_> = roots.values()
+              .map(|root_arc| (root_arc.clone(), None))
               .collect();
 
-          type PredecessorSet = Option<BTreeSet<GrammarTokenID>>;
           type NodePtr = *const PrecomputeNode1;
+          let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
 
-          // This map will be populated by the 'process' closure as a side effect.
-          let edges_to_keep: Arc<RwLock<HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>>>> =
-              Arc::new(RwLock::new(HashMap::new()));
-
-          Trie::special_map_grouped(
+          Trie::special_map(
               trie1_god,
-              &traversal_data,
               initial_nodes_and_values,
-              // step closure
-              |pred_set: &PredecessorSet,
-               edge_key: &Option<GrammarTokenID>,
-               dest_map: &OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>| {
-                  let next_pred_set = match edge_key {
-                      Some(t) if Some(*t) == ignore_terminal_id => pred_set.clone(),
-                      Some(t) => Some(BTreeSet::from([*t])),
-                      None => pred_set.clone(),
-                  };
-                  dest_map.keys().map(move |&dest_idx| (dest_idx, next_pred_set.clone()))
-              },
-              // merge closure
-              |existing_set, new_set| match (existing_set, new_set) {
-                  // If we ever merge with `None` (unconstrained), we become unconstrained.
-                  (val @ _, None) => *val = None,
-                  (None, _) => { /* already unconstrained, do nothing */ }
-                  (Some(existing), Some(new)) => {
-                      existing.extend(new);
+              |predecessors: &Option<BTreeSet<GrammarTokenID>>, edge_key: &Option<GrammarTokenID>, _edge_bv, _child_node| {
+                  match edge_key {
+                      Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
+                      Some(t) => Some(Some(BTreeSet::from([*t]))),
+                      None => Some(predecessors.clone()),
                   }
               },
-              // process closure
-              |node, _node_idx, maybe_all_immediate_predecessors| {
+              |existing_set, new_set| {
+                  match (existing_set, new_set) {
+                      (None, _) => {},
+                      (existing_set @ _, None) => *existing_set = None,
+                      (Some(existing), Some(new)) => existing.extend(new),
+                  }
+              },
+              |node, maybe_all_immediate_predecessors| {
                   if maybe_all_immediate_predecessors.is_none() {
-                      // Unconstrained, so keep all edges and continue propagation.
-                      let keys_to_keep = node.children().keys().cloned().collect();
-                      let node_ptr: NodePtr = node;
-                      edges_to_keep.write().unwrap().insert(node_ptr, keys_to_keep);
-                      return Some(maybe_all_immediate_predecessors);
+                      return true;
                   }
 
                   let mut allowed_follow_terminals = BTreeSet::new();
-                  if let Some(all_immediate_predecessors) = &maybe_all_immediate_predecessors {
+                  if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
                       for preceding_terminal in all_immediate_predecessors {
                           if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
                               allowed_follow_terminals.extend(follow_set.iter().cloned());
@@ -5392,37 +5486,28 @@ local_system:
                       }
                   }
 
-                  let keys_to_keep_set: BTreeSet<_> = node
-                      .children()
-                      .keys()
-                      .filter(|edge_key| match edge_key {
-                          Some(edge_terminal) => {
-                              allowed_follow_terminals.contains(edge_terminal)
-                                  || Some(*edge_terminal) == ignore_terminal_id
-                          }
+                  let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_key| {
+                      match edge_key {
+                          Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
                           None => true,
-                      })
-                      .cloned()
-                      .collect();
+                      }
+                  }).cloned().collect();
 
                   let node_ptr: NodePtr = node;
-                  edges_to_keep.write().unwrap().insert(node_ptr, keys_to_keep_set);
-
-                  // Return the computed predecessor set to be used by the `step` function.
-                  Some(maybe_all_immediate_predecessors)
+                  edges_to_keep.insert(node_ptr, keys_to_keep);
+                  true
               },
           );
 
-          // Now, apply the pruning based on the collected `edges_to_keep` map.
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-          let edges_to_keep_guard = edges_to_keep.read().unwrap();
-          for node_idx in all_nodes {
+          for node_arc in all_nodes {
               let node_ptr: NodePtr = {
-                  let guard = node_idx.read(trie1_god).expect("poison");
+                  let guard = node_arc.read(trie1_god).expect("poison");
                   &*guard as *const _
               };
-              if let Some(keys_to_keep) = edges_to_keep_guard.get(&node_ptr) {
-                  let mut node_guard = node_idx.write(trie1_god).unwrap();
+              if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
+                  let mut node_guard = node_arc.write(trie1_god).unwrap();
                   node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
               }
           }
@@ -5614,13 +5699,13 @@ local_system:
       #[derive(Debug, Clone)]
       pub struct TrieTraversalData {
           /// The nodes reachable from the roots, in a fixed order.
-          nodes: Vec<Trie2Index>,
+          pub(crate) nodes: Vec<Trie2Index>,
           /// A map from a node's `usize` index to its position in the `nodes` vector.
           pos_of_u: HashMap<usize, usize>,
           /// A map from a node's position in `nodes` to its SCC ID.
           comp_id: Vec<usize>,
           /// The list of SCCs. Each inner vector contains node positions.
-          sccs: Vec<Vec<usize>>,
+          pub(crate) sccs: Vec<Vec<usize>>,
           /// The topologically sorted list of SCC IDs.
           topo: Vec<usize>,
       }
@@ -6509,29 +6594,20 @@ local_system:
               EV: Clone,
           {
               let mut all_paths = Vec::new();
-              let mut active: HashMap<Trie2Index, Vec<usize>> = HashMap::new();
 
               for &root in roots {
                   if let Some(root_guard) = root.read(arena) {
                       let root_value = root_guard.value.clone();
-                      active.entry(root).or_default().push(0);
                       Self::get_all_paths_with_cycles_recursive(
                           arena,
                           root,
                           &mut vec![],
                           &mut all_paths,
-                          &mut active,
                           &is_end,
                           &is_path_edge,
                           &root_value,
                           max_path_length,
                       );
-                      if let Some(vec) = active.get_mut(&root) {
-                          vec.pop();
-                          if vec.is_empty() {
-                              active.remove(&root);
-                          }
-                      }
                   }
               }
               all_paths
@@ -6540,9 +6616,8 @@ local_system:
           fn get_all_paths_with_cycles_recursive<F, G>(
               arena: &Arena<Self>,
               node_idx: Trie2Index,
-              path: &mut Vec<(EK, EV, T)>,
+              current_path: &mut Vec<(EK, EV, T)>,
               all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
-              active: &mut HashMap<Trie2Index, Vec<usize>>,
               is_end: &F,
               is_path_edge: &G,
               root_value: &T,
@@ -6553,64 +6628,126 @@ local_system:
               T: Clone,
               EV: Clone,
           {
-              if let Some(g) = node_idx.read(arena) {
-                  if is_end(node_idx, &g) {
-                      all_paths.push((root_value.clone(), path.clone()));
+              // Iterative DFS to avoid stack overflows on deep/large graphs.
+              // Semantics:
+              // - Record a path when is_end(current_node) is true (including the root with a zero-length path).
+              // - Enforce max_path_length AFTER recording the current node as an endpoint, based on counted edges.
+              // - Allow revisiting nodes (cycles are allowed) but stop expanding when the counted-edge path length reaches max_path_length.
+              // - Prevent infinite loops formed solely by uncounted edges using an "active stamps" map:
+              //   a node cannot be revisited at the same counted length (stamp), but can be revisited after progress.
+              // Work on a local copy of the path, so callers' mutable reference remains unchanged.
+              let mut path: Vec<(EK, EV, T)> = current_path.clone();
+              // Stack frame for iterative DFS.
+              struct Frame<EK2, EV2> {
+                  node: Trie2Index,
+                  // Snapshot of edges in deterministic order: (edge_key, edge_value, child_idx)
+                  edges: Vec<(EK2, EV2, Trie2Index)>,
+                  idx: usize,                 // Next edge index to process
+                  started: bool,              // Whether we've done the "node entry" work (is_end + length check)
+                  has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`
+                  // "Stamp" equals counted-edge length (path.len()) at entry; used to manage active stamps.
+                  stamp: usize,
+              }
+              // Helper to snapshot a node's outgoing edges in deterministic order (no locks held after).
+              let edges_for = |n: Trie2Index| -> Vec<(EK, EV, Trie2Index)> {
+                  if let Some(g) = n.read(arena) {
+                      g.children().iter()
+                          .flat_map(|(ek, dest_map)| {
+                              let ekc = ek.clone();
+                              dest_map.iter()
+                                  .map(move |(child_idx, ev)| (ekc.clone(), ev.clone(), *child_idx))
+                          })
+                          .collect()
+                  } else {
+                      Vec::new()
                   }
-              }
-
-              if path.len() >= max_path_length {
-                  return;
-              }
-
-              let children_to_visit: Vec<(EK, EV, Trie2Index)> = if let Some(g) = node_idx.read(arena) {
-                  g.children()
-                      .iter()
-                      .flat_map(|(ek, dest_map)| {
-                          dest_map
-                              .iter()
-                              .map(move |(child_idx, ev)| (ek.clone(), ev.clone(), *child_idx))
-                      })
-                      .collect()
-              } else {
-                  return;
               };
-
-              for (ek, ev, child_idx) in children_to_visit {
+              let mut stack: Vec<Frame<EK, EV>> = Vec::new();
+              // Active stamps: for each node, which counted-length stamps are currently on the path.
+              let mut active: HashMap<Trie2Index, Vec<usize>> = HashMap::new();
+              stack.push(Frame {
+                  node: node_idx,
+                  edges: edges_for(node_idx),
+                  idx: 0,
+                  started: false,
+                  has_incoming_edge: false, // root has no incoming edge
+                  stamp: 0,                  // root is entered at counted length 0
+              });
+              active.entry(node_idx).or_default().push(0);
+              while let Some(frame) = stack.last_mut() {
+                  // On first entry to this node: evaluate `is_end` and enforce max_path_length.
+                  if !frame.started {
+                      frame.started = true;
+                      if let Some(g) = frame.node.read(arena) {
+                          if is_end(frame.node, &g) {
+                              all_paths.push((root_value.clone(), path.clone()));
+                          }
+                      }
+                      // If we've reached the max number of edges on this path, do not expand further.
+                      if path.len() >= max_path_length {
+                          let popped = stack.pop().unwrap();
+                          if let Some(vec) = active.get_mut(&popped.node) {
+                              if let Some(last) = vec.pop() {
+                                  debug_assert!(last == popped.stamp);
+                              }
+                              if vec.is_empty() {
+                                  active.remove(&popped.node);
+                              }
+                          }
+                          if popped.has_incoming_edge {
+                              path.pop(); // backtrack edge added when entering this frame
+                          }
+                          continue;
+                      }
+                  }
+                  // If we've exhausted edges for this node, backtrack.
+                  if frame.idx >= frame.edges.len() {
+                      let popped = stack.pop().unwrap();
+                      if let Some(vec) = active.get_mut(&popped.node) {
+                          if let Some(last) = vec.pop() {
+                              debug_assert!(last == popped.stamp);
+                          }
+                          if vec.is_empty() {
+                              active.remove(&popped.node);
+                          }
+                      }
+                      if popped.has_incoming_edge {
+                          path.pop(); // backtrack the edge that led here
+                      }
+                      continue;
+                  }
+                  // Take the next outgoing edge and descend to the child.
+                  let (ek, ev, child_idx) = frame.edges[frame.idx].clone();
+                  frame.idx += 1;
+                  // Determine whether this edge increases the counted length.
                   let include_edge = is_path_edge(&ek, &ev, child_idx);
                   let next_stamp = path.len() + if include_edge { 1 } else { 0 };
 
+                  // Prevent infinite loops formed solely by uncounted edges:
+                  // do not re-enter the same node at the same counted length.
                   if active.get(&child_idx).map_or(false, |v| v.contains(&next_stamp)) {
                       continue;
                   }
-
                   if let Some(child_guard) = child_idx.read(arena) {
+                      let child_value = child_guard.value.clone();
+                      if include_edge {
+                          // Add this edge to the current path before exploring the child.
+                          path.push((ek, ev, child_value));
+                      }
+                      // Snapshot child's edges now (no locks held across iterations).
+                      let child_edges = edges_for(child_idx);
+                      stack.push(Frame {
+                          node: child_idx,
+                          edges: child_edges,
+                          idx: 0,
+                          started: false,
+                          has_incoming_edge: include_edge,
+                          stamp: next_stamp,
+                      });
                       active.entry(child_idx).or_default().push(next_stamp);
-                      if include_edge {
-                          path.push((ek.clone(), ev.clone(), child_guard.value.clone()));
-                      }
-
-                      Self::get_all_paths_with_cycles_recursive(
-                          arena,
-                          child_idx,
-                          path,
-                          all_paths,
-                          active,
-                          is_end,
-                          is_path_edge,
-                          root_value,
-                          max_path_length,
-                      );
-
-                      if include_edge {
-                          path.pop();
-                      }
-                      if let Some(vec) = active.get_mut(&child_idx) {
-                          vec.pop();
-                          if vec.is_empty() {
-                              active.remove(&child_idx);
-                          }
-                      }
+                  } else {
+                      // If child is missing, skip it and proceed.
+                      continue;
                   }
               }
           }
@@ -9368,6 +9505,7 @@ local_system:
 
       pub struct Trie1Config {
           pub enabled: bool,
+          pub break_cycles: bool,
           pub early_flatten_epsilon: bool,
           pub minimize_by_signature: bool,
           pub merge_equivalent_llm_tokens: bool,
@@ -9383,6 +9521,7 @@ local_system:
           fn default() -> Self {
               Self {
                   enabled: true,
+                  break_cycles: false,
                   early_flatten_epsilon: true,
                   minimize_by_signature: true,
                   merge_equivalent_llm_tokens: true,
@@ -9400,6 +9539,7 @@ local_system:
           pub fn off() -> Self {
               Self {
                   enabled: false,
+                  break_cycles: false,
                   early_flatten_epsilon: false,
                   minimize_by_signature: false,
                   merge_equivalent_llm_tokens: false,
@@ -9958,7 +10098,9 @@ local_system:
 
           // === Pass 4: Final Minimization and GC ===
           // Break cycles before final minimization passes that might be confused by them.
-          break_cycles_trie1(precomputed1, trie1_god);
+          if config.break_cycles {
+              break_cycles_trie1(precomputed1, trie1_god);
+          }
 
           if config.minimize_by_signature {
               merge_nodes_trie1(precomputed1, trie1_god);
@@ -10965,97 +11107,96 @@ local_system:
               return;
           }
 
-          // Use special_map_grouped which correctly handles cycles by iterating within SCCs.
+          // Precompute traversal data to handle cycles correctly.
           let traversal_data = match Trie::compute_traversal_data(trie1_god, &roots_vec) {
               Some(data) => data,
-              None => return, // Empty graph
+              None => return,
           };
 
-          let initial_nodes_and_values: Vec<_> = roots
-              .values()
-              .map(|root_idx| (*root_idx, None)) // Start with None, meaning "unconstrained"
+          let initial_nodes_and_values: Vec<_> = roots_vec
+              .iter()
+              .map(|root_idx| (*root_idx, None)) // None signifies "no preceding terminal"
               .collect();
 
-          type PredecessorSet = Option<BTreeSet<GrammarTokenID>>;
-          type NodePtr = *const PrecomputeNode1;
-
-          // This map will be populated by the 'process' closure as a side effect.
-          let edges_to_keep: Arc<RwLock<HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>>>> =
+          // This map will store the computed set of allowed edge keys for each node.
+          // We use a side channel because the return value of `process` is used for propagation.
+          let edges_to_keep: Arc<RwLock<HashMap<PrecomputeNode1Index, BTreeSet<Option<GrammarTokenID>>>>> =
               Arc::new(RwLock::new(HashMap::new()));
+
+          // The value propagated is Option<BTreeSet<GrammarTokenID>>:
+          // - None: Represents "top" - reachable from a root without a preceding terminal.
+          // - Some(set): The set of terminals that can immediately precede this node.
+          type PredecessorSet = Option<BTreeSet<GrammarTokenID>>;
 
           Trie::special_map_grouped(
               trie1_god,
               &traversal_data,
               initial_nodes_and_values,
-              // step closure
-              |pred_set: &PredecessorSet,
+              // step: determines the predecessor set for children based on the current node's set and the edge key.
+              |predecessors: &PredecessorSet,
                edge_key: &Option<GrammarTokenID>,
                dest_map: &OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>| {
-                  let next_pred_set = match edge_key {
-                      Some(t) if Some(*t) == ignore_terminal_id => pred_set.clone(),
-                      Some(t) => Some(BTreeSet::from([*t])),
-                      None => pred_set.clone(),
+                  let next_predecessors = match edge_key {
+                      Some(t) if Some(*t) == ignore_terminal_id => predecessors.clone(),
+                      Some(t) => Some(Some(BTreeSet::from([*t]))),
+                      None => predecessors.clone(),
                   };
-                  dest_map.keys().map(move |&dest_idx| (dest_idx, next_pred_set.clone())).collect::<Vec<_>>()
+                  dest_map.keys().map(move |&dst| (dst, next_predecessors.clone()))
               },
-              // merge closure
-              |existing_set, new_set| match (existing_set, new_set) {
-                  // If we ever merge with `None` (unconstrained), we become unconstrained.
-                  (val @ _, None) => *val = None,
-                  (None, _) => { /* already unconstrained, do nothing */ }
-                  (Some(existing), Some(new)) => {
-                      existing.extend(new);
+              // merge: combines predecessor sets for a node from multiple parents.
+              |existing_set: &mut PredecessorSet, new_set: PredecessorSet| {
+                  match (existing_set, new_set) {
+                      // If existing is already "top", it stays "top".
+                      (None, _) => {},
+                      // If new is "top", existing becomes "top".
+                      (existing, None) => *existing = None,
+                      // Otherwise, union the sets.
+                      (Some(existing), Some(new)) => existing.extend(new),
                   }
               },
-              // process closure
-              |node, _node_idx, maybe_all_immediate_predecessors| {
-                  if maybe_all_immediate_predecessors.is_none() {
-                      // Unconstrained, so keep all edges and continue propagation.
-                      let keys_to_keep = node.children().keys().cloned().collect();
-                      let node_ptr: NodePtr = node;
-                      edges_to_keep.write().unwrap().insert(node_ptr, keys_to_keep);
-                      return Some(maybe_all_immediate_predecessors);
-                  }
-
+              // process: once a node's predecessor set stabilizes, compute which of its outgoing edges are valid.
+              |node, node_idx, predecessors| {
                   let mut allowed_follow_terminals = BTreeSet::new();
-                  if let Some(all_immediate_predecessors) = &maybe_all_immediate_predecessors {
-                      for preceding_terminal in all_immediate_predecessors {
-                          if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
-                              allowed_follow_terminals.extend(follow_set.iter().cloned());
+                  match &predecessors {
+                      // If "top", any terminal that can follow *anything* is allowed.
+                      // We can compute this by taking the union of all follow sets.
+                      None => {
+                          for follow_set in terminal_follow_map.values() {
+                              allowed_follow_terminals.extend(follow_set);
+                          }
+                      }
+                      // Otherwise, compute the union of follow sets for the specific predecessors.
+                      Some(preds) => {
+                          for preceding_terminal in preds {
+                              if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
+                                  allowed_follow_terminals.extend(follow_set.iter().cloned());
+                              }
                           }
                       }
                   }
 
-                  let keys_to_keep_set: BTreeSet<_> = node
-                      .children()
-                      .keys()
-                      .filter(|edge_key| match edge_key {
+                  let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_key| match edge_key {
                           Some(edge_terminal) => {
                               allowed_follow_terminals.contains(edge_terminal)
                                   || Some(*edge_terminal) == ignore_terminal_id
                           }
-                          None => true,
-                      })
-                      .cloned()
-                      .collect();
+                          None => true, // Epsilon edges are always kept for now.
+                      }).cloned().collect();
 
-                  let node_ptr: NodePtr = node;
-                  edges_to_keep.write().unwrap().insert(node_ptr, keys_to_keep_set);
+                  edges_to_keep.write().unwrap().insert(node_idx, keys_to_keep);
 
-                  // Return the computed predecessor set to be used by the `step` function.
-                  Some(maybe_all_immediate_predecessors)
+                  // Return the predecessor set to continue propagation.
+                  // The `process` function in `special_map_grouped` must return an Option<U>.
+                  // We return Some to indicate processing should continue for children.
+                  Some(predecessors)
               },
           );
 
-          // Now, apply the pruning based on the collected `edges_to_keep` map.
-          let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+          // Apply the pruning.
+          let all_nodes = &traversal_data.nodes;
           let edges_to_keep_guard = edges_to_keep.read().unwrap();
           for node_idx in all_nodes {
-              let node_ptr: NodePtr = {
-                  let guard = node_idx.read(trie1_god).expect("poison");
-                  &*guard as *const _
-              };
-              if let Some(keys_to_keep) = edges_to_keep_guard.get(&node_ptr) {
+              if let Some(keys_to_keep) = edges_to_keep_guard.get(node_idx) {
                   let mut node_guard = node_idx.write(trie1_god).unwrap();
                   node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
               }
@@ -11219,7 +11360,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -11290,13 +11431,13 @@ messages:
       #[derive(Debug, Clone)]
       pub struct TrieTraversalData {
           /// The nodes reachable from the roots, in a fixed order.
-          nodes: Vec<Trie2Index>,
+          pub(crate) nodes: Vec<Trie2Index>,
           /// A map from a node's `usize` index to its position in the `nodes` vector.
           pos_of_u: HashMap<usize, usize>,
           /// A map from a node's position in `nodes` to its SCC ID.
           comp_id: Vec<usize>,
           /// The list of SCCs. Each inner vector contains node positions.
-          sccs: Vec<Vec<usize>>,
+          pub(crate) sccs: Vec<Vec<usize>>,
           /// The topologically sorted list of SCC IDs.
           topo: Vec<usize>,
       }
@@ -15101,6 +15242,7 @@ messages:
 
       pub struct Trie1Config {
           pub enabled: bool,
+          pub break_cycles: bool,
           pub early_flatten_epsilon: bool,
           pub minimize_by_signature: bool,
           pub merge_equivalent_llm_tokens: bool,
@@ -15116,6 +15258,7 @@ messages:
           fn default() -> Self {
               Self {
                   enabled: true,
+                  break_cycles: false,
                   early_flatten_epsilon: true,
                   minimize_by_signature: true,
                   merge_equivalent_llm_tokens: true,
@@ -15133,6 +15276,7 @@ messages:
           pub fn off() -> Self {
               Self {
                   enabled: false,
+                  break_cycles: false,
                   early_flatten_epsilon: false,
                   minimize_by_signature: false,
                   merge_equivalent_llm_tokens: false,
@@ -15690,6 +15834,11 @@ messages:
           }
 
           // === Pass 4: Final Minimization and GC ===
+          // Break cycles before final minimization passes that might be confused by them.
+          if config.break_cycles {
+              break_cycles_trie1(precomputed1, trie1_god);
+          }
+
           if config.minimize_by_signature {
               merge_nodes_trie1(precomputed1, trie1_god);
           }
@@ -15710,6 +15859,119 @@ messages:
           let mut stats = PrecomputeStats::default();
           crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
           crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
+      }
+
+      /// Breaks structural cycles in the Trie1 graph by "unrolling" strongly connected components.
+      /// This makes the graph a DAG, which can be simpler for some analysis tools.
+      /// The transformation preserves token-aware paths, relying on the property that no single
+      /// LLM token can traverse a cycle.
+      fn break_cycles_trie1(
+          roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+          trie1_god: &Trie1GodWrapper,
+      ) {
+          crate::debug!(2, "Breaking cycles in Trie1...");
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          if roots_vec.is_empty() {
+              return;
+          }
+
+          let traversal_data = match Trie::compute_traversal_data(trie1_god, &roots_vec) {
+              Some(data) => data,
+              None => return,
+          };
+
+          let all_nodes_vec = &traversal_data.nodes;
+          let sccs = &traversal_data.sccs;
+
+          #[derive(Debug)]
+          enum Modification {
+              AddEdge(PrecomputeNode1Index, Option<GrammarTokenID>, PrecomputeNode1Index, LLMTokenBV),
+              RemoveEdge(PrecomputeNode1Index, Option<GrammarTokenID>, PrecomputeNode1Index),
+          }
+          let mut modifications = Vec::new();
+
+          for scc_node_positions in sccs {
+              let is_trivial_scc = if scc_node_positions.len() == 1 {
+                  let pos = scc_node_positions[0];
+                  let u_idx = all_nodes_vec[pos];
+                  let u_guard = u_idx.read(trie1_god).unwrap();
+                  !u_guard.children().values().any(|dm| dm.contains_key(&u_idx))
+              } else {
+                  scc_node_positions.len() < 2
+              };
+
+              if is_trivial_scc {
+                  continue;
+              }
+
+              let scc_nodes: HashSet<PrecomputeNode1Index> = scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
+              crate::debug!(3, "Breaking cycles in SCC of size {}", scc_nodes.len());
+
+              // 1. Create a copy of each node in the SCC.
+              let copies: HashMap<_, _> = scc_nodes.iter().map(|v| {
+                  let v_guard = v.read(trie1_god).unwrap();
+                  let v_copy_idx = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(v_guard.value.clone())));
+                  (*v, v_copy_idx)
+              }).collect();
+
+              // 2. Find a spanning tree of the SCC subgraph to preserve connectivity in the copied component.
+              let mut spanning_tree_edges = HashSet::new();
+              let mut q = VecDeque::new();
+              let mut visited = HashSet::new();
+              if let Some(start_node) = scc_nodes.iter().next() {
+                  q.push_back(*start_node);
+                  visited.insert(*start_node);
+
+                  while let Some(u) = q.pop_front() {
+                      let u_guard = u.read(trie1_god).unwrap();
+                      // Iterate children in a deterministic order for deterministic spanning tree
+                      let mut child_edges: Vec<_> = u_guard.children().iter().flat_map(|(ek, dm)| dm.iter().map(move |(v, bv)| (ek, v, bv))).collect();
+                      child_edges.sort_by_key(|(ek, v, _)| (*ek, *v));
+
+                      for (_, v, _) in child_edges {
+                          if scc_nodes.contains(v) && visited.insert(*v) {
+                              q.push_back(*v);
+                              spanning_tree_edges.insert((u, *v));
+                          }
+                      }
+                  }
+              }
+
+              // 3. Schedule edge modifications.
+              for u in &scc_nodes {
+                  let u_copy = copies[u];
+                  let u_guard = u.read(trie1_god).unwrap();
+                  let children_snapshot = u_guard.children().clone();
+                  drop(u_guard);
+
+                  for (ek, dm) in children_snapshot {
+                      for (v, bv) in dm {
+                          if scc_nodes.contains(&v) { // Internal edge
+                              let v_copy = copies[&v];
+                              modifications.push(Modification::RemoveEdge(*u, ek.clone(), v));
+                              modifications.push(Modification::AddEdge(*u, ek.clone(), v_copy, bv.clone()));
+                              if spanning_tree_edges.contains(&(*u, v)) {
+                                  modifications.push(Modification::AddEdge(u_copy, ek, v_copy, bv));
+                              }
+                          } else { // Exit edge
+                              modifications.push(Modification::AddEdge(u_copy, ek, v, bv));
+                          }
+                      }
+                  }
+              }
+          }
+
+          // 4. Apply all scheduled modifications.
+          for m in modifications {
+              match m {
+                  Modification::AddEdge(u, ek, v, bv) => {
+                      trie1_god.insert_edge_simple(u, v, ek, bv);
+                  }
+                  Modification::RemoveEdge(u, ek, v) => {
+                      trie1_god.remove_edge(u, v, &ek);
+                  }
+              }
+          }
       }
 
       fn simplify_none_edges_to_former_end_nodes_trie1(
@@ -16577,65 +16839,38 @@ messages:
           ignore_terminal_id: Option<TerminalID>,
       ) {
           crate::debug!(2, "Pruning Trie1 based on terminal follow sets.");
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          if roots_vec.is_empty() {
-              return;
-          }
 
-          // Use special_map_grouped which correctly handles cycles by iterating within SCCs.
-          let traversal_data = match Trie::compute_traversal_data(trie1_god, &roots_vec) {
-              Some(data) => data,
-              None => return, // Empty graph
-          };
-
-          let initial_nodes_and_values: Vec<_> = roots
-              .values()
-              .map(|root_idx| (*root_idx, None)) // Start with None, meaning "unconstrained"
+          let initial_nodes_and_values: Vec<_> = roots.values()
+              .map(|root_arc| (root_arc.clone(), None))
               .collect();
 
-          type PredecessorSet = Option<BTreeSet<GrammarTokenID>>;
           type NodePtr = *const PrecomputeNode1;
+          let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
 
-          // This map will be populated by the 'process' closure as a side effect.
-          let edges_to_keep: Arc<RwLock<HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>>>> =
-              Arc::new(RwLock::new(HashMap::new()));
-
-          Trie::special_map_grouped(
+          Trie::special_map(
               trie1_god,
-              &traversal_data,
               initial_nodes_and_values,
-              // step closure
-              |pred_set: &PredecessorSet,
-               edge_key: &Option<GrammarTokenID>,
-               dest_map: &OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>| {
-                  let next_pred_set = match edge_key {
-                      Some(t) if Some(*t) == ignore_terminal_id => pred_set.clone(),
-                      Some(t) => Some(BTreeSet::from([*t])),
-                      None => pred_set.clone(),
-                  };
-                  dest_map.keys().map(move |&dest_idx| (dest_idx, next_pred_set.clone()))
-              },
-              // merge closure
-              |existing_set, new_set| match (existing_set, new_set) {
-                  // If we ever merge with `None` (unconstrained), we become unconstrained.
-                  (val @ _, None) => *val = None,
-                  (None, _) => { /* already unconstrained, do nothing */ }
-                  (Some(existing), Some(new)) => {
-                      existing.extend(new);
+              |predecessors: &Option<BTreeSet<GrammarTokenID>>, edge_key: &Option<GrammarTokenID>, _edge_bv, _child_node| {
+                  match edge_key {
+                      Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
+                      Some(t) => Some(Some(BTreeSet::from([*t]))),
+                      None => Some(predecessors.clone()),
                   }
               },
-              // process closure
-              |node, _node_idx, maybe_all_immediate_predecessors| {
+              |existing_set, new_set| {
+                  match (existing_set, new_set) {
+                      (None, _) => {},
+                      (existing_set @ _, None) => *existing_set = None,
+                      (Some(existing), Some(new)) => existing.extend(new),
+                  }
+              },
+              |node, maybe_all_immediate_predecessors| {
                   if maybe_all_immediate_predecessors.is_none() {
-                      // Unconstrained, so keep all edges and continue propagation.
-                      let keys_to_keep = node.children().keys().cloned().collect();
-                      let node_ptr: NodePtr = node;
-                      edges_to_keep.write().unwrap().insert(node_ptr, keys_to_keep);
-                      return Some(maybe_all_immediate_predecessors);
+                      return true;
                   }
 
                   let mut allowed_follow_terminals = BTreeSet::new();
-                  if let Some(all_immediate_predecessors) = &maybe_all_immediate_predecessors {
+                  if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
                       for preceding_terminal in all_immediate_predecessors {
                           if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
                               allowed_follow_terminals.extend(follow_set.iter().cloned());
@@ -16643,37 +16878,28 @@ messages:
                       }
                   }
 
-                  let keys_to_keep_set: BTreeSet<_> = node
-                      .children()
-                      .keys()
-                      .filter(|edge_key| match edge_key {
-                          Some(edge_terminal) => {
-                              allowed_follow_terminals.contains(edge_terminal)
-                                  || Some(*edge_terminal) == ignore_terminal_id
-                          }
+                  let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_key| {
+                      match edge_key {
+                          Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
                           None => true,
-                      })
-                      .cloned()
-                      .collect();
+                      }
+                  }).cloned().collect();
 
                   let node_ptr: NodePtr = node;
-                  edges_to_keep.write().unwrap().insert(node_ptr, keys_to_keep_set);
-
-                  // Return the computed predecessor set to be used by the `step` function.
-                  Some(maybe_all_immediate_predecessors)
+                  edges_to_keep.insert(node_ptr, keys_to_keep);
+                  true
               },
           );
 
-          // Now, apply the pruning based on the collected `edges_to_keep` map.
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-          let edges_to_keep_guard = edges_to_keep.read().unwrap();
-          for node_idx in all_nodes {
+          for node_arc in all_nodes {
               let node_ptr: NodePtr = {
-                  let guard = node_idx.read(trie1_god).expect("poison");
+                  let guard = node_arc.read(trie1_god).expect("poison");
                   &*guard as *const _
               };
-              if let Some(keys_to_keep) = edges_to_keep_guard.get(&node_ptr) {
-                  let mut node_guard = node_idx.write(trie1_god).unwrap();
+              if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
+                  let mut node_guard = node_arc.write(trie1_god).unwrap();
                   node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
               }
           }
@@ -16829,16 +17055,10 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute1_utils.rs
-  - user: |+
-      error: lifetime may not live long enough
-          --> src/constraint_precompute1_utils.rs:1539:13
-           |
-      1533 |          dest_map: &OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>| {
-           |                    - let's call the lifetime of this reference `'1` - return type of closure is std::iter::Map<ordered_hash_map::ordered_map::Keys<'2, trie::Trie2Index, hybrid_bitset::HybridBitset>, {closure@src/constraint_precompute1_utils.rs:1539:33: 1539:49}>
-      ...
-      1539 |             dest_map.keys().map(move |&dest_idx| (dest_idx, next_pred_set.clone()))
-           |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
-
+  - user: |-
+      Make sure `prune_on_no_terminal_follow_trie1` works correctly when there are cycles. It should first figure out which predecessor terminals can occur on each node, accounting for cycles. I guess it'll have to keep going until no more changes are made? IDK. But then once we know that it's easy.
+      I think the key is to ensure that eventually we stop traversing, I guess by returning false from the process fn.
+      Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your solutions.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -16858,429 +17078,217 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course, I can help with that. Here are the step-by-step instructions to fix the compilation error and the failing test, followed by the corresponding git diffs.
+      Of course. Dealing with cycles in graph algorithms requires careful handling to ensure termination and correctness. The current implementation of `prune_on_no_terminal_follow_trie1` uses a traversal method (`Trie::special_map`) that isn't designed to converge to a fixed point in the presence of cycles.
+
+      Here is my analysis and the proposed solution:
+
+      ### Mathematical Analysis & Hypotheses
+
+      1.  **Problem Statement**: We need to determine, for each node `N` in the graph, the set `P(N)` of all possible grammar terminals that can immediately precede a path to `N`. Once `P(N)` is known for all `N`, we can prune outgoing edges `N -> N'` with terminal `t` if `t` is not in the "follow set" of any terminal in `P(N)`.
+
+      2.  **Monotonicity Hypothesis**: The computation of `P(N)` is a monotonic process. Let `P_i(N)` be the computed set of predecessors for node `N` after iteration `i`. We start with `P_0(N) = ∅` for all nodes except roots. In each step, we propagate terminals across edges. A `Some(t)` edge from `M` to `N` adds `{t}` to `P(N)`. A `None` edge from `M` to `N` adds `P(M)` to `P(N)`. Since the propagation and merge operations are unions, `P_i(N) ⊆ P_{i+1}(N)` for all `i` and `N`.
+
+      3.  **Convergence Hypothesis**: Because the total number of terminals in the grammar is finite, the predecessor sets `P(N)` cannot grow indefinitely. Due to the monotonicity property, the iterative computation of these sets is guaranteed to reach a fixed point where no more changes occur.
+
+      4.  **Algorithmic Solution**: A worklist-based algorithm is ideal for reaching this fixed point. We need an algorithm that re-evaluates a node whenever one of its inputs (predecessor sets from parent nodes) changes. The `Trie::special_map_grouped` function is perfectly suited for this, as it processes the graph's Strongly Connected Components (SCCs) in topological order and iterates within each SCC until the propagated values stabilize.
+
+      ### Implementation Plan
+
+      I will replace the body of `prune_on_no_terminal_follow_trie1` to use `Trie::special_map_grouped`. This will correctly compute the predecessor sets even in graphs with cycles. The new implementation will also fix a subtle bug in the original logic where nodes reachable from roots via `None`-only paths were handled incorrectly.
+
+      Here are the step-by-step instructions to apply the changes:
 
       ### Step-by-step Instructions
 
-      #### File: `src/constraint_precompute1_utils.rs`
+      1.  **Open the file `src/constraint_precompute1_utils.rs`.**
 
-      1.  Open the file `src/constraint_precompute1_utils.rs`.
-      2.  Navigate to the `prune_on_no_terminal_follow_trie1` function.
-      3.  Inside this function, find the `step` closure being passed to `Trie::special_map_grouped`.
-      4.  The return expression of this closure is causing a lifetime error because the iterator it produces borrows from the `dest_map` argument. To fix this, you need to collect the results into an owned `Vec`.
+      2.  **Locate the function `prune_on_no_terminal_follow_trie1`.**
 
-          Modify this line:
-          ```rust
-          dest_map.keys().map(move |&dest_idx| (dest_idx, next_pred_set.clone()))
-          ```
-          to become:
-          ```rust
-          dest_map.keys().map(move |&dest_idx| (dest_idx, next_pred_set.clone())).collect::<Vec<_>>()
-          ```
+      3.  **Replace the entire body of the function** with the new implementation below. This new version uses `Trie::compute_traversal_data` and `Trie::special_map_grouped` to correctly handle cycles by iterating to a fixed point.
 
-      #### File: `src/datastructures/trie.rs`
+          *   It first computes the graph's structure (SCCs).
+          *   It then uses `special_map_grouped` to propagate the set of possible preceding terminals through the graph, iterating within cycles until the sets stabilize.
+          *   Once the stable predecessor sets are known for every node, it determines which outgoing edges are valid based on the grammar's follow-set rules.
+          *   Finally, it removes the invalid edges from the graph.
 
-      The current iterative implementation of `get_all_paths_with_cycles_recursive` is complex and contains a bug that causes a test to fail. We will replace it with a clearer, recursive implementation that correctly handles cycles.
+      This approach is more robust and mathematically sound for graphs containing cycles.
 
-      1.  Open the file `src/datastructures/trie.rs`.
-      2.  Replace the entire `get_all_paths_with_cycles` function with the version below. This new version correctly sets up the initial state for the recursive helper function.
+      ---
 
-          ```rust
-          pub fn get_all_paths_with_cycles<F, G>(
-              arena: &Arena<Self>,
-              roots: &[Trie2Index],
-              is_end: F,
-              is_path_edge: G,
-              max_path_length: usize,
-          ) -> Vec<(T, Vec<(EK, EV, T)>)>
-          where
-              F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
-              G: Fn(&EK, &EV, Trie2Index) -> bool,
-              T: Clone,
-              EV: Clone,
-          {
-              let mut all_paths = Vec::new();
-              let mut active: HashMap<Trie2Index, Vec<usize>> = HashMap::new();
+      ### Git Diff
 
-              for &root in roots {
-                  if let Some(root_guard) = root.read(arena) {
-                      let root_value = root_guard.value.clone();
-                      active.entry(root).or_default().push(0);
-                      Self::get_all_paths_with_cycles_recursive(
-                          arena,
-                          root,
-                          &mut vec![],
-                          &mut all_paths,
-                          &mut active,
-                          &is_end,
-                          &is_path_edge,
-                          &root_value,
-                          max_path_length,
-                      );
-                      if let Some(vec) = active.get_mut(&root) {
-                          vec.pop();
-                          if vec.is_empty() {
-                              active.remove(&root);
-                          }
-                      }
-                  }
-              }
-              all_paths
-          }
-          ```
-
-      3.  Next, replace the entire `get_all_paths_with_cycles_recursive` function with the new recursive implementation below. This version correctly implements the cycle-aware traversal logic.
-
-          ```rust
-          fn get_all_paths_with_cycles_recursive<F, G>(
-              arena: &Arena<Self>,
-              node_idx: Trie2Index,
-              path: &mut Vec<(EK, EV, T)>,
-              all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
-              active: &mut HashMap<Trie2Index, Vec<usize>>,
-              is_end: &F,
-              is_path_edge: &G,
-              root_value: &T,
-              max_path_length: usize,
-          ) where
-              F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
-              G: Fn(&EK, &EV, Trie2Index) -> bool,
-              T: Clone,
-              EV: Clone,
-          {
-              if let Some(g) = node_idx.read(arena) {
-                  if is_end(node_idx, &g) {
-                      all_paths.push((root_value.clone(), path.clone()));
-                  }
-              }
-
-              if path.len() >= max_path_length {
-                  return;
-              }
-
-              let children_to_visit: Vec<(EK, EV, Trie2Index)> = if let Some(g) = node_idx.read(arena) {
-                  g.children()
-                      .iter()
-                      .flat_map(|(ek, dest_map)| {
-                          dest_map
-                              .iter()
-                              .map(move |(child_idx, ev)| (ek.clone(), ev.clone(), *child_idx))
-                      })
-                      .collect()
-              } else {
-                  return;
-              };
-
-              for (ek, ev, child_idx) in children_to_visit {
-                  let include_edge = is_path_edge(&ek, &ev, child_idx);
-                  let next_stamp = path.len() + if include_edge { 1 } else { 0 };
-
-                  if active.get(&child_idx).map_or(false, |v| v.contains(&next_stamp)) {
-                      continue;
-                  }
-
-                  if let Some(child_guard) = child_idx.read(arena) {
-                      active.entry(child_idx).or_default().push(next_stamp);
-                      if include_edge {
-                          path.push((ek.clone(), ev.clone(), child_guard.value.clone()));
-                      }
-
-                      Self::get_all_paths_with_cycles_recursive(
-                          arena,
-                          child_idx,
-                          path,
-                          all_paths,
-                          active,
-                          is_end,
-                          is_path_edge,
-                          root_value,
-                          max_path_length,
-                      );
-
-                      if include_edge {
-                          path.pop();
-                      }
-                      if let Some(vec) = active.get_mut(&child_idx) {
-                          vec.pop();
-                          if vec.is_empty() {
-                              active.remove(&child_idx);
-                          }
-                      }
-                  }
-              }
-          }
-          ```
-
-      ### Git Diffs
-
-      Here are the changes in `diff` format.
+      Here is the git diff to apply the changes to `src/constraint_precompute1_utils.rs`.
 
       ```diff
-      --- a/src/datastructures/trie.rs
-      +++ b/src/datastructures/trie.rs
-      @@ -1008,10 +1008,29 @@
-               T: Clone,
-               EV: Clone,
-           {
-               let mut all_paths = Vec::new();
-      +        let mut active: HashMap<Trie2Index, Vec<usize>> = HashMap::new();
-       
-               for &root in roots {
-                   if let Some(root_guard) = root.read(arena) {
-                       let root_value = root_guard.value.clone();
-      +                active.entry(root).or_default().push(0);
-                       Self::get_all_paths_with_cycles_recursive(
-                           arena,
-                           root,
-                           &mut vec![],
-                           &mut all_paths,
-      +                    &mut active,
-                           &is_end,
-                           &is_path_edge,
-                           &root_value,
-                           max_path_length,
-                       );
-      +                if let Some(vec) = active.get_mut(&root) {
-      +                    vec.pop();
-      +                    if vec.is_empty() {
-      +                        active.remove(&root);
-      +                    }
-      +                }
-                   }
-               }
-               all_paths
-      @@ -1020,158 +1039,68 @@
-           fn get_all_paths_with_cycles_recursive<F, G>(
-               arena: &Arena<Self>,
-               node_idx: Trie2Index,
-      -        current_path: &mut Vec<(EK, EV, T)>,
-      +        path: &mut Vec<(EK, EV, T)>,
-               all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
-      +        active: &mut HashMap<Trie2Index, Vec<usize>>,
-               is_end: &F,
-               is_path_edge: &G,
-               root_value: &T,
-               max_path_length: usize,
-           ) where
-               F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
-               G: Fn(&EK, &EV, Trie2Index) -> bool,
-               T: Clone,
-               EV: Clone,
-           {
-      -        // Iterative DFS to avoid stack overflows on deep/large graphs.
-      -        // Semantics:
-      -        // - Record a path when is_end(current_node) is true (including the root with a zero-length path).
-      -        // - Enforce max_path_length AFTER recording the current node as an endpoint, based on counted edges.
-      -        // - Allow revisiting nodes (cycles are allowed) but stop expanding when the counted-edge path length reaches max_path_length.
-      -        // - Prevent infinite loops formed solely by uncounted edges using an "active stamps" map:
-      -        //   a node cannot be revisited at the same counted length (stamp), but can be revisited after progress.
-      -        // Work on a local copy of the path, so callers' mutable reference remains unchanged.
-      -        let mut path: Vec<(EK, EV, T)> = current_path.clone();
-      -        // Stack frame for iterative DFS.
-      -        struct Frame<EK2, EV2> {
-      -            node: Trie2Index,
-      -            // Snapshot of edges in deterministic order: (edge_key, edge_value, child_idx)
-      -            edges: Vec<(EK2, EV2, Trie2Index)>,
-      -            idx: usize,                 // Next edge index to process
-      -            started: bool,              // Whether we've done the "node entry" work (is_end + length check)
-      -            has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`
-      -            // "Stamp" equals counted-edge length (path.len()) at entry; used to manage active stamps.
-      -            stamp: usize,
-      -        }
-      -        // Helper to snapshot a node's outgoing edges in deterministic order (no locks held after).
-      -        let edges_for = |n: Trie2Index| -> Vec<(EK, EV, Trie2Index)> {
-      -            if let Some(g) = n.read(arena) {
-      -                g.children().iter()
-      -                    .flat_map(|(ek, dest_map)| {
-      -                        let ekc = ek.clone();
-      -                        dest_map.iter()
-      -                            .map(move |(child_idx, ev)| (ekc.clone(), ev.clone(), *child_idx))
-      -                    })
-      -                    .collect()
-      -            } else {
-      -                Vec::new()
-      -            }
-      -        };
-      -        let mut stack: Vec<Frame<EK, EV>> = Vec::new();
-      -        // Active stamps: for each node, which counted-length stamps are currently on the path.
-      -        let mut active: HashMap<Trie2Index, Vec<usize>> = HashMap::new();
-      -        stack.push(Frame {
-      -            node: node_idx,
-      -            edges: edges_for(node_idx),
-      -            idx: 0,
-      -            started: false,
-      -            has_incoming_edge: false, // root has no incoming edge
-      -            stamp: 0,                  // root is entered at counted length 0
-      -        });
-      -        active.entry(node_idx).or_default().push(0);
-      -        while let Some(frame) = stack.last_mut() {
-      -            // On first entry to this node: evaluate `is_end` and enforce max_path_length.
-      -            if !frame.started {
-      -                frame.started = true;
-      -                if let Some(g) = frame.node.read(arena) {
-      -                    if is_end(frame.node, &g) {
-      -                        all_paths.push((root_value.clone(), path.clone()));
-      -                    }
-      -                }
-      -                // If we've reached the max number of edges on this path, do not expand further.
-      -                if path.len() >= max_path_length {
-      -                    let popped = stack.pop().unwrap();
-      -                    if let Some(vec) = active.get_mut(&popped.node) {
-      -                        if let Some(last) = vec.pop() {
-      -                            debug_assert!(last == popped.stamp);
-      -                        }
-      -                        if vec.is_empty() {
-      -                            active.remove(&popped.node);
-      -                        }
-      -                    }
-      -                    if popped.has_incoming_edge {
-      -                        path.pop(); // backtrack edge added when entering this frame
-      -                    }
-      -                    continue;
-      -                }
-      -            }
-      -            // If we've exhausted edges for this node, backtrack.
-      -            if frame.idx >= frame.edges.len() {
-      -                let popped = stack.pop().unwrap();
-      -                if let Some(vec) = active.get_mut(&popped.node) {
-      -                    if let Some(last) = vec.pop() {
-      -                        debug_assert!(last == popped.stamp);
-      -                    }
-      -                    if vec.is_empty() {
-      -                        active.remove(&popped.node);
-      -                    }
-      -                }
-      -                if popped.has_incoming_edge {
-      -                    path.pop(); // backtrack the edge that led here
-      -                }
-      -                continue;
-      -            }
-      -            // Take the next outgoing edge and descend to the child.
-      -            let (ek, ev, child_idx) = frame.edges[frame.idx].clone();
-      -            frame.idx += 1;
-      -            // Determine whether this edge increases the counted length.
-      -            let include_edge = is_path_edge(&ek, &ev, child_idx);
-      -            let next_stamp = path.len() + if include_edge { 1 } else { 0 };
-      -
-      -            // Prevent infinite loops formed solely by uncounted edges:
-      -            // do not re-enter the same node at the same counted length.
-      -            if active.get(&child_idx).map_or(false, |v| v.contains(&next_stamp)) {
-      -                continue;
-      -            }
-      -            if let Some(child_guard) = child_idx.read(arena) {
-      -                let child_value = child_guard.value.clone();
-      -                if include_edge {
-      -                    // Add this edge to the current path before exploring the child.
-      -                    path.push((ek, ev, child_value));
-      -                }
-      -                // Snapshot child's edges now (no locks held across iterations).
-      -                let child_edges = edges_for(child_idx);
-      -                stack.push(Frame {
-      -                    node: child_idx,
-      -                    edges: child_edges,
-      -                    idx: 0,
-      -                    started: false,
-      -                    has_incoming_edge: include_edge,
-      -                    stamp: next_stamp,
-      -                });
-      -                active.entry(child_idx).or_default().push(next_stamp);
-      -            } else {
-      -                // If child is missing, skip it and proceed.
-      -                continue;
-      -            }
-      +        if let Some(g) = node_idx.read(arena) {
-      +            if is_end(node_idx, &g) {
-      +                all_paths.push((root_value.clone(), path.clone()));
-      +            }
-      +        }
-      +
-      +        if path.len() >= max_path_length {
-      +            return;
-      +        }
-      +
-      +        let children_to_visit: Vec<(EK, EV, Trie2Index)> = if let Some(g) = node_idx.read(arena) {
-      +            g.children()
-      +                .iter()
-      +                .flat_map(|(ek, dest_map)| {
-      +                    dest_map
-      +                        .iter()
-      +                        .map(move |(child_idx, ev)| (ek.clone(), ev.clone(), *child_idx))
-      +                })
-      +                .collect()
-      +        } else {
-      +            return;
-      +        };
-      +
-      +        for (ek, ev, child_idx) in children_to_visit {
-      +            let include_edge = is_path_edge(&ek, &ev, child_idx);
-      +            let next_stamp = path.len() + if include_edge { 1 } else { 0 };
-      +
-      +            if active.get(&child_idx).map_or(false, |v| v.contains(&next_stamp)) {
-      +                continue;
-      +            }
-      +
-      +            if let Some(child_guard) = child_idx.read(arena) {
-      +                active.entry(child_idx).or_default().push(next_stamp);
-      +                if include_edge {
-      +                    path.push((ek.clone(), ev.clone(), child_guard.value.clone()));
-      +                }
-      +
-      +                Self::get_all_paths_with_cycles_recursive(
-      +                    arena,
-      +                    child_idx,
-      +                    path,
-      +                    all_paths,
-      +                    active,
-      +                    is_end,
-      +                    is_path_edge,
-      +                    root_value,
-      +                    max_path_length,
-      +                );
-      +
-      +                if include_edge {
-      +                    path.pop();
-      +                }
-      +                if let Some(vec) = active.get_mut(&child_idx) {
-      +                    vec.pop();
-      +                    if vec.is_empty() {
-      +                        active.remove(&child_idx);
-      +                    }
-      +                }
-      +            }
-               }
-           }
-       }
-
-      ``````diff
       --- a/src/constraint_precompute1_utils.rs
       +++ b/src/constraint_precompute1_utils.rs
-      @@ -1536,7 +1536,7 @@
-                       Some(t) => Some(BTreeSet::from([*t])),
-                       None => pred_set.clone(),
-                   };
-      -            dest_map.keys().map(move |&dest_idx| (dest_idx, next_pred_set.clone()))
-      +            dest_map.keys().map(move |&dest_idx| (dest_idx, next_pred_set.clone())).collect::<Vec<_>>()
+      @@ -1419,67 +1419,95 @@
+           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+           ignore_terminal_id: Option<TerminalID>,
+       ) {
+           crate::debug!(2, "Pruning Trie1 based on terminal follow sets.");
+      -
+      -    let initial_nodes_and_values: Vec<_> = roots.values()
+      -        .map(|root_arc| (root_arc.clone(), None))
+      -        .collect();
+      -
+      -    type NodePtr = *const PrecomputeNode1;
+      -    let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
+      -
+      -    Trie::special_map(
+      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
+      +    if roots_vec.is_empty() {
+      +        return;
+      +    }
+      +
+      +    // Precompute traversal data to handle cycles correctly.
+      +    let traversal_data = match Trie::compute_traversal_data(trie1_god, &roots_vec) {
+      +        Some(data) => data,
+      +        None => return,
+      +    };
+      +
+      +    let initial_nodes_and_values: Vec<_> = roots_vec
+      +        .iter()
+      +        .map(|root_idx| (*root_idx, None)) // None signifies "no preceding terminal"
+      +        .collect();
+      +
+      +    // This map will store the computed set of allowed edge keys for each node.
+      +    // We use a side channel because the return value of `process` is used for propagation.
+      +    let edges_to_keep: Arc<RwLock<HashMap<PrecomputeNode1Index, BTreeSet<Option<GrammarTokenID>>>>> =
+      +        Arc::new(RwLock::new(HashMap::new()));
+      +
+      +    // The value propagated is Option<BTreeSet<GrammarTokenID>>:
+      +    // - None: Represents "top" - reachable from a root without a preceding terminal.
+      +    // - Some(set): The set of terminals that can immediately precede this node.
+      +    type PredecessorSet = Option<BTreeSet<GrammarTokenID>>;
+      +
+      +    Trie::special_map_grouped(
+               trie1_god,
+      +        &traversal_data,
+               initial_nodes_and_values,
+      -        |predecessors: &Option<BTreeSet<GrammarTokenID>>, edge_key: &Option<GrammarTokenID>, _edge_bv, _child_node| {
+      -            match edge_key {
+      -                Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
+      -                Some(t) => Some(Some(BTreeSet::from([*t]))),
+      -                None => Some(predecessors.clone()),
+      -            }
+      -        },
+      -        |existing_set, new_set| {
+      +        // step: determines the predecessor set for children based on the current node's set and the edge key.
+      +        |predecessors: &PredecessorSet,
+      +         edge_key: &Option<GrammarTokenID>,
+      +         dest_map: &OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>| {
+      +            let next_predecessors = match edge_key {
+      +                Some(t) if Some(*t) == ignore_terminal_id => predecessors.clone(),
+      +                Some(t) => Some(Some(BTreeSet::from([*t]))),
+      +                None => predecessors.clone(),
+      +            };
+      +            dest_map.keys().map(move |&dst| (dst, next_predecessors.clone()))
+      +        },
+      +        // merge: combines predecessor sets for a node from multiple parents.
+      +        |existing_set: &mut PredecessorSet, new_set: PredecessorSet| {
+                   match (existing_set, new_set) {
+      +                // If existing is already "top", it stays "top".
+                       (None, _) => {},
+      -                (existing_set @ _, None) => *existing_set = None,
+      +                // If new is "top", existing becomes "top".
+      +                (existing, None) => *existing = None,
+      +                // Otherwise, union the sets.
+                       (Some(existing), Some(new)) => existing.extend(new),
+                   }
                },
-               // merge closure
-               |existing_set, new_set| match (existing_set, new_set) {
+      -        |node, maybe_all_immediate_predecessors| {
+      -            if maybe_all_immediate_predecessors.is_none() {
+      -                return true;
+      -            }
+      -
+      +        // process: once a node's predecessor set stabilizes, compute which of its outgoing edges are valid.
+      +        |node, node_idx, predecessors| {
+                   let mut allowed_follow_terminals = BTreeSet::new();
+      -            if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
+      -                for preceding_terminal in all_immediate_predecessors {
+      -                    if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
+      -                        allowed_follow_terminals.extend(follow_set.iter().cloned());
+      -                    }
+      -                }
+      -            }
+      -
+      -            let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_key| {
+      -                match edge_key {
+      -                    Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
+      -                    None => true,
+      -                }
+      -            }).cloned().collect();
+      -
+      -            let node_ptr: NodePtr = node;
+      -            edges_to_keep.insert(node_ptr, keys_to_keep);
+      -            true
+      +            match &predecessors {
+      +                // If "top", any terminal that can follow *anything* is allowed.
+      +                // We can compute this by taking the union of all follow sets.
+      +                None => {
+      +                    for follow_set in terminal_follow_map.values() {
+      +                        allowed_follow_terminals.extend(follow_set);
+      +                    }
+      +                }
+      +                // Otherwise, compute the union of follow sets for the specific predecessors.
+      +                Some(preds) => {
+      +                    for preceding_terminal in preds {
+      +                        if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
+      +                            allowed_follow_terminals.extend(follow_set.iter().cloned());
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_key| match edge_key {
+      +                    Some(edge_terminal) => {
+      +                        allowed_follow_terminals.contains(edge_terminal)
+      +                            || Some(*edge_terminal) == ignore_terminal_id
+      +                    }
+      +                    None => true, // Epsilon edges are always kept for now.
+      +                }).cloned().collect();
+      +
+      +            edges_to_keep.write().unwrap().insert(node_idx, keys_to_keep);
+      +
+      +            // Return the predecessor set to continue propagation.
+      +            // The `process` function in `special_map_grouped` must return an Option<U>.
+      +            // We return Some to indicate processing should continue for children.
+      +            Some(predecessors)
+               },
+           );
+       
+      -    let roots_vec: Vec<_> = roots.values().cloned().collect();
+      -    let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+      -    for node_arc in all_nodes {
+      -        let node_ptr: NodePtr = {
+      -            let guard = node_arc.read(trie1_god).expect("poison");
+      -            &*guard as *const _
+      -        };
+      -        if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
+      -            let mut node_guard = node_arc.write(trie1_god).unwrap();
+      +    // Apply the pruning.
+      +    let all_nodes = &traversal_data.nodes;
+      +    let edges_to_keep_guard = edges_to_keep.read().unwrap();
+      +    for node_idx in all_nodes {
+      +        if let Some(keys_to_keep) = edges_to_keep_guard.get(node_idx) {
+      +            let mut node_guard = node_idx.write(trie1_god).unwrap();
+                   node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
+               }
+           }
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/trie.rs
-      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/trie.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/constraint_precompute1_utils.rs
       Applying patch to 'src/constraint_precompute1_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute1_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix lifetime error in precompute1 and
-      implement cycle breaking/path finding for Trie1"'
+  - user: 'Changes committed with message: "Refactor: Use `special_map_grouped` in
+      `prune_on_no_terminal_follow_trie1` to correctly handle cycles"'
     metadata:
 ...

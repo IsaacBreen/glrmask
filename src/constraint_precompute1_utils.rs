@@ -1621,67 +1621,102 @@ fn prune_on_no_terminal_follow_trie1(
     ignore_terminal_id: Option<TerminalID>,
 ) {
     crate::debug!(2, "Pruning Trie1 based on terminal follow sets.");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    if roots_vec.is_empty() {
+        return;
+    }
 
-    let initial_nodes_and_values: Vec<_> = roots.values()
-        .map(|root_arc| (root_arc.clone(), None))
+    // Precompute traversal data to handle cycles correctly.
+    let traversal_data = match Trie::compute_traversal_data(trie1_god, &roots_vec) {
+        Some(data) => data,
+        None => return,
+    };
+
+    let initial_nodes_and_values: Vec<_> = roots_vec
+        .iter()
+        .map(|root_idx| (*root_idx, None)) // None signifies "no preceding terminal"
         .collect();
 
-    type NodePtr = *const PrecomputeNode1;
-    let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
+    // This map will store the computed set of allowed edge keys for each node.
+    // We use a side channel because the return value of `process` is used for propagation.
+    let edges_to_keep: Arc<RwLock<HashMap<PrecomputeNode1Index, BTreeSet<Option<GrammarTokenID>>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
 
-    Trie::special_map(
+    // The value propagated is Option<BTreeSet<GrammarTokenID>>:
+    // - None: Represents "top" - reachable from a root without a preceding terminal.
+    // - Some(set): The set of terminals that can immediately precede this node.
+    type PredecessorSet = Option<BTreeSet<GrammarTokenID>>;
+
+    Trie::special_map_grouped(
         trie1_god,
+        &traversal_data,
         initial_nodes_and_values,
-        |predecessors: &Option<BTreeSet<GrammarTokenID>>, edge_key: &Option<GrammarTokenID>, _edge_bv, _child_node| {
-            match edge_key {
-                Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
-                Some(t) => Some(Some(BTreeSet::from([*t]))),
-                None => Some(predecessors.clone()),
-            }
+        // step: determines the predecessor set for children based on the current node's set and the edge key.
+        |predecessors: &PredecessorSet,
+         edge_key: &Option<GrammarTokenID>,
+         dest_map: &OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>| {
+            let next_predecessors = match edge_key {
+                Some(t) if Some(*t) == ignore_terminal_id => predecessors.clone(),
+                Some(t) => Some(BTreeSet::from([*t])),
+                None => predecessors.clone(),
+            };
+            dest_map.keys().map(move |&dst| (dst, next_predecessors.clone()))
         },
-        |existing_set, new_set| {
+        // merge: combines predecessor sets for a node from multiple parents.
+        |existing_set: &mut PredecessorSet, new_set: PredecessorSet| {
             match (existing_set, new_set) {
+                // If existing is already "top", it stays "top".
                 (None, _) => {},
-                (existing_set @ _, None) => *existing_set = None,
+                // If new is "top", existing becomes "top".
+                (existing, None) => *existing = None,
+                // Otherwise, union the sets.
                 (Some(existing), Some(new)) => existing.extend(new),
             }
         },
-        |node, maybe_all_immediate_predecessors| {
-            if maybe_all_immediate_predecessors.is_none() {
-                return true;
-            }
-
+        // process: once a node's predecessor set stabilizes, compute which of its outgoing edges are valid.
+        |node, node_idx, predecessors| {
             let mut allowed_follow_terminals = BTreeSet::new();
-            if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
-                for preceding_terminal in all_immediate_predecessors {
-                    if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
-                        allowed_follow_terminals.extend(follow_set.iter().cloned());
+            match &predecessors {
+                // If "top", any terminal that can follow *anything* is allowed.
+                // We can compute this by taking the union of all follow sets.
+                None => {
+                    for follow_set in terminal_follow_map.values() {
+                        allowed_follow_terminals.extend(follow_set);
+                    }
+                }
+                // Otherwise, compute the union of follow sets for the specific predecessors.
+                Some(preds) => {
+                    for preceding_terminal in preds {
+                        if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
+                            allowed_follow_terminals.extend(follow_set.iter().cloned());
+                        }
                     }
                 }
             }
 
-            let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_key| {
-                match edge_key {
-                    Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
-                    None => true,
-                }
-            }).cloned().collect();
+            let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_key| match edge_key {
+                    Some(edge_terminal) => {
+                        allowed_follow_terminals.contains(edge_terminal)
+                            || Some(*edge_terminal) == ignore_terminal_id
+                    }
+                    None => true, // Epsilon edges are always kept for now.
+                }).cloned().collect();
 
-            let node_ptr: NodePtr = node;
-            edges_to_keep.insert(node_ptr, keys_to_keep);
-            true
+            edges_to_keep.write().unwrap().insert(node_idx, keys_to_keep);
+
+            // Return the predecessor set to continue propagation.
+            // The `process` function in `special_map_grouped` must return an Option<U>.
+            // We return Some to indicate processing should continue for children.
+            Some(predecessors)
         },
     );
 
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-    for node_arc in all_nodes {
-        let node_ptr: NodePtr = {
-            let guard = node_arc.read(trie1_god).expect("poison");
-            &*guard as *const _
-        };
-        if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
-            let mut node_guard = node_arc.write(trie1_god).unwrap();
+    // Apply the pruning.
+    let all_nodes = &traversal_data.nodes;
+    let edges_to_keep_guard = edges_to_keep.read().unwrap();
+    for node_idx in all_nodes {
+        if let Some(keys_to_keep) = edges_to_keep_guard.get(node_idx) {
+            let mut node_guard = node_idx.write(trie1_god).unwrap();
             node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
         }
     }
