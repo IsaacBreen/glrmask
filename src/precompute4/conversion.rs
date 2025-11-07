@@ -80,8 +80,7 @@ fn convert_dwa_subgraph(
 
         for (&char_code, &target_dwa_id) in &dwa_state.transitions.exceptions {
             if char_code < 0 {
-                eprintln!("Encountered negative transition code {} during conversion. Please run negative-resolution pass before conversion.", char_code);
-                continue;
+                panic!("Encountered negative transition code {} during conversion. Please run negative-resolution pass before conversion.", char_code);
             }
             let parser_state_id = char_code as usize;
             handled_exceptions.insert(parser_state_id);
