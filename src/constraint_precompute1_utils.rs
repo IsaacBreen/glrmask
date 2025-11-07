@@ -686,7 +686,10 @@ fn break_cycles_trie1(
             continue;
         }
 
-        let scc_nodes: HashSet<PrecomputeNode1Index> = scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
+        let scc_nodes_set: HashSet<PrecomputeNode1Index> = scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
+        let mut scc_nodes: Vec<_> = scc_nodes_set.iter().cloned().collect();
+        scc_nodes.sort(); // For deterministic behavior
+
         crate::debug!(3, "Breaking cycles in SCC of size {}", scc_nodes.len());
 
         // 1. Create a copy of each node in the SCC.
@@ -696,11 +699,13 @@ fn break_cycles_trie1(
             (*v, v_copy_idx)
         }).collect();
 
+        type SpanningTreeEdge = (PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>);
+
         // 2. Find a spanning tree of the SCC subgraph to preserve connectivity in the copied component.
-        let mut spanning_tree_edges = HashSet::new();
+        let mut spanning_tree_edges = BTreeSet::<SpanningTreeEdge>::new();
         let mut q = VecDeque::new();
         let mut visited = HashSet::new();
-        if let Some(start_node) = scc_nodes.iter().next() {
+        if let Some(start_node) = scc_nodes.first() {
             q.push_back(*start_node);
             visited.insert(*start_node);
 
@@ -710,10 +715,10 @@ fn break_cycles_trie1(
                 let mut child_edges: Vec<_> = u_guard.children().iter().flat_map(|(ek, dm)| dm.iter().map(move |(v, bv)| (ek, v, bv))).collect();
                 child_edges.sort_by_key(|(ek, v, _)| (*ek, *v));
 
-                for (_, v, _) in child_edges {
-                    if scc_nodes.contains(v) && visited.insert(*v) {
+                for (ek, v, _) in child_edges {
+                    if scc_nodes_set.contains(v) && visited.insert(*v) {
                         q.push_back(*v);
-                        spanning_tree_edges.insert((u, *v));
+                        spanning_tree_edges.insert((u, *v, *ek));
                     }
                 }
             }
@@ -728,11 +733,11 @@ fn break_cycles_trie1(
 
             for (ek, dm) in children_snapshot {
                 for (v, bv) in dm {
-                    if scc_nodes.contains(&v) { // Internal edge
+                    if scc_nodes_set.contains(&v) { // Internal edge
                         let v_copy = copies[&v];
                         modifications.push(Modification::RemoveEdge(*u, ek.clone(), v));
                         modifications.push(Modification::AddEdge(*u, ek.clone(), v_copy, bv.clone()));
-                        if spanning_tree_edges.contains(&(*u, v)) {
+                        if spanning_tree_edges.contains(&(*u, v, ek)) {
                             modifications.push(Modification::AddEdge(u_copy, ek, v_copy, bv));
                         }
                     } else { // Exit edge

@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - src/datastructures/trie.rs
     - src/constraint_precompute1_utils.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/datastructures/trie.rs: |
@@ -10167,7 +10167,10 @@ local_system:
                   continue;
               }
 
-              let scc_nodes: HashSet<PrecomputeNode1Index> = scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
+              let scc_nodes_set: HashSet<PrecomputeNode1Index> = scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
+              let mut scc_nodes: Vec<_> = scc_nodes_set.iter().cloned().collect();
+              scc_nodes.sort(); // For deterministic behavior
+
               crate::debug!(3, "Breaking cycles in SCC of size {}", scc_nodes.len());
 
               // 1. Create a copy of each node in the SCC.
@@ -10177,11 +10180,13 @@ local_system:
                   (*v, v_copy_idx)
               }).collect();
 
+              type SpanningTreeEdge = (PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>);
+
               // 2. Find a spanning tree of the SCC subgraph to preserve connectivity in the copied component.
-              let mut spanning_tree_edges = HashSet::new();
+              let mut spanning_tree_edges = BTreeSet::<SpanningTreeEdge>::new();
               let mut q = VecDeque::new();
               let mut visited = HashSet::new();
-              if let Some(start_node) = scc_nodes.iter().next() {
+              if let Some(start_node) = scc_nodes.first() {
                   q.push_back(*start_node);
                   visited.insert(*start_node);
 
@@ -10191,10 +10196,10 @@ local_system:
                       let mut child_edges: Vec<_> = u_guard.children().iter().flat_map(|(ek, dm)| dm.iter().map(move |(v, bv)| (ek, v, bv))).collect();
                       child_edges.sort_by_key(|(ek, v, _)| (*ek, *v));
 
-                      for (_, v, _) in child_edges {
-                          if scc_nodes.contains(v) && visited.insert(*v) {
+                      for (ek, v, _) in child_edges {
+                          if scc_nodes_set.contains(v) && visited.insert(*v) {
                               q.push_back(*v);
-                              spanning_tree_edges.insert((u, *v));
+                              spanning_tree_edges.insert((u, *v, *ek));
                           }
                       }
                   }
@@ -10209,11 +10214,11 @@ local_system:
 
                   for (ek, dm) in children_snapshot {
                       for (v, bv) in dm {
-                          if scc_nodes.contains(&v) { // Internal edge
+                          if scc_nodes_set.contains(&v) { // Internal edge
                               let v_copy = copies[&v];
                               modifications.push(Modification::RemoveEdge(*u, ek.clone(), v));
                               modifications.push(Modification::AddEdge(*u, ek.clone(), v_copy, bv.clone()));
-                              if spanning_tree_edges.contains(&(*u, v)) {
+                              if spanning_tree_edges.contains(&(*u, v, ek)) {
                                   modifications.push(Modification::AddEdge(u_copy, ek, v_copy, bv));
                               }
                           } else { // Exit edge
@@ -17059,10 +17064,7 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute1_utils.rs
-  - user: |-
-      Make sure `prune_on_no_terminal_follow_trie1` works correctly when there are cycles. It should first figure out which predecessor terminals can occur on each node, accounting for cycles. I guess it'll have to keep going until no more changes are made? IDK. But then once we know that it's easy.
-      I think the key is to ensure that eventually we stop traversing, I guess by returning false from the process fn.
-      Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your solutions.
+  - user: It seems that `break_cycles_trie1` isn't actually breaking cycles. Fix it.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -17082,204 +17084,93 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with cycles in graph algorithms requires careful handling to ensure termination and correctness. The current implementation of `prune_on_no_terminal_follow_trie1` uses a traversal method (`Trie::special_map`) that isn't designed to converge to a fixed point in the presence of cycles.
-
-      Here is my analysis and the proposed solution:
-
-      ### Mathematical Analysis & Hypotheses
-
-      1.  **Problem Statement**: We need to determine, for each node `N` in the graph, the set `P(N)` of all possible grammar terminals that can immediately precede a path to `N`. Once `P(N)` is known for all `N`, we can prune outgoing edges `N -> N'` with terminal `t` if `t` is not in the "follow set" of any terminal in `P(N)`.
-
-      2.  **Monotonicity Hypothesis**: The computation of `P(N)` is a monotonic process. Let `P_i(N)` be the computed set of predecessors for node `N` after iteration `i`. We start with `P_0(N) = ∅` for all nodes except roots. In each step, we propagate terminals across edges. A `Some(t)` edge from `M` to `N` adds `{t}` to `P(N)`. A `None` edge from `M` to `N` adds `P(M)` to `P(N)`. Since the propagation and merge operations are unions, `P_i(N) ⊆ P_{i+1}(N)` for all `i` and `N`.
-
-      3.  **Convergence Hypothesis**: Because the total number of terminals in the grammar is finite, the predecessor sets `P(N)` cannot grow indefinitely. Due to the monotonicity property, the iterative computation of these sets is guaranteed to reach a fixed point where no more changes occur.
-
-      4.  **Algorithmic Solution**: A worklist-based algorithm is ideal for reaching this fixed point. We need an algorithm that re-evaluates a node whenever one of its inputs (predecessor sets from parent nodes) changes. The `Trie::special_map_grouped` function is perfectly suited for this, as it processes the graph's Strongly Connected Components (SCCs) in topological order and iterates within each SCC until the propagated values stabilize.
-
-      ### Implementation Plan
-
-      I will replace the body of `prune_on_no_terminal_follow_trie1` to use `Trie::special_map_grouped`. This will correctly compute the predecessor sets even in graphs with cycles. The new implementation will also fix a subtle bug in the original logic where nodes reachable from roots via `None`-only paths were handled incorrectly.
-
-      Here are the step-by-step instructions to apply the changes:
+      Of course. Here are the step-by-step instructions to fix the cycle-breaking logic, followed by the git diff to apply the changes.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/constraint_precompute1_utils.rs`.**
+      I will apply modifications to the file `src/constraint_precompute1_utils.rs` to correct the cycle-breaking logic. The current implementation has issues with non-determinism and incorrect handling of parallel edges within a cycle, which can lead to an incorrectly formed acyclic graph.
 
-      2.  **Locate the function `prune_on_no_terminal_follow_trie1`.**
+      Here are the planned changes for the `break_cycles_trie1` function in `src/constraint_precompute1_utils.rs`:
 
-      3.  **Replace the entire body of the function** with the new implementation below. This new version uses `Trie::compute_traversal_data` and `Trie::special_map_grouped` to correctly handle cycles by iterating to a fixed point.
+      1.  **Ensure Deterministic Spanning Tree Construction**:
+          *   Inside the loop over Strongly Connected Components (SCCs), the nodes of the SCC will be collected from the `HashSet` into a `Vec`.
+          *   This `Vec` of nodes will be sorted to ensure a deterministic starting point for building the spanning tree. This makes the entire cycle-breaking process reproducible.
 
-          *   It first computes the graph's structure (SCCs).
-          *   It then uses `special_map_grouped` to propagate the set of possible preceding terminals through the graph, iterating within cycles until the sets stabilize.
-          *   Once the stable predecessor sets are known for every node, it determines which outgoing edges are valid based on the grammar's follow-set rules.
-          *   Finally, it removes the invalid edges from the graph.
+      2.  **Refine Spanning Tree Edge Representation**:
+          *   The `spanning_tree_edges` variable, currently a `HashSet` of node pairs `(u, v)`, will be changed to a `BTreeSet`.
+          *   It will now store tuples of `(u, v, edge_key)` to uniquely identify the specific edge that forms part of the spanning tree. This is crucial for correctly handling cases where multiple edges exist between two nodes.
 
-      This approach is more robust and mathematically sound for graphs containing cycles.
+      3.  **Update Spanning Tree Logic**:
+          *   The Breadth-First Search (BFS) that builds the spanning tree will be updated to store the full `(u, v, edge_key)` tuple in the new `BTreeSet`.
+          *   When deciding which edges to add to the copied, acyclic component, the check will now use the full edge tuple, ensuring only the true spanning tree edges are replicated.
 
-      ---
+      These changes will make the cycle-breaking algorithm both correct and deterministic.
 
-      ### Git Diff
+      ### Git Diffs
 
-      Here is the git diff to apply the changes to `src/constraint_precompute1_utils.rs`.
+      Here is the git diff for the required changes.
 
       ```diff
       --- a/src/constraint_precompute1_utils.rs
       +++ b/src/constraint_precompute1_utils.rs
-      @@ -1419,67 +1419,95 @@
-           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-           ignore_terminal_id: Option<TerminalID>,
-       ) {
-           crate::debug!(2, "Pruning Trie1 based on terminal follow sets.");
-      -
-      -    let initial_nodes_and_values: Vec<_> = roots.values()
-      -        .map(|root_arc| (root_arc.clone(), None))
-      -        .collect();
-      -
-      -    type NodePtr = *const PrecomputeNode1;
-      -    let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
-      -
-      -    Trie::special_map(
-      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
-      +    if roots_vec.is_empty() {
-      +        return;
-      +    }
-      +
-      +    // Precompute traversal data to handle cycles correctly.
-      +    let traversal_data = match Trie::compute_traversal_data(trie1_god, &roots_vec) {
-      +        Some(data) => data,
-      +        None => return,
-      +    };
-      +
-      +    let initial_nodes_and_values: Vec<_> = roots_vec
-      +        .iter()
-      +        .map(|root_idx| (*root_idx, None)) // None signifies "no preceding terminal"
-      +        .collect();
-      +
-      +    // This map will store the computed set of allowed edge keys for each node.
-      +    // We use a side channel because the return value of `process` is used for propagation.
-      +    let edges_to_keep: Arc<RwLock<HashMap<PrecomputeNode1Index, BTreeSet<Option<GrammarTokenID>>>>> =
-      +        Arc::new(RwLock::new(HashMap::new()));
-      +
-      +    // The value propagated is Option<BTreeSet<GrammarTokenID>>:
-      +    // - None: Represents "top" - reachable from a root without a preceding terminal.
-      +    // - Some(set): The set of terminals that can immediately precede this node.
-      +    type PredecessorSet = Option<BTreeSet<GrammarTokenID>>;
-      +
-      +    Trie::special_map_grouped(
-               trie1_god,
-      +        &traversal_data,
-               initial_nodes_and_values,
-      -        |predecessors: &Option<BTreeSet<GrammarTokenID>>, edge_key: &Option<GrammarTokenID>, _edge_bv, _child_node| {
-      -            match edge_key {
-      -                Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
-      -                Some(t) => Some(Some(BTreeSet::from([*t]))),
-      -                None => Some(predecessors.clone()),
-      -            }
-      -        },
-      -        |existing_set, new_set| {
-      +        // step: determines the predecessor set for children based on the current node's set and the edge key.
-      +        |predecessors: &PredecessorSet,
-      +         edge_key: &Option<GrammarTokenID>,
-      +         dest_map: &OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>| {
-      +            let next_predecessors = match edge_key {
-      +                Some(t) if Some(*t) == ignore_terminal_id => predecessors.clone(),
-      +                Some(t) => Some(Some(BTreeSet::from([*t]))),
-      +                None => predecessors.clone(),
-      +            };
-      +            dest_map.keys().map(move |&dst| (dst, next_predecessors.clone()))
-      +        },
-      +        // merge: combines predecessor sets for a node from multiple parents.
-      +        |existing_set: &mut PredecessorSet, new_set: PredecessorSet| {
-                   match (existing_set, new_set) {
-      +                // If existing is already "top", it stays "top".
-                       (None, _) => {},
-      -                (existing_set @ _, None) => *existing_set = None,
-      +                // If new is "top", existing becomes "top".
-      +                (existing, None) => *existing = None,
-      +                // Otherwise, union the sets.
-                       (Some(existing), Some(new)) => existing.extend(new),
-                   }
-               },
-      -        |node, maybe_all_immediate_predecessors| {
-      -            if maybe_all_immediate_predecessors.is_none() {
-      -                return true;
-      -            }
-      -
-      +        // process: once a node's predecessor set stabilizes, compute which of its outgoing edges are valid.
-      +        |node, node_idx, predecessors| {
-                   let mut allowed_follow_terminals = BTreeSet::new();
-      -            if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
-      -                for preceding_terminal in all_immediate_predecessors {
-      -                    if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
-      -                        allowed_follow_terminals.extend(follow_set.iter().cloned());
-      -                    }
-      -                }
-      -            }
-      -
-      -            let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_key| {
-      -                match edge_key {
-      -                    Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
-      -                    None => true,
-      -                }
-      -            }).cloned().collect();
-      -
-      -            let node_ptr: NodePtr = node;
-      -            edges_to_keep.insert(node_ptr, keys_to_keep);
-      -            true
-      +            match &predecessors {
-      +                // If "top", any terminal that can follow *anything* is allowed.
-      +                // We can compute this by taking the union of all follow sets.
-      +                None => {
-      +                    for follow_set in terminal_follow_map.values() {
-      +                        allowed_follow_terminals.extend(follow_set);
-      +                    }
-      +                }
-      +                // Otherwise, compute the union of follow sets for the specific predecessors.
-      +                Some(preds) => {
-      +                    for preceding_terminal in preds {
-      +                        if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
-      +                            allowed_follow_terminals.extend(follow_set.iter().cloned());
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +
-      +            let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_key| match edge_key {
-      +                    Some(edge_terminal) => {
-      +                        allowed_follow_terminals.contains(edge_terminal)
-      +                            || Some(*edge_terminal) == ignore_terminal_id
-      +                    }
-      +                    None => true, // Epsilon edges are always kept for now.
-      +                }).cloned().collect();
-      +
-      +            edges_to_keep.write().unwrap().insert(node_idx, keys_to_keep);
-      +
-      +            // Return the predecessor set to continue propagation.
-      +            // The `process` function in `special_map_grouped` must return an Option<U>.
-      +            // We return Some to indicate processing should continue for children.
-      +            Some(predecessors)
-               },
-           );
-       
-      -    let roots_vec: Vec<_> = roots.values().cloned().collect();
-      -    let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-      -    for node_arc in all_nodes {
-      -        let node_ptr: NodePtr = {
-      -            let guard = node_arc.read(trie1_god).expect("poison");
-      -            &*guard as *const _
-      -        };
-      -        if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
-      -            let mut node_guard = node_arc.write(trie1_god).unwrap();
-      +    // Apply the pruning.
-      +    let all_nodes = &traversal_data.nodes;
-      +    let edges_to_keep_guard = edges_to_keep.read().unwrap();
-      +    for node_idx in all_nodes {
-      +        if let Some(keys_to_keep) = edges_to_keep_guard.get(node_idx) {
-      +            let mut node_guard = node_idx.write(trie1_god).unwrap();
-                   node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
+      @@ -780,18 +780,24 @@
+                   continue;
                }
-           }
+       
+      -        let scc_nodes: HashSet<PrecomputeNode1Index> = scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
+      +        let scc_nodes_set: HashSet<PrecomputeNode1Index> = scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
+      +        let mut scc_nodes: Vec<_> = scc_nodes_set.iter().cloned().collect();
+      +        scc_nodes.sort(); // For deterministic behavior
+      +
+               crate::debug!(3, "Breaking cycles in SCC of size {}", scc_nodes.len());
+       
+               // 1. Create a copy of each node in the SCC.
+               let copies: HashMap<_, _> = scc_nodes.iter().map(|v| {
+                   let v_guard = v.read(trie1_god).unwrap();
+                   let v_copy_idx = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(v_guard.value.clone())));
+                   (*v, v_copy_idx)
+               }).collect();
+       
+      +        type SpanningTreeEdge = (PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>);
+      +
+               // 2. Find a spanning tree of the SCC subgraph to preserve connectivity in the copied component.
+      -        let mut spanning_tree_edges = HashSet::new();
+      +        let mut spanning_tree_edges = BTreeSet::<SpanningTreeEdge>::new();
+               let mut q = VecDeque::new();
+               let mut visited = HashSet::new();
+      -        if let Some(start_node) = scc_nodes.iter().next() {
+      +        if let Some(start_node) = scc_nodes.first() {
+                   q.push_back(*start_node);
+                   visited.insert(*start_node);
+       
+      @@ -801,10 +807,10 @@
+                       let mut child_edges: Vec<_> = u_guard.children().iter().flat_map(|(ek, dm)| dm.iter().map(move |(v, bv)| (ek, v, bv))).collect();
+                       child_edges.sort_by_key(|(ek, v, _)| (*ek, *v));
+       
+      -                for (_, v, _) in child_edges {
+      -                    if scc_nodes.contains(v) && visited.insert(*v) {
+      +                for (ek, v, _) in child_edges {
+      +                    if scc_nodes_set.contains(v) && visited.insert(*v) {
+                               q.push_back(*v);
+      -                        spanning_tree_edges.insert((u, *v));
+      +                        spanning_tree_edges.insert((u, *v, *ek));
+                           }
+                       }
+                   }
+      @@ -819,11 +825,11 @@
+       
+                   for (ek, dm) in children_snapshot {
+                       for (v, bv) in dm {
+      -                    if scc_nodes.contains(&v) { // Internal edge
+      +                    if scc_nodes_set.contains(&v) { // Internal edge
+                               let v_copy = copies[&v];
+                               modifications.push(Modification::RemoveEdge(*u, ek.clone(), v));
+                               modifications.push(Modification::AddEdge(*u, ek.clone(), v_copy, bv.clone()));
+      -                        if spanning_tree_edges.contains(&(*u, v)) {
+      +                        if spanning_tree_edges.contains(&(*u, v, ek)) {
+                                   modifications.push(Modification::AddEdge(u_copy, ek, v_copy, bv));
+                               }
+                           } else { // Exit edge
 
       ```
     metadata:
@@ -17292,108 +17183,7 @@ messages:
       Applying patch to 'src/constraint_precompute1_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute1_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Use `special_map_grouped` in
-      `prune_on_no_terminal_follow_trie1` to correctly handle cycles"'
-    metadata:
-  - user: |-
-      Diff of src/datastructures/trie.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint_precompute1_utils.rs since previous turn:
-      ```diff
-      --- original version of src/constraint_precompute1_utils.rs
-      +++ current version of src/constraint_precompute1_utils.rs
-      @@ -1657,7 +1657,7 @@
-                dest_map: &OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>| {
-                   let next_predecessors = match edge_key {
-                       Some(t) if Some(*t) == ignore_terminal_id => predecessors.clone(),
-      -                Some(t) => Some(Some(BTreeSet::from([*t]))),
-      +                Some(t) => Some(BTreeSet::from([*t])),
-                       None => predecessors.clone(),
-                   };
-                   dest_map.keys().map(move |&dst| (dst, next_predecessors.clone()))
-
-      ```
-    metadata:
-  - user: |+
-      error: lifetime may not live long enough
-          --> src/constraint_precompute1_utils.rs:1663:13
-           |
-      1657 |          dest_map: &OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>| {
-           |                    - let's call the lifetime of this reference `'1` - return type of closure is std::iter::Map<ordered_hash_map::ordered_map::Keys<'2, trie::Trie2Index, hybrid_bitset::HybridBitset>, {closure@src/constraint_precompute1_utils.rs:1663:33: 1663:44}>
-      ...
-      1663 |             dest_map.keys().map(move |&dst| (dst, next_predecessors.clone()))
-           |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
-
-    metadata:
-  - assistant: |-
-      I see. The compiler is pointing out a lifetime issue with the iterator returned by the `step` closure. The iterator borrows from the `dest_map` reference, but the compiler cannot prove that this reference will live long enough.
-
-      You are right to assume that I've tried obvious steps and to move directly to a fix. The solution is to collect the results of the map into a new `Vec`. This new collection will own its data, breaking the problematic lifetime dependency.
-
-      Here are the detailed instructions to fix the compile error.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file `src/constraint_precompute1_utils.rs`**.
-
-      2.  **Navigate to the `prune_on_no_terminal_follow_trie1` function**.
-
-      3.  **Locate the `step` closure** passed to `Trie::special_map_grouped`. The closure's return statement is causing the error.
-
-      4.  **Modify the return expression** to collect the iterator into a `Vec`. This ensures the returned value owns its data and doesn't borrow from the closure's arguments.
-
-          *   Find this line:
-              ```rust
-              dest_map.keys().map(move |&dst| (dst, next_predecessors.clone()))
-              ```
-
-          *   Replace it with the following block:
-              ```rust
-              dest_map
-                  .keys()
-                  .copied()
-                  .map(move |dst| (dst, next_predecessors.clone()))
-                  .collect::<Vec<_>>()
-              ```
-          This change uses `.copied()` to convert the iterator over `&PrecomputeNode1Index` to an iterator over `PrecomputeNode1Index` (which is possible because `Trie2Index` is `Copy`), and then collects the results into a new `Vec`.
-
-      ### Git Diff
-
-      Here is the corresponding git diff for the change.
-
-      ```diff
-      --- a/src/constraint_precompute1_utils.rs
-      +++ b/src/constraint_precompute1_utils.rs
-      @@ -1661,7 +1661,11 @@
-                       Some(t) => Some(BTreeSet::from([*t])),
-                       None => predecessors.clone(),
-                   };
-      -            dest_map.keys().map(move |&dst| (dst, next_predecessors.clone()))
-      +            dest_map
-      +                .keys()
-      +                .copied()
-      +                .map(move |dst| (dst, next_predecessors.clone()))
-      +                .collect::<Vec<_>>()
-               },
-               // merge: combines predecessor sets for a node from multiple parents.
-               |existing_set: &mut PredecessorSet, new_set: PredecessorSet| {
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint_precompute1_utils.rs
-      Applying patch to 'src/constraint_precompute1_utils.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint_precompute1_utils.rs.
-    metadata:
-  - user: 'Changes committed with message: "Fix lifetime error in `prune_on_no_terminal_follow_trie1`
-      step closure by collecting iterator into Vec"'
+  - user: 'Changes committed with message: "Fix: Ensure deterministic cycle breaking
+      in trie1 and refactor terminal follow set pruning to use special_map_grouped"'
     metadata:
 ...
