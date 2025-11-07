@@ -587,8 +587,8 @@ impl NWA {
             Self::run_pass(&pb, "dedup epsilons", &mut changed, || self.dedup_epsilon_edges());
             Self::run_pass(&pb, "bypass ε-chains", &mut changed, || self.bypass_trivial_epsilon_chains());
             Self::run_pass(&pb, "collapse SCCs", &mut changed, || self.collapse_all_weight_epsilon_sccs());
-            Self::run_pass(&pb, "prune unreachable", &mut changed, || self.prune_unreachable());
-            Self::run_pass(&pb, "prune dead ends", &mut changed, || self.prune_dead_ends());
+            Self::run_pass(&pb, "prune unreachable", &mut changed, || self.prune_unreachable()); // Quick pass
+            Self::run_pass(&pb, "prune and relax", &mut changed, || self.prune_and_relax()); // Deeper pass
             Self::run_pass(&pb, "merge equivalent", &mut changed, || self.merge_equivalent_states_partition());
             Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
         }
@@ -655,72 +655,158 @@ impl NWA {
         true
     }
 
-    fn prune_dead_ends(&mut self) -> bool {
+    fn compute_reachable_weights(&self) -> Vec<Weight> {
         let n = self.states.len();
-        if n == 0 { return false; }
+        let mut reachable = vec![Weight::zeros(); n];
+        if self.body.start_state >= n {
+            return reachable;
+        }
 
-        let fut = self.compute_future_weights();
-        let live: Vec<bool> = fut.iter().map(|w| !w.is_empty()).collect();
+        let mut q = VecDeque::new();
+        reachable[self.body.start_state] = Weight::all();
+        q.push_back(self.body.start_state);
 
-        if self.body.start_state >= n || !live[self.body.start_state] {
-            let changed = n > 0;
+        while let Some(u) = q.pop_front() {
+            let ru = reachable[u].clone();
+            if ru.is_empty() {
+                continue;
+            }
+
+            // Epsilon transitions
+            for &(v, ref w) in &self.states[u].epsilons {
+                if v >= n {
+                    continue;
+                }
+                let prop = &ru & w;
+                if !prop.is_subset_of(&reachable[v]) {
+                    reachable[v] |= &prop;
+                    q.push_back(v);
+                }
+            }
+
+            // Labeled transitions
+            for (_, (v, w)) in &self.states[u].transitions {
+                if *v >= n {
+                    continue;
+                }
+                let prop = &ru & w;
+                if !prop.is_subset_of(&reachable[*v]) {
+                    reachable[*v] |= &prop;
+                    q.push_back(*v);
+                }
+            }
+            // Default transition
+            if let Some((v, w)) = &self.states[u].default {
+                if *v >= n {
+                    continue;
+                }
+                let prop = &ru & w;
+                if !prop.is_subset_of(&reachable[*v]) {
+                    reachable[*v] |= &prop;
+                    q.push_back(*v);
+                }
+            }
+        }
+        reachable
+    }
+
+    /// Prune states and transitions that are not on any productive path, and relax edge weights.
+    /// A path is productive if the intersection of weights along it is non-empty.
+    /// This uses both forward (reachable) and backward (future) weight analysis.
+    fn prune_and_relax(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 {
+            return false;
+        }
+
+        let future = self.compute_future_weights();
+        let reachable = self.compute_reachable_weights();
+
+        let productive_states: Vec<bool> = (0..n).map(|i| !(&reachable[i] & &future[i]).is_empty()).collect();
+
+        let original_n = n;
+        let num_productive = productive_states.iter().filter(|&&b| b).count();
+        let mut changed = num_productive != original_n;
+
+        if self.body.start_state >= n || !productive_states[self.body.start_state] {
             self.states.0.clear();
             self.body.start_state = self.states.add_state();
-            return changed;
+            return original_n > 0;
         }
 
-        // Relax edges using future weights (sound: (w | !F[v]) & F[v] == w & F[v])
-        let not_fut: Vec<Weight> = fut.iter().map(|w| !w).collect();
-        let mut changed_weights = false;
+        // Relax edge weights using future weights of targets. This is sound because any bits
+        // not in future[v] would be filtered out by later intersections anyway.
+        let not_fut: Vec<Weight> = future.iter().map(|w| !w).collect();
         for i in 0..n {
+            if !productive_states[i] {
+                continue;
+            }
             let st = &mut self.states[i];
             for (v, w) in &mut st.epsilons {
-                let new_w = &*w | &not_fut[*v];
-                if new_w != *w { *w = new_w; changed_weights = true; }
+                if *v < n && productive_states[*v] {
+                    let new_w = &*w | &not_fut[*v];
+                    if new_w != *w { *w = new_w; changed = true; }
+                }
             }
             for (_, (v, w)) in &mut st.transitions {
-                let new_w = &*w | &not_fut[*v];
-                if new_w != *w { *w = new_w; changed_weights = true; }
+                if *v < n && productive_states[*v] {
+                    let new_w = &*w | &not_fut[*v];
+                    if new_w != *w { *w = new_w; changed = true; }
+                }
             }
             if let Some((v, w)) = &mut st.default {
-                let new_w = &*w | &not_fut[*v];
-                if new_w != *w { *w = new_w; changed_weights = true; }
-            }
-        }
-
-        let num_live = live.iter().filter(|&&b| b).count();
-        if num_live == n {
-            return changed_weights;
-        }
-
-        let mut remap = vec![usize::MAX; n];
-        let mut new_states_vec = Vec::with_capacity(num_live);
-        for i in 0..n {
-            if live[i] {
-                remap[i] = new_states_vec.len();
-                new_states_vec.push(self.states[i].clone());
-            }
-        }
-
-        for st in &mut new_states_vec {
-            st.epsilons.retain(|(v, _)| live[*v]);
-            st.epsilons.iter_mut().for_each(|(v, _)| *v = remap[*v]);
-
-            st.transitions.retain(|_, (v, _)| live[*v]);
-            st.transitions.values_mut().for_each(|(v, _)| *v = remap[*v]);
-
-            if let Some((v, _)) = &st.default {
-                if !live[*v] {
-                    st.default = None;
-                } else {
-                    st.default.as_mut().unwrap().0 = remap[*v];
+                if *v < n && productive_states[*v] {
+                    let new_w = &*w | &not_fut[*v];
+                    if new_w != *w { *w = new_w; changed = true; }
                 }
             }
         }
 
-        self.states.0 = new_states_vec;
-        self.body.start_state = remap[self.body.start_state];
+        // Rebuild the NWA with only productive states and edges.
+        let mut remap = vec![usize::MAX; n];
+        let mut next_id = 0;
+        for i in 0..n {
+            if productive_states[i] {
+                remap[i] = next_id;
+                next_id += 1;
+            }
+        }
 
+        let mut final_new_states = Vec::with_capacity(num_productive);
+        for old_i in 0..n {
+            if !productive_states[old_i] {
+                continue;
+            }
+            let mut new_st = self.states[old_i].clone(); // Contains relaxed weights
+            let ru = &reachable[old_i];
+
+            let old_eps_len = new_st.epsilons.len();
+            new_st.epsilons.retain(|(v, w)| *v < n && productive_states[*v] && !(&*ru & w & &future[*v]).is_empty());
+            if new_st.epsilons.len() != old_eps_len { changed = true; }
+            new_st.epsilons.iter_mut().for_each(|(v, _)| *v = remap[*v]);
+
+            let old_trans_len = new_st.transitions.len();
+            new_st.transitions.retain(|_, (v, w)| *v < n && productive_states[*v] && !(ru & &*w & &future[*v]).is_empty());
+            if new_st.transitions.len() != old_trans_len { changed = true; }
+            new_st.transitions.values_mut().for_each(|(v, _)| *v = remap[*v]);
+
+            if let Some((v, w)) = &new_st.default {
+                if *v >= n || !productive_states[*v] || (&*ru & w & &future[*v]).is_empty() {
+                    if new_st.default.is_some() { changed = true; }
+                    new_st.default = None;
+                } else {
+                    new_st.default.as_mut().unwrap().0 = remap[*v];
+                }
+            }
+            final_new_states.push(new_st);
+        }
+
+        if !changed && num_productive == original_n {
+            return false;
+        }
+
+        self.states.0 = final_new_states;
+        self.body.start_state = remap[self.body.start_state];
         true
     }
 
