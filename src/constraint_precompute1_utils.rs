@@ -613,6 +613,9 @@ pub fn optimize_trie1_size(
     }
 
     // === Pass 4: Final Minimization and GC ===
+    // Break cycles before final minimization passes that might be confused by them.
+    break_cycles_trie1(precomputed1, trie1_god);
+
     if config.minimize_by_signature {
         merge_nodes_trie1(precomputed1, trie1_god);
     }
@@ -633,6 +636,119 @@ pub fn optimize_trie1_size(
     let mut stats = PrecomputeStats::default();
     crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
     crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
+}
+
+/// Breaks structural cycles in the Trie1 graph by "unrolling" strongly connected components.
+/// This makes the graph a DAG, which can be simpler for some analysis tools.
+/// The transformation preserves token-aware paths, relying on the property that no single
+/// LLM token can traverse a cycle.
+fn break_cycles_trie1(
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+) {
+    crate::debug!(2, "Breaking cycles in Trie1...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    if roots_vec.is_empty() {
+        return;
+    }
+
+    let traversal_data = match Trie::compute_traversal_data(trie1_god, &roots_vec) {
+        Some(data) => data,
+        None => return,
+    };
+
+    let all_nodes_vec = &traversal_data.nodes;
+    let sccs = &traversal_data.sccs;
+
+    #[derive(Debug)]
+    enum Modification {
+        AddEdge(PrecomputeNode1Index, Option<GrammarTokenID>, PrecomputeNode1Index, LLMTokenBV),
+        RemoveEdge(PrecomputeNode1Index, Option<GrammarTokenID>, PrecomputeNode1Index),
+    }
+    let mut modifications = Vec::new();
+
+    for scc_node_positions in sccs {
+        let is_trivial_scc = if scc_node_positions.len() == 1 {
+            let pos = scc_node_positions[0];
+            let u_idx = all_nodes_vec[pos];
+            let u_guard = u_idx.read(trie1_god).unwrap();
+            !u_guard.children().values().any(|dm| dm.contains_key(&u_idx))
+        } else {
+            scc_node_positions.len() < 2
+        };
+
+        if is_trivial_scc {
+            continue;
+        }
+
+        let scc_nodes: HashSet<PrecomputeNode1Index> = scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
+        crate::debug!(3, "Breaking cycles in SCC of size {}", scc_nodes.len());
+
+        // 1. Create a copy of each node in the SCC.
+        let copies: HashMap<_, _> = scc_nodes.iter().map(|v| {
+            let v_guard = v.read(trie1_god).unwrap();
+            let v_copy_idx = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(v_guard.value.clone())));
+            (*v, v_copy_idx)
+        }).collect();
+
+        // 2. Find a spanning tree of the SCC subgraph to preserve connectivity in the copied component.
+        let mut spanning_tree_edges = HashSet::new();
+        let mut q = VecDeque::new();
+        let mut visited = HashSet::new();
+        if let Some(start_node) = scc_nodes.iter().next() {
+            q.push_back(*start_node);
+            visited.insert(*start_node);
+
+            while let Some(u) = q.pop_front() {
+                let u_guard = u.read(trie1_god).unwrap();
+                // Iterate children in a deterministic order for deterministic spanning tree
+                let mut child_edges: Vec<_> = u_guard.children().iter().flat_map(|(ek, dm)| dm.iter().map(move |(v, bv)| (ek, v, bv))).collect();
+                child_edges.sort_by_key(|(ek, v, _)| (*ek, *v));
+
+                for (_, v, _) in child_edges {
+                    if scc_nodes.contains(v) && visited.insert(*v) {
+                        q.push_back(*v);
+                        spanning_tree_edges.insert((u, *v));
+                    }
+                }
+            }
+        }
+
+        // 3. Schedule edge modifications.
+        for u in &scc_nodes {
+            let u_copy = copies[u];
+            let u_guard = u.read(trie1_god).unwrap();
+            let children_snapshot = u_guard.children().clone();
+            drop(u_guard);
+
+            for (ek, dm) in children_snapshot {
+                for (v, bv) in dm {
+                    if scc_nodes.contains(&v) { // Internal edge
+                        let v_copy = copies[&v];
+                        modifications.push(Modification::RemoveEdge(*u, ek.clone(), v));
+                        modifications.push(Modification::AddEdge(*u, ek.clone(), v_copy, bv.clone()));
+                        if spanning_tree_edges.contains(&(*u, v)) {
+                            modifications.push(Modification::AddEdge(u_copy, ek, v_copy, bv));
+                        }
+                    } else { // Exit edge
+                        modifications.push(Modification::AddEdge(u_copy, ek, v, bv));
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Apply all scheduled modifications.
+    for m in modifications {
+        match m {
+            Modification::AddEdge(u, ek, v, bv) => {
+                trie1_god.insert_edge_simple(u, v, ek, bv);
+            }
+            Modification::RemoveEdge(u, ek, v) => {
+                trie1_god.remove_edge(u, v, &ek);
+            }
+        }
+    }
 }
 
 fn simplify_none_edges_to_former_end_nodes_trie1(
