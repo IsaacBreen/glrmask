@@ -1,347 +1,661 @@
 // src/precompute4/weighted_automata/determinization.rs
 //
-// New determinization strategy: per-bit-plane decomposition.
-// The weight on edges is a bitset (SimpleBitset). The automaton semantics
-// (intersection on path, union over choices) are bitwise operations. This means
-// we can decompose the weighted automaton problem into N independent unweighted
-// automaton problems, one for each bit in the bitset.
+// A simpler determinization that keeps the same semantics and performance characteristics:
+// - Determinized states are defined by sets of macro-signatures (structural behavior).
+// - We compute ε-closures once and reuse them.
+// - For each NWA state, we precompute "steps": default and per-label exceptions as ε-closed
+//   sets with their weights; steps are interned to avoid duplication.
+// - Steps are compiled by macro-signature, so all computations operate on compact signature IDs.
+// - Determinization uses a worklist to propagate "gates" (weights) to a fixpoint.
+// - For each determinized state, we compute one default transition baseline and override it
+//   on labels that have exceptions in any member signature. This avoids per-label recomputation
+//   and preserves defaults efficiently.
 //
-// The algorithm is as follows:
-// 1. For each bit `i` in the `Weight` bitset, construct an NFA (`NFA_i`) where
-//    an edge exists if and only if the `i`-th bit is set in the corresponding
-//    weight in the original NWA.
-// 2. Many of these `NFA_i` might be structurally identical. We hash them to find
-//    the set of unique NFAs.
-// 3. Each unique NFA is determinized to a DFA using standard subset construction.
-//    This is an unweighted determinization, which is much simpler and faster
-//    than weighted determinization.
-// 4. The final DWA is constructed as a product of all the unique DFAs. A state
-//    in the final DWA corresponds to a tuple of states, one from each unique DFA.
-//    We only build the reachable states of this product automaton.
-// 5. Transitions in the final DWA have weight `Weight::all()`. The logic is
-//    encoded in the structure of the automaton.
-// 6. The final weight of a state in the DWA is a bitset where bit `i` is set
-//    if the corresponding component DFA state (for bit `i`) is an accepting state.
-//
-// This approach is effective because the structure of the NWA (few SCCs with
-// mostly `Weight::all()` internally) leads to many identical or simple bit-plane
-// NFAs, making the DFAs and their product manageable in size.
+// Semantics preserved for bitset weights with ∧ on path and ∨ over choices.
 
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
+use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
 use super::common::Weight;
 use super::dwa::DWA;
 use super::nwa::{NWAStates, NWA};
-use crate::precompute4::weighted_automata::{StateID, NWAStateID};
+use crate::precompute4::weighted_automata::NWAStateID;
+use crate::profiler::PROGRESS_BAR_ENABLED;
+use indicatif::{ProgressBar, ProgressStyle};
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
+        let now = Instant::now();
+
         let mut nwa = self.clone();
+        // Keep as-is; NWA::simplify reduces epsilon chains and prunes unreachable parts.
         nwa.simplify();
-        if nwa.states.len() == 0 {
-            return DWA::new();
-        }
-        nwa.determinize_by_bits()
+
+        let result = nwa.det_fixpoint();
+
+        crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
+        result
     }
 
-    fn determinize_by_bits(&self) -> DWA {
-        let mut num_bits = 0;
-
-        for state in &self.states.0 {
-            if let Some(w) = &state.final_weight {
-                num_bits = num_bits.max(w.max_item().unwrap_or(0) + 1);
-            }
-            for (_on, (_to, w)) in &state.transitions {
-                num_bits = num_bits.max(w.max_item().unwrap_or(0) + 1);
-            }
-            for (_to, w) in &state.epsilons {
-                num_bits = num_bits.max(w.max_item().unwrap_or(0) + 1);
-            }
-            if let Some((_to, w)) = &state.default {
-                num_bits = num_bits.max(w.max_item().unwrap_or(0) + 1);
-            }
-        }
-
-        if num_bits == 0 {
+    fn det_fixpoint(&self) -> DWA {
+        let fut = self.compute_future_weights();
+        let n = self.states.len();
+        if n == 0 {
             return DWA::new();
         }
 
-        // 1. Create NFAs for each bit plane, identifying unique ones.
-        let mut bit_to_dfa_idx = vec![0; num_bits];
-        let mut unique_dfas = Vec::<DFA>::new();
-        let mut nfa_to_dfa_idx = HashMap::<NFA, usize>::new();
-
-        for i in 0..num_bits {
-            let nfa = NFA::from_nwa(self, i);
-            if let Some(&dfa_idx) = nfa_to_dfa_idx.get(&nfa) {
-                bit_to_dfa_idx[i] = dfa_idx;
-            } else {
-                let dfa = nfa.determinize();
-                let dfa_idx = unique_dfas.len();
-                unique_dfas.push(dfa);
-                nfa_to_dfa_idx.insert(nfa, dfa_idx);
-                bit_to_dfa_idx[i] = dfa_idx;
-            }
-        }
-
-        // 2. Product construction of unique DFAs.
-        let mut dwa = DWA::new();
-        dwa.states.0.clear();
-
-        let mut product_map = HashMap::<Vec<StateID>, StateID>::new();
-        let mut worklist = VecDeque::<StateID>::new();
-        let mut dwa_id_to_product_state = Vec::<Vec<StateID>>::new();
-
-        let get_or_create_dwa_state = |product_state: Vec<StateID>,
-                                       dwa: &mut DWA,
-                                       product_map: &mut HashMap<Vec<StateID>, StateID>,
-                                       worklist: &mut VecDeque<StateID>,
-                                       dwa_id_to_product_state: &mut Vec<Vec<StateID>>|
-         -> StateID {
-            *product_map.entry(product_state.clone()).or_insert_with(|| {
-                let new_id = dwa.add_state();
-                worklist.push_back(new_id);
-                dwa_id_to_product_state.push(product_state);
-                new_id
-            })
-        };
-
-        let start_product_state: Vec<StateID> =
-            unique_dfas.iter().map(|dfa| dfa.start_state).collect();
-        dwa.body.start_state = get_or_create_dwa_state(
-            start_product_state,
-            &mut dwa,
-            &mut product_map,
-            &mut worklist,
-            &mut dwa_id_to_product_state,
-        );
-
-        while let Some(dwa_id) = worklist.pop_front() {
-            let product_state = dwa_id_to_product_state[dwa_id].clone();
-
-            // Collect all exception labels from all component DFA states.
-            let mut labels = BTreeSet::new();
-            for (dfa_idx, &dfa_state_id) in product_state.iter().enumerate() {
-                for &label in unique_dfas[dfa_idx].states[dfa_state_id].transitions.keys() {
-                    labels.insert(label);
+        // Weighted ε-closure from sources, intersected with fut[]
+        fn eps_closure_masked(
+            sources: &[NWAStateID],
+            states: &NWAStates,
+            fut: &[Weight],
+        ) -> Vec<(NWAStateID, Weight)> {
+            let mut out: HashMap<NWAStateID, Weight> = HashMap::new();
+            let mut q: VecDeque<NWAStateID> = VecDeque::new();
+            for &s in sources {
+                if s >= states.len() {
+                    continue;
+                }
+                let f = fut[s].clone();
+                if !f.is_empty() {
+                    out.insert(s, f);
+                    q.push_back(s);
                 }
             }
-
-            // Default transition
-            let default_target_prod: Vec<StateID> = product_state
-                .iter()
-                .enumerate()
-                .map(|(dfa_idx, &dfa_state_id)| unique_dfas[dfa_idx].get_next_state(dfa_state_id, None))
-                .collect();
-            let default_dwa_target = get_or_create_dwa_state(
-                default_target_prod.clone(),
-                &mut dwa,
-                &mut product_map,
-                &mut worklist,
-                &mut dwa_id_to_product_state,
-            );
-            dwa.set_default_transition(dwa_id, default_dwa_target, Weight::all()).unwrap();
-
-            // Exception transitions
-            for label in labels {
-                let target_prod: Vec<StateID> = product_state
-                    .iter()
-                    .enumerate()
-                    .map(|(dfa_idx, &dfa_state_id)| {
-                        unique_dfas[dfa_idx].get_next_state(dfa_state_id, Some(label))
-                    })
-                    .collect();
-
-                // Only add an exception if it's different from the default.
-                if target_prod != default_target_prod {
-                    let dwa_target = get_or_create_dwa_state(
-                        target_prod,
-                        &mut dwa,
-                        &mut product_map,
-                        &mut worklist,
-                        &mut dwa_id_to_product_state,
-                    );
-                    dwa.add_transition(dwa_id, label, dwa_target, Weight::all()).unwrap();
+            while let Some(u) = q.pop_front() {
+                let base = out.get(&u).cloned().unwrap_or_else(Weight::zeros);
+                if base.is_empty() {
+                    continue;
                 }
-            }
-        }
-
-        // 3. Set final weights.
-        for dwa_id in 0..dwa.states.len() {
-            let product_state = &dwa_id_to_product_state[dwa_id];
-            let mut final_weight = Weight::zeros();
-            for bit in 0..num_bits {
-                let dfa_idx = bit_to_dfa_idx[bit];
-                let dfa_state_id = product_state[dfa_idx];
-                if unique_dfas[dfa_idx].states[dfa_state_id].is_final {
-                    final_weight.insert(bit);
-                }
-            }
-            if !final_weight.is_empty() {
-                dwa.set_final_weight(dwa_id, final_weight).unwrap();
-            }
-        }
-
-        dwa
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-struct NFAState {
-    transitions: BTreeMap<i16, Vec<NWAStateID>>,
-    epsilon: Vec<NWAStateID>,
-    default: Vec<NWAStateID>,
-    is_final: bool,
-}
-
-#[derive(Debug, Default, PartialEq, Eq, Hash)]
-struct NFA {
-    states: Vec<NFAState>,
-    start_state: NWAStateID,
-}
-
-impl NFA {
-    fn from_nwa(nwa: &NWA, bit: usize) -> Self {
-        let mut states = vec![NFAState::default(); nwa.states.len()];
-        for (id, nwa_state) in nwa.states.0.iter().enumerate() {
-            if let Some(w) = &nwa_state.final_weight {
-                if w.contains(bit) {
-                    states[id].is_final = true;
-                }
-            }
-            for (on, (to, w)) in &nwa_state.transitions {
-                if w.contains(bit) {
-                    states[id].transitions.entry(*on).or_default().push(*to);
-                }
-            }
-            for (to, w) in &nwa_state.epsilons {
-                if w.contains(bit) {
-                    states[id].epsilon.push(*to);
-                }
-            }
-            if let Some((to, w)) = &nwa_state.default {
-                if w.contains(bit) {
-                    states[id].default.push(*to);
-                }
-            }
-        }
-        Self { states, start_state: nwa.body.start_state }
-    }
-
-    fn epsilon_closure(&self, initial_states: &BTreeSet<NWAStateID>) -> BTreeSet<NWAStateID> {
-        let mut closure = initial_states.clone();
-        let mut queue: VecDeque<_> = initial_states.iter().copied().collect();
-        let mut visited = initial_states.clone();
-
-        while let Some(u) = queue.pop_front() {
-            for &v in &self.states[u].epsilon {
-                if v < self.states.len() && !visited.contains(&v) {
-                    closure.insert(v);
-                    visited.insert(v);
-                    queue.push_back(v);
-                }
-            }
-        }
-        closure
-    }
-
-    fn determinize(&self) -> DFA {
-        let mut dfa = DFA::default();
-        let mut worklist = VecDeque::new();
-        let mut subset_map = HashMap::new();
-
-        let start_subset = self.epsilon_closure(&BTreeSet::from([self.start_state]));
-        dfa.start_state = dfa.get_or_create_state(&start_subset, self, &mut subset_map, &mut worklist);
-
-        while let Some(subset) = worklist.pop_front() {
-            let from_dfa_id = *subset_map.get(&subset).unwrap();
-
-            let mut labels = BTreeSet::new();
-            for &nfa_id in &subset {
-                if nfa_id < self.states.len() {
-                    for &label in self.states[nfa_id].transitions.keys() {
-                        labels.insert(label);
+                for &(v, ref w_eps) in &states[u].epsilons {
+                    if v >= states.len() {
+                        continue;
                     }
-                }
-            }
-
-            // Default transition
-            let mut default_next = BTreeSet::new();
-            for &nfa_id in &subset {
-                if nfa_id < self.states.len() {
-                    default_next.extend(&self.states[nfa_id].default);
-                }
-            }
-            let default_subset = self.epsilon_closure(&default_next);
-            let to_dfa_id = dfa.get_or_create_state(&default_subset, self, &mut subset_map, &mut worklist);
-            dfa.states[from_dfa_id].default = Some(to_dfa_id);
-
-            // Exception transitions
-            for label in labels {
-                let mut next_states = BTreeSet::new();
-                for &nfa_id in &subset {
-                    if nfa_id < self.states.len() {
-                        if let Some(targets) = self.states[nfa_id].transitions.get(&label) {
-                            next_states.extend(targets);
-                        } else {
-                            next_states.extend(&self.states[nfa_id].default);
+                    let mut prop = &base & w_eps;
+                    if prop.is_empty() {
+                        continue;
+                    }
+                    prop &= &fut[v];
+                    if prop.is_empty() {
+                        continue;
+                    }
+                    match out.entry(v) {
+                        Entry::Occupied(mut e) => {
+                            let old = e.get_mut();
+                            let nu = &*old | &prop;
+                            if nu != *old {
+                                *old = nu;
+                                q.push_back(v);
+                            }
+                        }
+                        Entry::Vacant(e) => {
+                            e.insert(prop);
+                            q.push_back(v);
                         }
                     }
                 }
-                let next_subset = self.epsilon_closure(&next_states);
-                let to_dfa_id = dfa.get_or_create_state(&next_subset, self, &mut subset_map, &mut worklist);
-                dfa.states[from_dfa_id].transitions.insert(label, to_dfa_id);
+            }
+            let mut v: Vec<(NWAStateID, Weight)> = out.into_iter().collect();
+            v.sort_by_key(|(sid, _)| *sid);
+            v
+        }
+
+        // Apply additional weight to closure pairs, dropping empties
+        fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
+            if w.is_all_fast() {
+                return base.to_vec();
+            }
+            let mut out: Vec<(NWAStateID, Weight)> = Vec::with_capacity(base.len());
+            for (sid, wt) in base.iter() {
+                let x = wt & w;
+                if !x.is_empty() {
+                    out.push((*sid, x));
+                }
+            }
+            out
+        }
+
+        // Pool of raw step-vectors: list of (NWA state, weight), interned by fingerprint.
+        struct StepPool {
+            raw: Vec<Vec<(NWAStateID, Weight)>>,
+            map: HashMap<u64, Vec<usize>>,
+        }
+        impl StepPool {
+            fn new() -> Self {
+                Self { raw: Vec::new(), map: HashMap::new() }
+            }
+            fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
+                let mut fp = FP_ZERO;
+                for (sid, w) in pairs.iter() {
+                    fp = mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2));
+                }
+                fp
+            }
+            fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
+                pairs.retain(|(_, w)| !w.is_empty());
+                let fp = Self::fingerprint(&pairs);
+                if let Some(cands) = self.map.get(&fp) {
+                    for &id in cands {
+                        if self.raw[id].len() == pairs.len() && self.raw[id] == pairs {
+                            return id;
+                        }
+                    }
+                }
+                let id = self.raw.len();
+                self.raw.push(pairs);
+                self.map.entry(fp).or_default().push(id);
+                id
+            }
+            fn len(&self) -> usize { self.raw.len() }
+        }
+
+        #[derive(Clone)]
+        struct CompiledStep {
+            by_sig: Vec<(usize, Weight)>, // macro_sig_id -> weight
+            mask: Weight,                 // union of weights over by_sig
+        }
+
+        #[derive(Clone)]
+        struct MacroSig {
+            final_w: Option<Weight>,
+            def: Option<usize>,            // step id (raw; compiled later)
+            ex: BTreeMap<i16, usize>,      // label -> step id (raw; compiled later)
+        }
+
+        #[derive(Clone, Hash, Eq, PartialEq)]
+        struct MacroSigKey {
+            final_fp: u64,
+            def: Option<usize>,
+            ex: Vec<(i16, usize)>, // already sorted
+        }
+
+        // Precompute ε-closure from each NWA state and build macro signatures.
+        let pb_eps = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(n as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
+                    .expect("progress-bar style"),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
+        let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
+        for s in 0..n {
+            eps_cache[s] = eps_closure_masked(std::slice::from_ref(&s), &self.states, &fut);
+            if let Some(p) = &pb_eps {
+                p.inc(1);
             }
         }
-        dfa
-    }
-}
-
-#[derive(Debug, Default)]
-struct DFAState {
-    transitions: BTreeMap<i16, StateID>,
-    default: Option<StateID>,
-    is_final: bool,
-}
-
-#[derive(Debug, Default)]
-struct DFA {
-    states: Vec<DFAState>,
-    start_state: StateID,
-}
-
-impl DFA {
-    fn get_or_create_state(
-        &mut self,
-        subset: &BTreeSet<NWAStateID>,
-        nfa: &NFA,
-        subset_map: &mut HashMap<BTreeSet<NWAStateID>, StateID>,
-        worklist: &mut VecDeque<BTreeSet<NWAStateID>>,
-    ) -> StateID {
-        if let Some(&id) = subset_map.get(subset) {
-            return id;
+        if let Some(p) = pb_eps {
+            p.finish_with_message("ε-closures done");
         }
-        let new_id = self.states.len();
-        let is_final = subset.iter().any(|&id| id < nfa.states.len() && nfa.states[id].is_final);
-        self.states.push(DFAState { is_final, ..Default::default() });
-        subset_map.insert(subset.clone(), new_id);
-        if !subset.is_empty() {
-            worklist.push_back(subset.clone());
-        }
-        new_id
-    }
 
-    fn get_next_state(&self, from_state_id: StateID, on: Option<i16>) -> StateID {
-        let state = &self.states[from_state_id];
-        if let Some(on_char) = on {
-            if let Some(&to) = state.transitions.get(&on_char) {
-                return to;
+        let mut step_pool = StepPool::new();
+
+        let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
+        let mut state_to_sig_id: Vec<usize> = vec![0; n];
+        let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
+
+        let pb_sigs = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(n as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Macro signatures)")
+                    .expect("progress-bar style"),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
+        for s in 0..n {
+            // Final weight from ε-closure
+            let mut final_acc: Option<Weight> = None;
+            for (t, w) in eps_cache[s].iter() {
+                if let Some(fw) = &self.states[*t].final_weight {
+                    let c = w & fw;
+                    if !c.is_empty() {
+                        if let Some(ref mut a) = final_acc { *a |= &c; } else { final_acc = Some(c); }
+                    }
+                }
+            }
+
+            // Default step
+            let def = if let Some((to, wdef)) = &self.states[s].default {
+                if *to < n {
+                    Some(step_pool.intern(apply_weight_to_pairs(&eps_cache[*to], wdef)))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Exception steps
+            let mut ex: BTreeMap<i16, usize> = BTreeMap::new();
+            for (lbl, (to, wlbl)) in &self.states[s].transitions {
+                if *to >= n { continue; }
+                let id = step_pool.intern(apply_weight_to_pairs(&eps_cache[*to], wlbl));
+                ex.insert(*lbl, id);
+            }
+
+            let key = MacroSigKey {
+                final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
+                def,
+                ex: ex.iter().map(|(k, v)| (*k, *v)).collect(),
+            };
+            let sig_id = match sig_intern.entry(key) {
+                Entry::Occupied(o) => *o.get(),
+                Entry::Vacant(v) => {
+                    let id = sigs.len();
+                    sigs.push(MacroSig { final_w: final_acc.clone(), def, ex: ex.clone() });
+                    v.insert(id);
+                    id
+                }
+            };
+            state_to_sig_id[s] = sig_id;
+            if let Some(p) = &pb_sigs {
+                p.inc(1);
             }
         }
-        state.default.expect("DFA state should have a default transition")
+        if let Some(p) = pb_sigs {
+            p.finish_with_message("Macro signatures done");
+        }
+
+        // Compile steps by macro-signature
+        let pb_compile = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(step_pool.len() as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Compile steps)")
+                    .expect("progress-bar style"),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
+        let mut compiled_steps: Vec<CompiledStep> = vec![
+            CompiledStep { by_sig: Vec::new(), mask: Weight::zeros() };
+            step_pool.len()
+        ];
+        for id in 0..step_pool.len() {
+            let pairs = &step_pool.raw[id];
+            let mut acc: HashMap<usize, Weight> = HashMap::new();
+            for (t, w) in pairs.iter() {
+                let sid = state_to_sig_id[*t];
+                match acc.entry(sid) {
+                    Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= w; }
+                    Entry::Vacant(e) => { e.insert(w.clone()); }
+                }
+            }
+            let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
+            by_sig.sort_by_key(|(sid, _)| *sid);
+            let mut mask = Weight::zeros();
+            for (_, w) in &by_sig {
+                mask |= w;
+            }
+            compiled_steps[id] = CompiledStep { by_sig, mask };
+            if let Some(p) = &pb_compile {
+                p.inc(1);
+            }
+        }
+        if let Some(p) = pb_compile {
+            p.finish_with_message("Compile steps done");
+        }
+
+        // Determinization worklist
+        #[derive(Clone)]
+        struct DetState {
+            members: Vec<usize>,              // macro_sig ids, sorted
+            pos: HashMap<usize, usize>,       // macro_sig_id -> index
+            gates: Vec<Weight>,               // gates per member
+        }
+
+        #[derive(Clone, Eq, PartialEq, Hash)]
+        struct MembersKey {
+            items: Vec<usize>,
+        }
+        impl MembersKey {
+            fn new(mut items: Vec<usize>) -> Self {
+                items.sort_unstable();
+                items.dedup();
+                MembersKey { items }
+            }
+        }
+
+        fn ensure_state(
+            members: Vec<usize>,
+            init: Option<HashMap<usize, Weight>>,
+            states: &mut Vec<DetState>,
+            map: &mut HashMap<MembersKey, usize>,
+            work: &mut VecDeque<usize>,
+        ) -> usize {
+            let key = MembersKey::new(members);
+            if let Some(&id) = map.get(&key) {
+                if let Some(init_map) = init {
+                    let st = &mut states[id];
+                    let mut changed = false;
+                    for (sid, w) in init_map {
+                        if let Some(&idx) = st.pos.get(&sid) {
+                            let before = st.gates[idx].clone();
+                            st.gates[idx] |= &w;
+                            if st.gates[idx] != before {
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        work.push_back(id);
+                    }
+                }
+                return id;
+            }
+            let items = key.items.clone();
+            let mut pos = HashMap::with_capacity(items.len());
+            for (i, sid) in items.iter().enumerate() {
+                pos.insert(*sid, i);
+            }
+            let mut gates = vec![Weight::zeros(); items.len()];
+            if let Some(init_map) = init {
+                for (sid, w) in init_map {
+                    if let Some(&idx) = pos.get(&sid) {
+                        gates[idx] |= &w;
+                    }
+                }
+            }
+            let id = states.len();
+            states.push(DetState { members: items, pos, gates });
+            map.insert(key, id);
+            work.push_back(id);
+            id
+        }
+
+        // Initial determinized state: ε-closure(start) grouped by macro signature
+        let mut init_map: HashMap<usize, Weight> = HashMap::new();
+        for (t, w) in eps_cache[self.body.start_state].iter() {
+            let sid = state_to_sig_id[*t];
+            match init_map.entry(sid) {
+                Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= w; }
+                Entry::Vacant(e) => { e.insert(w.clone()); }
+            }
+        }
+        let init_members: Vec<usize> = {
+            let mut v: Vec<usize> = init_map.keys().copied().collect();
+            v.sort_unstable();
+            v
+        };
+
+        let mut states: Vec<DetState> = Vec::new();
+        let mut key_to_state: HashMap<MembersKey, usize> = HashMap::new();
+        let mut work: VecDeque<usize> = VecDeque::new();
+        let start_id = ensure_state(init_members, Some(init_map), &mut states, &mut key_to_state, &mut work);
+
+        // Helper: accumulate compiled step to a map with gate
+        fn accumulate(
+            dst: &mut HashMap<usize, Weight>,
+            compiled: &[(usize, Weight)],
+            gate: &Weight,
+        ) {
+            if gate.is_all_fast() {
+                for (sid, w) in compiled.iter() {
+                    match dst.entry(*sid) {
+                        Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= w; }
+                        Entry::Vacant(e) => { e.insert(w.clone()); }
+                    }
+                }
+            } else {
+                for (sid, w) in compiled.iter() {
+                    let x = w & gate;
+                    if x.is_empty() {
+                        continue;
+                    }
+                    match dst.entry(*sid) {
+                        Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= &x; }
+                        Entry::Vacant(e) => { e.insert(x); }
+                    }
+                }
+            }
+        }
+
+        let pb_det = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(0); // Length is unknown, will be updated
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({msg})")
+                    .expect("progress-bar style"),
+            );
+            p.set_message("Starting...");
+            Some(p)
+        } else {
+            None
+        };
+
+        // Fixpoint propagation: ensure all reachable determinized states are created and
+        // their gates saturated.
+        while let Some(sid) = work.pop_front() {
+            if let Some(p) = &pb_det {
+                p.inc(1);
+                p.set_length(states.len() as u64);
+                p.set_message(format!("states: {}, queue: {}", states.len(), work.len()));
+            }
+
+            let st = states[sid].clone();
+
+            // Default baseline: accumulate all members' defaults
+            let mut baseline: HashMap<usize, Weight> = HashMap::new();
+            for (i, sig_id) in st.members.iter().enumerate() {
+                if let Some(def_id) = sigs[*sig_id].def {
+                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+                }
+            }
+            if !baseline.is_empty() {
+                let mem: Vec<usize> = baseline.keys().copied().collect();
+                let _ = ensure_state(mem, Some(baseline.clone()), &mut states, &mut key_to_state, &mut work);
+            }
+
+            // Labels that appear as exceptions in any member
+            let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+            for (i, sig_id) in st.members.iter().enumerate() {
+                for (lbl, _) in &sigs[*sig_id].ex {
+                    label_groups.entry(*lbl).or_default().push(i);
+                }
+            }
+
+            // For each label: override baseline by removing default parts for members that have
+            // exceptions at this label and add exception parts.
+            for (lbl, idxs) in label_groups {
+                let mut cur_map = baseline.clone();
+
+                for i in idxs.iter().copied() {
+                    let sig_id = st.members[i];
+                    let gate = &st.gates[i];
+                    // Remove defaults for this member (if any)
+                    if let Some(def_id) = sigs[sig_id].def {
+                        let comp = &compiled_steps[def_id].by_sig;
+                        if gate.is_all_fast() {
+                            for (tsig, w) in comp {
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= w;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        } else {
+                            for (tsig, w) in comp {
+                                let share = w & gate;
+                                if share.is_empty() {
+                                    continue;
+                                }
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= &share;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Add exception
+                    if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
+                        let comp = &compiled_steps[ex_id].by_sig;
+                        accumulate(&mut cur_map, comp, gate);
+                    }
+                }
+
+                if !cur_map.is_empty() {
+                    let mem: Vec<usize> = cur_map.keys().copied().collect();
+                    let _ = ensure_state(mem, Some(cur_map), &mut states, &mut key_to_state, &mut work);
+                }
+            }
+        }
+        if let Some(p) = pb_det {
+            p.finish_with_message(format!("Determinized to {} states", states.len()));
+        }
+
+        // Build final DWA
+        let mut dwa = DWA::new();
+        dwa.states.0.clear();
+        for _ in 0..states.len() {
+            dwa.states.add_state();
+        }
+        dwa.body.start_state = start_id;
+
+        // Helper: compute final weight
+        let compute_final = |st: &DetState| -> Option<Weight> {
+            let mut acc: Option<Weight> = None;
+            for (i, sig_id) in st.members.iter().enumerate() {
+                if let Some(fw) = &sigs[*sig_id].final_w {
+                    let x = &st.gates[i] & fw;
+                    if !x.is_empty() {
+                        if let Some(ref mut a) = acc { *a |= &x; } else { acc = Some(x); }
+                    }
+                }
+            }
+            acc
+        };
+
+        let pb_build = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(states.len() as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Build DWA)")
+                    .expect("progress-bar style"),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
+        // Emit edges
+        for sid in 0..states.len() {
+            let st = states[sid].clone();
+
+            // Final
+            dwa.states[sid].final_weight = compute_final(&st);
+
+            // Build default baseline
+            let mut baseline: HashMap<usize, Weight> = HashMap::new();
+            for (i, sig_id) in st.members.iter().enumerate() {
+                if let Some(def_id) = sigs[*sig_id].def {
+                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+                }
+            }
+            if !baseline.is_empty() {
+                let mut mask = Weight::zeros();
+                for (_, w) in &baseline {
+                    mask |= w;
+                }
+                if !mask.is_empty() {
+                    let mut mem: Vec<usize> = baseline.keys().copied().collect();
+                    mem.sort_unstable();
+                    let key = MembersKey::new(mem);
+                    if let Some(&to_id) = key_to_state.get(&key) {
+                        let _ = dwa.set_default_transition(sid, to_id, mask);
+                    }
+                }
+            }
+
+            // Labels
+            let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+            for (i, sig_id) in st.members.iter().enumerate() {
+                for (lbl, _) in &sigs[*sig_id].ex {
+                    label_groups.entry(*lbl).or_default().push(i);
+                }
+            }
+            for (lbl, idxs) in label_groups {
+                let mut cur_map = baseline.clone();
+                // Remove defaults for members that have an exception on this label, then add ex
+                for i in idxs.iter().copied() {
+                    let sig_id = st.members[i];
+                    let gate = &st.gates[i];
+                    if let Some(def_id) = sigs[sig_id].def {
+                        let comp = &compiled_steps[def_id].by_sig;
+                        if gate.is_all_fast() {
+                            for (tsig, w) in comp {
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= w;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        } else {
+                            for (tsig, w) in comp {
+                                let share = w & gate;
+                                if share.is_empty() {
+                                    continue;
+                                }
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= &share;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
+                        let comp = &compiled_steps[ex_id].by_sig;
+                        accumulate(&mut cur_map, comp, gate);
+                    }
+                }
+
+                if cur_map.is_empty() {
+                    continue;
+                }
+                let mut mask = Weight::zeros();
+                for (_, w) in &cur_map {
+                    mask |= w;
+                }
+                if mask.is_empty() {
+                    continue;
+                }
+                let mut mem: Vec<usize> = cur_map.keys().copied().collect();
+                mem.sort_unstable();
+                let key = MembersKey::new(mem);
+                if let Some(&to_id) = key_to_state.get(&key) {
+                    let _ = dwa.add_transition(sid, lbl, to_id, mask);
+                }
+            }
+            if let Some(p) = &pb_build {
+                p.inc(1);
+            }
+        }
+        if let Some(p) = pb_build {
+            p.finish_with_message("Build DWA done");
+        }
+
+        dwa
     }
 }
