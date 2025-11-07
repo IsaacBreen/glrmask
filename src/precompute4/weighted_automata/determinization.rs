@@ -196,7 +196,7 @@ impl NWA {
             let ex: BTreeMap<i16, usize> = self.states[s]
                 .transitions
                 .iter()
-                .filter(|(_, (to, _))| **to < n)
+                .filter(|(_, (to, _))| *to < n)
                 .map(|(lbl, (to, wlbl))| (*lbl, step_pool.intern(apply_weight_to_pairs(&eps_cache[*to], wlbl))))
                 .collect();
 
@@ -409,12 +409,12 @@ impl NWA {
                 }
             }
 
-            node.final_weight = node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
+            node.final_weight = IntoOption::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
                 if let Some(fw) = &sigs[*sig_id].final_w {
                     acc |= &(gate & fw);
                 }
                 acc
-            }).into();
+            }));
 
             if let Some(p) = &pb_discover {
                 p.set_length(nodes.len() as u64);

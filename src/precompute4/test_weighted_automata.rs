@@ -264,11 +264,7 @@ pub fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
     //    - Ensure default and per-exception targets correspond under the evolving bijection.
     // 3) Verify that all states reachable in `b` are matched by some state of `a`.
 
-    DWA::propagate_and_constrain_weights(&mut a.states, &mut a.body);
-    DWA::propagate_future_weights(&mut a.states);
     a.simplify();
-    DWA::propagate_and_constrain_weights(&mut b.states, &mut b.body);
-    DWA::propagate_future_weights(&mut b.states);
     b.simplify();
 
     // Helper: convert Option<Weight> to Weight (None => zeros).

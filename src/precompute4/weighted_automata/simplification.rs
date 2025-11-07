@@ -838,7 +838,7 @@ impl NWA {
 
                 let eps_sig = st.epsilons.iter()
                     .fold(BTreeMap::new(), |mut acc, (to, w)| {
-                        acc.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
+                        *acc.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
                         acc
                     })
                     .into_iter().collect::<Vec<_>>();
