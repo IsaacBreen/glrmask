@@ -259,21 +259,12 @@ impl NWA {
             }
 
             for lbl in all_ex_labels {
-                let mut ex_map = target_maps.get(&None).cloned().unwrap_or_default();
+                let mut ex_map = HashMap::new();
                 for (sig_id, gate) in &node_gates {
                     if let Some(ex_id) = sigs[*sig_id].ex.get(&lbl) {
-                        // Subtract default contribution if it exists
-                        if let Some(def_id) = sigs[*sig_id].def {
-                            for (tsig, w) in &compiled_steps[def_id].by_sig {
-                                let share = w & gate;
-                                if let Some(old) = ex_map.get_mut(tsig) {
-                                    *old -= &share;
-                                    if old.is_empty() { ex_map.remove(tsig); }
-                                }
-                            }
-                        }
-                        // Add exception contribution
                         accumulate(&mut ex_map, &compiled_steps[*ex_id].by_sig, gate);
+                    } else if let Some(def_id) = sigs[*sig_id].def {
+                        accumulate(&mut ex_map, &compiled_steps[def_id].by_sig, gate);
                     }
                 }
                 target_maps.insert(Some(lbl), ex_map);
