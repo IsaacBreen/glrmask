@@ -264,11 +264,11 @@ pub fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
     //    - Ensure default and per-exception targets correspond under the evolving bijection.
     // 3) Verify that all states reachable in `b` are matched by some state of `a`.
 
-    DWA::propagate_and_constrain_weights(&mut a.states, &mut a.body);
-    DWA::propagate_future_weights(&mut a.states);
+    // DWA::propagate_and_constrain_weights(&mut a.states, &mut a.body);
+    // DWA::propagate_future_weights(&mut a.states);
     a.simplify();
-    DWA::propagate_and_constrain_weights(&mut b.states, &mut b.body);
-    DWA::propagate_future_weights(&mut b.states);
+    // DWA::propagate_and_constrain_weights(&mut b.states, &mut b.body);
+    // DWA::propagate_future_weights(&mut b.states);
     b.simplify();
 
     // Helper: convert Option<Weight> to Weight (None => zeros).
@@ -307,6 +307,14 @@ pub fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
     while let Some((ia, ib)) = q.pop_front() {
         let sa = &a.states[ia];
         let sb = &b.states[ib];
+
+        let fwa = opt_w_to_w(&sa.final_weight);
+        let fwb = opt_w_to_w(&sb.final_weight);
+        assert_eq!(
+            fwa, fwb,
+            "Final weight mismatch at (a:{}, b:{}): a.final_weight={} vs b.final_weight={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+            ia, ib, fwa, fwb, a, b
+        );
 
         // Compare default transition weights (None considered zeros).
         let dwa = opt_w_to_w(&sa.trans_weight_default);
@@ -386,22 +394,6 @@ pub fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
                 );
             }
         }
-    }
-
-    // After establishing the state mapping, verify that the union of final weights
-    // for all `a` states mapping to a given `b` state is equal to the final weight
-    // of that `b` state. This handles cases where `a` is an unminimized version of `b`.
-    for (ib, ias) in &map_ba {
-        let mut union_fa = Weight::zeros();
-        for &ia in ias {
-            union_fa |= &opt_w_to_w(&a.states[ia].final_weight);
-        }
-        let fb = opt_w_to_w(&b.states[*ib].final_weight);
-        assert_eq!(
-            union_fa, fb,
-            "Aggregated final weight mismatch for b-state {} (a-states: {:?}): union(a)={}, b={}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-            ib, ias, union_fa, fb, a, b
-        );
     }
 
     // Ensure we've covered all states reachable from b.start.
