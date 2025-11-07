@@ -24,6 +24,7 @@ use std::sync::{Arc, RwLock};
 
 pub struct Trie1Config {
     pub enabled: bool,
+    pub break_cycles: bool,
     pub early_flatten_epsilon: bool,
     pub minimize_by_signature: bool,
     pub merge_equivalent_llm_tokens: bool,
@@ -39,6 +40,7 @@ impl Default for Trie1Config {
     fn default() -> Self {
         Self {
             enabled: true,
+            break_cycles: false,
             early_flatten_epsilon: true,
             minimize_by_signature: true,
             merge_equivalent_llm_tokens: true,
@@ -56,6 +58,7 @@ impl Trie1Config {
     pub fn off() -> Self {
         Self {
             enabled: false,
+            break_cycles: false,
             early_flatten_epsilon: false,
             minimize_by_signature: false,
             merge_equivalent_llm_tokens: false,
@@ -614,7 +617,9 @@ pub fn optimize_trie1_size(
 
     // === Pass 4: Final Minimization and GC ===
     // Break cycles before final minimization passes that might be confused by them.
-    break_cycles_trie1(precomputed1, trie1_god);
+    if config.break_cycles {
+        break_cycles_trie1(precomputed1, trie1_god);
+    }
 
     if config.minimize_by_signature {
         merge_nodes_trie1(precomputed1, trie1_god);
