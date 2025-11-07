@@ -1,13 +1,17 @@
 // src/precompute4/weighted_automata/determinization.rs
 //
-// A faster determinization that preserves semantics but avoids HashMap-heavy hot paths.
-// Key changes:
-// - Replace HashMap-based baseline/label accumulation with sorted Vec<(sig_id, Weight)> operations.
-// - Batch-merge compiled steps with gates via sort+dedup union, and subtract/add via linear scans.
-// - Keep macro-signature and step interning intact, but drastically reduce per-state overhead.
+// A simpler determinization that keeps the same semantics and performance characteristics:
+// - Determinized states are defined by sets of macro-signatures (structural behavior).
+// - We compute ε-closures once and reuse them.
+// - For each NWA state, we precompute "steps": default and per-label exceptions as ε-closed
+//   sets with their weights; steps are interned to avoid duplication.
+// - Steps are compiled by macro-signature, so all computations operate on compact signature IDs.
+// - Determinization uses a worklist to propagate "gates" (weights) to a fixpoint.
+// - For each determinized state, we compute one default transition baseline and override it
+//   on labels that have exceptions in any member signature. This avoids per-label recomputation
+//   and preserves defaults efficiently.
 //
-// This leverages the structure where most transitions inside SCCs have Weight::all(),
-// so merging many compiled steps benefits from vectorized operations and low allocation churn.
+// Semantics preserved for bitset weights with ∧ on path and ∨ over choices.
 
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
@@ -33,14 +37,13 @@ impl NWA {
         // Keep as-is; NWA::simplify reduces epsilon chains and prunes unreachable parts.
         nwa.simplify();
 
-        let result = nwa.det_fixpoint_vecmerge();
+        let result = nwa.det_fixpoint();
 
         crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
         result
     }
 
-    /// New faster determinization based on vector merges instead of HashMaps in hot paths.
-    fn det_fixpoint_vecmerge(&self) -> DWA {
+    fn det_fixpoint(&self) -> DWA {
         let fut = self.compute_future_weights();
         let n = self.states.len();
         if n == 0 {
@@ -154,7 +157,7 @@ impl NWA {
 
         #[derive(Clone)]
         struct CompiledStep {
-            by_sig: Vec<(usize, Weight)>, // macro_sig_id -> weight, sorted by macro_sig_id
+            by_sig: Vec<(usize, Weight)>, // macro_sig_id -> weight
             mask: Weight,                 // union of weights over by_sig
         }
 
@@ -310,146 +313,6 @@ impl NWA {
             p.finish_with_message("Compile steps done");
         }
 
-        // ------------- Vector-merge helpers (fast path) ----------------
-
-        #[inline]
-        fn union_compiled_with_gates(
-            compiled_steps: &Vec<CompiledStep>,
-            pairs: &[(usize, &Weight)], // list of (compiled_step_id, gate)
-        ) -> Vec<(usize, Weight)> {
-            if pairs.is_empty() {
-                return Vec::new();
-            }
-            // Upper bound guess: sum of all by_sig lengths (in practice small).
-            let mut tmp: Vec<(usize, Weight)> = Vec::new();
-            for (sid, gate) in pairs.iter() {
-                let step = &compiled_steps[*sid].by_sig;
-                if gate.is_all_fast() {
-                    for (ms, w) in step.iter() {
-                        tmp.push((*ms, w.clone()));
-                    }
-                } else {
-                    for (ms, w) in step.iter() {
-                        let x = w & *gate;
-                        if !x.is_empty() {
-                            tmp.push((*ms, x));
-                        }
-                    }
-                }
-            }
-            if tmp.is_empty() {
-                return tmp;
-            }
-            // Sort by macro_sig id and OR weights for duplicates
-            tmp.sort_by_key(|(ms, _)| *ms);
-            let mut out: Vec<(usize, Weight)> = Vec::with_capacity(tmp.len());
-            let mut cur = tmp[0].0;
-            let mut acc = tmp[0].1.clone();
-            for i in 1..tmp.len() {
-                let (ms, ref w) = tmp[i];
-                if ms == cur {
-                    acc |= w;
-                } else {
-                    if !acc.is_empty() {
-                        out.push((cur, acc));
-                    }
-                    cur = ms;
-                    acc = w.clone();
-                }
-            }
-            if !acc.is_empty() {
-                out.push((cur, acc));
-            }
-            out
-        }
-
-        #[inline]
-        fn subtract_sorted(
-            base: &[(usize, Weight)], // sorted by sig
-            sub: &[(usize, Weight)],  // sorted by sig
-        ) -> Vec<(usize, Weight)> {
-            if base.is_empty() { return Vec::new(); }
-            if sub.is_empty() { return base.to_vec(); }
-            let mut out: Vec<(usize, Weight)> = Vec::with_capacity(base.len());
-            let mut i = 0usize;
-            let mut j = 0usize;
-            while i < base.len() {
-                let (b_sig, b_w) = (&base[i].0, &base[i].1);
-                if j >= sub.len() {
-                    // push remaining
-                    out.push((*b_sig, b_w.clone()));
-                    i += 1;
-                    continue;
-                }
-                let (s_sig, s_w) = (&sub[j].0, &sub[j].1);
-                if b_sig < s_sig {
-                    out.push((*b_sig, b_w.clone()));
-                    i += 1;
-                } else if b_sig == s_sig {
-                    let mut w = b_w.clone();
-                    w -= s_w;
-                    if !w.is_empty() {
-                        out.push((*b_sig, w));
-                    }
-                    i += 1;
-                    j += 1;
-                } else {
-                    // sub sig < base sig
-                    j += 1;
-                }
-            }
-            out
-        }
-
-        #[inline]
-        fn add_sorted(
-            a: &[(usize, Weight)], // sorted
-            b: &[(usize, Weight)], // sorted
-        ) -> Vec<(usize, Weight)> {
-            if a.is_empty() { return b.to_vec(); }
-            if b.is_empty() { return a.to_vec(); }
-            let mut out: Vec<(usize, Weight)> = Vec::with_capacity(a.len() + b.len());
-            let mut i = 0usize;
-            let mut j = 0usize;
-            while i < a.len() && j < b.len() {
-                let (asig, aw) = (&a[i].0, &a[i].1);
-                let (bsig, bw) = (&b[j].0, &b[j].1);
-                if asig < bsig {
-                    out.push((*asig, aw.clone()));
-                    i += 1;
-                } else if asig > bsig {
-                    out.push((*bsig, bw.clone()));
-                    j += 1;
-                } else {
-                    let mut w = aw.clone();
-                    w |= bw;
-                    if !w.is_empty() {
-                        out.push((*asig, w));
-                    }
-                    i += 1;
-                    j += 1;
-                }
-            }
-            while i < a.len() {
-                out.push((a[i].0, a[i].1.clone()));
-                i += 1;
-            }
-            while j < b.len() {
-                out.push((b[j].0, b[j].1.clone()));
-                j += 1;
-            }
-            out
-        }
-
-        #[inline]
-        fn compute_mask(v: &[(usize, Weight)]) -> Weight {
-            let mut m = Weight::zeros();
-            for (_, w) in v {
-                m |= w;
-            }
-            m
-        }
-
         // Determinization worklist
         #[derive(Clone)]
         struct DetState {
@@ -537,6 +400,33 @@ impl NWA {
         let mut work: VecDeque<usize> = VecDeque::new();
         let start_id = ensure_state(init_members, Some(init_map), &mut states, &mut key_to_state, &mut work);
 
+        // Helper: accumulate compiled step to a map with gate
+        fn accumulate(
+            dst: &mut HashMap<usize, Weight>,
+            compiled: &[(usize, Weight)],
+            gate: &Weight,
+        ) {
+            if gate.is_all_fast() {
+                for (sid, w) in compiled.iter() {
+                    match dst.entry(*sid) {
+                        Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= w; }
+                        Entry::Vacant(e) => { e.insert(w.clone()); }
+                    }
+                }
+            } else {
+                for (sid, w) in compiled.iter() {
+                    let x = w & gate;
+                    if x.is_empty() {
+                        continue;
+                    }
+                    match dst.entry(*sid) {
+                        Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= &x; }
+                        Entry::Vacant(e) => { e.insert(x); }
+                    }
+                }
+            }
+        }
+
         let pb_det = if PROGRESS_BAR_ENABLED {
             let p = ProgressBar::new(0); // Length is unknown, will be updated
             p.set_style(
@@ -550,7 +440,8 @@ impl NWA {
             None
         };
 
-        // Fixpoint propagation
+        // Fixpoint propagation: ensure all reachable determinized states are created and
+        // their gates saturated.
         while let Some(sid) = work.pop_front() {
             if let Some(p) = &pb_det {
                 p.inc(1);
@@ -560,29 +451,16 @@ impl NWA {
 
             let st = states[sid].clone();
 
-            // Build the list of (default step id, gate) for all members that have defaults.
-            let mut def_pairs: Vec<(usize, &Weight)> = Vec::new();
-            def_pairs.reserve(st.members.len());
+            // Default baseline: accumulate all members' defaults
+            let mut baseline: HashMap<usize, Weight> = HashMap::new();
             for (i, sig_id) in st.members.iter().enumerate() {
                 if let Some(def_id) = sigs[*sig_id].def {
-                    let gate = &st.gates[i];
-                    if !gate.is_empty() {
-                        def_pairs.push((def_id, gate));
-                    }
+                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
                 }
             }
-            // Default baseline (sorted vec)
-            let baseline = union_compiled_with_gates(&compiled_steps, &def_pairs);
             if !baseline.is_empty() {
-                let mem: Vec<usize> = baseline.iter().map(|(m, _)| *m).collect();
-                if !mem.is_empty() {
-                    // build init gates map
-                    let mut init_gates: HashMap<usize, Weight> = HashMap::with_capacity(baseline.len());
-                    for (m, w) in baseline.iter() {
-                        init_gates.insert(*m, w.clone());
-                    }
-                    let _ = ensure_state(mem, Some(init_gates), &mut states, &mut key_to_state, &mut work);
-                }
+                let mem: Vec<usize> = baseline.keys().copied().collect();
+                let _ = ensure_state(mem, Some(baseline.clone()), &mut states, &mut key_to_state, &mut work);
             }
 
             // Labels that appear as exceptions in any member
@@ -593,39 +471,52 @@ impl NWA {
                 }
             }
 
+            // For each label: override baseline by removing default parts for members that have
+            // exceptions at this label and add exception parts.
             for (lbl, idxs) in label_groups {
-                // Build removal vec = union of defaults for members having exception on lbl
-                let mut rem_pairs: Vec<(usize, &Weight)> = Vec::with_capacity(idxs.len());
-                let mut ex_pairs: Vec<(usize, &Weight)> = Vec::with_capacity(idxs.len());
+                let mut cur_map = baseline.clone();
+
                 for i in idxs.iter().copied() {
                     let sig_id = st.members[i];
                     let gate = &st.gates[i];
-                    if gate.is_empty() { continue; }
+                    // Remove defaults for this member (if any)
                     if let Some(def_id) = sigs[sig_id].def {
-                        rem_pairs.push((def_id, gate));
+                        let comp = &compiled_steps[def_id].by_sig;
+                        if gate.is_all_fast() {
+                            for (tsig, w) in comp {
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= w;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        } else {
+                            for (tsig, w) in comp {
+                                let share = w & gate;
+                                if share.is_empty() {
+                                    continue;
+                                }
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= &share;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        }
                     }
+                    // Add exception
                     if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
-                        ex_pairs.push((ex_id, gate));
+                        let comp = &compiled_steps[ex_id].by_sig;
+                        accumulate(&mut cur_map, comp, gate);
                     }
                 }
-                let removal = union_compiled_with_gates(&compiled_steps, &rem_pairs);
-                let mut cur = subtract_sorted(&baseline, &removal);
-                // Add exceptions
-                let adds = union_compiled_with_gates(&compiled_steps, &ex_pairs);
-                cur = add_sorted(&cur, &adds);
 
-                if cur.is_empty() {
-                    continue;
+                if !cur_map.is_empty() {
+                    let mem: Vec<usize> = cur_map.keys().copied().collect();
+                    let _ = ensure_state(mem, Some(cur_map), &mut states, &mut key_to_state, &mut work);
                 }
-                let mem: Vec<usize> = cur.iter().map(|(m, _)| *m).collect();
-                if mem.is_empty() {
-                    continue;
-                }
-                let mut init_gates: HashMap<usize, Weight> = HashMap::with_capacity(cur.len());
-                for (m, w) in cur.iter() {
-                    init_gates.insert(*m, w.clone());
-                }
-                let _ = ensure_state(mem, Some(init_gates), &mut states, &mut key_to_state, &mut work);
             }
         }
         if let Some(p) = pb_det {
@@ -673,22 +564,20 @@ impl NWA {
             // Final
             dwa.states[sid].final_weight = compute_final(&st);
 
-            // Default baseline
-            let mut def_pairs: Vec<(usize, &Weight)> = Vec::new();
-            def_pairs.reserve(st.members.len());
+            // Build default baseline
+            let mut baseline: HashMap<usize, Weight> = HashMap::new();
             for (i, sig_id) in st.members.iter().enumerate() {
                 if let Some(def_id) = sigs[*sig_id].def {
-                    let gate = &st.gates[i];
-                    if !gate.is_empty() {
-                        def_pairs.push((def_id, gate));
-                    }
+                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
                 }
             }
-            let baseline = union_compiled_with_gates(&compiled_steps, &def_pairs);
             if !baseline.is_empty() {
-                let mask = compute_mask(&baseline);
+                let mut mask = Weight::zeros();
+                for (_, w) in &baseline {
+                    mask |= w;
+                }
                 if !mask.is_empty() {
-                    let mut mem: Vec<usize> = baseline.iter().map(|(m, _)| *m).collect();
+                    let mut mem: Vec<usize> = baseline.keys().copied().collect();
                     mem.sort_unstable();
                     let key = MembersKey::new(mem);
                     if let Some(&to_id) = key_to_state.get(&key) {
@@ -705,32 +594,54 @@ impl NWA {
                 }
             }
             for (lbl, idxs) in label_groups {
-                let mut rem_pairs: Vec<(usize, &Weight)> = Vec::with_capacity(idxs.len());
-                let mut ex_pairs: Vec<(usize, &Weight)> = Vec::with_capacity(idxs.len());
+                let mut cur_map = baseline.clone();
+                // Remove defaults for members that have an exception on this label, then add ex
                 for i in idxs.iter().copied() {
                     let sig_id = st.members[i];
                     let gate = &st.gates[i];
-                    if gate.is_empty() { continue; }
                     if let Some(def_id) = sigs[sig_id].def {
-                        rem_pairs.push((def_id, gate));
+                        let comp = &compiled_steps[def_id].by_sig;
+                        if gate.is_all_fast() {
+                            for (tsig, w) in comp {
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= w;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        } else {
+                            for (tsig, w) in comp {
+                                let share = w & gate;
+                                if share.is_empty() {
+                                    continue;
+                                }
+                                if let Some(old) = cur_map.get_mut(tsig) {
+                                    *old -= &share;
+                                    if old.is_empty() {
+                                        cur_map.remove(tsig);
+                                    }
+                                }
+                            }
+                        }
                     }
                     if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
-                        ex_pairs.push((ex_id, gate));
+                        let comp = &compiled_steps[ex_id].by_sig;
+                        accumulate(&mut cur_map, comp, gate);
                     }
                 }
-                let removal = union_compiled_with_gates(&compiled_steps, &rem_pairs);
-                let mut cur = subtract_sorted(&baseline, &removal);
-                let adds = union_compiled_with_gates(&compiled_steps, &ex_pairs);
-                cur = add_sorted(&cur, &adds);
 
-                if cur.is_empty() {
+                if cur_map.is_empty() {
                     continue;
                 }
-                let mask = compute_mask(&cur);
+                let mut mask = Weight::zeros();
+                for (_, w) in &cur_map {
+                    mask |= w;
+                }
                 if mask.is_empty() {
                     continue;
                 }
-                let mut mem: Vec<usize> = cur.iter().map(|(m, _)| *m).collect();
+                let mut mem: Vec<usize> = cur_map.keys().copied().collect();
                 mem.sort_unstable();
                 let key = MembersKey::new(mem);
                 if let Some(&to_id) = key_to_state.get(&key) {
