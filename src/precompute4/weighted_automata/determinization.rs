@@ -18,7 +18,11 @@ impl NWA {
         let mut nwa = self.clone();
         nwa.simplify();
 
+        crate::debug!(4, "NWA::determinize_to_dwa stats after simplify:\n{}", nwa.stats());
+
         let result = nwa.det_fixpoint();
+
+        crate::debug!(4, "NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
 
         crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
         result

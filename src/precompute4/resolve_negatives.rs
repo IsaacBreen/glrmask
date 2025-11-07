@@ -86,16 +86,19 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
     let mut nwa = NWA::from_dwa(dwa);
     crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
+    crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
 
     if let Some(p) = &pb { p.set_message("Resolve negatives in NWA"); p.set_position(2); }
     resolve_negative_codes_in_nwa(&mut nwa);
     crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
+    crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
 
     if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(3); }
     let mut result = nwa.determinize_to_dwa();
     if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(4); }
     result.simplify();
     *dwa = result;
+    crate::debug!(4, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
 
     if let Some(p) = &pb { p.finish_with_message("Done"); }
     crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());

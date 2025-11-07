@@ -5,7 +5,7 @@
 
 use super::common::{format_i16_char, NWAStateID, Weight};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fmt::{Display, Formatter};
+use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +185,74 @@ impl Display for NWAStates {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NWAStats {
+    pub num_states: usize,
+    pub num_final_states: usize,
+    pub total_epsilon_transitions: usize,
+    pub total_labeled_transitions: usize,
+    pub total_default_transitions: usize,
+    pub avg_epsilon_per_state: f64,
+    pub avg_labeled_per_state: f64,
+}
+
+impl Display for NWAStats {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "NWA Stats:")?;
+        writeln!(f, "  - States: {}", self.num_states)?;
+        writeln!(f, "  - Final States: {}", self.num_final_states)?;
+        writeln!(f, "  - Epsilon Transitions: {}", self.total_epsilon_transitions)?;
+        writeln!(f, "  - Labeled Transitions: {}", self.total_labeled_transitions)?;
+        writeln!(f, "  - Default Transitions: {}", self.total_default_transitions)?;
+        writeln!(f, "  - Avg Epsilon/State: {:.2}", self.avg_epsilon_per_state)?;
+        writeln!(f, "  - Avg Labeled/State: {:.2}", self.avg_labeled_per_state)
+    }
+}
+
+impl NWA {
+    pub fn stats(&self) -> NWAStats {
+        let num_states = self.states.len();
+        if num_states == 0 {
+            return NWAStats {
+                num_states: 0,
+                num_final_states: 0,
+                total_epsilon_transitions: 0,
+                total_labeled_transitions: 0,
+                total_default_transitions: 0,
+                avg_epsilon_per_state: 0.0,
+                avg_labeled_per_state: 0.0,
+            };
+        }
+
+        let mut num_final_states = 0;
+        let mut total_epsilon_transitions = 0;
+        let mut total_labeled_transitions = 0;
+        let mut total_default_transitions = 0;
+
+        for state in &self.states.0 {
+            if state.final_weight.is_some() {
+                num_final_states += 1;
+            }
+            total_epsilon_transitions += state.epsilons.len();
+            total_labeled_transitions += state.transitions.values().map(|v| v.len()).sum::<usize>();
+            total_default_transitions += state.default.len();
+        }
+
+        let avg_epsilon_per_state = total_epsilon_transitions as f64 / num_states as f64;
+        let avg_labeled_per_state = total_labeled_transitions as f64 / num_states as f64;
+
+        NWAStats {
+            num_states,
+            num_final_states,
+            total_epsilon_transitions,
+            total_labeled_transitions,
+            total_default_transitions,
+            avg_epsilon_per_state,
+            avg_labeled_per_state,
+        }
     }
 }
 

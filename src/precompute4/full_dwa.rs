@@ -1,3 +1,4 @@
+use crate::r#macro::is_debug_level_enabled;
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::parser::{ExpectElse, GLRParser};
@@ -188,6 +189,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     };
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
+    if is_debug_level_enabled(5) {
+        for (term, dwa) in template_dwas.iter().take(5) {
+            crate::debug!(5, "Stats for template DWA for terminal {:?}:\n{}", term, dwa.stats());
+        }
+    }
 
     // 2. Set up shared NWA state arena.
     let states_arena = RefCell::new(NWAStates::default());
@@ -313,11 +319,13 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     };
     crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
+    crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
 
     let now = Instant::now();
     crate::debug!(5, "Starting resolve_negative_codes_in_nwa...");
     resolve_negative_codes_in_nwa(&mut combined_nwa);
     crate::debug!(4, "resolve_negative_codes_in_nwa took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+    crate::debug!(4, "Stats for combined NWA after negative resolution:\n{}", combined_nwa.stats());
 
     let now = Instant::now();
     // Determinize the single combined NWA
@@ -325,6 +333,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let mut final_dwa = combined_nwa.determinize_to_dwa();
     final_dwa.simplify();
     crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
+    crate::debug!(4, "Stats for final DWA:\n{}", final_dwa.stats());
 
     crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
     final_dwa

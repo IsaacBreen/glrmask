@@ -5,7 +5,7 @@
 
 use super::common::{format_pos_code, I16Map, StateID, Weight};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fmt::{Display, Formatter};
+use std::fmt::{self, Display, Formatter};
 use std::ops::{Deref, Index, IndexMut};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -320,6 +320,66 @@ impl DWA {
         from_state.transitions.default = Some(to);
         from_state.trans_weight_default = Some(weight);
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DWAStats {
+    pub num_states: usize,
+    pub num_transitions: usize,
+    pub num_final_states: usize,
+    pub num_default_transitions: usize,
+    pub avg_exceptions_per_state: f64,
+}
+
+impl Display for DWAStats {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "DWA Stats:")?;
+        writeln!(f, "  - States: {}", self.num_states)?;
+        writeln!(f, "  - Transitions: {}", self.num_transitions)?;
+        writeln!(f, "  - Final States: {}", self.num_final_states)?;
+        writeln!(f, "  - States with Default: {}", self.num_default_transitions)?;
+        writeln!(f, "  - Avg Exceptions/State: {:.2}", self.avg_exceptions_per_state)
+    }
+}
+
+impl DWA {
+    pub fn stats(&self) -> DWAStats {
+        let num_states = self.states.len();
+        if num_states == 0 {
+            return DWAStats {
+                num_states: 0,
+                num_transitions: 0,
+                num_final_states: 0,
+                num_default_transitions: 0,
+                avg_exceptions_per_state: 0.0,
+            };
+        }
+
+        let mut num_exceptions = 0;
+        let mut num_final_states = 0;
+        let mut num_default_transitions = 0;
+
+        for state in &self.states.0 {
+            num_exceptions += state.transitions.exceptions.len();
+            if state.final_weight.is_some() {
+                num_final_states += 1;
+            }
+            if state.transitions.default.is_some() {
+                num_default_transitions += 1;
+            }
+        }
+
+        let num_transitions = num_exceptions + num_default_transitions;
+        let avg_exceptions_per_state = num_exceptions as f64 / num_states as f64;
+
+        DWAStats {
+            num_states,
+            num_transitions,
+            num_final_states,
+            num_default_transitions,
+            avg_exceptions_per_state,
+        }
     }
 }
 
