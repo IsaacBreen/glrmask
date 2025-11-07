@@ -259,12 +259,21 @@ impl NWA {
             }
 
             for lbl in all_ex_labels {
-                let mut ex_map = HashMap::new();
+                let mut ex_map = target_maps.get(&None).cloned().unwrap_or_default();
                 for (sig_id, gate) in &node_gates {
                     if let Some(ex_id) = sigs[*sig_id].ex.get(&lbl) {
+                        // Subtract default contribution if it exists
+                        if let Some(def_id) = sigs[*sig_id].def {
+                            for (tsig, w) in &compiled_steps[def_id].by_sig {
+                                let share = w & gate;
+                                if let Some(old) = ex_map.get_mut(tsig) {
+                                    *old -= &share;
+                                    if old.is_empty() { ex_map.remove(tsig); }
+                                }
+                            }
+                        }
+                        // Add exception contribution
                         accumulate(&mut ex_map, &compiled_steps[*ex_id].by_sig, gate);
-                    } else if let Some(def_id) = sigs[*sig_id].def {
-                        accumulate(&mut ex_map, &compiled_steps[def_id].by_sig, gate);
                     }
                 }
                 target_maps.insert(Some(lbl), ex_map);
@@ -352,19 +361,6 @@ impl NWA {
         let mut next_dwa_id = 0;
         let final_start_id = partitions[start_idx];
 
-        // Pre-compute total weight for each partition
-        let mut partition_weights: HashMap<usize, Weight> = HashMap::new();
-        for i in 0..num_nodes {
-            let part_id = partitions[i];
-            let mut node_mask = Weight::zeros();
-            for w in nodes[i].gates.values() {
-                node_mask |= w;
-            }
-            if !node_mask.is_empty() {
-                *partition_weights.entry(part_id).or_insert_with(Weight::zeros) |= &node_mask;
-            }
-        }
-
         let mut dwa = DWA::new();
         dwa.states.0.clear();
 
@@ -399,16 +395,21 @@ impl NWA {
             let from_dwa_id = *part_to_dwa_id.get(&from_part).unwrap();
             let node = &nodes[i];
 
+            let compute_edge_weight = |target_idx: usize| -> Weight {
+                let mut mask = Weight::zeros();
+                for w in nodes[target_idx].gates.values() { mask |= w; }
+                mask
+            };
+
             if let Some(def_idx) = node.default_target_idx {
                 let to_part = partitions[def_idx];
                 let to_dwa_id = *part_to_dwa_id.get(&to_part).unwrap();
-                if let Some(weight) = partition_weights.get(&to_part) {
-                    if !weight.is_empty() {
-                        if let Some(w) = dwa.states[from_dwa_id].trans_weight_default.as_mut() {
-                            *w |= weight;
-                        } else {
-                            dwa.set_default_transition(from_dwa_id, to_dwa_id, weight.clone()).ok();
-                        }
+                let weight = compute_edge_weight(def_idx);
+                if !weight.is_empty() {
+                    if let Some(w) = dwa.states[from_dwa_id].trans_weight_default.as_mut() {
+                        *w |= &weight;
+                    } else {
+                        dwa.set_default_transition(from_dwa_id, to_dwa_id, weight).ok();
                     }
                 }
             }
@@ -416,13 +417,12 @@ impl NWA {
             for (lbl, ex_idx) in &node.exception_targets {
                 let to_part = partitions[*ex_idx];
                 let to_dwa_id = *part_to_dwa_id.get(&to_part).unwrap();
-                if let Some(weight) = partition_weights.get(&to_part) {
-                    if !weight.is_empty() {
-                        if let Some(w) = dwa.states[from_dwa_id].trans_weights_exceptions.get_mut(lbl) {
-                            *w |= weight;
-                        } else {
-                            dwa.add_transition(from_dwa_id, *lbl, to_dwa_id, weight.clone()).ok();
-                        }
+                let weight = compute_edge_weight(*ex_idx);
+                if !weight.is_empty() {
+                    if let Some(w) = dwa.states[from_dwa_id].trans_weights_exceptions.get_mut(lbl) {
+                        *w |= &weight;
+                    } else {
+                        dwa.add_transition(from_dwa_id, *lbl, to_dwa_id, weight).ok();
                     }
                 }
             }
