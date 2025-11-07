@@ -6,7 +6,7 @@
 use super::bitset::SimpleBitset;
 use std::collections::BTreeMap;
 
-pub(crate) const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
+pub(crate) const STOCHASTIC_DEBUG: bool = true; // Set to false by default to avoid heavy stochastic validation on large automata
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct I16Map<T> {
