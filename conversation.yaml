@@ -3039,8 +3039,7 @@ local_system:
               struct DetState {
                   members: Vec<usize>,              // macro_sig ids, sorted
                   pos: HashMap<usize, usize>,       // macro_sig_id -> index
-                  gates: Vec<Weight>,               // current gates per member (monotone growing)
-                  done: Vec<Weight>,                // already-propagated portion per member (subset of gates[i])
+                  gates: Vec<Weight>,               // gates per member
               }
 
               #[derive(Clone, Eq, PartialEq, Hash)]
@@ -3096,9 +3095,7 @@ local_system:
                       }
                   }
                   let id = states.len();
-                  // 'done' starts at zero; we will propagate only deltas = gates - done
-                  let done = vec![Weight::zeros(); items.len()];
-                  states.push(DetState { members: items, pos, gates, done });
+                  states.push(DetState { members: items, pos, gates });
                   map.insert(key, id);
                   work.push_back(id);
                   id
@@ -3173,55 +3170,31 @@ local_system:
                       p.set_message(format!("states: {}, queue: {}", states.len(), work.len()));
                   }
 
-                  // Snapshot current members/gates/done for delta computation
-                  let members = states[sid].members.clone();
-                  let gates = states[sid].gates.clone();
-                  let prev_done = states[sid].done.clone();
+                  let st = states[sid].clone();
 
-                  // Compute per-member delta = gates - done; only propagate deltas
-                  let mut deltas: Vec<Weight> = vec![Weight::zeros(); members.len()];
-                  let mut idxs_delta: Vec<usize> = Vec::new();
-                  for i in 0..members.len() {
-                      let mut d = gates[i].clone();
-                      d -= &prev_done[i];
-                      if !d.is_empty() {
-                          deltas[i] = d;
-                          idxs_delta.push(i);
+                  // Default baseline: accumulate all members' defaults
+                  let mut structural_baseline: HashMap<usize, Weight> = HashMap::new();
+                  for (i, sig_id) in st.members.iter().enumerate() {
+                      if let Some(def_id) = sigs[*sig_id].def {
+                          accumulate(&mut structural_baseline, &compiled_steps[def_id].by_sig, &Weight::all());
                       }
                   }
-                  if idxs_delta.is_empty() {
-                      // Nothing new to propagate from this state
-                      continue;
-                  }
-
-                  // Default baseline: accumulate defaults only for delta parts
-                  let mut baseline: HashMap<usize, Weight> = HashMap::new();
-                  for &i in &idxs_delta {
-                      let sig_id = members[i];
-                      if let Some(def_id) = sigs[sig_id].def {
-                          // Early mask filter: if delta ∧ step-mask is empty, skip
-                          let gate_eff = &deltas[i] & &compiled_steps[def_id].mask;
-                          if gate_eff.is_empty() {
-                              continue;
-                          }
-                          accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &gate_eff);
+                  let mut actual_baseline: HashMap<usize, Weight> = HashMap::new();
+                  for (i, sig_id) in st.members.iter().enumerate() {
+                      if let Some(def_id) = sigs[*sig_id].def {
+                          accumulate(&mut actual_baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
                       }
                   }
-                  if !baseline.is_empty() {
-                      let mem: Vec<usize> = baseline.keys().copied().collect();
-                      let _ = ensure_state(mem, Some(baseline.clone()), &mut states, &mut key_to_state, &mut work);
+
+                  if !structural_baseline.is_empty() {
+                      let mem: Vec<usize> = structural_baseline.keys().copied().collect();
+                      let _ = ensure_state(mem, Some(actual_baseline.clone()), &mut states, &mut key_to_state, &mut work);
                   }
 
-                  // Labels that appear as exceptions in members having non-empty delta (and whose ex-step mask intersects the delta)
+                  // Labels that appear as exceptions in any member
                   let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-                  for &i in &idxs_delta {
-                      let sig_id = members[i];
-                      for (lbl, ex_id) in &sigs[sig_id].ex {
-                          // Only consider this label if the exception step has any overlap with the delta
-                          let gate_ex = &deltas[i] & &compiled_steps[*ex_id].mask;
-                          if gate_ex.is_empty() {
-                              continue;
-                          }
+                  for (i, sig_id) in st.members.iter().enumerate() {
+                      for (lbl, _) in &sigs[*sig_id].ex {
                           label_groups.entry(*lbl).or_default().push(i);
                       }
                   }
@@ -3229,48 +3202,69 @@ local_system:
                   // For each label: override baseline by removing default parts for members that have
                   // exceptions at this label and add exception parts.
                   for (lbl, idxs) in label_groups {
-                      let mut cur_map = baseline.clone();
-
+                      let mut structural_cur_map = structural_baseline.clone();
                       for i in idxs.iter().copied() {
-                          let sig_id = members[i];
-                          // Remove defaults for this member (corresponding only to the delta part for defaults)
+                          let sig_id = st.members[i];
                           if let Some(def_id) = sigs[sig_id].def {
                               let comp = &compiled_steps[def_id].by_sig;
-                              let gate_def = &deltas[i] & &compiled_steps[def_id].mask;
-                              if !gate_def.is_empty() {
+                              for (tsig, w) in comp {
+                                  if let Some(old) = structural_cur_map.get_mut(tsig) {
+                                      *old -= w;
+                                      if old.is_empty() {
+                                          structural_cur_map.remove(tsig);
+                                      }
+                                  }
+                              }
+                          }
+                          if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
+                              let comp = &compiled_steps[ex_id].by_sig;
+                              accumulate(&mut structural_cur_map, comp, &Weight::all());
+                          }
+                      }
+
+                      if structural_cur_map.is_empty() {
+                          continue;
+                      }
+
+                      let mut actual_cur_map = actual_baseline.clone();
+                      for i in idxs.iter().copied() {
+                          let sig_id = st.members[i];
+                          let gate = &st.gates[i];
+                          if let Some(def_id) = sigs[sig_id].def {
+                              let comp = &compiled_steps[def_id].by_sig;
+                              if gate.is_all_fast() {
                                   for (tsig, w) in comp {
-                                      let share = w & &gate_def;
+                                      if let Some(old) = actual_cur_map.get_mut(tsig) {
+                                          *old -= w;
+                                          if old.is_empty() {
+                                              actual_cur_map.remove(tsig);
+                                          }
+                                      }
+                                  }
+                              } else {
+                                  for (tsig, w) in comp {
+                                      let share = w & gate;
                                       if share.is_empty() {
                                           continue;
                                       }
-                                      if let Some(old) = cur_map.get_mut(tsig) {
+                                      if let Some(old) = actual_cur_map.get_mut(tsig) {
                                           *old -= &share;
                                           if old.is_empty() {
-                                              cur_map.remove(tsig);
+                                              actual_cur_map.remove(tsig);
                                           }
                                       }
                                   }
                               }
                           }
-                          // Remove defaults for this member (if any)
-                          // Add exception
                           if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
                               let comp = &compiled_steps[ex_id].by_sig;
-                              let gate_ex = &deltas[i] & &compiled_steps[ex_id].mask;
-                              if !gate_ex.is_empty() {
-                                  accumulate(&mut cur_map, comp, &gate_ex);
-                              }
+                              accumulate(&mut actual_cur_map, comp, gate);
                           }
                       }
 
-                      if !cur_map.is_empty() {
-                          let mem: Vec<usize> = cur_map.keys().copied().collect();
-                          let _ = ensure_state(mem, Some(cur_map), &mut states, &mut key_to_state, &mut work);
-                      }
+                      let mem: Vec<usize> = structural_cur_map.keys().copied().collect();
+                      let _ = ensure_state(mem, Some(actual_cur_map), &mut states, &mut key_to_state, &mut work);
                   }
-
-                  // Mark all current gate bits as processed for this state
-                  states[sid].done = gates;
               }
               if let Some(p) = pb_det {
                   p.finish_with_message(format!("Determinized to {} states", states.len()));
@@ -3318,22 +3312,30 @@ local_system:
                   dwa.states[sid].final_weight = compute_final(&st);
 
                   // Build default baseline
-                  let mut baseline: HashMap<usize, Weight> = HashMap::new();
+                  let mut structural_baseline: HashMap<usize, Weight> = HashMap::new();
                   for (i, sig_id) in st.members.iter().enumerate() {
                       if let Some(def_id) = sigs[*sig_id].def {
-                          accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+                          accumulate(&mut structural_baseline, &compiled_steps[def_id].by_sig, &Weight::all());
                       }
                   }
-                  if !baseline.is_empty() {
-                      let mut mask = Weight::zeros();
-                      for (_, w) in &baseline {
-                          mask |= w;
-                      }
-                      if !mask.is_empty() {
-                          let mut mem: Vec<usize> = baseline.keys().copied().collect();
-                          mem.sort_unstable();
-                          let key = MembersKey::new(mem);
-                          if let Some(&to_id) = key_to_state.get(&key) {
+
+                  if !structural_baseline.is_empty() {
+                      let mut mem: Vec<usize> = structural_baseline.keys().copied().collect();
+                      mem.sort_unstable();
+                      let key = MembersKey::new(mem);
+                      if let Some(&to_id) = key_to_state.get(&key) {
+                          let mut actual_baseline: HashMap<usize, Weight> = HashMap::new();
+                          for (i, sig_id) in st.members.iter().enumerate() {
+                              if let Some(def_id) = sigs[*sig_id].def {
+                                  accumulate(&mut actual_baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+                              }
+                          }
+
+                          let mut mask = Weight::zeros();
+                          for (_, w) in &actual_baseline {
+                              mask |= w;
+                          }
+                          if !mask.is_empty() {
                               let _ = dwa.set_default_transition(sid, to_id, mask);
                           }
                       }
@@ -3347,57 +3349,80 @@ local_system:
                       }
                   }
                   for (lbl, idxs) in label_groups {
-                      let mut cur_map = baseline.clone();
-                      // Remove defaults for members that have an exception on this label, then add ex
+                      let mut structural_cur_map = structural_baseline.clone();
                       for i in idxs.iter().copied() {
                           let sig_id = st.members[i];
-                          let gate = &st.gates[i];
                           if let Some(def_id) = sigs[sig_id].def {
                               let comp = &compiled_steps[def_id].by_sig;
-                              if gate.is_all_fast() {
-                                  for (tsig, w) in comp {
-                                      if let Some(old) = cur_map.get_mut(tsig) {
-                                          *old -= w;
-                                          if old.is_empty() {
-                                              cur_map.remove(tsig);
-                                          }
-                                      }
-                                  }
-                              } else {
-                                  for (tsig, w) in comp {
-                                      let share = w & gate;
-                                      if share.is_empty() {
-                                          continue;
-                                      }
-                                      if let Some(old) = cur_map.get_mut(tsig) {
-                                          *old -= &share;
-                                          if old.is_empty() {
-                                              cur_map.remove(tsig);
-                                          }
+                              for (tsig, w) in comp {
+                                  if let Some(old) = structural_cur_map.get_mut(tsig) {
+                                      *old -= w;
+                                      if old.is_empty() {
+                                          structural_cur_map.remove(tsig);
                                       }
                                   }
                               }
                           }
                           if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
                               let comp = &compiled_steps[ex_id].by_sig;
-                              accumulate(&mut cur_map, comp, gate);
+                              accumulate(&mut structural_cur_map, comp, &Weight::all());
                           }
                       }
 
-                      if cur_map.is_empty() {
+                      if structural_cur_map.is_empty() {
                           continue;
                       }
-                      let mut mask = Weight::zeros();
-                      for (_, w) in &cur_map {
-                          mask |= w;
-                      }
-                      if mask.is_empty() {
-                          continue;
-                      }
-                      let mut mem: Vec<usize> = cur_map.keys().copied().collect();
+
+                      let mut mem: Vec<usize> = structural_cur_map.keys().copied().collect();
                       mem.sort_unstable();
                       let key = MembersKey::new(mem);
                       if let Some(&to_id) = key_to_state.get(&key) {
+                          let mut actual_baseline: HashMap<usize, Weight> = HashMap::new();
+                          for (i, sig_id) in st.members.iter().enumerate() {
+                              if let Some(def_id) = sigs[*sig_id].def {
+                                  accumulate(&mut actual_baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+                              }
+                          }
+                          let mut actual_cur_map = actual_baseline;
+                          for i in idxs.iter().copied() {
+                              let sig_id = st.members[i];
+                              let gate = &st.gates[i];
+                              if let Some(def_id) = sigs[sig_id].def {
+                                  let comp = &compiled_steps[def_id].by_sig;
+                                  if gate.is_all_fast() {
+                                      for (tsig, w) in comp {
+                                          if let Some(old) = actual_cur_map.get_mut(tsig) {
+                                              *old -= w;
+                                              if old.is_empty() {
+                                                  actual_cur_map.remove(tsig);
+                                              }
+                                          }
+                                      }
+                                  } else {
+                                      for (tsig, w) in comp {
+                                          let share = w & gate;
+                                          if share.is_empty() {
+                                              continue;
+                                          }
+                                          if let Some(old) = actual_cur_map.get_mut(tsig) {
+                                              *old -= &share;
+                                              if old.is_empty() {
+                                                  actual_cur_map.remove(tsig);
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                              if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
+                                  let comp = &compiled_steps[ex_id].by_sig;
+                                  accumulate(&mut actual_cur_map, comp, gate);
+                              }
+                          }
+
+                          if actual_cur_map.is_empty() { continue; }
+                          let mut mask = Weight::zeros();
+                          for (_, w) in &actual_cur_map { mask |= w; }
+                          if mask.is_empty() { continue; }
                           let _ = dwa.add_transition(sid, lbl, to_id, mask);
                       }
                   }
@@ -3423,7 +3448,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -5176,6 +5201,10 @@ messages:
       ```
       This just seems to keep going with no end. How? We want it to be as fast as possible. But it'd be good if it *actually finishes* as well.
       This just keeps going, the number of states increases and the queue increases in proportion.
+      We need to make it radically faster by changing the approach.
+
+      You can make use of this information:
+      There are a relatively small number of strongly connected components. Within each component, almost all edges have weight `SimpleBitset::all()`. Between components, there are few edges, but they normally have more complex non-all weights.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5195,181 +5224,89 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here’s a focused fix to make determinization finish and run faster by avoiding repeated full recomputation per state. We’ll switch to incremental (delta) propagation: when a determinized state’s gate weights increase, we only propagate the newly-added bits (delta) instead of recomputing all transitions from scratch. We also use compiled-step masks to skip work when a delta doesn’t intersect any outgoing transitions.
+      Of course. The state space explosion during determinization is a classic problem, and your insight about the structure of weights within and between strongly connected components is key to solving it. The current algorithm creates new determinized states whenever the set of active NWA states changes, and this set is sensitive to weights pruning paths.
 
-      Step-by-step instructions
+      My proposed solution is to decouple the structure of the determinized automaton from the weights. The set of states and transitions in the DWA will be determined only by the NWA's topology (as if all weights were `Weight::all()`). The actual weights will then be propagated through this fixed structure. This prevents weight variations from creating an exploding number of DWA states.
 
-      1) Edit src/precompute4/weighted_automata/determinization.rs
-      - Inside det_fixpoint:
-        - Extend the DetState struct with a new field done: Vec<Weight>. This tracks which weight bits have already been propagated for each member (macro signature) of a determinized state.
-        - In ensure_state(...), initialize done to a vector of Weight::zeros() for new states. Leave it unchanged for existing states (so we only propagate newly added bits).
-        - Replace the inner fixpoint loop’s body to:
-          - Compute per-member delta = gates[i] - done[i]. If all deltas are empty, skip.
-          - Build the “baseline” (default transitions) using only those deltas and filter via compiled step masks (compiled_steps[step_id].mask).
-          - Build label-specific groups considering only members with non-empty deltas and only labels where the exception’s mask intersects the delta (again, using compiled step masks).
-          - For each label group, subtract default parts corresponding to the same delta, then add the exception parts (also masked by the delta).
-          - Ensure target states via ensure_state as before, but only with the newly-added contributions.
-          - Finally, update states[sid].done = gates (we’ve now propagated all bits currently present).
-      - This change prevents repeatedly re-propagating the same weight bits and drastically reduces queue churn and state explosion.
+      Here are the step-by-step instructions to modify the determinization algorithm, followed by the git diff.
 
-      2) No other files need changes.
+      ### Step-by-step Instructions
 
-      Git diffs
+      File to edit: `src/precompute4/weighted_automata/determinization.rs`
+
+      I will modify the `det_fixpoint` function in two places: the main fixpoint loop that discovers states and propagates weights, and the final loop that builds the DWA.
+
+      1.  **Modify the fixpoint propagation loop:**
+          -   Locate the `while let Some(sid) = work.pop_front()` loop.
+          -   Inside this loop, we first calculate the target for a **default transition**. We will now calculate two versions: a `structural_baseline` map (assuming all weights are `Weight::all()`) and an `actual_baseline` map (using the real weights). The `structural_baseline` will determine the target DWA state's identity, while the `actual_baseline` will be used to update its weights.
+          -   Next, for **exception transitions**, we will do the same. For each exception label, we'll compute a `structural_cur_map` and an `actual_cur_map`. The structural map defines the target state, and the actual map provides the weights to propagate.
+          -   The call to `ensure_state` will use the members from the *structural* map to define the target state, but pass the *actual* map to update the weights.
+
+      2.  **Modify the final DWA construction loop:**
+          -   Locate the `for sid in 0..states.len()` loop at the end of the function.
+          -   This loop builds the final `DWA` transitions. The logic here must mirror the changes from the fixpoint loop.
+          -   To determine the target state ID for a **default transition**, we'll compute the `structural_baseline` map, derive the `MembersKey` from it, and look it up in `key_to_state`.
+          -   Once we have the target ID, we'll compute the `actual_baseline` map to calculate the transition's weight (`mask`).
+          -   Similarly, for each **exception transition**, we'll compute the `structural_cur_map` to find the target state ID, and then the `actual_cur_map` to calculate the transition's weight.
+
+      This change ensures that the DWA's state graph is stable and doesn't explode due to weight variations, which should solve the performance problem.
+
+      ### Git Diffs
+
+      Here is the git diff for the required changes.
 
       ```diff
-      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
       --- a/src/precompute4/weighted_automata/determinization.rs
       +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -206,11 +206,12 @@
-               // Determinization worklist
-               #[derive(Clone)]
-               struct DetState {
-                   members: Vec<usize>,              // macro_sig ids, sorted
-                   pos: HashMap<usize, usize>,       // macro_sig_id -> index
-      -            gates: Vec<Weight>,               // gates per member
-      +            gates: Vec<Weight>,               // current gates per member (monotone growing)
-      +            done: Vec<Weight>,                // already-propagated portion per member (subset of gates[i])
-               }
+      @@ -502,58 +502,108 @@
+                   let st = states[sid].clone();
        
-               #[derive(Clone, Eq, PartialEq, Hash)]
-               struct MembersKey {
-                   items: Vec<usize>,
-      @@ -234,6 +235,7 @@
-                   }
-                   let items = key.items.clone();
-                   let mut pos = HashMap::with_capacity(items.len());
-                   for (i, sid) in items.iter().enumerate() {
-                       pos.insert(*sid, i);
-      @@ -241,12 +243,14 @@
-                   let mut gates = vec![Weight::zeros(); items.len()];
-                   if let Some(init_map) = init {
-                       for (sid, w) in init_map {
-                           if let Some(&idx) = pos.get(&sid) {
-                               gates[idx] |= &w;
-                           }
-                       }
-                   }
-                   let id = states.len();
-      -            states.push(DetState { members: items, pos, gates });
-      +            // 'done' starts at zero; we will propagate only deltas = gates - done
-      +            let done = vec![Weight::zeros(); items.len()];
-      +            states.push(DetState { members: items, pos, gates, done });
-                   map.insert(key, id);
-                   work.push_back(id);
-                   id
-               }
-       
-      @@ -303,55 +307,118 @@
-                   );
-                   p.set_message("Starting...");
-                   Some(p)
-               } else {
-                   None
-               };
-       
-               // Fixpoint propagation: ensure all reachable determinized states are created and
-               // their gates saturated.
-               while let Some(sid) = work.pop_front() {
-                   if let Some(p) = &pb_det {
-                       p.inc(1);
-                       p.set_length(states.len() as u64);
-                       p.set_message(format!("states: {}, queue: {}", states.len(), work.len()));
-                   }
-       
-      -            let st = states[sid].clone();
-      -
-      -            // Default baseline: accumulate all members' defaults
-      +            // Snapshot current members/gates/done for delta computation
-      +            let members = states[sid].members.clone();
-      +            let gates = states[sid].gates.clone();
-      +            let prev_done = states[sid].done.clone();
-      +
-      +            // Compute per-member delta = gates - done; only propagate deltas
-      +            let mut deltas: Vec<Weight> = vec![Weight::zeros(); members.len()];
-      +            let mut idxs_delta: Vec<usize> = Vec::new();
-      +            for i in 0..members.len() {
-      +                let mut d = gates[i].clone();
-      +                d -= &prev_done[i];
-      +                if !d.is_empty() {
-      +                    deltas[i] = d;
-      +                    idxs_delta.push(i);
+                   // Default baseline: accumulate all members' defaults
+      -            let mut baseline: HashMap<usize, Weight> = HashMap::new();
+      +            let mut structural_baseline: HashMap<usize, Weight> = HashMap::new();
+                   for (i, sig_id) in st.members.iter().enumerate() {
+                       if let Some(def_id) = sigs[*sig_id].def {
+      -                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+      -                }
+      -            }
+      -            if !baseline.is_empty() {
+      -                let mem: Vec<usize> = baseline.keys().copied().collect();
+      -                let _ = ensure_state(mem, Some(baseline.clone()), &mut states, &mut key_to_state, &mut work);
+      +                    accumulate(&mut structural_baseline, &compiled_steps[def_id].by_sig, &Weight::all());
       +                }
       +            }
-      +            if idxs_delta.is_empty() {
-      +                // Nothing new to propagate from this state
-      +                continue;
+      +            let mut actual_baseline: HashMap<usize, Weight> = HashMap::new();
+      +            for (i, sig_id) in st.members.iter().enumerate() {
+      +                if let Some(def_id) = sigs[*sig_id].def {
+      +                    accumulate(&mut actual_baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+      +                }
       +            }
       +
-      +            // Default baseline: accumulate defaults only for delta parts
-                   let mut baseline: HashMap<usize, Weight> = HashMap::new();
-      -            for (i, sig_id) in st.members.iter().enumerate() {
-      -                if let Some(def_id) = sigs[*sig_id].def {
-      -                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
-      +            for &i in &idxs_delta {
-      +                let sig_id = members[i];
-      +                if let Some(def_id) = sigs[sig_id].def {
-      +                    // Early mask filter: if delta ∧ step-mask is empty, skip
-      +                    let gate_eff = &deltas[i] & &compiled_steps[def_id].mask;
-      +                    if gate_eff.is_empty() {
-      +                        continue;
-      +                    }
-      +                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &gate_eff);
-                       }
-                   }
-                   if !baseline.is_empty() {
-                       let mem: Vec<usize> = baseline.keys().copied().collect();
-                       let _ = ensure_state(mem, Some(baseline.clone()), &mut states, &mut key_to_state, &mut work);
+      +            if !structural_baseline.is_empty() {
+      +                let mem: Vec<usize> = structural_baseline.keys().copied().collect();
+      +                let _ = ensure_state(mem, Some(actual_baseline.clone()), &mut states, &mut key_to_state, &mut work);
                    }
        
-      -            // Labels that appear as exceptions in any member
-      +            // Labels that appear as exceptions in members having non-empty delta (and whose ex-step mask intersects the delta)
+                   // Labels that appear as exceptions in any member
                    let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-      -            for (i, sig_id) in st.members.iter().enumerate() {
-      -                for (lbl, _) in &sigs[*sig_id].ex {
-      -                    label_groups.entry(*lbl).or_default().push(i);
-      +            for &i in &idxs_delta {
-      +                let sig_id = members[i];
-      +                for (lbl, ex_id) in &sigs[sig_id].ex {
-      +                    // Only consider this label if the exception step has any overlap with the delta
-      +                    let gate_ex = &deltas[i] & &compiled_steps[*ex_id].mask;
-      +                    if gate_ex.is_empty() {
-      +                        continue;
-      +                    }
-      +                    label_groups.entry(*lbl).or_default().push(i);
+                   for (i, sig_id) in st.members.iter().enumerate() {
+                       for (lbl, _) in &sigs[*sig_id].ex {
+                           label_groups.entry(*lbl).or_default().push(i);
                        }
                    }
        
                    // For each label: override baseline by removing default parts for members that have
                    // exceptions at this label and add exception parts.
                    for (lbl, idxs) in label_groups {
-                       let mut cur_map = baseline.clone();
-       
+      -                let mut cur_map = baseline.clone();
+      -
+      +                let mut structural_cur_map = structural_baseline.clone();
                        for i in idxs.iter().copied() {
-      -                    let sig_id = st.members[i];
+                           let sig_id = st.members[i];
       -                    let gate = &st.gates[i];
-      +                    let sig_id = members[i];
-      +                    // Remove defaults for this member (corresponding only to the delta part for defaults)
-      +                    if let Some(def_id) = sigs[sig_id].def {
-      +                        let comp = &compiled_steps[def_id].by_sig;
-      +                        let gate_def = &deltas[i] & &compiled_steps[def_id].mask;
-      +                        if !gate_def.is_empty() {
-      +                            for (tsig, w) in comp {
-      +                                let share = w & &gate_def;
-      +                                if share.is_empty() {
-      +                                    continue;
-      +                                }
-      +                                if let Some(old) = cur_map.get_mut(tsig) {
-      +                                    *old -= &share;
-      +                                    if old.is_empty() {
-      +                                        cur_map.remove(tsig);
-      +                                    }
-      +                                }
-      +                            }
-      +                        }
-      +                    }
-                           // Remove defaults for this member (if any)
-      -                    if let Some(def_id) = sigs[sig_id].def {
-      -                        let comp = &compiled_steps[def_id].by_sig;
+      -                    // Remove defaults for this member (if any)
+                           if let Some(def_id) = sigs[sig_id].def {
+                               let comp = &compiled_steps[def_id].by_sig;
       -                        if gate.is_all_fast() {
       -                            for (tsig, w) in comp {
       -                                if let Some(old) = cur_map.get_mut(tsig) {
@@ -5377,8 +5314,13 @@ messages:
       -                                    if old.is_empty() {
       -                                        cur_map.remove(tsig);
       -                                    }
-      -                                }
-      -                            }
+      +                        for (tsig, w) in comp {
+      +                            if let Some(old) = structural_cur_map.get_mut(tsig) {
+      +                                *old -= w;
+      +                                if old.is_empty() {
+      +                                    structural_cur_map.remove(tsig);
+                                       }
+                                   }
       -                        } else {
       -                            for (tsig, w) in comp {
       -                                let share = w & gate;
@@ -5390,33 +5332,239 @@ messages:
       -                                    if old.is_empty() {
       -                                        cur_map.remove(tsig);
       -                                    }
-      -                                }
-      -                            }
-      -                        }
-      -                    }
-                           // Add exception
+      +                        }
+      +                    }
+      +                    if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
+      +                        let comp = &compiled_steps[ex_id].by_sig;
+      +                        accumulate(&mut structural_cur_map, comp, &Weight::all());
+      +                    }
+      +                }
+      +
+      +                if structural_cur_map.is_empty() {
+      +                    continue;
+      +                }
+      +
+      +                let mut actual_cur_map = actual_baseline.clone();
+      +                for i in idxs.iter().copied() {
+      +                    let sig_id = st.members[i];
+      +                    let gate = &st.gates[i];
+      +                    if let Some(def_id) = sigs[sig_id].def {
+      +                        let comp = &compiled_steps[def_id].by_sig;
+      +                        if gate.is_all_fast() {
+      +                            for (tsig, w) in comp {
+      +                                if let Some(old) = actual_cur_map.get_mut(tsig) {
+      +                                    *old -= w;
+      +                                    if old.is_empty() {
+      +                                        actual_cur_map.remove(tsig);
+      +                                    }
+      +                                }
+      +                            }
+      +                        } else {
+      +                            for (tsig, w) in comp {
+      +                                let share = w & gate;
+      +                                if share.is_empty() {
+      +                                    continue;
+      +                                }
+      +                                if let Some(old) = actual_cur_map.get_mut(tsig) {
+      +                                    *old -= &share;
+      +                                    if old.is_empty() {
+      +                                        actual_cur_map.remove(tsig);
+      +                                    }
+                                       }
+                                   }
+                               }
+                           }
+      -                    // Add exception
                            if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
                                let comp = &compiled_steps[ex_id].by_sig;
       -                        accumulate(&mut cur_map, comp, gate);
-      +                        let gate_ex = &deltas[i] & &compiled_steps[ex_id].mask;
-      +                        if !gate_ex.is_empty() {
-      +                            accumulate(&mut cur_map, comp, &gate_ex);
-      +                        }
-                           }
-                       }
-       
-                       if !cur_map.is_empty() {
-                           let mem: Vec<usize> = cur_map.keys().copied().collect();
-                           let _ = ensure_state(mem, Some(cur_map), &mut states, &mut key_to_state, &mut work);
-                       }
-                   }
+      -                    }
+      -                }
+      -
+      -                if !cur_map.is_empty() {
+      -                    let mem: Vec<usize> = cur_map.keys().copied().collect();
+      -                    let _ = ensure_state(mem, Some(cur_map), &mut states, &mut key_to_state, &mut work);
+      -                }
+      +                        accumulate(&mut actual_cur_map, comp, gate);
+      +                    }
+      +                }
       +
-      +            // Mark all current gate bits as processed for this state
-      +            states[sid].done = gates;
+      +                let mem: Vec<usize> = structural_cur_map.keys().copied().collect();
+      +                let _ = ensure_state(mem, Some(actual_cur_map), &mut states, &mut key_to_state, &mut work);
+                   }
                }
                if let Some(p) = pb_det {
-                   p.finish_with_message(format!("Determinized to {} states", states.len()));
-               }
+      @@ -593,22 +643,31 @@
+                   dwa.states[sid].final_weight = compute_final(&st);
+       
+                   // Build default baseline
+      -            let mut baseline: HashMap<usize, Weight> = HashMap::new();
+      +            let mut structural_baseline: HashMap<usize, Weight> = HashMap::new();
+                   for (i, sig_id) in st.members.iter().enumerate() {
+                       if let Some(def_id) = sigs[*sig_id].def {
+      -                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+      -                }
+      -            }
+      -            if !baseline.is_empty() {
+      -                let mut mask = Weight::zeros();
+      -                for (_, w) in &baseline {
+      -                    mask |= w;
+      -                }
+      -                if !mask.is_empty() {
+      -                    let mut mem: Vec<usize> = baseline.keys().copied().collect();
+      -                    mem.sort_unstable();
+      -                    let key = MembersKey::new(mem);
+      -                    if let Some(&to_id) = key_to_state.get(&key) {
+      +                    accumulate(&mut structural_baseline, &compiled_steps[def_id].by_sig, &Weight::all());
+      +                }
+      +            }
+      +
+      +            if !structural_baseline.is_empty() {
+      +                let mut mem: Vec<usize> = structural_baseline.keys().copied().collect();
+      +                mem.sort_unstable();
+      +                let key = MembersKey::new(mem);
+      +                if let Some(&to_id) = key_to_state.get(&key) {
+      +                    let mut actual_baseline: HashMap<usize, Weight> = HashMap::new();
+      +                    for (i, sig_id) in st.members.iter().enumerate() {
+      +                        if let Some(def_id) = sigs[*sig_id].def {
+      +                            accumulate(&mut actual_baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+      +                        }
+      +                    }
+      +
+      +                    let mut mask = Weight::zeros();
+      +                    for (_, w) in &actual_baseline {
+      +                        mask |= w;
+      +                    }
+      +                    if !mask.is_empty() {
+                               let _ = dwa.set_default_transition(sid, to_id, mask);
+                           }
+                       }
+      @@ -622,59 +681,81 @@
+                       }
+                   }
+                   for (lbl, idxs) in label_groups {
+      -                let mut cur_map = baseline.clone();
+      -                // Remove defaults for members that have an exception on this label, then add ex
+      +                let mut structural_cur_map = structural_baseline.clone();
+                       for i in idxs.iter().copied() {
+                           let sig_id = st.members[i];
+      -                    let gate = &st.gates[i];
+                           if let Some(def_id) = sigs[sig_id].def {
+                               let comp = &compiled_steps[def_id].by_sig;
+      -                        if gate.is_all_fast() {
+      -                            for (tsig, w) in comp {
+      -                                if let Some(old) = cur_map.get_mut(tsig) {
+      -                                    *old -= w;
+      -                                    if old.is_empty() {
+      -                                        cur_map.remove(tsig);
+      -                                    }
+      +                        for (tsig, w) in comp {
+      +                            if let Some(old) = structural_cur_map.get_mut(tsig) {
+      +                                *old -= w;
+      +                                if old.is_empty() {
+      +                                    structural_cur_map.remove(tsig);
+                                       }
+                                   }
+      -                        } else {
+      -                            for (tsig, w) in comp {
+      -                                let share = w & gate;
+      -                                if share.is_empty() {
+      -                                    continue;
+      -                                }
+      -                                if let Some(old) = cur_map.get_mut(tsig) {
+      -                                    *old -= &share;
+      -                                    if old.is_empty() {
+      -                                        cur_map.remove(tsig);
+      -                                    }
+      +                        }
+      +                    }
+      +                    if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
+      +                        let comp = &compiled_steps[ex_id].by_sig;
+      +                        accumulate(&mut structural_cur_map, comp, &Weight::all());
+      +                    }
+      +                }
+      +
+      +                if structural_cur_map.is_empty() {
+      +                    continue;
+      +                }
+      +
+      +                let mut mem: Vec<usize> = structural_cur_map.keys().copied().collect();
+      +                mem.sort_unstable();
+      +                let key = MembersKey::new(mem);
+      +                if let Some(&to_id) = key_to_state.get(&key) {
+      +                    let mut actual_baseline: HashMap<usize, Weight> = HashMap::new();
+      +                    for (i, sig_id) in st.members.iter().enumerate() {
+      +                        if let Some(def_id) = sigs[*sig_id].def {
+      +                            accumulate(&mut actual_baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+      +                        }
+      +                    }
+      +                    let mut actual_cur_map = actual_baseline;
+      +                    for i in idxs.iter().copied() {
+      +                        let sig_id = st.members[i];
+      +                        let gate = &st.gates[i];
+      +                        if let Some(def_id) = sigs[sig_id].def {
+      +                            let comp = &compiled_steps[def_id].by_sig;
+      +                            if gate.is_all_fast() {
+      +                                for (tsig, w) in comp {
+      +                                    if let Some(old) = actual_cur_map.get_mut(tsig) {
+      +                                        *old -= w;
+      +                                        if old.is_empty() {
+      +                                            actual_cur_map.remove(tsig);
+      +                                        }
+      +                                    }
+      +                                }
+      +                            } else {
+      +                                for (tsig, w) in comp {
+      +                                    let share = w & gate;
+      +                                    if share.is_empty() {
+      +                                        continue;
+      +                                    }
+      +                                    if let Some(old) = actual_cur_map.get_mut(tsig) {
+      +                                        *old -= &share;
+      +                                        if old.is_empty() {
+      +                                            actual_cur_map.remove(tsig);
+      +                                        }
+      +                                    }
+                                       }
+                                   }
+                               }
+      -                    }
+      -                    if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
+      -                        let comp = &compiled_steps[ex_id].by_sig;
+      -                        accumulate(&mut cur_map, comp, gate);
+      -                    }
+      -                }
+      -
+      -                if cur_map.is_empty() {
+      -                    continue;
+      -                }
+      -                let mut mask = Weight::zeros();
+      -                for (_, w) in &cur_map {
+      -                    mask |= w;
+      -                }
+      -                if mask.is_empty() {
+      -                    continue;
+      -                }
+      -                let mut mem: Vec<usize> = cur_map.keys().copied().collect();
+      -                mem.sort_unstable();
+      -                let key = MembersKey::new(mem);
+      -                if let Some(&to_id) = key_to_state.get(&key) {
+      -                    let _ = dwa.add_transition(sid, lbl, to_id, mask);
+      +                        if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
+      +                            let comp = &compiled_steps[ex_id].by_sig;
+      +                            accumulate(&mut actual_cur_map, comp, gate);
+      +                        }
+      +                    }
+      +
+      +                    if actual_cur_map.is_empty() { continue; }
+      +                    let mut mask = Weight::zeros();
+      +                    for (_, w) in &actual_cur_map { mask |= w; }
+      +                    if mask.is_empty() { continue; }
+      +                    let _ = dwa.add_transition(sid, lbl, to_id, mask);
+                       }
+                   }
+                   if let Some(p) = &pb_build {
+
       ```
     metadata:
   - user: |
@@ -5428,7 +5576,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
     metadata:
-  - user: 'Changes committed with message: "Determinization: Switch to delta-based
-      weight propagation in fixpoint loop for performance"'
+  - user: 'Changes committed with message: "Determinization: Decouple structural next-state
+      computation from weight accumulation to bound state space"'
     metadata:
 ...
