@@ -34,6 +34,7 @@ pub struct Trie1Config {
     pub prune_dead_paths: bool,
     pub gc: bool,
     pub minimize_dummy_penalty: bool,
+    pub canonicalize_end_nodes: bool,
 }
 
 impl Default for Trie1Config {
@@ -50,6 +51,7 @@ impl Default for Trie1Config {
             prune_dead_paths: true,
             gc: true,
             minimize_dummy_penalty: true,
+            canonicalize_end_nodes: true,
         }
     }
 }
@@ -68,6 +70,7 @@ impl Trie1Config {
             prune_dead_paths: false,
             gc: false,
             minimize_dummy_penalty: false,
+            canonicalize_end_nodes: false,
         }
     }
 }
@@ -290,11 +293,11 @@ fn prune_dead_paths_trie1(
     }
 }
 
-// Exact signature-based DAG minimization for Trie1:
-// Two nodes are equivalent iff:
-//   - their end flags match
-//   - for each edge key and destination class, the aggregated LLMTokenBV is identical
-// We reconstruct representative nodes and redirect all references to them.
+/// Merge nodes with identical structure via iterative partition refinement.
+/// Two nodes are equivalent iff:
+///   - their end flags match
+///   - for each edge key and destination class, the aggregated LLMTokenBV is identical
+/// This version uses a canonical signature, avoiding hash-based collisions.
 fn merge_nodes_trie1(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
@@ -305,79 +308,73 @@ fn merge_nodes_trie1(
     if all_nodes.is_empty() { return; }
 
     // Dense indexing
-    let mut dense_of: HashMap<PrecomputeNode1Index, usize> = HashMap::new();
-    let mut old_of: Vec<PrecomputeNode1Index> = Vec::with_capacity(all_nodes.len());
-    for (i, idx) in all_nodes.iter().enumerate() {
-        dense_of.insert(*idx, i);
-        old_of.push(*idx);
-    }
+    let dense_of: HashMap<_, _> = all_nodes.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let old_of: Vec<_> = all_nodes;
     let n = old_of.len();
 
-    let mut ends: Vec<bool> = vec![false; n];
-    type RawEdge1 = (Option<GrammarTokenID>, LLMTokenBV, usize);
-    let mut raw_edges: Vec<Vec<RawEdge1>> = vec![Vec::new(); n];
-
-    for (u_dense, u_idx) in old_of.iter().enumerate() {
-        let g = u_idx.read(trie1_god).expect("read");
-        ends[u_dense] = g.value.end;
-        for (ek, dm) in g.children() {
-            for (v_idx, bv) in dm {
-                if let Some(&v_dense) = dense_of.get(v_idx) {
-                    raw_edges[u_dense].push((*ek, bv.clone(), v_dense));
-                }
-            }
-        }
-    }
-
     // Initial partition by end flag
-    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+    let mut prev_class: Vec<usize> = (0..n)
+        .map(|i| if old_of[i].read(trie1_god).unwrap().value.end { 1 } else { 0 })
+        .collect();
 
     const MAX_ITERS: usize = 40;
     for it in 0..MAX_ITERS {
-        type SigEdgeKey = (Option<GrammarTokenID>, usize);
+        // Signature: (is_end, sorted_aggregated_edges)
+        // aggregated_edge: (edge_key, sorted_dest_classes)
+        // dest_class_info: (dest_class, unioned_bv)
+        type AggregatedEdge = (Option<GrammarTokenID>, Vec<(usize, LLMTokenBV)>);
+        type NodeSignature = (bool, Vec<AggregatedEdge>);
 
-        let mut h_of: Vec<u64> = vec![0; n];
-
-        #[cfg(not(rustrover))]
-        let its = tqdm!(0..n, desc = format!("Trie1 Merge Hash Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
-        #[cfg(rustrover)]
-        let its = 0..n;
-
-        for u in its {
-            let mut aggr: BTreeMap<SigEdgeKey, LLMTokenBV> = BTreeMap::new();
-            for (ek, llm_bv, v_dense) in &raw_edges[u] {
-                let dest_class = prev_class[*v_dense];
-                let key = (*ek, dest_class);
-                aggr.entry(key)
-                    .and_modify(|e| *e |= llm_bv)
-                    .or_insert_with(|| llm_bv.clone());
-            }
-            let agg_vec: Vec<(SigEdgeKey, LLMTokenBV)> = aggr.into_iter().collect();
-
-            let mut hasher = DefaultHasher::new();
-            ends[u].hash(&mut hasher);
-            agg_vec.hash(&mut hasher);
-            h_of[u] = hasher.finish();
-        }
-
-        let mut map: HashMap<u64, usize> = HashMap::with_capacity(n.checked_div(2).unwrap_or(1024));
+        let mut sig_to_class: HashMap<NodeSignature, usize> = HashMap::new();
         let mut new_class = vec![0; n];
-        let mut next_id = 0;
+        let mut next_class_id = 0;
         let mut changes = 0;
 
-        for u in 0..n {
-            let cid = *map.entry(h_of[u]).or_insert_with(|| {
-                let id = next_id;
-                next_id += 1;
+        for u_dense in 0..n {
+            let u_idx = old_of[u_dense];
+            let u_guard = u_idx.read(trie1_god).unwrap();
+
+            // Aggregate edges by (edge_key, dest_class)
+            let mut aggr: BTreeMap<(Option<GrammarTokenID>, usize), LLMTokenBV> = BTreeMap::new();
+            for (ek, dm) in u_guard.children() {
+                for (v_idx, bv) in dm {
+                    if let Some(&v_dense) = dense_of.get(v_idx) {
+                        let dest_class = prev_class[v_dense];
+                        aggr.entry((*ek, dest_class))
+                            .and_modify(|e| *e |= bv)
+                            .or_insert_with(|| bv.clone());
+                    }
+                }
+            }
+
+            // Group by edge_key to build the canonical signature
+            let mut grouped_by_ek: BTreeMap<Option<GrammarTokenID>, Vec<(usize, LLMTokenBV)>> = BTreeMap::new();
+            for ((ek, dest_class), bv) in aggr {
+                grouped_by_ek.entry(ek).or_default().push((dest_class, bv));
+            }
+
+            let mut sig_edges: Vec<AggregatedEdge> = Vec::with_capacity(grouped_by_ek.len());
+            for (ek, mut dests) in grouped_by_ek {
+                dests.sort_unstable_by_key(|k| k.0); // Sort by dest_class for canonical representation
+                sig_edges.push((ek, dests));
+            }
+            // No need to sort sig_edges because BTreeMap already did.
+
+            let signature: NodeSignature = (u_guard.value.end, sig_edges);
+            
+            let class_id = *sig_to_class.entry(signature).or_insert_with(|| {
+                let id = next_class_id;
+                next_class_id += 1;
                 id
             });
-            new_class[u] = cid;
-            if new_class[u] != prev_class[u] {
-                changes += 1
+
+            new_class[u_dense] = class_id;
+            if new_class[u_dense] != prev_class[u_dense] {
+                changes += 1;
             }
         }
 
-        crate::debug!(3, "Trie1 merge iter {}: classes={}, changes={}", it + 1, map.len(), changes);
+        crate::debug!(3, "Trie1 merge iter {}: classes={}, changes={}", it + 1, sig_to_class.len(), changes);
         prev_class = new_class;
         if changes == 0 { break; }
     }
@@ -400,42 +397,26 @@ fn merge_nodes_trie1(
     for cid in 0..num_classes {
         if let Some(rep_idx) = rep_of_class[cid] {
             let sample_dense = prev_class.iter().position(|&c| c == cid).unwrap();
-            // Aggregate edges by (edge_key, dest_class)
-            let mut aggr: BTreeMap<(Option<GrammarTokenID>, usize), LLMTokenBV> = BTreeMap::new();
-            for (ek, llm_bv, v_dense) in &raw_edges[sample_dense] {
-                let dst_c = prev_class[*v_dense];
-                aggr.entry((*ek, dst_c))
-                    .and_modify(|e| *e |= llm_bv)
-                    .or_insert(llm_bv.clone());
-            }
+            let sample_idx = old_of[sample_dense];
+            let sample_guard = sample_idx.read(trie1_god).unwrap();
 
             let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
-            for ((ek, dest_class), llm_bv) in aggr {
-                if llm_bv.is_empty() { continue; }
-                let dest_rep = rep_of_class[dest_class].unwrap();
-                new_children.entry(ek)
-                    .or_default()
-                    .entry(dest_rep)
-                    .and_modify(|e| *e |= &llm_bv)
-                    .or_insert(llm_bv);
-            }
-
-            let mut new_live_tokens = LLMTokenBV::zeros();
-            for dm in new_children.values() {
-                for bv in dm.values() {
-                    new_live_tokens |= bv;
-                }
-            }
-
-            for (i, &c) in prev_class.iter().enumerate() {
-                if c == cid {
-                    new_live_tokens |= &old_of[i].read(trie1_god).unwrap().value.live_tokens;
+            
+            for (ek, dm) in sample_guard.children() {
+                for (v_idx, bv) in dm {
+                    if let Some(v_rep) = node_to_rep.get(v_idx) {
+                        new_children.entry(*ek)
+                            .or_default()
+                            .entry(*v_rep)
+                            .and_modify(|e| *e |= bv)
+                            .or_insert_with(|| bv.clone());
+                    }
                 }
             }
 
             let mut w = rep_idx.write(trie1_god).expect("write");
             *w.children_mut() = new_children;
-            w.value.live_tokens = new_live_tokens;
+            // live_tokens will be recomputed by prune_dead_paths later.
         }
     }
 
@@ -445,9 +426,6 @@ fn merge_nodes_trie1(
             *r = *rep;
         }
     }
-
-    let roots_vec2: Vec<_> = roots.values().cloned().collect();
-    Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
 }
 
 fn minimize_dummy_penalty_trie1(
@@ -541,9 +519,76 @@ fn minimize_dummy_penalty_trie1(
     }
 }
 
-// Exact signature-based DAG minimization for Trie1:
-// Two nodes are equivalent iff:
-//   - their end flags match
+/// Merges all end nodes into a single canonical representative.
+fn canonicalize_end_nodes_trie1(
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+) {
+    crate::debug!(3, "Trie1: canonicalizing end nodes...");
+    let all_nodes = Trie::all_nodes(trie1_god, &roots.values().cloned().collect::<Vec<_>>());
+    if all_nodes.is_empty() { return; }
+
+    let mut end_nodes: Vec<PrecomputeNode1Index> = all_nodes
+        .iter()
+        .filter(|&n| n.read(trie1_god).unwrap().value.end)
+        .cloned()
+        .collect();
+
+    if end_nodes.len() <= 1 {
+        return;
+    }
+
+    end_nodes.sort(); // for determinism
+    let canonical_end = end_nodes[0];
+    let other_ends: HashSet<_> = end_nodes.iter().skip(1).cloned().collect();
+
+    // Ensure canonical end node is a true sink and marked as end.
+    {
+        let mut w = canonical_end.write(trie1_god).unwrap();
+        w.value.end = true;
+        w.children_mut().clear();
+    }
+
+    // Decommission other end nodes.
+    for &end_node in &other_ends {
+        let mut w = end_node.write(trie1_god).unwrap();
+        w.value.end = false;
+        w.children_mut().clear();
+    }
+
+    // Rewire all edges pointing to any end node to point to the canonical one.
+    let all_end_nodes_set: HashSet<_> = end_nodes.into_iter().collect();
+    for node_idx in &all_nodes {
+        let mut w = node_idx.write(trie1_god).unwrap();
+        let old_children = std::mem::take(w.children_mut());
+        let mut new_children = BTreeMap::new();
+
+        for (ek, dm) in old_children {
+            let mut new_dm = OrderedHashMap::new();
+            for (dst, bv) in dm {
+                let new_dst = if all_end_nodes_set.contains(&dst) {
+                    canonical_end
+                } else {
+                    dst
+                };
+                new_dm.entry(new_dst)
+                    .and_modify(|e: &mut LLMTokenBV| *e |= &bv)
+                    .or_insert(bv);
+            }
+            if !new_dm.is_empty() {
+                new_children.insert(ek, new_dm);
+            }
+        }
+        *w.children_mut() = new_children;
+    }
+
+    // Remap roots if any were decommissioned end nodes.
+    for root in roots.values_mut() {
+        if other_ends.contains(root) {
+            *root = canonical_end;
+        }
+    }
+}
 
 pub fn optimize_trie1_size(
     precomputed1: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
@@ -568,7 +613,7 @@ pub fn optimize_trie1_size(
     crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
     crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
 
-    // === Pass 1: Initial Simplification and Pruning ===
+    // === Pass 1: Initial Simplification ===
     simplify_none_edges_to_former_end_nodes_trie1(precomputed1, trie1_god, trie0_god, node0_to_node1_map);
     replace_ignore_token_edges_with_none_edges_trie1(precomputed1, trie1_god, ignore_terminal_id);
     if config.early_flatten_epsilon {
@@ -581,6 +626,8 @@ pub fn optimize_trie1_size(
     if config.prune_on_no_terminal_follow {
         prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
     }
+
+    // === Pass 2: Pruning ===
     if config.prune_nodes_not_reaching_end {
         prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
     }
@@ -588,17 +635,21 @@ pub fn optimize_trie1_size(
         prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
     }
 
-    // === Pass 2: Minimization and further cleanup ===
+    // === Pass 3: Merging and Canonicalization ===
     if config.minimize_by_signature {
         merge_nodes_trie1(precomputed1, trie1_god);
+    }
+    if config.canonicalize_end_nodes {
+        canonicalize_end_nodes_trie1(precomputed1, trie1_god);
     }
     if config.minimize_dummy_penalty {
         minimize_dummy_penalty_trie1(precomputed1, trie1_god, dummy_terminal_penalties);
     }
+
+    // === Pass 4: Post-merge Cleanup ===
     if !config.early_flatten_epsilon {
         flatten_all_none_edges_trie1(precomputed1, trie1_god);
     }
-    // Trim keyed edges again after potential expansion
     reduce_some_edges_via_post_none_dominance_trie1(precomputed1, trie1_god);
     if config.prune_nodes_not_reaching_end {
         prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
@@ -607,7 +658,7 @@ pub fn optimize_trie1_size(
         prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
     }
 
-    // === Pass 3: Token-level optimizations ===
+    // === Pass 5: Token-level optimizations ===
     if config.merge_equivalent_llm_tokens {
         merge_equivalent_llm_tokens_trie1(precomputed1, trie1_god, stage_vocab);
     }
@@ -615,22 +666,22 @@ pub fn optimize_trie1_size(
         reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
     }
 
-    // === Pass 4: Final Minimization and GC ===
-    // Break cycles before final minimization passes that might be confused by them.
+    // === Pass 6: Final Structural Optimization and GC ===
     if config.break_cycles {
         break_cycles_trie1(precomputed1, trie1_god);
     }
-
     if config.minimize_by_signature {
         merge_nodes_trie1(precomputed1, trie1_god);
     }
-    // Final aggressive Some-edge reduction after struct-level merging
+    if config.canonicalize_end_nodes {
+        canonicalize_end_nodes_trie1(precomputed1, trie1_god);
+    }
     reduce_some_edges_via_post_none_dominance_trie1(precomputed1, trie1_god);
     if config.prune_nodes_not_reaching_end {
         prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
     }
     if config.prune_dead_paths {
-        prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+        prune_dead_paths_trie1(precomputed1, trie1_god, stage_vocab.internal_max_llm_token);
     }
     if config.gc {
         Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
