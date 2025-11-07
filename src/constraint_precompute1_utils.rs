@@ -1660,7 +1660,11 @@ fn prune_on_no_terminal_follow_trie1(
                 Some(t) => Some(BTreeSet::from([*t])),
                 None => predecessors.clone(),
             };
-            dest_map.keys().map(move |&dst| (dst, next_predecessors.clone()))
+            dest_map
+                .keys()
+                .copied()
+                .map(move |dst| (dst, next_predecessors.clone()))
+                .collect::<Vec<_>>()
         },
         // merge: combines predecessor sets for a node from multiple parents.
         |existing_set: &mut PredecessorSet, new_set: PredecessorSet| {
