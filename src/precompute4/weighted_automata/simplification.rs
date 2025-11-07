@@ -345,12 +345,26 @@ impl DWA {
             if states[v].transitions.default.is_some() || !states[v].transitions.exceptions.is_empty() {
                 continue;
             }
-            let fw = match &states[v].final_weight {
-                Some(w) if !w.is_empty() => w.clone(),
-                _ => continue,
-            };
-            if fw.is_all_fast() {
-                continue; // nothing to absorb
+
+            // The effective weight is the intersection of final_weight and state_weight.
+            let mut effective_weight = Weight::all();
+            let mut has_restriction = false;
+
+            if let Some(fw) = &states[v].final_weight {
+                if !fw.is_all_fast() {
+                    effective_weight &= fw;
+                    has_restriction = true;
+                }
+            }
+            if let Some(sw) = &states[v].state_weight {
+                if !sw.is_all_fast() {
+                    effective_weight &= sw;
+                    has_restriction = true;
+                }
+            }
+
+            if !has_restriction {
+                continue;
             }
 
             // This transformation is only valid if there are incoming edges to absorb the weight.
@@ -361,9 +375,9 @@ impl DWA {
             // Intersect incoming default edges
             for &p in &def_preds[v] {
                 if let Some(w) = states[p].trans_weight_default.as_mut() {
-                    let new_w = &*w & &fw;
-                    if new_w != *w {
-                        *w = new_w;
+                    let old_w = w.clone();
+                    *w &= &effective_weight;
+                    if *w != old_w {
                         changed = true;
                     }
                 }
@@ -371,16 +385,22 @@ impl DWA {
             // Intersect incoming exception edges
             for &(p, ch) in &ex_preds[v] {
                 if let Some(w) = states[p].trans_weights_exceptions.get_mut(&ch) {
-                    let new_w = &*w & &fw;
-                    if new_w != *w {
-                        *w = new_w;
+                    let old_w = w.clone();
+                    *w &= &effective_weight;
+                    if *w != old_w {
                         changed = true;
                     }
                 }
             }
-            // Make the sink final weight ALL to enable merging
-            states[v].final_weight = Some(Weight::all());
-            changed = true; // This is a change since fw is not ALL.
+            // Make the sink final weight ALL and clear state weight to enable merging
+            if states[v].final_weight.as_ref().map_or(false, |w| !w.is_all_fast()) {
+                states[v].final_weight = Some(Weight::all());
+                changed = true;
+            }
+            if states[v].state_weight.is_some() {
+                states[v].state_weight = None;
+                changed = true;
+            }
         }
         changed
     }
