@@ -343,7 +343,7 @@ impl NWA {
 
             for (sig_id, gate) in &node_gates {
                 for def_id in &sigs[*sig_id].def {
-                    *def_groups.entry(def_id).or_default() |= gate;
+                    *def_groups.entry(*def_id).or_default() |= gate;
                 }
                 for (lbl, ex_steps) in &sigs[*sig_id].ex {
                     for ex_step in ex_steps {

@@ -154,26 +154,28 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
 
         for a in 0..states.len() {
             let state_a = &states[a];
-            for (neg_label, (b, w_ab)) in &state_a.transitions {
+            for (neg_label, targets) in &state_a.transitions {
                 if *neg_label >= 0 { continue; }
                 let c = neg_label.wrapping_sub(i16::MIN);
 
-                if *b >= states.len() { continue; }
+                for (b, w_ab) in targets {
+                    if *b >= states.len() { continue; }
 
-                let eps_closure_of_b = compute_eps_closure(states, *b, &all_new_epsilons);
+                    let eps_closure_of_b = compute_eps_closure(states, *b, &all_new_epsilons);
 
-                for (b_reachable, w_b_br) in eps_closure_of_b {
-                    if b_reachable >= states.len() { continue; }
-                    let targets_to_use = if let Some(targets) = states[b_reachable].transitions.get(&c) {
-                        targets
-                    } else {
-                        &states[b_reachable].default
-                    };
+                    for (b_reachable, w_b_br) in eps_closure_of_b {
+                        if b_reachable >= states.len() { continue; }
+                        let targets_to_use = if let Some(targets) = states[b_reachable].transitions.get(&c) {
+                            targets
+                        } else {
+                            &states[b_reachable].default
+                        };
 
-                    for (c_target, w_br_c) in targets_to_use {
-                        let new_w = w_ab & &w_b_br & w_br_c;
-                        if !new_w.is_empty() {
-                            pass_epsilons.push((a, *c_target, new_w));
+                        for (c_target, w_br_c) in targets_to_use {
+                            let new_w = w_ab & &w_b_br & w_br_c;
+                            if !new_w.is_empty() {
+                                pass_epsilons.push((a, *c_target, new_w));
+                            }
                         }
                     }
                 }
