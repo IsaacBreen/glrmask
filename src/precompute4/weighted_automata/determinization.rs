@@ -140,6 +140,7 @@ impl NWA {
         }
         #[derive(Clone, Hash, Eq, PartialEq)]
         struct MacroSigKey {
+            final_fp: u64,
             def: Option<usize>,
             ex: Vec<(i16, usize)>,
         }
@@ -199,26 +200,17 @@ impl NWA {
                 .map(|(lbl, (to, wlbl))| (*lbl, step_pool.intern(apply_weight_to_pairs(&eps_cache[*to], wlbl))))
                 .collect();
 
-            let key = MacroSigKey { def, ex: ex.iter().map(|(k, v)| (*k, *v)).collect() };
-            match sig_intern.entry(key) {
-                Entry::Occupied(entry) => {
-                    let sig_id = *entry.get();
-                    state_to_sig_id[s] = sig_id;
-                    if let Some(final_acc) = final_acc {
-                        if let Some(existing_fw) = &mut sigs[sig_id].final_w {
-                            *existing_fw |= &final_acc;
-                        } else {
-                            sigs[sig_id].final_w = Some(final_acc);
-                        }
-                    }
-                }
-                Entry::Vacant(entry) => {
-                    let sig_id = sigs.len();
-                    entry.insert(sig_id);
-                    sigs.push(MacroSig { final_w: final_acc, def, ex });
-                    state_to_sig_id[s] = sig_id;
-                }
-            }
+            let key = MacroSigKey {
+                final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
+                def,
+                ex: ex.iter().map(|(k, v)| (*k, *v)).collect(),
+            };
+            let sig_id = *sig_intern.entry(key).or_insert_with(|| {
+                let id = sigs.len();
+                sigs.push(MacroSig { final_w: final_acc, def, ex });
+                id
+            });
+            state_to_sig_id[s] = sig_id;
             if let Some(p) = &pb_sigs {
                 p.inc(1);
             }
