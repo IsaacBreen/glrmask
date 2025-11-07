@@ -472,6 +472,13 @@ impl NWA {
                     }
                 }
             }
+            if !remove.is_empty() {
+                for k in remove {
+                    map.remove(&k);
+                }
+                changed = true;
+            }
+            changed
         }
 
         #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
