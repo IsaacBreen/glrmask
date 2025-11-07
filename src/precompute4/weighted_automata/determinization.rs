@@ -409,7 +409,7 @@ impl NWA {
                 }
             }
 
-            node.final_weight = IntoOption::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
+            node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
                 if let Some(fw) = &sigs[*sig_id].final_w {
                     acc |= &(gate & fw);
                 }
@@ -447,14 +447,5 @@ impl NWA {
             }
         }
         dwa
-    }
-}
-
-trait IntoOption<T> {
-    fn into(self) -> Option<T>;
-}
-impl IntoOption<Weight> for Weight {
-    fn into(self) -> Option<Weight> {
-        if self.is_empty() { None } else { Some(self) }
     }
 }
