@@ -82,9 +82,6 @@ impl DWA {
             if let Some(p) = &pb { p.set_message("normalize".to_string()); }
             changed_any |= Self::normalize_edges_inplace(states);
 
-            if let Some(p) = &pb { p.set_message("push final weights".to_string()); }
-            changed_any |= Self::push_final_weights_to_edges(states, body);
-
             if large {
                 // Fast relaxation to expose more compression opportunities
                 if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
@@ -104,51 +101,6 @@ impl DWA {
         if let Some(p) = &pb {
             p.finish_with_message(format!("Simplified to {} states", states.len()));
         }
-    }
-
-    pub fn push_final_weights_to_edges(states: &mut DWAStates, body: &mut DWABody) -> bool {
-        let n = states.len();
-        if n == 0 {
-            return false;
-        }
-
-        // Build reverse adjacency
-        let mut rev_adj: Vec<Vec<(StateID, Option<i16>)>> = vec![vec![]; n];
-        for i in 0..n {
-            if let Some(def_target) = states[i].transitions.default {
-                if def_target < n {
-                    rev_adj[def_target].push((i, None));
-                }
-            }
-            for (ch, &ex_target) in &states[i].transitions.exceptions {
-                if ex_target < n {
-                    rev_adj[ex_target].push((i, Some(*ch)));
-                }
-            }
-        }
-
-        let mut changed = false;
-        for s in 0..n {
-            if s == body.start_state { continue; }
-            if let Some(fw) = states[s].final_weight.clone() {
-                if fw.is_all_fast() || rev_adj[s].is_empty() { continue; }
-
-                for &(p, ch_opt) in &rev_adj[s] {
-                    let p_state = &mut states[p];
-                    if let Some(ch) = ch_opt {
-                        if let Some(w) = p_state.trans_weights_exceptions.get_mut(&ch) {
-                            *w &= &fw;
-                        }
-                    } else if let Some(w) = p_state.trans_weight_default.as_mut() {
-                        *w &= &fw;
-                    }
-                }
-
-                states[s].final_weight = Some(Weight::all());
-                changed = true;
-            }
-        }
-        changed
     }
 
     pub fn propagate_and_constrain_weights(states: &mut DWAStates, body: &mut DWABody) -> bool {

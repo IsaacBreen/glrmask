@@ -120,7 +120,7 @@ impl NWA {
             }
             fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
                 pairs.retain(|(_, w)| !w.is_empty());
-                let fp = Self::fingerprint(&pairs);
+                let fp = Self::fingerprint(&pairs); // Corrected syntax: Self::
                 if let Some(cands) = self.map.get(&fp) {
                     for &id in cands {
                         if self.raw[id].len() == pairs.len() && self.raw[id] == pairs {
@@ -133,7 +133,7 @@ impl NWA {
                 self.map.entry(fp).or_default().push(id);
                 id
             }
-            fn len(&self) -> usize { self.raw.len() }
+            fn len(&self) -> usize { self.raw.len() } // Added missing method
         }
 
         // (MacroSig and related structs remain the same)
@@ -198,20 +198,19 @@ impl NWA {
 
         #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
         struct MembersKey {
-            items: Vec<(usize, u64)>,
+            items: Vec<usize>,
         }
         impl MembersKey {
-            fn new(map: &HashMap<usize, Weight>) -> Self {
-                let mut items: Vec<(usize, u64)> = map.iter()
-                    .map(|(sid, w)| (*sid, w.fp))
-                    .collect();
+            fn new(mut items: Vec<usize>) -> Self {
                 items.sort_unstable();
+                items.dedup();
                 MembersKey { items }
             }
         }
 
         // Represents a node in our "composition graph"
         struct CompositionNode {
+            key: MembersKey,
             final_weight: Option<Weight>,
             default_target_idx: Option<usize>,
             exception_targets: BTreeMap<i16, usize>, // label -> target index
@@ -236,10 +235,10 @@ impl NWA {
             let sid = state_to_sig_id[*t];
             match init_map.entry(sid) { Entry::Occupied(mut e) => { let v = e.get_mut(); *v |= w; } Entry::Vacant(e) => { e.insert(w.clone()); } }
         }
-        let init_key = MembersKey::new(&init_map);
+        let init_key = MembersKey::new(init_map.keys().copied().collect());
         let start_idx = 0;
         key_to_idx.insert(init_key.clone(), start_idx);
-        nodes.push(CompositionNode { final_weight: None, default_target_idx: None, exception_targets: BTreeMap::new(), gates: init_map });
+        nodes.push(CompositionNode { key: init_key, final_weight: None, default_target_idx: None, exception_targets: BTreeMap::new(), gates: init_map });
         work.push_back(start_idx);
 
         while let Some(idx) = work.pop_front() {
@@ -283,17 +282,22 @@ impl NWA {
             // For each target composition, ensure a node exists and update gates
             for (label, map) in target_maps {
                 if map.is_empty() { continue; }
-                let key = MembersKey::new(&map);
+                let key = MembersKey::new(map.keys().copied().collect());
                 let target_idx = match key_to_idx.entry(key.clone()) {
                     Entry::Occupied(o) => *o.get(),
                     Entry::Vacant(v) => {
                         let new_idx = nodes.len();
-                        nodes.push(CompositionNode { final_weight: None, default_target_idx: None, exception_targets: BTreeMap::new(), gates: map.clone() });
+                        nodes.push(CompositionNode { key, final_weight: None, default_target_idx: None, exception_targets: BTreeMap::new(), gates: HashMap::new() });
                         work.push_back(new_idx);
                         v.insert(new_idx);
                         new_idx
                     }
                 };
+                // Update gates in target node
+                for (sig_id, weight) in map {
+                    let gate = nodes[target_idx].gates.entry(sig_id).or_insert_with(Weight::zeros);
+                    *gate |= &weight;
+                }
                 // Set transition link
                 if let Some(lbl) = label {
                     nodes[idx].exception_targets.insert(lbl, target_idx);
