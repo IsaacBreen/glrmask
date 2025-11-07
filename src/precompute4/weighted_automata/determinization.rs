@@ -451,19 +451,7 @@ impl NWA {
 
             let st = states[sid].clone();
 
-            // Default baseline: accumulate all members' defaults
-            let mut baseline: HashMap<usize, Weight> = HashMap::new();
-            for (i, sig_id) in st.members.iter().enumerate() {
-                if let Some(def_id) = sigs[*sig_id].def {
-                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
-                }
-            }
-            if !baseline.is_empty() {
-                let mem: Vec<usize> = baseline.keys().copied().collect();
-                let _ = ensure_state(mem, Some(baseline.clone()), &mut states, &mut key_to_state, &mut work);
-            }
-
-            // Labels that appear as exceptions in any member
+            // Group members by which exception labels they have.
             let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
             for (i, sig_id) in st.members.iter().enumerate() {
                 for (lbl, _) in &sigs[*sig_id].ex {
@@ -471,51 +459,34 @@ impl NWA {
                 }
             }
 
-            // For each label: override baseline by removing default parts for members that have
-            // exceptions at this label and add exception parts.
-            for (lbl, idxs) in label_groups {
-                let mut cur_map = baseline.clone();
+            // Compute default transition target. This is for all labels that are not in label_groups.
+            // All members will use their default transition.
+            let mut default_map: HashMap<usize, Weight> = HashMap::new();
+            for (i, sig_id) in st.members.iter().enumerate() {
+                if let Some(def_id) = sigs[*sig_id].def {
+                    accumulate(&mut default_map, &compiled_steps[def_id].by_sig, &st.gates[i]);
+                }
+            }
+            if !default_map.is_empty() {
+                let mem: Vec<usize> = default_map.keys().copied().collect();
+                let _ = ensure_state(mem, Some(default_map), &mut states, &mut key_to_state, &mut work);
+            }
 
-                for i in idxs.iter().copied() {
-                    let sig_id = st.members[i];
+            // For each exception label, compute its target state.
+            for (lbl, _) in &label_groups {
+                let mut ex_map: HashMap<usize, Weight> = HashMap::new();
+                for (i, sig_id) in st.members.iter().enumerate() {
                     let gate = &st.gates[i];
-                    // Remove defaults for this member (if any)
-                    if let Some(def_id) = sigs[sig_id].def {
-                        let comp = &compiled_steps[def_id].by_sig;
-                        if gate.is_all_fast() {
-                            for (tsig, w) in comp {
-                                if let Some(old) = cur_map.get_mut(tsig) {
-                                    *old -= w;
-                                    if old.is_empty() {
-                                        cur_map.remove(tsig);
-                                    }
-                                }
-                            }
-                        } else {
-                            for (tsig, w) in comp {
-                                let share = w & gate;
-                                if share.is_empty() {
-                                    continue;
-                                }
-                                if let Some(old) = cur_map.get_mut(tsig) {
-                                    *old -= &share;
-                                    if old.is_empty() {
-                                        cur_map.remove(tsig);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Add exception
-                    if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
-                        let comp = &compiled_steps[ex_id].by_sig;
-                        accumulate(&mut cur_map, comp, gate);
+                    if let Some(ex_id) = sigs[*sig_id].ex.get(&lbl) {
+                        accumulate(&mut ex_map, &compiled_steps[*ex_id].by_sig, gate);
+                    } else if let Some(def_id) = sigs[*sig_id].def {
+                        accumulate(&mut ex_map, &compiled_steps[def_id].by_sig, gate);
                     }
                 }
 
-                if !cur_map.is_empty() {
-                    let mem: Vec<usize> = cur_map.keys().copied().collect();
-                    let _ = ensure_state(mem, Some(cur_map), &mut states, &mut key_to_state, &mut work);
+                if !ex_map.is_empty() {
+                    let mem: Vec<usize> = ex_map.keys().copied().collect();
+                    let _ = ensure_state(mem, Some(ex_map), &mut states, &mut key_to_state, &mut work);
                 }
             }
         }
@@ -559,26 +530,33 @@ impl NWA {
 
         // Emit edges
         for sid in 0..states.len() {
-            let st = states[sid].clone();
+            let st = &states[sid];
 
             // Final
-            dwa.states[sid].final_weight = compute_final(&st);
+            dwa.states[sid].final_weight = compute_final(st);
 
-            // Build default baseline
-            let mut baseline: HashMap<usize, Weight> = HashMap::new();
+            // Group members by which exception labels they have.
+            let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
             for (i, sig_id) in st.members.iter().enumerate() {
-                if let Some(def_id) = sigs[*sig_id].def {
-                    accumulate(&mut baseline, &compiled_steps[def_id].by_sig, &st.gates[i]);
+                for (lbl, _) in &sigs[*sig_id].ex {
+                    label_groups.entry(*lbl).or_default().push(i);
                 }
             }
-            if !baseline.is_empty() {
+
+            // Compute and set default transition
+            let mut default_map: HashMap<usize, Weight> = HashMap::new();
+            for (i, sig_id) in st.members.iter().enumerate() {
+                if let Some(def_id) = sigs[*sig_id].def {
+                    accumulate(&mut default_map, &compiled_steps[def_id].by_sig, &st.gates[i]);
+                }
+            }
+            if !default_map.is_empty() {
                 let mut mask = Weight::zeros();
-                for (_, w) in &baseline {
+                for w in default_map.values() {
                     mask |= w;
                 }
                 if !mask.is_empty() {
-                    let mut mem: Vec<usize> = baseline.keys().copied().collect();
-                    mem.sort_unstable();
+                    let mem: Vec<usize> = default_map.keys().copied().collect();
                     let key = MembersKey::new(mem);
                     if let Some(&to_id) = key_to_state.get(&key) {
                         let _ = dwa.set_default_transition(sid, to_id, mask);
@@ -586,68 +564,33 @@ impl NWA {
                 }
             }
 
-            // Labels
-            let mut label_groups: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-            for (i, sig_id) in st.members.iter().enumerate() {
-                for (lbl, _) in &sigs[*sig_id].ex {
-                    label_groups.entry(*lbl).or_default().push(i);
-                }
-            }
-            for (lbl, idxs) in label_groups {
-                let mut cur_map = baseline.clone();
-                // Remove defaults for members that have an exception on this label, then add ex
-                for i in idxs.iter().copied() {
-                    let sig_id = st.members[i];
+            // Compute and set exception transitions
+            for (lbl, _) in &label_groups {
+                let mut ex_map: HashMap<usize, Weight> = HashMap::new();
+                for (i, sig_id) in st.members.iter().enumerate() {
                     let gate = &st.gates[i];
-                    if let Some(def_id) = sigs[sig_id].def {
-                        let comp = &compiled_steps[def_id].by_sig;
-                        if gate.is_all_fast() {
-                            for (tsig, w) in comp {
-                                if let Some(old) = cur_map.get_mut(tsig) {
-                                    *old -= w;
-                                    if old.is_empty() {
-                                        cur_map.remove(tsig);
-                                    }
-                                }
-                            }
-                        } else {
-                            for (tsig, w) in comp {
-                                let share = w & gate;
-                                if share.is_empty() {
-                                    continue;
-                                }
-                                if let Some(old) = cur_map.get_mut(tsig) {
-                                    *old -= &share;
-                                    if old.is_empty() {
-                                        cur_map.remove(tsig);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if let Some(ex_id) = sigs[sig_id].ex.get(&lbl).copied() {
-                        let comp = &compiled_steps[ex_id].by_sig;
-                        accumulate(&mut cur_map, comp, gate);
+                    if let Some(ex_id) = sigs[*sig_id].ex.get(&lbl) {
+                        accumulate(&mut ex_map, &compiled_steps[*ex_id].by_sig, gate);
+                    } else if let Some(def_id) = sigs[*sig_id].def {
+                        accumulate(&mut ex_map, &compiled_steps[def_id].by_sig, gate);
                     }
                 }
 
-                if cur_map.is_empty() {
-                    continue;
-                }
-                let mut mask = Weight::zeros();
-                for (_, w) in &cur_map {
-                    mask |= w;
-                }
-                if mask.is_empty() {
-                    continue;
-                }
-                let mut mem: Vec<usize> = cur_map.keys().copied().collect();
-                mem.sort_unstable();
-                let key = MembersKey::new(mem);
-                if let Some(&to_id) = key_to_state.get(&key) {
-                    let _ = dwa.add_transition(sid, lbl, to_id, mask);
+                if !ex_map.is_empty() {
+                    let mut mask = Weight::zeros();
+                    for w in ex_map.values() {
+                        mask |= w;
+                    }
+                    if !mask.is_empty() {
+                        let mem: Vec<usize> = ex_map.keys().copied().collect();
+                        let key = MembersKey::new(mem);
+                        if let Some(&to_id) = key_to_state.get(&key) {
+                            let _ = dwa.add_transition(sid, *lbl, to_id, mask);
+                        }
+                    }
                 }
             }
+
             if let Some(p) = &pb_build {
                 p.inc(1);
             }
