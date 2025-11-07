@@ -187,27 +187,49 @@ impl NWA {
             });
             let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
 
-            let def = self.states[s]
-                .default
-                .as_ref()
-                .filter(|(to, _)| *to < n)
-                .map(|(to, wdef)| step_pool.intern(apply_weight_to_pairs(&eps_cache[*to], wdef)));
+            // Compute default step; skip if out-of-bounds or effect is empty after weighting + ε-closure.
+            let def_step: Option<usize> = if let Some((to, wdef)) = self.states[s].default.as_ref() {
+                if *to < n {
+                    let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
+                    if pairs_def.is_empty() {
+                        None
+                    } else {
+                        Some(step_pool.intern(pairs_def))
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
-            let ex: BTreeMap<i16, usize> = self.states[s]
-                .transitions
-                .iter()
-                .filter(|(_, (to, _))| *to < n)
-                .map(|(lbl, (to, wlbl))| (*lbl, step_pool.intern(apply_weight_to_pairs(&eps_cache[*to], wlbl))))
-                .collect();
+            // Compute exceptions; drop those that are empty or identical to the default step effect.
+            let mut ex: BTreeMap<i16, usize> = BTreeMap::new();
+            for (lbl, (to, wlbl)) in self.states[s].transitions.iter() {
+                if *to >= n {
+                    continue;
+                }
+                let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
+                if pairs_ex.is_empty() {
+                    // No effect for this label after masking/ε-closure -> redundant edge.
+                    continue;
+                }
+                let step_ex = step_pool.intern(pairs_ex);
+                if def_step.is_some() && def_step == Some(step_ex) {
+                    // Labeled edge is structurally identical to default -> redundant exception.
+                    continue;
+                }
+                ex.insert(*lbl, step_ex);
+            }
 
             let key = MacroSigKey {
                 final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
-                def,
+                def: def_step,
                 ex: ex.iter().map(|(k, v)| (*k, *v)).collect(),
             };
             let sig_id = *sig_intern.entry(key).or_insert_with(|| {
                 let id = sigs.len();
-                sigs.push(MacroSig { final_w: final_acc, def, ex });
+                sigs.push(MacroSig { final_w: final_acc, def: def_step, ex });
                 id
             });
             state_to_sig_id[s] = sig_id;

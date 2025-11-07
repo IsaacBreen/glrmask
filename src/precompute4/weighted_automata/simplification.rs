@@ -85,11 +85,13 @@ impl DWA {
             if let Some(p) = &pb { p.set_message("absorb sink finals".to_string()); }
             changed_any |= Self::absorb_sink_finals_into_incoming(states);
 
-            if large {
-                // Fast relaxation to expose more compression opportunities
-                if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
-                changed_any |= Self::relax_weights_by_local_future(states);
-            } else {
+            // Always relax first: this safely enlarges edge weights with ¬future(target),
+            // exposing more structural equality opportunities for minimization.
+            if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
+            changed_any |= Self::relax_weights_by_local_future(states);
+
+            // For small automata, follow relaxation with a proper minimization pass.
+            if !large {
                 if let Some(p) = &pb { p.set_message("minimize".to_string()); }
                 changed_any |= Self::minimize_partition_refinement(states, body);
             }
