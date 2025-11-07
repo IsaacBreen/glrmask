@@ -103,6 +103,156 @@ impl DWA {
         }
     }
 
+    pub fn propagate_and_constrain_weights(states: &mut DWAStates, body: &mut DWABody) -> bool {
+        let n = states.len();
+        if n == 0 {
+            return false;
+        }
+
+        let mut reachable_weights = vec![Weight::zeros(); n];
+        let mut worklist = VecDeque::new();
+
+        if body.start_state >= n {
+            return false;
+        }
+        reachable_weights[body.start_state] = Weight::all();
+        worklist.push_back(body.start_state);
+
+        while let Some(u) = worklist.pop_front() {
+            let u_rw = reachable_weights[u].clone();
+            if u_rw.is_empty() {
+                continue;
+            }
+            let u_state = &states[u];
+
+            // State entry weight gates outgoing paths too
+            let gated_u_rw = if let Some(sw) = &u_state.state_weight {
+                &u_rw & sw
+            } else {
+                u_rw
+            };
+
+            for (_lbl, v, edge_w) in u_state.iter_edges() {
+                if v >= n { continue; }
+                let new_v_rw = &gated_u_rw & edge_w;
+                let old_v_rw = &reachable_weights[v];
+
+                if !new_v_rw.is_subset_of(old_v_rw) {
+                    reachable_weights[v] |= &new_v_rw;
+                    worklist.push_back(v);
+                }
+            }
+        }
+
+        // Now apply constraints
+        let mut changed = false;
+        for i in 0..n {
+            let old_fw = states[i].final_weight.clone();
+            if let Some(fw) = states[i].final_weight.as_mut() {
+                *fw &= &reachable_weights[i];
+                if fw.is_empty() {
+                    states[i].final_weight = None;
+                }
+            }
+            if states[i].final_weight != old_fw {
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub fn propagate_future_weights(states: &mut DWAStates) -> bool {
+        let n = states.len();
+        if n == 0 {
+            return false;
+        }
+
+        // Reverse adjacency (unique preds)
+        let mut rev_adj: Vec<Vec<StateID>> = vec![vec![]; n];
+        for i in 0..n {
+            for (_lbl, v, _w) in states[i].iter_edges() {
+                if v < n { rev_adj[v].push(i); }
+            }
+        }
+        for preds in rev_adj.iter_mut() {
+            preds.sort_unstable();
+            preds.dedup();
+        }
+
+        let mut future_weights = vec![Weight::zeros(); n];
+        let mut worklist = VecDeque::new();
+        for i in 0..n {
+            if let Some(fw) = &states[i].final_weight {
+                if !fw.is_empty() {
+                    future_weights[i] = fw.clone();
+                    for &pred in &rev_adj[i] {
+                        worklist.push_back(pred);
+                    }
+                }
+            }
+        }
+
+        while let Some(u) = worklist.pop_front() {
+            let mut u_new_fw = states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
+
+            if let Some(sw) = &states[u].state_weight {
+                u_new_fw |= sw;
+            }
+
+            for (_lbl, v, edge_w) in states[u].iter_edges() {
+                if v < n {
+                    u_new_fw |= &(edge_w & &future_weights[v]);
+                }
+            }
+
+            if u_new_fw != future_weights[u] {
+                future_weights[u] = u_new_fw;
+                for &pred in &rev_adj[u] {
+                    worklist.push_back(pred);
+                }
+            }
+        }
+
+        // Precompute complements to avoid recomputing !future_weights[v] many times
+        let not_future: Vec<Weight> = future_weights.iter().map(|w| !w).collect();
+
+        // 2. Update edge weights. An edge weight W can be relaxed to W | !future_weight(target)
+        // because any bits not in future_weight(target) would be filtered out anyway.
+        let mut any_weight_changed = false;
+        for i in 0..n {
+            let st = &mut states[i];
+            // Default
+            if let Some(v) = st.transitions.default {
+                if v < n {
+                    if let Some(w) = st.trans_weight_default.as_mut() {
+                        let new_w = &*w | &not_future[v];
+                        if new_w != *w {
+                            *w = new_w;
+                            any_weight_changed = true;
+                        }
+                    }
+                }
+            }
+            // Exceptions
+            let keys: Vec<i16> = st.transitions.exceptions.keys().copied().collect();
+            for ch in keys {
+                if let Some(&v) = st.transitions.exceptions.get(&ch) {
+                    if v < n {
+                        if let Some(w) = st.trans_weights_exceptions.get_mut(&ch) {
+                            let new_w = &*w | &not_future[v];
+                            if new_w != *w {
+                                *w = new_w;
+                                any_weight_changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        any_weight_changed
+    }
+
     /// Fast, single-pass local relaxation:
     /// For each state v, compute an upper bound U[v] on future acceptance:
     ///     U[v] = (state_weight[v] if present else ALL) ∧ (final_weight[v] ∪ default_weight[v] ∪ ⋃ exception_weights[v])
