@@ -246,15 +246,6 @@ impl NWA {
             p.finish_with_message("Macro signatures done");
         }
 
-        // *** NEW: Compute future weights for each Macro Signature ***
-        // This translates the future-weight information from the NWA-state space
-        // to the more abstract macro-signature space, where it can be used to
-        // constrain weights during determinization.
-        let mut sig_future_weights: Vec<Weight> = vec![Weight::zeros(); sigs.len()];
-        for (nwa_state_id, sig_id) in state_to_sig_id.iter().enumerate() {
-            sig_future_weights[*sig_id] |= &fut[nwa_state_id];
-        }
-
         let pb_compile = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
                 ProgressStyle::default_bar()
@@ -350,25 +341,11 @@ impl NWA {
             }
             let node_gates = nodes[idx].gates.clone();
 
-            // *** CORE CHANGE: Constrain the gates of the current DWA state ***
-            // Before calculating transitions, we prune all bits from the gate weights
-            // that cannot lead to a final state, based on our pre-computed future weights.
-            // This forces states that only differ by "dead" weights to behave identically,
-            // allowing them to merge and preventing the state explosion.
-            let mut constrained_gates = HashMap::new();
-            for (sig_id, gate_weight) in &node_gates {
-                let constrained_w = gate_weight & &sig_future_weights[*sig_id];
-                if !constrained_w.is_empty() {
-                    constrained_gates.insert(*sig_id, constrained_w);
-                }
-            }
-
             let mut def_groups: HashMap<usize, Weight> = HashMap::new();
             let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
             let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
 
-            // Use the new `constrained_gates` to calculate all subsequent transitions.
-            for (sig_id, gate) in &constrained_gates {
+            for (sig_id, gate) in &node_gates {
                 for def_id in &sigs[*sig_id].def {
                     *def_groups.entry(*def_id).or_default() |= gate;
                 }
@@ -463,8 +440,7 @@ impl NWA {
                 }
             }
 
-            // The final weight must also be calculated from the constrained gates for consistency.
-            node.final_weight = Into::into(constrained_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
+            node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
                 if let Some(fw) = &sigs[*sig_id].final_w {
                     acc |= &(gate & fw);
                 }
