@@ -82,6 +82,9 @@ impl DWA {
             if let Some(p) = &pb { p.set_message("normalize".to_string()); }
             changed_any |= Self::normalize_edges_inplace(states);
 
+            if let Some(p) = &pb { p.set_message("absorb sink finals".to_string()); }
+            changed_any |= Self::absorb_sink_finals_into_incoming(states);
+
             if large {
                 // Fast relaxation to expose more compression opportunities
                 if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
@@ -307,6 +310,79 @@ impl DWA {
             }
         }
         any_weight_changed
+    }
+
+    /// Absorb final weights of sink states (no outgoing edges) into incoming edges.
+    /// For each sink v with final_weight F (non-empty, not ALL):
+    ///   - For every incoming edge e: u -> v, set weight(e) := weight(e) ∧ F.
+    ///   - Set final_weight[v] := ALL.
+    /// This preserves semantics (any accepted word ending in v has its weight gated by F either way)
+    /// and enables merging of multiple structurally identical sinks that previously differed only by final_weight.
+    pub fn absorb_sink_finals_into_incoming(states: &mut DWAStates) -> bool {
+        let n = states.len();
+        if n == 0 {
+            return false;
+        }
+        // Build reverse adjacency: for each target v, collect predecessors
+        let mut def_preds: Vec<Vec<StateID>> = vec![Vec::new(); n];
+        let mut ex_preds: Vec<Vec<(StateID, i16)>> = vec![Vec::new(); n];
+        for p in 0..n {
+            if let Some(d) = states[p].transitions.default {
+                if d < n {
+                    def_preds[d].push(p);
+                }
+            }
+            for (ch, &tgt) in states[p].transitions.exceptions.iter() {
+                if tgt < n {
+                    ex_preds[tgt].push((p, *ch));
+                }
+            }
+        }
+
+        let mut changed = false;
+        for v in 0..n {
+            // Sink = no outgoing edges (no default and no exceptions)
+            if states[v].transitions.default.is_some() || !states[v].transitions.exceptions.is_empty() {
+                continue;
+            }
+            let fw = match &states[v].final_weight {
+                Some(w) if !w.is_empty() => w.clone(),
+                _ => continue,
+            };
+            if fw.is_all_fast() {
+                continue; // nothing to absorb
+            }
+
+            // This transformation is only valid if there are incoming edges to absorb the weight.
+            if def_preds[v].is_empty() && ex_preds[v].is_empty() {
+                continue;
+            }
+
+            // Intersect incoming default edges
+            for &p in &def_preds[v] {
+                if let Some(w) = states[p].trans_weight_default.as_mut() {
+                    let new_w = &*w & &fw;
+                    if new_w != *w {
+                        *w = new_w;
+                        changed = true;
+                    }
+                }
+            }
+            // Intersect incoming exception edges
+            for &(p, ch) in &ex_preds[v] {
+                if let Some(w) = states[p].trans_weights_exceptions.get_mut(&ch) {
+                    let new_w = &*w & &fw;
+                    if new_w != *w {
+                        *w = new_w;
+                        changed = true;
+                    }
+                }
+            }
+            // Make the sink final weight ALL to enable merging
+            states[v].final_weight = Some(Weight::all());
+            changed = true; // This is a change since fw is not ALL.
+        }
+        changed
     }
 
     pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
