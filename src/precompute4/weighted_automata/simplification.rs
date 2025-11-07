@@ -282,7 +282,11 @@ impl DWA {
 
     pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> bool {
         let n = states.0.len();
-        if n <= 1 { return false; }
+        if n <= 1 {
+            return false;
+        }
+
+        // Initial partition by outputs (state_weight, final_weight).
         let mut part: Vec<usize> = vec![0; n];
         let mut canon0: HashMap<(Option<Weight>, Option<Weight>), usize> = HashMap::new();
         for i in 0..n {
@@ -290,41 +294,72 @@ impl DWA {
             let next_id = canon0.len();
             part[i] = *canon0.entry(key).or_insert(next_id);
         }
+
+        // Refine until stable
         let mut changed = true;
         let mut rounds = 0usize;
         while changed && rounds < 30 {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: HashMap<(Option<Weight>, Option<Weight>, Option<(usize, Weight)>, Vec<(i16, (usize, Weight))>), usize> = HashMap::new();
+            let mut sig2pid: HashMap<(
+                Option<Weight>,
+                Option<Weight>,
+                Option<(usize, Weight)>,
+                Vec<(i16, (usize, Weight))>,
+            ), usize> = HashMap::new();
+
             for i in 0..n {
                 let st = &states[i];
-                let def_sig = st.transitions.default.map(|d| (part[d], st.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all)));
-                let ex_sig: Vec<_> = st.transitions.exceptions.iter().map(|(ch, &tgt)| (*ch, (part[tgt], st.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all)))).filter(|(_, (cls, w))| def_sig.as_ref().map_or(true, |(dc, dw)| *dc != *cls || dw != w)).collect();
+                let def_sig = st.transitions.default.map(|d| {
+                    (part[d], st.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
+                });
+                let ex_sig: Vec<_> = st.transitions.exceptions.iter()
+                    .map(|(ch, &tgt)| (*ch, (part[tgt], st.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all))))
+                    .filter(|(_, (cls, w))| def_sig.as_ref().map_or(true, |(dc, dw)| *dc != *cls || dw != w))
+                    .collect();
                 let sig = (st.state_weight.clone(), st.final_weight.clone(), def_sig, ex_sig);
                 let next_pid = sig2pid.len();
                 next_part[i] = *sig2pid.entry(sig).or_insert(next_pid);
             }
-            if next_part != part { part = next_part; changed = true; }
+            if next_part != part {
+                part = next_part;
+                changed = true;
+            }
         }
-        if groups.len() == n { return false; }
+
+        // Build groups
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for (i, p) in part.iter().enumerate() { groups.entry(*p).or_default().push(i); }
-        if groups.len() == n { return false; }
+        for (i, p) in part.iter().enumerate() {
+            groups.entry(*p).or_default().push(i);
+        }
+        if groups.len() == n {
+            return false;
+        }
+
+        // Map partition id -> new state id
         let mut pid_to_new: HashMap<usize, usize> = HashMap::new();
         let mut new_states: Vec<DWAState> = Vec::with_capacity(groups.len());
+
         for (pid, members) in &groups {
             let rep = members[0];
             let rep_state = &states[rep];
             let def_cls = rep_state.transitions.default.map(|d| part[d]);
+
             let mut st = DWAState::default();
             st.state_weight = rep_state.state_weight.clone();
             st.final_weight = rep_state.final_weight.clone();
+
+            // Structure: keep default if present, and exceptions that differ from default class
             st.transitions.default = def_cls.map(|_| Some(0)).flatten();
             for (ch, tgt) in &rep_state.transitions.exceptions {
                 let cls = part[*tgt];
-                if def_cls.map_or(true, |dc| dc != cls) { st.transitions.exceptions.insert(*ch, 0); }
+                if def_cls.map_or(true, |dc| dc != cls) {
+                    st.transitions.exceptions.insert(*ch, 0);
+                }
             }
+
+            // Aggregate weights (union) across members: default and per-label exceptions
             if st.transitions.default.is_some() {
                 let mut agg_def: Option<Weight> = None;
                 for &old in members {
@@ -341,20 +376,27 @@ impl DWA {
                         if let Some(ref mut a) = agg { *a |= w; } else { agg = Some(w.clone()); }
                     }
                 }
-                if let Some(w) = agg { st.trans_weights_exceptions.insert(ch, w); }
+                if let Some(w) = agg {
+                    st.trans_weights_exceptions.insert(ch, w);
+                }
             }
+
             let new_id = new_states.len();
             pid_to_new.insert(*pid, new_id);
             new_states.push(st);
         }
+
+        // Fix transition targets
         for (pid, members) in &groups {
             let new_id = *pid_to_new.get(pid).unwrap();
             let rep = members[0];
             let rep_state = &states[rep];
+
             if let Some(d) = rep_state.transitions.default {
                 let cls = part[d];
                 new_states[new_id].transitions.default = Some(*pid_to_new.get(&cls).unwrap());
             }
+
             let ex_old = new_states[new_id].transitions.exceptions.clone();
             new_states[new_id].transitions.exceptions.clear();
             for (ch, _) in ex_old {
@@ -362,10 +404,12 @@ impl DWA {
                 new_states[new_id].transitions.exceptions.insert(ch, *pid_to_new.get(&cls).unwrap());
             }
         }
+
         states.0 = new_states;
         let _ = Self::normalize_edges_inplace(states);
         let start_pid = part[body.start_state];
         body.start_state = *pid_to_new.get(&start_pid).unwrap();
+
         true
     }
 
