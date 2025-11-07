@@ -251,7 +251,7 @@ impl DWA {
     }
 }
 
-pub fn assert_dwa_equivalent(mut a: DWA, mut b: DWA) {
+pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
     todo!()
 }
 
@@ -365,7 +365,7 @@ fn test_union_simple() {
     expected.set_final_weight(s_b, Weight::from_item(2)).unwrap();
 
     let u = d1.union(&d2);
-    assert_dwa_equivalent(u, expected);
+    stochastic_equivalence_test(u, expected);
 }
 
 #[test]
@@ -385,7 +385,7 @@ fn test_union_overlapping() {
     expected.set_final_weight(s_b, Weight::from_item(3)).unwrap();
 
     let u = d1.union(&d2);
-    assert_dwa_equivalent(u, expected);
+    stochastic_equivalence_test(u, expected);
 }
 
 #[test]
@@ -394,7 +394,7 @@ fn test_concatenate_simple() {
     let d2 = dwa_accepts_char('b', Weight::from_iter([2, 3]));
     let c = d1.concatenate(&d2);
     let expected = dwa_from_str("ab", Weight::from_item(2));
-    assert_dwa_equivalent(c, expected);
+    stochastic_equivalence_test(c, expected);
 }
 
 #[test]
@@ -461,7 +461,7 @@ fn test_union_transition_weight_union() {
         .set_final_weight(s, Weight::from_iter(vec![1, 2]))
         .unwrap();
 
-    assert_dwa_equivalent(u, expected);
+    stochastic_equivalence_test(u, expected);
 }
 
 #[test]
@@ -536,7 +536,7 @@ fn test_equivalence_via_simplification() {
     b.add_transition(0, 0, s1b, Weight::from_item(1)).unwrap();
     b.add_transition(0, 2, s1b, Weight::from_item(0)).unwrap();
 
-    assert_dwa_equivalent(a, b);
+    stochastic_equivalence_test(a, b);
 }
 
 #[test]
@@ -560,7 +560,7 @@ fn test_concatenate_left_start_is_final() {
     let mut expected = DWA::new();
     expected.set_final_weight(expected.body.start_state, Weight::from_item(1)).unwrap();
 
-    assert_dwa_equivalent(c, expected);
+    stochastic_equivalence_test(c, expected);
 }
 
 #[test]
@@ -590,7 +590,7 @@ fn test_simplify_propagates_future_weights() {
 
     a.simplify();
 
-    assert_dwa_equivalent(a, b);
+    stochastic_equivalence_test(a, b);
 }
 
 #[test]
@@ -1181,7 +1181,7 @@ fn test_union_identical_cyclic() {
     let u = d1.union(&d2);
 
     // The union of two identical automata should be equivalent to the original.
-    assert_dwa_equivalent(u, d1);
+    stochastic_equivalence_test(u, d1);
 }
 
 #[test]
@@ -1316,7 +1316,7 @@ fn test_simplify_complex_dwa_from_attachment() {
     let mut simplified = left.clone();
     simplified.simplify();
 
-    assert_dwa_equivalent(left, simplified);
+    stochastic_equivalence_test(left, simplified);
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
-use crate::precompute4::test_weighted_automata::assert_dwa_equivalent;
+use crate::precompute4::test_weighted_automata::stochastic_equivalence_test;
 use crate::precompute4::weighted_automata::{Weight, DWA};
 
 #[test]
@@ -28,7 +28,7 @@ fn test_resolve_negatives_simple_cancellation() {
     expected.add_transition(expected.body.start_state, code_a, s_final, Weight::from_item(2)).unwrap();
     expected.set_final_weight(s_final, Weight::from_item(2)).unwrap();
 
-    assert_dwa_equivalent(d, expected);
+    stochastic_equivalence_test(d, expected);
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn test_resolve_negatives_long_cancellation_chain() {
     expected.add_transition(expected.body.start_state, code7, s_final, Weight::all()).unwrap();
     expected.set_final_weight(s_final, Weight::all()).unwrap();
 
-    assert_dwa_equivalent(d, expected);
+    stochastic_equivalence_test(d, expected);
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn test_resolve_negatives_from_debug_log() {
     expected.add_transition(expected.body.start_state, code2, s_final2, Weight::all()).unwrap();
     expected.set_final_weight(s_final2, Weight::from_item(0)).unwrap();
 
-    assert_dwa_equivalent(d, expected);
+    stochastic_equivalence_test(d, expected);
 }
 
 #[test]
@@ -178,7 +178,7 @@ fn test_resolve_negatives_from_intermediate_debug_log() {
     expected.set_default_transition(exp_s3, exp_s_after_4, Weight::all()).unwrap();
     expected.add_transition(exp_s_after_4, 7, exp_s_final, Weight::all()).unwrap();
 
-    assert_dwa_equivalent(d, expected);
+    stochastic_equivalence_test(d, expected);
 }
 
 #[test]
@@ -201,5 +201,5 @@ fn test_resolve_negatives_minimal_loop_with_default() {
     let mut expected = DWA::new();
     expected.set_final_weight(expected.body.start_state, Weight::all()).unwrap();
 
-    assert_dwa_equivalent(d, expected);
+    stochastic_equivalence_test(d, expected);
 }

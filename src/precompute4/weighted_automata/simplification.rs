@@ -36,7 +36,7 @@ impl DWA {
 
         if let Some(before) = before_simplify {
             IN_SIMPLIFY_CHECK.with(|c| c.set(true));
-            test_weighted_automata::assert_dwa_equivalent(before, self.clone());
+            test_weighted_automata::stochastic_equivalence_test(before, self.clone());
             IN_SIMPLIFY_CHECK.with(|c| c.set(false));
         }
     }
