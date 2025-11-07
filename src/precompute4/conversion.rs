@@ -18,6 +18,10 @@ pub fn dwa_to_precompute3(
     let start_dwa_state = &dwa.states[dwa.body.start_state];
 
     for (&char_code, &target_dwa_id) in &start_dwa_state.transitions.exceptions {
+        let mut weight = start_dwa_state.get_weight(char_code).cloned().unwrap();
+        if let Some(state_weight) = &start_dwa_state.state_weight {
+            weight &= state_weight;
+        }
         let tokenizer_state_id = TokenizerStateID(char_code as usize);
         let trie3_root = convert_dwa_subgraph(
             dwa,
