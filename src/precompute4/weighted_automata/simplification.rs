@@ -444,16 +444,23 @@ impl DWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: HashMap<(Option<Weight>, Option<Weight>, Option<usize>, Vec<(i16, usize)>), usize> = HashMap::new();
+            let mut sig2pid: HashMap<(
+                Option<Weight>,
+                Option<Weight>,
+                Option<(usize, Weight)>,
+                Vec<(i16, (usize, Weight))>,
+            ), usize> = HashMap::new();
 
             for i in 0..n {
                 let st = &states[i];
-                let def_cls = st.transitions.default.map(|d| part[d]);
-                let ex = st.transitions.exceptions.iter()
-                    .map(|(ch, &tgt)| (*ch, part[tgt]))
-                    .filter(|(_, cls)| def_cls.map_or(true, |dc| dc != *cls))
-                    .collect::<Vec<_>>();
-                let sig = (st.state_weight.clone(), st.final_weight.clone(), def_cls, ex);
+                let def_sig = st.transitions.default.map(|d| {
+                    (part[d], st.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
+                });
+                let ex_sig: Vec<_> = st.transitions.exceptions.iter()
+                    .map(|(ch, &tgt)| (*ch, (part[tgt], st.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all))))
+                    .filter(|(_, (cls, w))| def_sig.as_ref().map_or(true, |(dc, dw)| *dc != *cls || dw != w))
+                    .collect();
+                let sig = (st.state_weight.clone(), st.final_weight.clone(), def_sig, ex_sig);
                 let next_pid = sig2pid.len();
                 next_part[i] = *sig2pid.entry(sig).or_insert(next_pid);
             }
