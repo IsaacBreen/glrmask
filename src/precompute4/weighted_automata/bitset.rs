@@ -121,6 +121,35 @@ impl SimpleBitset {
     pub fn is_subset_of(&self, rhs: &SimpleBitset) -> bool {
         (self & rhs) == *self
     }
+
+    pub fn insert(&mut self, item: usize) {
+        if self.is_all_fast() { return; }
+        self.rsb.insert(item);
+        self.update_cached();
+    }
+
+    pub fn remove(&mut self, item: usize) {
+        if self.is_empty() { return; }
+        if self.is_all_fast() {
+            self.rsb = universe_rsb();
+        }
+        self.rsb.remove(item);
+        self.update_cached();
+    }
+
+    pub fn set(&mut self, item: usize, value: bool) {
+        if value {
+            self.insert(item);
+        } else {
+            self.remove(item);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.rsb.clear();
+        self.fp = FP_ZERO;
+        self.is_all = false;
+    }
 }
 
 impl Hash for SimpleBitset {
