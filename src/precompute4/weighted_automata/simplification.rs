@@ -723,11 +723,15 @@ impl NWA {
             for (v, _) in &st.epsilons {
                 if *v < n && !reachable[*v] { reachable[*v] = true; q.push_back(*v); }
             }
-            for (_, (v, _)) in &st.transitions {
-                if *v < n && !reachable[*v] { reachable[*v] = true; q.push_back(*v); }
+            for (_, targets) in &st.transitions {
+                for (v, _) in targets {
+                    if *v < n && !reachable[*v] { reachable[*v] = true; q.push_back(*v); }
+                }
             }
-            if let Some((v, _)) = &st.default {
-                if *v < n && !reachable[*v] { reachable[*v] = true; q.push_back(*v); }
+            for (v, _) in &st.default {
+                if *v < n && !reachable[*v] {
+                    reachable[*v] = true; q.push_back(*v);
+                }
             }
         }
 
@@ -745,9 +749,13 @@ impl NWA {
 
         for st in &mut new_states_vec {
             st.epsilons.iter_mut().for_each(|(v, _)| *v = remap[*v]);
-            st.transitions.values_mut().for_each(|(v, _)| *v = remap[*v]);
-            if let Some((v, _)) = &mut st.default {
-                *v = remap[*v];
+            st.transitions.values_mut().for_each(|targets| {
+                for (v, _) in targets {
+                    *v = remap[*v];
+                }
+            });
+            for (v, _) in &mut st.default {
+                *v = remap[*v]
             }
         }
 
@@ -780,11 +788,13 @@ impl NWA {
                 let new_w = &*w | &not_fut[*v];
                 if new_w != *w { *w = new_w; changed_weights = true; }
             }
-            for (_, (v, w)) in &mut st.transitions {
-                let new_w = &*w | &not_fut[*v];
-                if new_w != *w { *w = new_w; changed_weights = true; }
+            for (_, targets) in &mut st.transitions {
+                for (v, w) in targets {
+                    let new_w = &*w | &not_fut[*v];
+                    if new_w != *w { *w = new_w; changed_weights = true; }
+                }
             }
-            if let Some((v, w)) = &mut st.default {
+            for (v, w) in &mut st.default {
                 let new_w = &*w | &not_fut[*v];
                 if new_w != *w { *w = new_w; changed_weights = true; }
             }
@@ -808,16 +818,14 @@ impl NWA {
             st.epsilons.retain(|(v, _)| live[*v]);
             st.epsilons.iter_mut().for_each(|(v, _)| *v = remap[*v]);
 
-            st.transitions.retain(|_, (v, _)| live[*v]);
-            st.transitions.values_mut().for_each(|(v, _)| *v = remap[*v]);
+            st.transitions.values_mut().for_each(|targets| {
+                targets.retain(|(v, _)| live[*v]);
+                targets.iter_mut().for_each(|(v, _)| *v = remap[*v]);
+            });
+            st.transitions.retain(|_, targets| !targets.is_empty());
 
-            if let Some((v, _)) = &st.default {
-                if !live[*v] {
-                    st.default = None;
-                } else {
-                    st.default.as_mut().unwrap().0 = remap[*v];
-                }
-            }
+            st.default.retain(|(v, _)| live[*v]);
+            st.default.iter_mut().for_each(|(v, _)| *v = remap[*v]);
         }
 
         self.states.0 = new_states_vec;
@@ -859,14 +867,14 @@ impl NWA {
             new_state.final_weight = final_weight;
 
             for &sid in comp {
-                for (&lbl, &(to, ref w)) in &self.states[sid].transitions {
-                    let to_comp = comp_of[to];
-                    Self::add_transition_to_state(&mut new_state, lbl, to_comp, w.clone());
-                }
-                if let Some((to, w)) = &self.states[sid].default {
-                    if new_state.default.is_none() {
-                        new_state.default = Some((comp_of[*to], w.clone()));
+                for (&lbl, targets) in &self.states[sid].transitions {
+                    for &(to, ref w) in targets {
+                        let to_comp = comp_of[to];
+                        Self::add_transition_to_state(&mut new_state, lbl, to_comp, w.clone());
                     }
+                }
+                for (to, w) in &self.states[sid].default {
+                    Self::add_default_transition_to_state(&mut new_state, comp_of[*to], w.clone());
                 }
                 for &(to, ref w) in &self.states[sid].epsilons {
                     let to_comp = comp_of[to];
@@ -880,10 +888,12 @@ impl NWA {
 
         for st in &mut new_states_vec {
             st.epsilons.iter_mut().for_each(|(v, _)| *v = comp_of[*v]);
-            st.transitions.values_mut().for_each(|(v, _)| *v = comp_of[*v]);
-            if let Some((v, _)) = &mut st.default {
+            st.transitions.values_mut().for_each(|targets| {
+                targets.iter_mut().for_each(|(v, _)| *v = comp_of[*v]);
+            });
+            st.default.iter_mut().for_each(|(v, _)| {
                 *v = comp_of[*v];
-            }
+            });
         }
 
         self.states.0 = new_states_vec;
@@ -924,11 +934,19 @@ impl NWA {
     }
 
     fn add_transition_to_state(state: &mut NWAState, on: i16, to: NWAStateID, w: Weight) {
-        if let Some((old_to, old_w)) = state.transitions.get_mut(&on) {
-            assert_eq!(*old_to, to, "NWA restricted: cannot merge states with same-label transitions to different components");
+        let targets = state.transitions.entry(on).or_default();
+        if let Some((_, existing_w)) = targets.iter_mut().find(|(t, _)| *t == to) {
+            *existing_w |= &w;
+        } else {
+            targets.push((to, w));
+        }
+    }
+
+    fn add_default_transition_to_state(state: &mut NWAState, to: NWAStateID, w: Weight) {
+        if let Some((_, old_w)) = state.default.iter_mut().find(|(t, _)| *t == to) {
             *old_w |= &w;
         } else {
-            state.transitions.insert(on, (to, w));
+            state.default.push((to, w));
         }
     }
 }
@@ -947,23 +965,25 @@ impl NWA {
 
             // Remove empty-weight labeled transitions
             let before_lbl = st.transitions.len();
-            st.transitions.retain(|_, (_, w)| !w.is_empty());
+            st.transitions.values_mut().for_each(|targets| targets.retain(|(_, w)| !w.is_empty()));
+            st.transitions.retain(|_, targets| !targets.is_empty());
             if st.transitions.len() != before_lbl { changed = true; }
 
             // Remove empty-weight default
-            if let Some((_, w)) = &st.default {
-                if w.is_empty() {
-                    st.default = None;
-                    changed = true;
-                }
-            }
+            let before_def = st.default.len();
+            st.default.retain(|(_, w)| !w.is_empty());
+            if st.default.len() != before_def { changed = true; }
 
             // Remove labeled transitions that are identical to default (same target, same weight)
-            if let Some((def_to, def_w)) = &st.default {
-                let def_to = *def_to;
-                let def_w = def_w.clone();
+            if !st.default.is_empty() {
+                let mut sorted_default = st.default.clone();
+                sorted_default.sort_unstable();
                 let before = st.transitions.len();
-                st.transitions.retain(|_, (to, w)| !(*to == def_to && *w == def_w));
+                st.transitions.retain(|_, targets| {
+                    let mut sorted_targets = targets.clone();
+                    sorted_targets.sort_unstable();
+                    sorted_targets != sorted_default
+                });
                 if st.transitions.len() != before { changed = true; }
             }
         }
@@ -1007,7 +1027,7 @@ impl NWA {
             let st = &self.states[s];
             if st.final_weight.is_some() { continue; }
             if !st.transitions.is_empty() { continue; }
-            if st.default.is_some() { continue; }
+            if !st.default.is_empty() { continue; }
             if st.epsilons.len() != 1 { continue; }
             let (t, w) = &st.epsilons[0];
             if !w.is_all_fast() { continue; }
@@ -1035,13 +1055,15 @@ impl NWA {
                 let nv = ultimate[*v];
                 if nv != *v { *v = nv; changed = true; }
             }
-            for (_, (v, _)) in &mut st.transitions {
+            for (_, targets) in &mut st.transitions {
+                for (v, _) in targets {
+                    let nv = ultimate[*v];
+                    if nv != *v { *v = nv; changed = true; }
+                }
+            }
+            for (v, _) in &mut st.default {
                 let nv = ultimate[*v];
                 if nv != *v { *v = nv; changed = true; }
-            }
-            if let Some((ref mut dv, _)) = &mut st.default {
-                let nv = ultimate[*dv];
-                if nv != *dv { *dv = nv; changed = true; }
             }
         }
         let new_start = ultimate[self.body.start_state];
@@ -1083,13 +1105,14 @@ impl NWA {
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
             let mut sig2pid: HashMap<
-                (Option<Weight>, Option<(usize, Weight)>, Vec<(usize, Weight)>, Vec<(i16, (usize, Weight))>),
+                (Option<Weight>, Vec<(usize, Weight)>, Vec<(usize, Weight)>, Vec<(i16, Vec<(usize, Weight)>)>),
                 usize,
             > = HashMap::new();
 
             for i in 0..n {
                 let st = &self.states[i];
-                let def_sig = st.default.as_ref().map(|(to, w)| (part[*to], w.clone()));
+                let mut def_sig = st.default.iter().map(|(to, w)| (part[*to], w.clone())).collect::<Vec<_>>();
+                def_sig.sort_unstable();
 
                 let eps_sig = st.epsilons.iter()
                     .fold(BTreeMap::new(), |mut acc, (to, w)| {
@@ -1099,7 +1122,13 @@ impl NWA {
                     .into_iter().collect::<Vec<_>>();
 
                 let lbl_sig = st.transitions.iter()
-                    .map(|(lbl, (to, w))| (*lbl, (part[*to], w.clone())))
+                    .map(|(lbl, targets)| {
+                        let mut target_sigs = targets.iter()
+                            .map(|(to, w)| (part[*to], w.clone()))
+                            .collect::<Vec<_>>();
+                        target_sigs.sort_unstable();
+                        (*lbl, target_sigs)
+                    })
                     .collect::<Vec<_>>();
 
                 let sig = (st.final_weight.clone(), def_sig, eps_sig, lbl_sig);
@@ -1130,18 +1159,22 @@ impl NWA {
 
             // Fix targets to new partition ids
             // Default
-            if let Some((to, w)) = st.default.clone() {
+            let mut new_default = Vec::new();
+            for (to, w) in st.default {
                 let cls = part[to];
-                st.default = Some((*pid_to_new.entry(cls).or_insert_with(|| {
-                    groups.keys().position(|k| *k == cls).unwrap()
-                }), w));
+                new_default.push((cls, w));
             }
+            st.default = new_default;
             // Labeled transitions
             let trans = st.transitions.clone();
             st.transitions.clear();
-            for (lbl, (to, w)) in trans {
-                let cls = part[to];
-                st.transitions.insert(lbl, (cls, w));
+            for (lbl, targets) in trans {
+                let mut new_targets = Vec::new();
+                for (to, w) in targets {
+                    let cls = part[to];
+                    new_targets.push((cls, w));
+                }
+                st.transitions.insert(lbl, new_targets);
             }
             // Epsilons (aggregate after class remap)
             let eps = st.epsilons.clone();
@@ -1158,15 +1191,21 @@ impl NWA {
         // Rewrite class ids in edges to actual new state ids and deduplicate ε-edges
         for st in &mut new_states {
             // Default
-            if let Some((cls, w)) = &st.default.clone() {
-                st.default = Some((*pid_to_new.get(cls).expect("missing class"), w.clone()));
+            let mut new_default = Vec::new();
+            for (cls, w) in &st.default {
+                new_default.push((*pid_to_new.get(cls).expect("missing class"), w.clone()));
             }
+            st.default = new_default;
             // Labeled
             let trans = st.transitions.clone();
             st.transitions.clear();
-            for (lbl, (cls, w)) in trans {
-                let to_new = *pid_to_new.get(&cls).expect("missing class");
-                st.transitions.insert(lbl, (to_new, w));
+            for (lbl, targets) in trans {
+                let mut new_targets = Vec::new();
+                for (cls, w) in targets {
+                    let to_new = *pid_to_new.get(&cls).expect("missing class");
+                    new_targets.push((to_new, w));
+                }
+                st.transitions.insert(lbl, new_targets);
             }
             // Epsilons
             let eps = st.epsilons.clone();

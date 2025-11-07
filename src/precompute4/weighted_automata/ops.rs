@@ -145,12 +145,16 @@ impl NWA {
                 if t < n { rev[t].push((p, w.clone())); }
             }
             // Labeled
-            for (_, (t, w)) in &self.states[p].transitions {
-                if *t < n { rev[*t].push((p, w.clone())); }
+            for (_, targets) in &self.states[p].transitions {
+                for (t, w) in targets {
+                    if *t < n { rev[*t].push((p, w.clone())); }
+                }
             }
             // Default
-            if let Some((t, w)) = &self.states[p].default {
-                if *t < n { rev[*t].push((p, w.clone())); }
+            for (t, w) in &self.states[p].default {
+                if *t < n {
+                    rev[*t].push((p, w.clone()));
+                }
             }
         }
 
@@ -197,7 +201,7 @@ impl NWA {
             // Default -> NWA default
             if let Some(to) = st.transitions.default {
                 if let Some(w) = &st.trans_weight_default {
-                    nwa.states.0[i].default = Some((to, w.clone()));
+                    nwa.states.0[i].default.push((to, w.clone()));
                 }
             }
             // Labeled
@@ -258,16 +262,20 @@ impl NWA {
                 }
             }
             // labeled
-            for (_, (v, _)) in states[u].transitions.iter() {
-                if *v < states.len() && !visited[*v] {
-                    visited[*v] = true;
-                    q.push_back(*v);
+            for (_, targets) in states[u].transitions.iter() {
+                for (v, _) in targets {
+                    if *v < states.len() && !visited[*v] {
+                        visited[*v] = true;
+                        q.push_back(*v);
+                    }
                 }
             }
-            if let Some((v, _)) = &states[u].default {
-                if *v < states.len() && !visited[*v] {
-                    visited[*v] = true;
-                    q.push_back(*v);
+            if !states[u].default.is_empty() {
+                for (v, _) in &states[u].default {
+                    if *v < states.len() && !visited[*v] {
+                        visited[*v] = true;
+                        q.push_back(*v);
+                    }
                 }
             }
         }

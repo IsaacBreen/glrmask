@@ -10,16 +10,12 @@ use std::ops::{Index, IndexMut};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NWABuildError {
-    DefaultTransitionAlreadyExists { from: NWAStateID },
     StateOutOfBounds { state: NWAStateID },
 }
 
 impl Display for NWABuildError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            NWABuildError::DefaultTransitionAlreadyExists { from } => {
-                write!(f, "Default transition from state {} already exists", from)
-            }
             NWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
         }
     }
@@ -31,25 +27,22 @@ impl Display for NWABuildError {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NWAState {
     pub final_weight: Option<Weight>,
-    /// Non-epsilon transitions: unique target per input symbol.
-    /// Map: label -> (target, weight)
-    pub transitions: BTreeMap<i16, (NWAStateID, Weight)>,
+    /// Non-epsilon transitions: multiple targets per input symbol are allowed.
+    /// Map: label -> Vec<(target, weight)>
+    pub transitions: BTreeMap<i16, Vec<(NWAStateID, Weight)>>,
     /// Epsilon transitions: list of (target, weight).
     pub epsilons: Vec<(NWAStateID, Weight)>,
-    /// Default transition: used when a labeled transition for a symbol is absent.
-    /// Semantics: for any symbol not present as a labeled transition, this edge applies.
-    pub default: Option<(NWAStateID, Weight)>,
+    /// Default transitions: used when a labeled transition for a symbol is absent.
+    pub default: Vec<(NWAStateID, Weight)>,
 }
 
 impl NWAState {
-    pub fn get_transition(&self, on: i16) -> Option<&(NWAStateID, Weight)> {
-        self.transitions.get(&on).or_else(|| {
-            if let Some(result) = &self.default {
-                Some(result)
-            } else {
-                None
-            }
-        })
+    pub fn get_transition(&self, on: i16) -> &[(NWAStateID, Weight)] {
+        if let Some(targets) = self.transitions.get(&on) {
+            targets
+        } else {
+            &self.default
+        }
     }
 }
 
@@ -77,8 +70,7 @@ impl NWAStates {
         self.0[from].epsilons.push((to, w));
     }
 
-    /// Add a labeled transition; if an existing transition on the same label exists,
-    /// we merge weights if the target is the same, otherwise we assert (as per restricted NWA).
+    /// Add a labeled transition. Multiple transitions on the same label are allowed.
     pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
         if from >= self.len() {
             return Err(NWABuildError::StateOutOfBounds { state: from });
@@ -86,12 +78,7 @@ impl NWAStates {
         if to >= self.len() {
             return Err(NWABuildError::StateOutOfBounds { state: to });
         }
-        if let Some((old_to, old_w)) = self.0[from].transitions.get_mut(&on) {
-            assert_eq!(*old_to, to, "NWA restricted: only one target per (state, symbol)");
-            *old_w |= &w;
-        } else {
-            self.0[from].transitions.insert(on, (to, w));
-        }
+        self.0[from].transitions.entry(on).or_default().push((to, w));
         Ok(())
     }
 
@@ -102,10 +89,7 @@ impl NWAStates {
         if to >= self.len() {
             return Err(NWABuildError::StateOutOfBounds { state: to });
         }
-        if self.0[from].default.is_some() {
-            return Err(NWABuildError::DefaultTransitionAlreadyExists { from });
-        }
-        self.0[from].default = Some((to, w));
+        self.0[from].default.push((to, w));
         Ok(())
     }
 
@@ -140,26 +124,28 @@ impl NWAStates {
             // Labeled edges
             let trans = other.0[old].transitions.clone();
             self.0[new].transitions.clear();
-            for (lbl, (to_old, w)) in trans {
-                let to_new = *remap.entry(to_old).or_insert_with(|| {
-                    let n = self.add_state();
-                    self.0[n] = other.0[to_old].clone();
-                    q.push_back((to_old, n));
-                    n
-                });
-                self.0[new].transitions.insert(lbl, (to_new, w.clone()));
+            for (lbl, targets) in trans {
+                for (to_old, w) in targets {
+                    let to_new = *remap.entry(to_old).or_insert_with(|| {
+                        let n = self.add_state();
+                        self.0[n] = other.0[to_old].clone();
+                        q.push_back((to_old, n));
+                        n
+                    });
+                    self.0[new].transitions.entry(lbl).or_default().push((to_new, w.clone()));
+                }
             }
             // Default edge
             let def_old = other.0[old].default.clone();
-            self.0[new].default = None;
-            if let Some((to_old, w)) = def_old {
+            self.0[new].default.clear();
+            for (to_old, w) in def_old {
                 let to_new = *remap.entry(to_old).or_insert_with(|| {
                     let n = self.add_state();
                     self.0[n] = other.0[to_old].clone();
                     q.push_back((to_old, n));
                     n
                 });
-                self.0[new].default = Some((to_new, w));
+                self.0[new].default.push((to_new, w));
             }
         }
 
@@ -183,12 +169,16 @@ impl Display for NWAStates {
             if let Some(w) = &state.final_weight {
                 writeln!(f, "    final_weight: {}", w)?;
             }
-            if let Some((to, w)) = &state.default {
-                writeln!(f, "    * -> {} (weight: {})", to, w)?;
+            if !state.default.is_empty() {
+                for (to, w) in &state.default {
+                    writeln!(f, "    * -> {} (weight: {})", to, w)?;
+                }
             }
-            for (on, (to, w)) in &state.transitions {
-                let char_repr = format_i16_char(*on);
-                writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+            for (on, targets) in &state.transitions {
+                for (to, w) in targets {
+                    let char_repr = format_i16_char(*on);
+                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+                }
             }
             for (to, w) in &state.epsilons {
                 writeln!(f, "    ε -> {} (weight: {})", to, w)?;
@@ -243,12 +233,16 @@ impl Display for NWA {
             if let Some(w) = &state.final_weight {
                 writeln!(f, "    final_weight: {}", w)?;
             }
-            if let Some((to, w)) = &state.default {
-                writeln!(f, "    * -> {} (weight: {})", to, w)?;
+            if !state.default.is_empty() {
+                for (to, w) in &state.default {
+                    writeln!(f, "    * -> {} (weight: {})", to, w)?;
+                }
             }
-            for (on, (to, w)) in &state.transitions {
-                let char_repr = format_i16_char(*on);
-                writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+            for (on, targets) in &state.transitions {
+                for (to, w) in targets {
+                    let char_repr = format_i16_char(*on);
+                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+                }
             }
             for (to, w) in &state.epsilons {
                 writeln!(f, "    ε -> {} (weight: {})", to, w)?;

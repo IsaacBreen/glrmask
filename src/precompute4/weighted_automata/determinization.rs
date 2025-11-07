@@ -135,14 +135,14 @@ impl NWA {
         #[derive(Clone)]
         struct MacroSig {
             final_w: Option<Weight>,
-            def: Option<usize>,
-            ex: BTreeMap<i16, usize>,
+            def: Vec<usize>,
+            ex: BTreeMap<i16, Vec<usize>>,
         }
         #[derive(Clone, Hash, Eq, PartialEq)]
         struct MacroSigKey {
             final_fp: u64,
-            def: Option<usize>,
-            ex: Vec<(i16, usize)>,
+            def: Vec<usize>,
+            ex: Vec<(i16, Vec<usize>)>,
         }
 
         let pb_eps = if PROGRESS_BAR_ENABLED {
@@ -188,48 +188,49 @@ impl NWA {
             let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
 
             // Compute default step; skip if out-of-bounds or effect is empty after weighting + ε-closure.
-            let def_step: Option<usize> = if let Some((to, wdef)) = self.states[s].default.as_ref() {
+            let def_steps: Vec<usize> = self.states[s].default.iter().filter_map(|(to, wdef)| {
                 if *to < n {
                     let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
-                    if pairs_def.is_empty() {
-                        None
-                    } else {
-                        Some(step_pool.intern(pairs_def))
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+                    if pairs_def.is_empty() { None } else { Some(step_pool.intern(pairs_def)) }
+                } else { None }
+            }).collect();
 
             // Compute exceptions; drop those that are empty or identical to the default step effect.
-            let mut ex: BTreeMap<i16, usize> = BTreeMap::new();
-            for (lbl, (to, wlbl)) in self.states[s].transitions.iter() {
-                if *to >= n {
-                    continue;
+            let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+            for (lbl, targets) in self.states[s].transitions.iter() {
+                let mut step_exs: Vec<usize> = Vec::new();
+                for (to, wlbl) in targets {
+                    if *to >= n {
+                        continue;
+                    }
+                    let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
+                    if pairs_ex.is_empty() {
+                        continue;
+                    }
+                    step_exs.push(step_pool.intern(pairs_ex));
                 }
-                let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
-                if pairs_ex.is_empty() {
-                    // No effect for this label after masking/ε-closure -> redundant edge.
-                    continue;
+
+                if !step_exs.is_empty() {
+                    step_exs.sort_unstable();
+                    let mut sorted_def_steps = def_steps.clone();
+                    sorted_def_steps.sort_unstable();
+                    if step_exs == sorted_def_steps {
+                        continue;
+                    }
+                    ex.insert(*lbl, step_exs);
                 }
-                let step_ex = step_pool.intern(pairs_ex);
-                if def_step.is_some() && def_step == Some(step_ex) {
-                    // Labeled edge is structurally identical to default -> redundant exception.
-                    continue;
-                }
-                ex.insert(*lbl, step_ex);
             }
 
+            let mut sorted_def_steps = def_steps.clone();
+            sorted_def_steps.sort_unstable();
             let key = MacroSigKey {
                 final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
-                def: def_step,
-                ex: ex.iter().map(|(k, v)| (*k, *v)).collect(),
+                def: sorted_def_steps,
+                ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
             };
             let sig_id = *sig_intern.entry(key).or_insert_with(|| {
                 let id = sigs.len();
-                sigs.push(MacroSig { final_w: final_acc, def: def_step, ex });
+                sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
                 id
             });
             state_to_sig_id[s] = sig_id;
@@ -341,13 +342,17 @@ impl NWA {
             let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
 
             for (sig_id, gate) in &node_gates {
-                if let Some(def_id) = sigs[*sig_id].def {
+                for def_id in &sigs[*sig_id].def {
                     *def_groups.entry(def_id).or_default() |= gate;
                 }
-                for (lbl, ex_step) in &sigs[*sig_id].ex {
-                    *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
-                    if let Some(def_id) = sigs[*sig_id].def {
-                        *def_exers_by_label.entry(*lbl).or_default().entry(def_id).or_default() |= gate;
+                for (lbl, ex_steps) in &sigs[*sig_id].ex {
+                    for ex_step in ex_steps {
+                        *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
+                    }
+                    if !sigs[*sig_id].def.is_empty() {
+                        for def_id in &sigs[*sig_id].def {
+                            *def_exers_by_label.entry(*lbl).or_default().entry(*def_id).or_default() |= gate;
+                        }
                     }
                 }
             }

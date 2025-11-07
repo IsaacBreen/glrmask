@@ -164,7 +164,13 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
 
                 for (b_reachable, w_b_br) in eps_closure_of_b {
                     if b_reachable >= states.len() { continue; }
-                    if let Some((c_target, w_br_c)) = states[b_reachable].get_transition(c) {
+                    let targets_to_use = if let Some(targets) = states[b_reachable].transitions.get(&c) {
+                        targets
+                    } else {
+                        &states[b_reachable].default
+                    };
+
+                    for (c_target, w_br_c) in targets_to_use {
                         let new_w = w_ab & &w_b_br & w_br_c;
                         if !new_w.is_empty() {
                             pass_epsilons.push((a, *c_target, new_w));
@@ -215,9 +221,11 @@ fn compute_final_fixpoint(states: &NWAStates, new_epsilons: &[(NWAStateID, NWASt
             if v < n { rev[v].push((u, w.clone())); }
         }
         // Negative edges
-        for (label, (v, w)) in &states[u].transitions {
+        for (label, targets) in &states[u].transitions {
             if *label < 0 {
-                if *v < n { rev[*v].push((u, w.clone())); }
+                for (v, w) in targets {
+                    if *v < n { rev[*v].push((u, w.clone())); }
+                }
             }
         }
     }
