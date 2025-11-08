@@ -45,6 +45,7 @@ fn convert_dwa_subgraph(
     max_parser_state_id: usize,
     start_weight: Weight,
 ) -> PrecomputeNode3Index {
+    crate::debug!(5, "Converting DWA: {}", dwa);
     let mut dwa_state_to_trie_node: BTreeMap<StateID, PrecomputeNode3Index> = BTreeMap::new();
     let all_parser_states = StateIDBV::ones(max_parser_state_id + 1);
 
