@@ -1692,6 +1692,8 @@ fn test_dwa_to_nwa_to_dwa_roundtrip() {
     println!("Original DWA:\n{}", a);
 
     let nwa = NWA::from_dwa(&a);
+    println!("Converted NWA:\n{}", nwa);
+
     let mut roundtrip_dwa = nwa.determinize_to_dwa();
     roundtrip_dwa.simplify();
 
