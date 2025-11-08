@@ -105,23 +105,22 @@ impl NWA {
 
         // 4) Build product DFA over components (parallel composition).
         let now_product = Instant::now();
-        let product = ProductDFA::from_components(&comp_dfas, &sigma);
+        let mut product = ProductDFA::from_components(&comp_dfas, &sigma);
         debug_log(4, || {
             format!(
-                "Product DFA: states={}, alphabet_size={}, time={:?}",
+                "Product DFA (before min): states={}, alphabet_size={}, time={:?}",
                 product.n_states, sigma.size(), now_product.elapsed()
             )
+        });
+
+        product.minimize(&sigma);
+        debug_log(4, || {
+            format!("Product DFA (after min): states={}, total_product_time={:?}", product.n_states, now_product.elapsed())
         });
 
         // 5) Convert product DFA to DWA (attach weights).
         let now_convert = Instant::now();
         let dwa = product.to_dwa(&sigma, &atoms, &comp_dfas, &comp_sinks);
-        debug_log(4, || {
-            format!("Product->DWA conversion took {:?}", now_convert.elapsed())
-        });
-
-        // 6) Simplify DWA
-        let mut dwa = dwa;
 
         debug_log(3, || {
             format!("NWA::determinize_to_dwa total time: {:?}", now_total.elapsed())
@@ -689,6 +688,9 @@ struct DetDFA {
 impl DetDFA {
     fn minimize(&mut self, sigma: &Alphabet) {
         debug_log(4, || format!("Minimizing DFA with {} states", self.n_states));
+        if self.n_states == 0 {
+            return;
+        }
         // Remove states unreachable from start first
         let reachable = {
             let mut visited = vec![false; self.n_states];
@@ -920,6 +922,241 @@ struct ProductDFA {
     tuples: Vec<Vec<usize>>, // tuples[state] = [q0, q1, ..., q_{k-1}]
 }
 impl ProductDFA {
+    fn minimize(&mut self, sigma: &Alphabet) {
+        debug_log(4, || format!("Minimizing Product DFA with {} states", self.n_states));
+        if self.n_states == 0 {
+            return;
+        }
+        // Remove states unreachable from start first
+        let reachable = {
+            let mut visited = vec![false; self.n_states];
+            let mut q = VecDeque::new();
+            visited[self.start] = true;
+            q.push_back(self.start);
+            while let Some(u) = q.pop_front() {
+                for &v in &self.trans[u] {
+                    if !visited[v] {
+                        visited[v] = true;
+                        q.push_back(v);
+                    }
+                }
+            }
+            visited
+        };
+
+        // Map reachable states to compact ids
+        let mut map = vec![usize::MAX; self.n_states];
+        let mut new_states = 0usize;
+        for i in 0..self.n_states {
+            if reachable[i] {
+                map[i] = new_states;
+                new_states += 1;
+            }
+        }
+
+        if new_states == 0 {
+            // No reachable states? Create a single dead state.
+            self.n_states = 1;
+            self.start = 0;
+            self.finals = vec![false];
+            self.trans = vec![vec![0; sigma.size()]];
+            let k = if self.tuples.is_empty() { 0 } else { self.tuples[0].len() };
+            self.tuples = vec![vec![0; k]]; // Default tuple
+            return;
+        }
+
+        let mut finals = vec![false; new_states];
+        let mut trans = vec![vec![0usize; sigma.size()]; new_states];
+        let mut tuples = vec![Vec::new(); new_states];
+
+        for i in 0..self.n_states {
+            if !reachable[i] {
+                continue;
+            }
+            let ni = map[i];
+            finals[ni] = self.finals[i];
+            tuples[ni] = self.tuples[i].clone();
+            for a in 0..sigma.size() {
+                let v = self.trans[i][a];
+                trans[ni][a] = map[v];
+            }
+        }
+
+        self.n_states = new_states;
+        self.start = map[self.start];
+        self.finals = finals;
+        self.trans = trans;
+        self.tuples = tuples;
+
+        // Hopcroft minimization on complete DFA
+        if self.n_states <= 1 {
+            return;
+        }
+
+        let n = self.n_states;
+        let a = sigma.size();
+
+        // Initial partition: accepting vs non-accepting
+        let mut part_id = vec![0usize; n];
+        let mut blocks: Vec<Vec<usize>> = Vec::new();
+        let (accepting_block, non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| self.finals[s]);
+
+        if accepting_block.is_empty() || non_accepting_block.is_empty() {
+            // All accepting or all non-accepting -> nothing to split
+            return;
+        }
+        blocks.push(accepting_block);
+        blocks.push(non_accepting_block);
+        for (pid, block) in blocks.iter().enumerate() {
+            for &s in block {
+                part_id[s] = pid;
+            }
+        }
+
+        // Build inverse transitions for each symbol
+        let mut inv: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); n]; a];
+        for s in 0..n {
+            for sym in 0..a {
+                let v = self.trans[s][sym];
+                inv[sym][v].push(s);
+            }
+        }
+
+        // Worklist of (block id, symbol). Using BTreeSet for efficient presence checks and removal.
+        let mut worklist: BTreeSet<(usize, usize)> = BTreeSet::new();
+        let smaller_initial_set = if blocks[0].len() <= blocks[1].len() { 0 } else { 1 };
+        for sym in 0..a {
+            worklist.insert((smaller_initial_set, sym));
+        }
+
+        let pb_hopcroft = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new_spinner();
+            p.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.green} [Determinize/Minimize Product: {elapsed_precise}] Pass {pos}, worklist size: {msg}")
+                    .unwrap(),
+            );
+            Some(p)
+        } else {
+            None
+        };
+        let mut passes = 0u64;
+
+        while let Some(&(b, sym)) = worklist.iter().next() {
+            worklist.remove(&(b, sym));
+
+            if let Some(p) = &pb_hopcroft {
+                passes += 1;
+                p.set_position(passes);
+                p.set_message(format!("{}", worklist.len()));
+            }
+
+            // Compute preimage of block b under symbol sym
+            let mut pre: Vec<usize> = Vec::new();
+            for &v in &blocks[b] {
+                pre.extend_from_slice(&inv[sym][v]);
+            }
+            if pre.is_empty() {
+                continue;
+            }
+            pre.sort_unstable();
+            pre.dedup();
+
+            // For each block, split by intersection with pre
+            let mut affected: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
+            for &s in &pre {
+                let pid = part_id[s];
+                affected.entry(pid).or_default().0.push(s);
+            }
+            for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
+                // Fill not_in_pre
+                for &s in &blocks[*pid] {
+                    if !in_pre.binary_search(&s).is_ok() {
+                        not_in_pre.push(s);
+                    }
+                }
+            }
+
+            let mut to_replace: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
+
+            for (pid, (in_pre, not_in_pre)) in affected.into_iter() {
+                if in_pre.is_empty() || not_in_pre.is_empty() {
+                    continue;
+                }
+                to_replace.push((pid, in_pre, not_in_pre));
+            }
+
+            if to_replace.is_empty() {
+                continue;
+            }
+
+            // Apply replacements (block splits)
+            for (pid, mut in_pre, mut not_in_pre) in to_replace {
+                in_pre.sort_unstable();
+                not_in_pre.sort_unstable();
+
+                let pid2 = blocks.len();
+                blocks.push(not_in_pre);
+                blocks[pid] = in_pre;
+
+                // Update part_id map for all states in the newly created blocks
+                for &s in &blocks[pid] {
+                    part_id[s] = pid;
+                }
+                for &s in &blocks[pid2] {
+                    part_id[s] = pid2;
+                }
+
+                // Update worklist according to Hopcroft's algorithm
+                for sym2 in 0..a {
+                    if worklist.remove(&(pid, sym2)) {
+                        // The original block was on the worklist. Replace it with both new blocks.
+                        worklist.insert((pid, sym2));
+                        worklist.insert((pid2, sym2));
+                    } else {
+                        // The original block was not on the worklist. Add the smaller of the two new blocks.
+                        let (smaller_pid, _) = if blocks[pid].len() <= blocks[pid2].len() { (pid, pid2) } else { (pid2, pid) };
+                        worklist.insert((smaller_pid, sym2));
+                    }
+                }
+            }
+        }
+
+        if let Some(p) = pb_hopcroft {
+            p.finish_with_message(format!("Hopcroft (Product) done, {} partitions", blocks.len()));
+        }
+
+        // Build the quotient automaton
+        let num_parts = blocks.len();
+        let mut repr: Vec<usize> = vec![0; num_parts];
+        for (pid, block) in blocks.iter().enumerate() {
+            repr[pid] = block[0];
+        }
+
+        let start_part = part_id[self.start];
+        let mut finals2 = vec![false; num_parts];
+        let mut tuples2 = vec![Vec::new(); num_parts];
+        for pid in 0..num_parts {
+            finals2[pid] = self.finals[repr[pid]];
+            tuples2[pid] = self.tuples[repr[pid]].clone();
+        }
+
+        let mut trans2 = vec![vec![0usize; a]; num_parts];
+        for pid in 0..num_parts {
+            let s = repr[pid];
+            for sym in 0..a {
+                let v = self.trans[s][sym];
+                trans2[pid][sym] = part_id[v];
+            }
+        }
+
+        self.n_states = num_parts;
+        self.start = start_part;
+        self.finals = finals2;
+        self.trans = trans2;
+        self.tuples = tuples2;
+    }
+
     fn from_components(comps: &[DetDFA], sigma: &Alphabet) -> Self {
         let k = comps.len();
         // Starting tuple: [start0, start1, ..., start_{k-1}]
@@ -1017,6 +1254,10 @@ impl ProductDFA {
     /// - Edge weights: active indices at source state (union over atoms whose component is not sink).
     /// - Final weights: union over atoms whose component is accepting at that state.
     fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, comps: &[DetDFA], comp_sinks: &[Option<usize>]) -> DWA {
+        debug_log(4, || {
+            format!("Product->DWA conversion took {:?}", Instant::now())
+        });
+
         let mut dwa_states = DWAStates::default();
         for _ in 0..self.n_states {
             dwa_states.add_state();

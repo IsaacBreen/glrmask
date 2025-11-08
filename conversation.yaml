@@ -1218,6 +1218,9 @@ local_system:
               let mut nwa = self.clone();
               debug_log(3, || format!("Starting determinization for NWA with {} states", nwa.states.len()));
 
+              // Compute future-acceptance masks once. We will use them to prune atoms and shrink the alphabet.
+              let fut = nwa.compute_future_weights();
+
               // 1) Build the atomic partition of weights (disjoint contiguous ranges).
               let now_atoms = Instant::now();
               let atoms = WeightPartition::from_nwa(&nwa);
@@ -1227,7 +1230,9 @@ local_system:
 
               // 2) Build global alphabet (all labels used anywhere) + OTHER
               let now_sigma = Instant::now();
-              let sigma = Alphabet::from_nwa(&nwa);
+              // Filter the alphabet using the future-acceptance masks:
+              // we only keep labels that can contribute to acceptance along some path
+              let sigma = Alphabet::from_nwa_with_future(&nwa, &fut);
               debug_log(4, || {
                   format!("Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed())
               });
@@ -1250,9 +1255,10 @@ local_system:
               let mut comp_dfas: Vec<DetDFA> = Vec::with_capacity(atoms.intervals.len());
               let mut comp_sinks: Vec<Option<usize>> = Vec::with_capacity(atoms.intervals.len());
               for (i, atom) in atoms.intervals.iter().enumerate() {
-                  let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom);
+                  let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
                   let mut dfa = nfa.determinize(&sigma);
                   dfa.minimize(&sigma);
+                  crate::debug!(4, "Atom {}: interval={:?}, DFA states={}", i, atom, dfa.n_states);
                   let sink = dfa.find_sink_index(&sigma);
                   comp_sinks.push(sink);
                   comp_dfas.push(dfa);
@@ -1329,6 +1335,41 @@ local_system:
               }
               let labels: Vec<i16> = set.into_iter().collect();
               let other_index = labels.len(); // last slot is OTHER
+              Alphabet { labels, other_index }
+          }
+
+          /// Build an alphabet filtered by future-acceptance masks:
+          /// only keep labels that can actually contribute to acceptance along some path.
+          /// A label is kept if there exists some edge s --lbl/w--> t with (w ∧ F[t]) ≠ ∅,
+          /// or a default s --wdef--> t with (wdef ∧ F[t]) ≠ ∅, in which case we keep the defaults'
+          /// exception labels too (they must be separated from OTHER).
+          fn from_nwa_with_future(nwa: &NWA, fut: &Vec<Weight>) -> Self {
+              let mut set = BTreeSet::new();
+              for (s, st) in nwa.states.0.iter().enumerate() {
+                  // labeled transitions
+                  for (&lbl, targets) in &st.transitions {
+                      let mut relevant = false;
+                      for (t, w) in targets {
+                          if !(&fut[*t] & w).is_empty() {
+                              relevant = true;
+                              break;
+                          }
+                      }
+                      if relevant {
+                          set.insert(lbl);
+                      }
+                  }
+                  // defaults: if relevant, keep their exception labels
+                  for def in &st.default {
+                      if !(&fut[def.target] & &def.weight).is_empty() {
+                          for &lbl in &def.exceptions {
+                              set.insert(lbl);
+                          }
+                      }
+                  }
+              }
+              let labels: Vec<i16> = set.into_iter().collect();
+              let other_index = labels.len();
               Alphabet { labels, other_index }
           }
           #[inline]
@@ -1481,50 +1522,133 @@ local_system:
           eps_by_state: Vec<Vec<usize>>,
       }
       impl PerAtomNFA {
-          fn from_nwa(states: &NWAStates, start: usize, sigma: &Alphabet, atom: &RangeInclusive<usize>) -> Self {
-              let n = states.len();
-              let mut finals = vec![false; n];
-              let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); n];
-              let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); n];
-              let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); n];
-
+          fn from_nwa(states: &NWAStates, start: usize, _sigma: &Alphabet, atom: &RangeInclusive<usize>, fut: &[Weight]) -> Self {
+              let n_total = states.len();
               let atom_w: Weight = std::iter::once((*atom.start())..=(*atom.end())).collect();
 
-              for s in 0..n {
-                  // final
-                  if let Some(w) = &states[s].final_weight {
-                      if !(&atom_w & w).is_empty() {
-                          finals[s] = true;
+              // Live states for this atom: those with F[s] ∧ atom ≠ ∅
+              let mut live = vec![false; n_total];
+              for s in 0..n_total {
+                  if !(&fut[s] & &atom_w).is_empty() {
+                      live[s] = true;
+                  }
+              }
+
+              // If start is not live, return a trivial 1-state NFA (non-final, no edges).
+              if start >= n_total || !live[start] {
+                  return PerAtomNFA {
+                      n: 1,
+                      start: 0,
+                      finals: vec![false],
+                      ex_by_state: vec![BTreeMap::new()],
+                      def_by_state: vec![Vec::new()],
+                      eps_by_state: vec![Vec::new()],
+                  };
+              }
+
+              // BFS to collect only states reachable from start via edges that intersect atom and lead to live targets.
+              let mut visited = vec![false; n_total];
+              let mut order: Vec<usize> = Vec::new();
+              let mut q = VecDeque::new();
+              visited[start] = true;
+              q.push_back(start);
+              order.push(start);
+
+              while let Some(u) = q.pop_front() {
+                  // Epsilons
+                  for (v, w) in &states[u].epsilons {
+                      if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
+                          visited[*v] = true;
+                          q.push_back(*v);
+                          order.push(*v);
                       }
                   }
-                  // epsilons
-                  for (to, w) in &states[s].epsilons {
-                      if !(&atom_w & w).is_empty() {
-                          eps_by_state[s].push(*to);
-                      }
-                  }
-                  // defaults
-                  for def in &states[s].default {
-                      if !(&atom_w & &def.weight).is_empty() {
-                          def_by_state[s].push((def.target, def.exceptions.clone()));
-                      }
-                  }
-                  // exceptions
-                  for (&lbl, targets) in &states[s].transitions {
-                      // If lbl is not in global alphabet we still treat it as exception (but by construction, sigma.labels contains all).
-                      let mut keep_targets = Vec::new();
-                      for (to, w) in targets {
-                          if !(&atom_w & w).is_empty() {
-                              keep_targets.push(*to);
+                  // Labeled
+                  for (_lbl, targets) in &states[u].transitions {
+                      for (v, w) in targets {
+                          if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
+                              visited[*v] = true;
+                              q.push_back(*v);
+                              order.push(*v);
                           }
                       }
-                      if !keep_targets.is_empty() {
-                          ex_by_state[s].insert(lbl, keep_targets);
+                  }
+                  // Defaults
+                  for def in &states[u].default {
+                      let v = def.target;
+                      if v < n_total && live[v] && !(&atom_w & &def.weight).is_empty() && !visited[v] {
+                          visited[v] = true;
+                          q.push_back(v);
+                          order.push(v);
                       }
                   }
               }
 
-              Self { n, start, finals, ex_by_state, def_by_state, eps_by_state }
+              // Compact IDs
+              let m = order.len();
+              let mut id_of = vec![usize::MAX; n_total];
+              for (i, &old) in order.iter().enumerate() {
+                  id_of[old] = i;
+              }
+
+              let mut finals = vec![false; m];
+              let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); m];
+              let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); m];
+              let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); m];
+
+              for (new_s, &old_s) in order.iter().enumerate() {
+                  // final
+                  if let Some(w) = &states[old_s].final_weight {
+                      if !(&atom_w & w).is_empty() {
+                          finals[new_s] = true;
+                      }
+                  }
+                  // exceptions for this atom
+                  let mut local_ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+                  for (&lbl, targets) in &states[old_s].transitions {
+                      let mut kept: Vec<usize> = Vec::new();
+                      for (to_old, w) in targets {
+                          if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
+                              let to_new = id_of[*to_old];
+                              if to_new != usize::MAX {
+                                  kept.push(to_new);
+                              }
+                          }
+                      }
+                      if !kept.is_empty() {
+                          kept.sort_unstable();
+                          kept.dedup();
+                          local_ex.insert(lbl, kept);
+                      }
+                  }
+                  ex_by_state[new_s] = local_ex.clone();
+
+                  // default(s) for this atom: use per-atom exceptions = keys of local_ex
+                  let ex_for_def: BTreeSet<i16> = local_ex.keys().copied().collect();
+                  for def in &states[old_s].default {
+                      let to_old = def.target;
+                      if to_old < n_total && live[to_old] && !(&atom_w & &def.weight).is_empty() {
+                          let to_new = id_of[to_old];
+                          if to_new != usize::MAX {
+                              def_by_state[new_s].push((to_new, ex_for_def.clone()));
+                          }
+                      }
+                  }
+
+                  // epsilons
+                  for (to_old, w) in &states[old_s].epsilons {
+                      if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
+                          let to_new = id_of[*to_old];
+                          if to_new != usize::MAX {
+                              eps_by_state[new_s].push(to_new);
+                          }
+                      }
+                  }
+              }
+
+              let new_start = id_of[start];
+              debug_assert!(new_start != usize::MAX, "start must be visited when live[start] is true");
+              Self { n: m, start: new_start, finals, ex_by_state, def_by_state, eps_by_state }
           }
 
           /// Epsilon closure precomputation for each single state.
@@ -3409,6 +3533,7 @@ local_system:
                   let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
                   let mut dfa = nfa.determinize(&sigma);
                   dfa.minimize(&sigma);
+                  crate::debug!(4, "Atom {}: interval={:?}, DFA states={}", i, atom, dfa.n_states);
                   let sink = dfa.find_sink_index(&sigma);
                   comp_sinks.push(sink);
                   comp_dfas.push(dfa);
@@ -3429,23 +3554,22 @@ local_system:
 
               // 4) Build product DFA over components (parallel composition).
               let now_product = Instant::now();
-              let product = ProductDFA::from_components(&comp_dfas, &sigma);
+              let mut product = ProductDFA::from_components(&comp_dfas, &sigma);
               debug_log(4, || {
                   format!(
-                      "Product DFA: states={}, alphabet_size={}, time={:?}",
+                      "Product DFA (before min): states={}, alphabet_size={}, time={:?}",
                       product.n_states, sigma.size(), now_product.elapsed()
                   )
+              });
+
+              product.minimize(&sigma);
+              debug_log(4, || {
+                  format!("Product DFA (after min): states={}, total_product_time={:?}", product.n_states, now_product.elapsed())
               });
 
               // 5) Convert product DFA to DWA (attach weights).
               let now_convert = Instant::now();
               let dwa = product.to_dwa(&sigma, &atoms, &comp_dfas, &comp_sinks);
-              debug_log(4, || {
-                  format!("Product->DWA conversion took {:?}", now_convert.elapsed())
-              });
-
-              // 6) Simplify DWA
-              let mut dwa = dwa;
 
               debug_log(3, || {
                   format!("NWA::determinize_to_dwa total time: {:?}", now_total.elapsed())
@@ -4013,6 +4137,9 @@ local_system:
       impl DetDFA {
           fn minimize(&mut self, sigma: &Alphabet) {
               debug_log(4, || format!("Minimizing DFA with {} states", self.n_states));
+              if self.n_states == 0 {
+                  return;
+              }
               // Remove states unreachable from start first
               let reachable = {
                   let mut visited = vec![false; self.n_states];
@@ -4244,6 +4371,241 @@ local_system:
           tuples: Vec<Vec<usize>>, // tuples[state] = [q0, q1, ..., q_{k-1}]
       }
       impl ProductDFA {
+          fn minimize(&mut self, sigma: &Alphabet) {
+              debug_log(4, || format!("Minimizing Product DFA with {} states", self.n_states));
+              if self.n_states == 0 {
+                  return;
+              }
+              // Remove states unreachable from start first
+              let reachable = {
+                  let mut visited = vec![false; self.n_states];
+                  let mut q = VecDeque::new();
+                  visited[self.start] = true;
+                  q.push_back(self.start);
+                  while let Some(u) = q.pop_front() {
+                      for &v in &self.trans[u] {
+                          if !visited[v] {
+                              visited[v] = true;
+                              q.push_back(v);
+                          }
+                      }
+                  }
+                  visited
+              };
+
+              // Map reachable states to compact ids
+              let mut map = vec![usize::MAX; self.n_states];
+              let mut new_states = 0usize;
+              for i in 0..self.n_states {
+                  if reachable[i] {
+                      map[i] = new_states;
+                      new_states += 1;
+                  }
+              }
+
+              if new_states == 0 {
+                  // No reachable states? Create a single dead state.
+                  self.n_states = 1;
+                  self.start = 0;
+                  self.finals = vec![false];
+                  self.trans = vec![vec![0; sigma.size()]];
+                  let k = if self.tuples.is_empty() { 0 } else { self.tuples[0].len() };
+                  self.tuples = vec![vec![0; k]]; // Default tuple
+                  return;
+              }
+
+              let mut finals = vec![false; new_states];
+              let mut trans = vec![vec![0usize; sigma.size()]; new_states];
+              let mut tuples = vec![Vec::new(); new_states];
+
+              for i in 0..self.n_states {
+                  if !reachable[i] {
+                      continue;
+                  }
+                  let ni = map[i];
+                  finals[ni] = self.finals[i];
+                  tuples[ni] = self.tuples[i].clone();
+                  for a in 0..sigma.size() {
+                      let v = self.trans[i][a];
+                      trans[ni][a] = map[v];
+                  }
+              }
+
+              self.n_states = new_states;
+              self.start = map[self.start];
+              self.finals = finals;
+              self.trans = trans;
+              self.tuples = tuples;
+
+              // Hopcroft minimization on complete DFA
+              if self.n_states <= 1 {
+                  return;
+              }
+
+              let n = self.n_states;
+              let a = sigma.size();
+
+              // Initial partition: accepting vs non-accepting
+              let mut part_id = vec![0usize; n];
+              let mut blocks: Vec<Vec<usize>> = Vec::new();
+              let (accepting_block, non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| self.finals[s]);
+
+              if accepting_block.is_empty() || non_accepting_block.is_empty() {
+                  // All accepting or all non-accepting -> nothing to split
+                  return;
+              }
+              blocks.push(accepting_block);
+              blocks.push(non_accepting_block);
+              for (pid, block) in blocks.iter().enumerate() {
+                  for &s in block {
+                      part_id[s] = pid;
+                  }
+              }
+
+              // Build inverse transitions for each symbol
+              let mut inv: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); n]; a];
+              for s in 0..n {
+                  for sym in 0..a {
+                      let v = self.trans[s][sym];
+                      inv[sym][v].push(s);
+                  }
+              }
+
+              // Worklist of (block id, symbol). Using BTreeSet for efficient presence checks and removal.
+              let mut worklist: BTreeSet<(usize, usize)> = BTreeSet::new();
+              let smaller_initial_set = if blocks[0].len() <= blocks[1].len() { 0 } else { 1 };
+              for sym in 0..a {
+                  worklist.insert((smaller_initial_set, sym));
+              }
+
+              let pb_hopcroft = if PROGRESS_BAR_ENABLED {
+                  let p = ProgressBar::new_spinner();
+                  p.set_style(
+                      ProgressStyle::default_spinner()
+                          .template("{spinner:.green} [Determinize/Minimize Product: {elapsed_precise}] Pass {pos}, worklist size: {msg}")
+                          .unwrap(),
+                  );
+                  Some(p)
+              } else {
+                  None
+              };
+              let mut passes = 0u64;
+
+              while let Some(&(b, sym)) = worklist.iter().next() {
+                  worklist.remove(&(b, sym));
+
+                  if let Some(p) = &pb_hopcroft {
+                      passes += 1;
+                      p.set_position(passes);
+                      p.set_message(format!("{}", worklist.len()));
+                  }
+
+                  // Compute preimage of block b under symbol sym
+                  let mut pre: Vec<usize> = Vec::new();
+                  for &v in &blocks[b] {
+                      pre.extend_from_slice(&inv[sym][v]);
+                  }
+                  if pre.is_empty() {
+                      continue;
+                  }
+                  pre.sort_unstable();
+                  pre.dedup();
+
+                  // For each block, split by intersection with pre
+                  let mut affected: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
+                  for &s in &pre {
+                      let pid = part_id[s];
+                      affected.entry(pid).or_default().0.push(s);
+                  }
+                  for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
+                      // Fill not_in_pre
+                      for &s in &blocks[*pid] {
+                          if !in_pre.binary_search(&s).is_ok() {
+                              not_in_pre.push(s);
+                          }
+                      }
+                  }
+
+                  let mut to_replace: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
+
+                  for (pid, (in_pre, not_in_pre)) in affected.into_iter() {
+                      if in_pre.is_empty() || not_in_pre.is_empty() {
+                          continue;
+                      }
+                      to_replace.push((pid, in_pre, not_in_pre));
+                  }
+
+                  if to_replace.is_empty() {
+                      continue;
+                  }
+
+                  // Apply replacements (block splits)
+                  for (pid, mut in_pre, mut not_in_pre) in to_replace {
+                      in_pre.sort_unstable();
+                      not_in_pre.sort_unstable();
+
+                      let pid2 = blocks.len();
+                      blocks.push(not_in_pre);
+                      blocks[pid] = in_pre;
+
+                      // Update part_id map for all states in the newly created blocks
+                      for &s in &blocks[pid] {
+                          part_id[s] = pid;
+                      }
+                      for &s in &blocks[pid2] {
+                          part_id[s] = pid2;
+                      }
+
+                      // Update worklist according to Hopcroft's algorithm
+                      for sym2 in 0..a {
+                          if worklist.remove(&(pid, sym2)) {
+                              // The original block was on the worklist. Replace it with both new blocks.
+                              worklist.insert((pid, sym2));
+                              worklist.insert((pid2, sym2));
+                          } else {
+                              // The original block was not on the worklist. Add the smaller of the two new blocks.
+                              let (smaller_pid, _) = if blocks[pid].len() <= blocks[pid2].len() { (pid, pid2) } else { (pid2, pid) };
+                              worklist.insert((smaller_pid, sym2));
+                          }
+                      }
+                  }
+              }
+
+              if let Some(p) = pb_hopcroft {
+                  p.finish_with_message(format!("Hopcroft (Product) done, {} partitions", blocks.len()));
+              }
+
+              // Build the quotient automaton
+              let num_parts = blocks.len();
+              let mut repr: Vec<usize> = vec![0; num_parts];
+              for (pid, block) in blocks.iter().enumerate() {
+                  repr[pid] = block[0];
+              }
+
+              let start_part = part_id[self.start];
+              let mut finals2 = vec![false; num_parts];
+              let mut tuples2 = vec![Vec::new(); num_parts];
+              for pid in 0..num_parts {
+                  finals2[pid] = self.finals[repr[pid]];
+                  tuples2[pid] = self.tuples[repr[pid]].clone();
+              }
+
+              let mut trans2 = vec![vec![0usize; a]; num_parts];
+              for pid in 0..num_parts {
+                  let s = repr[pid];
+                  for sym in 0..a {
+                      let v = self.trans[s][sym];
+                      trans2[pid][sym] = part_id[v];
+                  }
+              }
+
+              self.n_states = num_parts;
+              self.start = start_part;
+              self.finals = finals2;
+              self.trans = trans2;
+              self.tuples = tuples2;
+          }
+
           fn from_components(comps: &[DetDFA], sigma: &Alphabet) -> Self {
               let k = comps.len();
               // Starting tuple: [start0, start1, ..., start_{k-1}]
@@ -4341,6 +4703,10 @@ local_system:
           /// - Edge weights: active indices at source state (union over atoms whose component is not sink).
           /// - Final weights: union over atoms whose component is accepting at that state.
           fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, comps: &[DetDFA], comp_sinks: &[Option<usize>]) -> DWA {
+              debug_log(4, || {
+                  format!("Product->DWA conversion took {:?}", Instant::now())
+              });
+
               let mut dwa_states = DWAStates::default();
               for _ in 0..self.n_states {
                   dwa_states.add_state();
@@ -4444,7 +4810,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -5710,6 +6076,9 @@ messages:
               let mut nwa = self.clone();
               debug_log(3, || format!("Starting determinization for NWA with {} states", nwa.states.len()));
 
+              // Compute future-acceptance masks once. We will use them to prune atoms and shrink the alphabet.
+              let fut = nwa.compute_future_weights();
+
               // 1) Build the atomic partition of weights (disjoint contiguous ranges).
               let now_atoms = Instant::now();
               let atoms = WeightPartition::from_nwa(&nwa);
@@ -5719,7 +6088,9 @@ messages:
 
               // 2) Build global alphabet (all labels used anywhere) + OTHER
               let now_sigma = Instant::now();
-              let sigma = Alphabet::from_nwa(&nwa);
+              // Filter the alphabet using the future-acceptance masks:
+              // we only keep labels that can contribute to acceptance along some path
+              let sigma = Alphabet::from_nwa_with_future(&nwa, &fut);
               debug_log(4, || {
                   format!("Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed())
               });
@@ -5742,9 +6113,10 @@ messages:
               let mut comp_dfas: Vec<DetDFA> = Vec::with_capacity(atoms.intervals.len());
               let mut comp_sinks: Vec<Option<usize>> = Vec::with_capacity(atoms.intervals.len());
               for (i, atom) in atoms.intervals.iter().enumerate() {
-                  let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom);
+                  let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
                   let mut dfa = nfa.determinize(&sigma);
                   dfa.minimize(&sigma);
+                  crate::debug!(4, "Atom {}: interval={:?}, DFA states={}", i, atom, dfa.n_states);
                   let sink = dfa.find_sink_index(&sigma);
                   comp_sinks.push(sink);
                   comp_dfas.push(dfa);
@@ -5821,6 +6193,41 @@ messages:
               }
               let labels: Vec<i16> = set.into_iter().collect();
               let other_index = labels.len(); // last slot is OTHER
+              Alphabet { labels, other_index }
+          }
+
+          /// Build an alphabet filtered by future-acceptance masks:
+          /// only keep labels that can actually contribute to acceptance along some path.
+          /// A label is kept if there exists some edge s --lbl/w--> t with (w ∧ F[t]) ≠ ∅,
+          /// or a default s --wdef--> t with (wdef ∧ F[t]) ≠ ∅, in which case we keep the defaults'
+          /// exception labels too (they must be separated from OTHER).
+          fn from_nwa_with_future(nwa: &NWA, fut: &Vec<Weight>) -> Self {
+              let mut set = BTreeSet::new();
+              for (s, st) in nwa.states.0.iter().enumerate() {
+                  // labeled transitions
+                  for (&lbl, targets) in &st.transitions {
+                      let mut relevant = false;
+                      for (t, w) in targets {
+                          if !(&fut[*t] & w).is_empty() {
+                              relevant = true;
+                              break;
+                          }
+                      }
+                      if relevant {
+                          set.insert(lbl);
+                      }
+                  }
+                  // defaults: if relevant, keep their exception labels
+                  for def in &st.default {
+                      if !(&fut[def.target] & &def.weight).is_empty() {
+                          for &lbl in &def.exceptions {
+                              set.insert(lbl);
+                          }
+                      }
+                  }
+              }
+              let labels: Vec<i16> = set.into_iter().collect();
+              let other_index = labels.len();
               Alphabet { labels, other_index }
           }
           #[inline]
@@ -5973,50 +6380,133 @@ messages:
           eps_by_state: Vec<Vec<usize>>,
       }
       impl PerAtomNFA {
-          fn from_nwa(states: &NWAStates, start: usize, sigma: &Alphabet, atom: &RangeInclusive<usize>) -> Self {
-              let n = states.len();
-              let mut finals = vec![false; n];
-              let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); n];
-              let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); n];
-              let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); n];
-
+          fn from_nwa(states: &NWAStates, start: usize, _sigma: &Alphabet, atom: &RangeInclusive<usize>, fut: &[Weight]) -> Self {
+              let n_total = states.len();
               let atom_w: Weight = std::iter::once((*atom.start())..=(*atom.end())).collect();
 
-              for s in 0..n {
-                  // final
-                  if let Some(w) = &states[s].final_weight {
-                      if !(&atom_w & w).is_empty() {
-                          finals[s] = true;
+              // Live states for this atom: those with F[s] ∧ atom ≠ ∅
+              let mut live = vec![false; n_total];
+              for s in 0..n_total {
+                  if !(&fut[s] & &atom_w).is_empty() {
+                      live[s] = true;
+                  }
+              }
+
+              // If start is not live, return a trivial 1-state NFA (non-final, no edges).
+              if start >= n_total || !live[start] {
+                  return PerAtomNFA {
+                      n: 1,
+                      start: 0,
+                      finals: vec![false],
+                      ex_by_state: vec![BTreeMap::new()],
+                      def_by_state: vec![Vec::new()],
+                      eps_by_state: vec![Vec::new()],
+                  };
+              }
+
+              // BFS to collect only states reachable from start via edges that intersect atom and lead to live targets.
+              let mut visited = vec![false; n_total];
+              let mut order: Vec<usize> = Vec::new();
+              let mut q = VecDeque::new();
+              visited[start] = true;
+              q.push_back(start);
+              order.push(start);
+
+              while let Some(u) = q.pop_front() {
+                  // Epsilons
+                  for (v, w) in &states[u].epsilons {
+                      if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
+                          visited[*v] = true;
+                          q.push_back(*v);
+                          order.push(*v);
                       }
                   }
-                  // epsilons
-                  for (to, w) in &states[s].epsilons {
-                      if !(&atom_w & w).is_empty() {
-                          eps_by_state[s].push(*to);
-                      }
-                  }
-                  // defaults
-                  for def in &states[s].default {
-                      if !(&atom_w & &def.weight).is_empty() {
-                          def_by_state[s].push((def.target, def.exceptions.clone()));
-                      }
-                  }
-                  // exceptions
-                  for (&lbl, targets) in &states[s].transitions {
-                      // If lbl is not in global alphabet we still treat it as exception (but by construction, sigma.labels contains all).
-                      let mut keep_targets = Vec::new();
-                      for (to, w) in targets {
-                          if !(&atom_w & w).is_empty() {
-                              keep_targets.push(*to);
+                  // Labeled
+                  for (_lbl, targets) in &states[u].transitions {
+                      for (v, w) in targets {
+                          if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
+                              visited[*v] = true;
+                              q.push_back(*v);
+                              order.push(*v);
                           }
                       }
-                      if !keep_targets.is_empty() {
-                          ex_by_state[s].insert(lbl, keep_targets);
+                  }
+                  // Defaults
+                  for def in &states[u].default {
+                      let v = def.target;
+                      if v < n_total && live[v] && !(&atom_w & &def.weight).is_empty() && !visited[v] {
+                          visited[v] = true;
+                          q.push_back(v);
+                          order.push(v);
                       }
                   }
               }
 
-              Self { n, start, finals, ex_by_state, def_by_state, eps_by_state }
+              // Compact IDs
+              let m = order.len();
+              let mut id_of = vec![usize::MAX; n_total];
+              for (i, &old) in order.iter().enumerate() {
+                  id_of[old] = i;
+              }
+
+              let mut finals = vec![false; m];
+              let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); m];
+              let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); m];
+              let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); m];
+
+              for (new_s, &old_s) in order.iter().enumerate() {
+                  // final
+                  if let Some(w) = &states[old_s].final_weight {
+                      if !(&atom_w & w).is_empty() {
+                          finals[new_s] = true;
+                      }
+                  }
+                  // exceptions for this atom
+                  let mut local_ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+                  for (&lbl, targets) in &states[old_s].transitions {
+                      let mut kept: Vec<usize> = Vec::new();
+                      for (to_old, w) in targets {
+                          if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
+                              let to_new = id_of[*to_old];
+                              if to_new != usize::MAX {
+                                  kept.push(to_new);
+                              }
+                          }
+                      }
+                      if !kept.is_empty() {
+                          kept.sort_unstable();
+                          kept.dedup();
+                          local_ex.insert(lbl, kept);
+                      }
+                  }
+                  ex_by_state[new_s] = local_ex.clone();
+
+                  // default(s) for this atom: use per-atom exceptions = keys of local_ex
+                  let ex_for_def: BTreeSet<i16> = local_ex.keys().copied().collect();
+                  for def in &states[old_s].default {
+                      let to_old = def.target;
+                      if to_old < n_total && live[to_old] && !(&atom_w & &def.weight).is_empty() {
+                          let to_new = id_of[to_old];
+                          if to_new != usize::MAX {
+                              def_by_state[new_s].push((to_new, ex_for_def.clone()));
+                          }
+                      }
+                  }
+
+                  // epsilons
+                  for (to_old, w) in &states[old_s].epsilons {
+                      if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
+                          let to_new = id_of[*to_old];
+                          if to_new != usize::MAX {
+                              eps_by_state[new_s].push(to_new);
+                          }
+                      }
+                  }
+              }
+
+              let new_start = id_of[start];
+              debug_assert!(new_start != usize::MAX, "start must be visited when live[start] is true");
+              Self { n: m, start: new_start, finals, ex_by_state, def_by_state, eps_by_state }
           }
 
           /// Epsilon closure precomputation for each single state.
@@ -6655,48 +7145,8 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata/determinization.rs
-  - user: |-
-      ```
-        [Resolving negatives in NWA: 00:00:00]  step 3/3 (Done)[DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:133: Starting determinization for NWA with 17694 states
-      ⠄ [Determinize/Subset: 00:05:27] States found: 1478789
-      ```
-
-      This is absurd. Something's going wrong. There can't be that many states. It never finishes. Fix it.
-      Note that the NWA is already simplified.
-
-      Here was the original prompt for this code:
-
-      > To construct the DWA, construct minimal DFA for each possible weight bit individually. Then combine them.
-      > This should produce a **minimal DWA**.
-      > 
-      > So, first get a partition over all weights. Imagine it like this. Gather all weights `all_weights`. We want to find a minimal disjoint partition set of weights `partition` such that its union is the union of `all_weights`, and any weight in `all_weights` can be formed by a union of some subset of weights in `partition`.
-      > The partition kind represents 'redundancy' in the weights.
-      > We can imagine minimizing the weights using this. Once it's minimized, we have a reasonable min/max index to loop over. (Previously, the min/max index would have been 0/`usize::MAX`.)
-      > 
-      > Define a NFA struct and a DFA struct.
-      > 
-      > Initialize a shared DFA.
-      > 
-      > Now loop over the indices in the uniqueified weights.
-      > Create a NFA restricted to just the current index.
-      > Determinize this into a DFA.
-      > Minimize the DFA using a know, efficient algorithm.
-      > Copy it into the shared DFA. Keep track of which body belongs to which index using this clever trick: create a transition on this index from the shared DFA start state to the copied-in DFA's start state. If we want to look up the DFA for a given uniqueified weight index, we can start at the shared start state and perform a transition as if the weight index itself were passed into the DFA as an input.
-      > 
-      > Now minimize the shared DFA.
-      > 
-      > Then we need to convert this DFA to a DWA. Figure that out.
-      > I imagine it's something like:
-      > - Figure out for each state which weight indices can reach that state. Can do this by creating a set of indices at each state, and populating them by walking those initial per-index transitions from the start state, marking states as we encounter them.
-      > - This gives us which weight indices can reach each state.
-      > - Ultimately, though, we need to know weights for each *transition*, and the *final* weights. Be careful here.
-
-      Note that this code deviates a bit from the prompt, and in fact the prompt may be incomplete or even incorrect. But still, just to give you context.
-
-      Why does this happen? Find the root cause.
-      Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your solutions.
-      Follow the computation through. Figure out where it goes wrong. Fix it.
-      Think of everything.
+  - user: The product DFA must be minimial. Ensure this is the case. Right now it's
+      far too inefficient.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -6716,363 +7166,328 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are precise, actionable steps you can apply to fix the determinization blow-up, followed by the corresponding git patches.
+      Of course. Minimizing the product DFA before converting it to a DWA is a crucial optimization. Here are the step-by-step instructions and the corresponding git diff to achieve this.
 
-      Plan and rationale
+      ### Step-by-step Instructions
 
-      Root cause
-      - The subset-construction is exploding because the per-atom NFA is built without pruning states/edges that can never contribute to acceptance for that atom. This makes the per-atom NFA unnecessarily large and highly nondeterministic, leading to an enormous number of subset states (e.g., >1.4M).
-      - Additionally, default transitions’ exceptions are not filtered per-atom. For an atom that removes some exception edges (no weight overlap), the default is still blocked for those labels because the exception set is cloned from the original NWA. This creates spurious nondeterminism (and/or spurious sinks), further inflating the state-space.
-      - The global alphabet includes all labels ever seen anywhere, even if those labels cannot lead to acceptance. This increases the per-state branching factor and the per-step work in subset construction.
+      1.  **Add a `minimize` method to `ProductDFA`**:
+          In `src/precompute4/weighted_automata/determinization.rs`, we will add a new method `minimize` to `impl ProductDFA`. This method will be a direct adaptation of `DetDFA::minimize`, but it will also correctly handle the `tuples` field of the `ProductDFA`. It will first remove unreachable states and then apply Hopcroft's algorithm to minimize the DFA.
 
-      Fix
-      - Compute future-acceptance masks F[s] once. Use them to:
-        - Build a filtered global alphabet that keeps only labels that can lead to acceptance on some path (for some weight), i.e., labels on transitions where w ∧ F[target] ≠ ∅ or in defaults whose def.weight ∧ F[target] ≠ ∅.
-        - Build per-atom NFAs that only include states s where F[s] intersects that atom and only include edges that both intersect the atom and go to live targets (F[target] intersects the atom). Also, compute default exceptions per atom from the per-atom exception edges in that state.
-      - If the start state isn’t live for a given atom, return a trivial 1-state NFA (non-final, no edges). The determinizer will then produce a tiny DFA that goes immediately to sink.
-      - This dramatically reduces the per-atom NFA size, subset-state count, and alphabet size, fixing the blow-up.
+      2.  **Call `product.minimize()` in `determinize_to_dwa`**:
+          In the `determinize_to_dwa` function within the same file, we will make the `product` variable mutable and call its new `minimize` method right after it's created. We'll also update the debug logs to show the number of states before and after minimization.
 
-      Step-by-step changes
+      3.  **Add a defensive guard to `DetDFA::minimize`**:
+          While we're at it, we'll add a guard at the beginning of `DetDFA::minimize` to prevent a panic if it's called on an empty DFA.
 
-      1) In src/precompute4/weighted_automata/determinization.rs, compute future acceptance masks before building the alphabet and per-atom NFAs:
-      - Call nwa.compute_future_weights() at the start of determinize_to_dwa.
+      4.  **Improve logging in `ProductDFA::to_dwa`**:
+          A small logging statement will be added to `ProductDFA::to_dwa` for better debugging visibility.
 
-      2) Create a filtered alphabet:
-      - Add a new Alphabet::from_nwa_with_future(&NWA, &Vec<Weight>) constructor.
-      - It includes a label only if it can lead to acceptance on some path:
-        - For any labeled transition s --lbl/w--> t where (w ∧ F[t]) ≠ ∅
-        - For any default s --def.weight--> t where (def.weight ∧ F[t]) ≠ ∅, include def.exceptions labels (because on those labels defaults must be blocked).
-      - Use this filtered alphabet when determinizing.
+      ### Git Diffs
 
-      3) Build per-atom NFA with pruning and per-atom exception filtering:
-      - Change PerAtomNFA::from_nwa signature to accept fut: &[Weight].
-      - For a given atom Ai:
-        - Let live[s] = (F[s] ∧ Ai) ≠ ∅.
-        - If live[start] is false, return a trivial 1-state NFA.
-        - Otherwise, BFS from start over eps/labeled/default edges whose weights intersect Ai and whose targets are live to gather the visited subgraph. Compact state indices to only the visited nodes.
-        - For each visited state s:
-          - Keep only labeled edges whose w ∧ Ai ≠ ∅ and target live.
-          - Compute default exceptions per atom to be exactly the set of labels for which s has kept per-atom labeled edges. This fixes the earlier “stale default exceptions” bug.
-          - Keep default edge s->t only if def.weight ∧ Ai ≠ ∅ and target live.
-          - Keep eps s->t only if w ∧ Ai ≠ ∅ and target live.
-          - Mark state final if final_weight ∧ Ai ≠ ∅.
-      - Determinize over the global sigma from step 2.
+      Here is the git diff for the required changes.
 
-      4) Wire it together:
-      - Use Alphabet::from_nwa_with_future in determinize_to_dwa.
-      - Pass &fut into PerAtomNFA::from_nwa calls.
-
-      After these changes, the determinization process prunes aggressively and removes dead/unproductive structure per atom, preventing the absurd state explosion you observed.
-
-      Git diffs
-
-      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
+      ```diff
       --- a/src/precompute4/weighted_automata/determinization.rs
       +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -1,12 +1,12 @@
-       #![allow(dead_code)]
-       #![allow(clippy::needless_borrow)]
+      @@ -130,22 +130,22 @@
        
-       use super::bitset::SimpleBitset as Weight;
-       use super::dwa::{DWAState, DWAStates, DWA, DWABody};
-       use super::nwa::{NWA, NWAStates};
-       use crate::profiler::PROGRESS_BAR_ENABLED;
-       use indicatif::{ProgressBar, ProgressStyle};
-       use range_set_blaze::RangeSetBlaze;
+               // 4) Build product DFA over components (parallel composition).
+               let now_product = Instant::now();
+      -        let product = ProductDFA::from_components(&comp_dfas, &sigma);
+      +        let mut product = ProductDFA::from_components(&comp_dfas, &sigma);
+               debug_log(4, || {
+                   format!(
+      -                "Product DFA: states={}, alphabet_size={}, time={:?}",
+      +                "Product DFA (before min): states={}, alphabet_size={}, time={:?}",
+                       product.n_states, sigma.size(), now_product.elapsed()
+                   )
+               });
        
-      -use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-      +use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-       use std::ops::RangeInclusive;
-       use std::time::Instant;
-       
-      @@ -34,17 +34,22 @@
-               let mut nwa = self.clone();
-               debug_log(3, || format!("Starting determinization for NWA with {} states", nwa.states.len()));
-       
-      +        // Compute future-acceptance masks once. We will use them to prune atoms and shrink the alphabet.
-      +        let fut = nwa.compute_future_weights();
+      +        product.minimize(&sigma);
+      +        debug_log(4, || {
+      +            format!("Product DFA (after min): states={}, total_product_time={:?}", product.n_states, now_product.elapsed())
+      +        });
       +
-               // 1) Build the atomic partition of weights (disjoint contiguous ranges).
-               let now_atoms = Instant::now();
-               let atoms = WeightPartition::from_nwa(&nwa);
-               debug_log(4, || {
-                   format!("Built weight partition with {} atoms in {:?}", atoms.intervals.len(), now_atoms.elapsed())
-               });
+               // 5) Convert product DFA to DWA (attach weights).
+               let now_convert = Instant::now();
+               let dwa = product.to_dwa(&sigma, &atoms, &comp_dfas, &comp_sinks);
+      -        debug_log(4, || {
+      -            format!("Product->DWA conversion took {:?}", now_convert.elapsed())
+      -        });
+      -
+      -        // 6) Simplify DWA
+      -        let mut dwa = dwa;
        
-               // 2) Build global alphabet (all labels used anywhere) + OTHER
-               let now_sigma = Instant::now();
-      -        let sigma = Alphabet::from_nwa(&nwa);
-      +        // Filter the alphabet using the future-acceptance masks:
-      +        // we only keep labels that can contribute to acceptance along some path
-      +        let sigma = Alphabet::from_nwa_with_future(&nwa, &fut);
-               debug_log(4, || {
-                   format!("Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed())
-               });
-       
-      @@ -63,7 +68,7 @@
-               let mut comp_dfas: Vec<DetDFA> = Vec::with_capacity(atoms.intervals.len());
-               let mut comp_sinks: Vec<Option<usize>> = Vec::with_capacity(atoms.intervals.len());
-               for (i, atom) in atoms.intervals.iter().enumerate() {
-      -            let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom);
-      +            let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
-                   let mut dfa = nfa.determinize(&sigma);
-                   dfa.minimize(&sigma);
-                   let sink = dfa.find_sink_index(&sigma);
-      @@ -180,6 +185,40 @@
-       struct Alphabet {
-           labels: Vec<i16>, // sorted unique exception labels
-           other_index: usize,
+               debug_log(3, || {
+                   format!("NWA::determinize_to_dwa total time: {:?}", now_total.elapsed())
+      @@ -813,6 +813,9 @@
+       impl DetDFA {
+           fn minimize(&mut self, sigma: &Alphabet) {
+               debug_log(4, || format!("Minimizing DFA with {} states", self.n_states));
+      +        if self.n_states == 0 {
+      +            return;
+      +        }
+               // Remove states unreachable from start first
+               let reachable = {
+                   let mut visited = vec![false; self.n_states];
+      @@ -1026,6 +1029,191 @@
+           tuples: Vec<Vec<usize>>, // tuples[state] = [q0, q1, ..., q_{k-1}]
        }
-       impl Alphabet {
-           fn from_nwa(nwa: &NWA) -> Self {
-               let mut set = BTreeSet::new();
-               for st in &nwa.states.0 {
-                   for (&lbl, _) in &st.transitions {
-                       set.insert(lbl);
-                   }
-                   for def in &st.default {
-                       for &lbl in &def.exceptions {
-                           set.insert(lbl);
-                       }
-                   }
-               }
-               let labels: Vec<i16> = set.into_iter().collect();
-               let other_index = labels.len(); // last slot is OTHER
-               Alphabet { labels, other_index }
-           }
-      +
-      +    /// Build an alphabet filtered by future-acceptance masks:
-      +    /// only keep labels that can actually contribute to acceptance along some path.
-      +    /// A label is kept if there exists some edge s --lbl/w--> t with (w ∧ F[t]) ≠ ∅,
-      +    /// or a default s --wdef--> t with (wdef ∧ F[t]) ≠ ∅, in which case we keep the defaults'
-      +    /// exception labels too (they must be separated from OTHER).
-      +    fn from_nwa_with_future(nwa: &NWA, fut: &Vec<Weight>) -> Self {
-      +        let mut set = BTreeSet::new();
-      +        for (s, st) in nwa.states.0.iter().enumerate() {
-      +            // labeled transitions
-      +            for (&lbl, targets) in &st.transitions {
-      +                let mut relevant = false;
-      +                for (t, w) in targets {
-      +                    if !(&fut[*t] & w).is_empty() {
-      +                        relevant = true;
-      +                        break;
+       impl ProductDFA {
+      +    fn minimize(&mut self, sigma: &Alphabet) {
+      +        debug_log(4, || format!("Minimizing Product DFA with {} states", self.n_states));
+      +        if self.n_states == 0 {
+      +            return;
+      +        }
+      +        // Remove states unreachable from start first
+      +        let reachable = {
+      +            let mut visited = vec![false; self.n_states];
+      +            let mut q = VecDeque::new();
+      +            visited[self.start] = true;
+      +            q.push_back(self.start);
+      +            while let Some(u) = q.pop_front() {
+      +                for &v in &self.trans[u] {
+      +                    if !visited[v] {
+      +                        visited[v] = true;
+      +                        q.push_back(v);
       +                    }
       +                }
-      +                if relevant {
-      +                    set.insert(lbl);
+      +            }
+      +            visited
+      +        };
+      +
+      +        // Map reachable states to compact ids
+      +        let mut map = vec![usize::MAX; self.n_states];
+      +        let mut new_states = 0usize;
+      +        for i in 0..self.n_states {
+      +            if reachable[i] {
+      +                map[i] = new_states;
+      +                new_states += 1;
+      +            }
+      +        }
+      +
+      +        if new_states == 0 {
+      +            // No reachable states? Create a single dead state.
+      +            self.n_states = 1;
+      +            self.start = 0;
+      +            self.finals = vec![false];
+      +            self.trans = vec![vec![0; sigma.size()]];
+      +            let k = if self.tuples.is_empty() { 0 } else { self.tuples[0].len() };
+      +            self.tuples = vec![vec![0; k]]; // Default tuple
+      +            return;
+      +        }
+      +
+      +        let mut finals = vec![false; new_states];
+      +        let mut trans = vec![vec![0usize; sigma.size()]; new_states];
+      +        let mut tuples = vec![Vec::new(); new_states];
+      +
+      +        for i in 0..self.n_states {
+      +            if !reachable[i] {
+      +                continue;
+      +            }
+      +            let ni = map[i];
+      +            finals[ni] = self.finals[i];
+      +            tuples[ni] = self.tuples[i].clone();
+      +            for a in 0..sigma.size() {
+      +                let v = self.trans[i][a];
+      +                trans[ni][a] = map[v];
+      +            }
+      +        }
+      +
+      +        self.n_states = new_states;
+      +        self.start = map[self.start];
+      +        self.finals = finals;
+      +        self.trans = trans;
+      +        self.tuples = tuples;
+      +
+      +        // Hopcroft minimization on complete DFA
+      +        if self.n_states <= 1 {
+      +            return;
+      +        }
+      +
+      +        let n = self.n_states;
+      +        let a = sigma.size();
+      +
+      +        // Initial partition: accepting vs non-accepting
+      +        let mut part_id = vec![0usize; n];
+      +        let mut blocks: Vec<Vec<usize>> = Vec::new();
+      +        let (accepting_block, non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| self.finals[s]);
+      +
+      +        if accepting_block.is_empty() || non_accepting_block.is_empty() {
+      +            // All accepting or all non-accepting -> nothing to split
+      +            return;
+      +        }
+      +        blocks.push(accepting_block);
+      +        blocks.push(non_accepting_block);
+      +        for (pid, block) in blocks.iter().enumerate() {
+      +            for &s in block {
+      +                part_id[s] = pid;
+      +            }
+      +        }
+      +
+      +        // Build inverse transitions for each symbol
+      +        let mut inv: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); n]; a];
+      +        for s in 0..n {
+      +            for sym in 0..a {
+      +                let v = self.trans[s][sym];
+      +                inv[sym][v].push(s);
+      +            }
+      +        }
+      +
+      +        // Worklist of (block id, symbol). Using BTreeSet for efficient presence checks and removal.
+      +        let mut worklist: BTreeSet<(usize, usize)> = BTreeSet::new();
+      +        let smaller_initial_set = if blocks[0].len() <= blocks[1].len() { 0 } else { 1 };
+      +        for sym in 0..a {
+      +            worklist.insert((smaller_initial_set, sym));
+      +        }
+      +
+      +        let pb_hopcroft = if PROGRESS_BAR_ENABLED {
+      +            let p = ProgressBar::new_spinner();
+      +            p.set_style(
+      +                ProgressStyle::default_spinner()
+      +                    .template("{spinner:.green} [Determinize/Minimize Product: {elapsed_precise}] Pass {pos}, worklist size: {msg}")
+      +                    .unwrap(),
+      +            );
+      +            Some(p)
+      +        } else {
+      +            None
+      +        };
+      +        let mut passes = 0u64;
+      +
+      +        while let Some(&(b, sym)) = worklist.iter().next() {
+      +            worklist.remove(&(b, sym));
+      +
+      +            if let Some(p) = &pb_hopcroft {
+      +                passes += 1;
+      +                p.set_position(passes);
+      +                p.set_message(format!("{}", worklist.len()));
+      +            }
+      +
+      +            // Compute preimage of block b under symbol sym
+      +            let mut pre: Vec<usize> = Vec::new();
+      +            for &v in &blocks[b] {
+      +                pre.extend_from_slice(&inv[sym][v]);
+      +            }
+      +            if pre.is_empty() {
+      +                continue;
+      +            }
+      +            pre.sort_unstable();
+      +            pre.dedup();
+      +
+      +            // For each block, split by intersection with pre
+      +            let mut affected: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
+      +            for &s in &pre {
+      +                let pid = part_id[s];
+      +                affected.entry(pid).or_default().0.push(s);
+      +            }
+      +            for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
+      +                // Fill not_in_pre
+      +                for &s in &blocks[*pid] {
+      +                    if !in_pre.binary_search(&s).is_ok() {
+      +                        not_in_pre.push(s);
+      +                    }
       +                }
       +            }
-      +            // defaults: if relevant, keep their exception labels
-      +            for def in &st.default {
-      +                if !(&fut[def.target] & &def.weight).is_empty() {
-      +                    for &lbl in &def.exceptions {
-      +                        set.insert(lbl);
+      +
+      +            let mut to_replace: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
+      +
+      +            for (pid, (in_pre, not_in_pre)) in affected.into_iter() {
+      +                if in_pre.is_empty() || not_in_pre.is_empty() {
+      +                    continue;
+      +                }
+      +                to_replace.push((pid, in_pre, not_in_pre));
+      +            }
+      +
+      +            if to_replace.is_empty() {
+      +                continue;
+      +            }
+      +
+      +            // Apply replacements (block splits)
+      +            for (pid, mut in_pre, mut not_in_pre) in to_replace {
+      +                in_pre.sort_unstable();
+      +                not_in_pre.sort_unstable();
+      +
+      +                let pid2 = blocks.len();
+      +                blocks.push(not_in_pre);
+      +                blocks[pid] = in_pre;
+      +
+      +                // Update part_id map for all states in the newly created blocks
+      +                for &s in &blocks[pid] {
+      +                    part_id[s] = pid;
+      +                }
+      +                for &s in &blocks[pid2] {
+      +                    part_id[s] = pid2;
+      +                }
+      +
+      +                // Update worklist according to Hopcroft's algorithm
+      +                for sym2 in 0..a {
+      +                    if worklist.remove(&(pid, sym2)) {
+      +                        // The original block was on the worklist. Replace it with both new blocks.
+      +                        worklist.insert((pid, sym2));
+      +                        worklist.insert((pid2, sym2));
+      +                    } else {
+      +                        // The original block was not on the worklist. Add the smaller of the two new blocks.
+      +                        let (smaller_pid, _) = if blocks[pid].len() <= blocks[pid2].len() { (pid, pid2) } else { (pid2, pid) };
+      +                        worklist.insert((smaller_pid, sym2));
       +                    }
       +                }
       +            }
       +        }
-      +        let labels: Vec<i16> = set.into_iter().collect();
-      +        let other_index = labels.len();
-      +        Alphabet { labels, other_index }
+      +
+      +        if let Some(p) = pb_hopcroft {
+      +            p.finish_with_message(format!("Hopcroft (Product) done, {} partitions", blocks.len()));
+      +        }
+      +
+      +        // Build the quotient automaton
+      +        let num_parts = blocks.len();
+      +        let mut repr: Vec<usize> = vec![0; num_parts];
+      +        for (pid, block) in blocks.iter().enumerate() {
+      +            repr[pid] = block[0];
+      +        }
+      +
+      +        let start_part = part_id[self.start];
+      +        let mut finals2 = vec![false; num_parts];
+      +        let mut tuples2 = vec![Vec::new(); num_parts];
+      +        for pid in 0..num_parts {
+      +            finals2[pid] = self.finals[repr[pid]];
+      +            tuples2[pid] = self.tuples[repr[pid]].clone();
+      +        }
+      +
+      +        let mut trans2 = vec![vec![0usize; a]; num_parts];
+      +        for pid in 0..num_parts {
+      +            let s = repr[pid];
+      +            for sym in 0..a {
+      +                let v = self.trans[s][sym];
+      +                trans2[pid][sym] = part_id[v];
+      +            }
+      +        }
+      +
+      +        self.n_states = num_parts;
+      +        self.start = start_part;
+      +        self.finals = finals2;
+      +        self.trans = trans2;
+      +        self.tuples = tuples2;
       +    }
-           #[inline]
-           fn size(&self) -> usize {
-               self.labels.len() + 1
-      @@ -303,26 +342,109 @@
-       struct PerAtomNFA {
-           n: usize,
-           start: usize,
-           finals: Vec<bool>,
-           ex_by_state: Vec<BTreeMap<i16, Vec<usize>>>,
-           def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>>, // list of (target, exceptions)
-           eps_by_state: Vec<Vec<usize>>,
-       }
-       impl PerAtomNFA {
-      -    fn from_nwa(states: &NWAStates, start: usize, sigma: &Alphabet, atom: &RangeInclusive<usize>) -> Self {
-      -        let n = states.len();
-      -        let mut finals = vec![false; n];
-      -        let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); n];
-      -        let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); n];
-      -        let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); n];
-      -
-      -        let atom_w: Weight = std::iter::once((*atom.start())..=(*atom.end())).collect();
-      -
-      -        for s in 0..n {
-      -            // final
-      -            if let Some(w) = &states[s].final_weight {
-      -                if !(&atom_w & w).is_empty() {
-      -                    finals[s] = true;
-      -                }
-      -            }
-      -            // epsilons
-      -            for (to, w) in &states[s].epsilons {
-      -                if !(&atom_w & w).is_empty() {
-      -                    eps_by_state[s].push(*to);
-      -                }
-      -            }
-      -            // defaults
-      -            for def in &states[s].default {
-      -                if !(&atom_w & &def.weight).is_empty() {
-      -                    def_by_state[s].push((def.target, def.exceptions.clone()));
-      -                }
-      -            }
-      -            // exceptions
-      -            for (&lbl, targets) in &states[s].transitions {
-      -                // If lbl is not in global alphabet we still treat it as exception (but by construction, sigma.labels contains all).
-      -                let mut keep_targets = Vec::new();
-      -                for (to, w) in targets {
-      -                    if !(&atom_w & w).is_empty() {
-      -                        keep_targets.push(*to);
-      -                    }
-      -                }
-      -                if !keep_targets.is_empty() {
-      -                    ex_by_state[s].insert(lbl, keep_targets);
-      -                }
-      -            }
-      -        }
-      -
-      -        Self { n, start, finals, ex_by_state, def_by_state, eps_by_state }
-      +    fn from_nwa(states: &NWAStates, start: usize, _sigma: &Alphabet, atom: &RangeInclusive<usize>, fut: &[Weight]) -> Self {
-      +        let n_total = states.len();
-      +        let atom_w: Weight = std::iter::once((*atom.start())..=(*atom.end())).collect();
       +
-      +        // Live states for this atom: those with F[s] ∧ atom ≠ ∅
-      +        let mut live = vec![false; n_total];
-      +        for s in 0..n_total {
-      +            if !(&fut[s] & &atom_w).is_empty() {
-      +                live[s] = true;
-      +            }
-      +        }
+           fn from_components(comps: &[DetDFA], sigma: &Alphabet) -> Self {
+               let k = comps.len();
+               // Starting tuple: [start0, start1, ..., start_{k-1}]
+      @@ -1107,6 +1295,10 @@
+           /// - Edge weights: active indices at source state (union over atoms whose component is not sink).
+           /// - Final weights: union over atoms whose component is accepting at that state.
+           fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, comps: &[DetDFA], comp_sinks: &[Option<usize>]) -> DWA {
+      +        debug_log(4, || {
+      +            format!("Product->DWA conversion took {:?}", Instant::now())
+      +        });
       +
-      +        // If start is not live, return a trivial 1-state NFA (non-final, no edges).
-      +        if start >= n_total || !live[start] {
-      +            return PerAtomNFA {
-      +                n: 1,
-      +                start: 0,
-      +                finals: vec![false],
-      +                ex_by_state: vec![BTreeMap::new()],
-      +                def_by_state: vec![Vec::new()],
-      +                eps_by_state: vec![Vec::new()],
-      +            };
-      +        }
-      +
-      +        // BFS to collect only states reachable from start via edges that intersect atom and lead to live targets.
-      +        let mut visited = vec![false; n_total];
-      +        let mut order: Vec<usize> = Vec::new();
-      +        let mut q = VecDeque::new();
-      +        visited[start] = true;
-      +        q.push_back(start);
-      +        order.push(start);
-      +
-      +        while let Some(u) = q.pop_front() {
-      +            // Epsilons
-      +            for (v, w) in &states[u].epsilons {
-      +                if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
-      +                    visited[*v] = true;
-      +                    q.push_back(*v);
-      +                    order.push(*v);
-      +                }
-      +            }
-      +            // Labeled
-      +            for (_lbl, targets) in &states[u].transitions {
-      +                for (v, w) in targets {
-      +                    if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
-      +                        visited[*v] = true;
-      +                        q.push_back(*v);
-      +                        order.push(*v);
-      +                    }
-      +                }
-      +            }
-      +            // Defaults
-      +            for def in &states[u].default {
-      +                let v = def.target;
-      +                if v < n_total && live[v] && !(&atom_w & &def.weight).is_empty() && !visited[v] {
-      +                    visited[v] = true;
-      +                    q.push_back(v);
-      +                    order.push(v);
-      +                }
-      +            }
-      +        }
-      +
-      +        // Compact IDs
-      +        let m = order.len();
-      +        let mut id_of = vec![usize::MAX; n_total];
-      +        for (i, &old) in order.iter().enumerate() {
-      +            id_of[old] = i;
-      +        }
-      +
-      +        let mut finals = vec![false; m];
-      +        let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); m];
-      +        let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); m];
-      +        let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); m];
-      +
-      +        for (new_s, &old_s) in order.iter().enumerate() {
-      +            // final
-      +            if let Some(w) = &states[old_s].final_weight {
-      +                if !(&atom_w & w).is_empty() {
-      +                    finals[new_s] = true;
-      +                }
-      +            }
-      +            // exceptions for this atom
-      +            let mut local_ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-      +            for (&lbl, targets) in &states[old_s].transitions {
-      +                let mut kept: Vec<usize> = Vec::new();
-      +                for (to_old, w) in targets {
-      +                    if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
-      +                        let to_new = id_of[*to_old];
-      +                        if to_new != usize::MAX {
-      +                            kept.push(to_new);
-      +                        }
-      +                    }
-      +                }
-      +                if !kept.is_empty() {
-      +                    kept.sort_unstable();
-      +                    kept.dedup();
-      +                    local_ex.insert(lbl, kept);
-      +                }
-      +            }
-      +            ex_by_state[new_s] = local_ex.clone();
-      +
-      +            // default(s) for this atom: use per-atom exceptions = keys of local_ex
-      +            let ex_for_def: BTreeSet<i16> = local_ex.keys().copied().collect();
-      +            for def in &states[old_s].default {
-      +                let to_old = def.target;
-      +                if to_old < n_total && live[to_old] && !(&atom_w & &def.weight).is_empty() {
-      +                    let to_new = id_of[to_old];
-      +                    if to_new != usize::MAX {
-      +                        def_by_state[new_s].push((to_new, ex_for_def.clone()));
-      +                    }
-      +                }
-      +            }
-      +
-      +            // epsilons
-      +            for (to_old, w) in &states[old_s].epsilons {
-      +                if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
-      +                    let to_new = id_of[*to_old];
-      +                    if to_new != usize::MAX {
-      +                        eps_by_state[new_s].push(to_new);
-      +                    }
-      +                }
-      +            }
-      +        }
-      +
-      +        let new_start = id_of[start];
-      +        debug_assert!(new_start != usize::MAX, "start must be visited when live[start] is true");
-      +        Self { n: m, start: new_start, finals, ex_by_state, def_by_state, eps_by_state }
-           }
-       
-           /// Epsilon closure precomputation for each single state.
-           fn eps_closure_per_state(&self) -> Vec<Vec<usize>> {
-               let mut out = vec![Vec::<usize>::new(); self.n];
-               for s in 0..self.n {
-                   let mut visited = vec![false; self.n];
-                   let mut stack = vec![s];
-                   visited[s] = true;
+               let mut dwa_states = DWAStates::default();
+               for _ in 0..self.n_states {
+                   dwa_states.add_state();
+
+      ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      No ```diff blocks found. Scanning for raw, unfenced diffs...
-      Found 1 potential raw diff block(s).
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
@@ -7080,7 +7495,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix determinization state explosion by
-      pruning alphabet and per-atom NFA states using future-acceptance masks"'
+  - user: 'Changes committed with message: "Determinization: Implement and apply ProductDFA
+      minimization"'
     metadata:
 ...
