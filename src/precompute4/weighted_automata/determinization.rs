@@ -12,35 +12,21 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::RangeInclusive;
 use std::time::Instant;
 
-/// This determinization is a complete rewrite. It follows a principled construction:
-/// 1) Extract a minimal disjoint partition of the weight space (atoms), by splitting at
-///    all range boundaries appearing in any edge/default/epsilon/final weight of the NWA.
-///    Each "atom" is a contiguous usize interval; every original weight is a union of atoms.
-/// 2) For each atom, build an unweighted NFA by keeping only those edges/defaults/epsilons/finals
-///    whose weights intersect that atom. Determinize this NFA to a DFA over a finite alphabet
-///    Sigma' = { all labels appearing anywhere in the NWA } ∪ { OTHER }, where OTHER means:
-///      "use state's default targets when there is no exception for that label."
-///    Then minimize the DFA (Hopcroft).
-/// 3) Combine all atom-DFAs into a single deterministic product DFA by parallel composition
-///    across components (one component per atom). The product DFA has a single start state
-///    (tuple of per-atom starts) and reads the original word labels (from Sigma').
-/// 4) Convert the product DFA into a DWA:
-///    - Each product state P = (q_0, q_1, ..., q_{k-1}) has an "active weight" equal to the union of
-///      atom-weights for components i where q_i is not the component's sink state (if any).
-///      We attach this active weight to all outgoing edges from P.
-///    - Each labeled edge (exception label) carries the active weight; the transition target is deterministic.
-///    - The default edge (OTHER) also carries the active weight.
-///    - The final weight of P is the union of atom-weights for components in which q_i is accepting.
-///    This construction yields a correct DWA: for any input word, each atom either remains "alive"
-///    (never falls into its component sink) and ends in a final component, contributing that atom's range
-///    to the final weight; otherwise it is filtered out by the final state's weight.
+/// This determinization implementation addresses state space explosion by
+/// 1) Building per-atom DFAs (minimized) as before,
+/// 2) Canonicalizing these DFAs and grouping structurally identical ones,
+/// 3) Building a product only across unique groups (instead of all atoms),
+/// 4) Converting the group-product DFA to a DWA whose per-state/edge/final weights
+///    are unions of atom weights for the atoms mapped into each group.
 ///
-/// This DWA is then simplified (minimized structurally and normalized) using the existing passes.
+/// This dramatically reduces the product's dimensionality, while preserving exact semantics.
+/// It shares structure across identical per-atom components rather than producing a full cartesian product
+/// across all atoms.
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now_total = Instant::now();
 
-        // Always work on a simplified copy of the NWA to avoid redundant structure.
+        // Work on a simplified copy of the NWA.
         let mut nwa = self.clone();
         debug_log(3, || format!("Starting determinization for NWA with {} states", nwa.states.len()));
 
@@ -54,10 +40,8 @@ impl NWA {
             format!("Built weight partition with {} atoms in {:?}", atoms.intervals.len(), now_atoms.elapsed())
         });
 
-        // 2) Build global alphabet (all labels used anywhere) + OTHER
+        // 2) Build global alphabet (all labels used anywhere) + OTHER, filtered by future masks
         let now_sigma = Instant::now();
-        // Filter the alphabet using the future-acceptance masks:
-        // we only keep labels that can contribute to acceptance along some path
         let sigma = Alphabet::from_nwa_with_future(&nwa, &fut);
         debug_log(4, || {
             format!("Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed())
@@ -99,29 +83,67 @@ impl NWA {
         // Edge case: If no atoms (i.e., union of all weights is empty), return an empty DWA quickly.
         if atoms.intervals.is_empty() {
             // No weight can ever be produced: produce a trivial 1-state DWA (non-final, no edges).
-            let mut dwa = DWA::new();
+            let dwa = DWA::new();
+            debug_log(3, || {
+                format!("NWA::determinize_to_dwa total time: {:?}", now_total.elapsed())
+            });
             return dwa;
         }
 
-        // 4) Build product DFA over components (parallel composition).
+        // 4) Group structurally identical component DFAs via canonicalization.
+        let now_group = Instant::now();
+        let mut sig_to_gid: HashMap<String, usize> = HashMap::new();
+        let mut group_dfas: Vec<DetDFA> = Vec::new();
+        let mut group_sinks: Vec<Option<usize>> = Vec::new();
+        let mut group_weights: Vec<Weight> = Vec::new();
+
+        // Build per-atom weight vector for convenience
+        let atom_weights: &Vec<Weight> = &atoms.atoms;
+
+        for (i, dfa) in comp_dfas.iter().enumerate() {
+            let (canon_dfa, sig) = dfa.canonicalize(&sigma);
+            let gid = if let Some(&g) = sig_to_gid.get(&sig) {
+                g
+            } else {
+                let g = group_dfas.len();
+                sig_to_gid.insert(sig, g);
+                // canonical sink index (recompute on canonical dfa)
+                let sink_idx = canon_dfa.find_sink_index(&sigma);
+                group_dfas.push(canon_dfa);
+                group_sinks.push(sink_idx);
+                group_weights.push(Weight::zeros());
+                g
+            };
+            // Accumulate this atom's weight into the group's weight
+            group_weights[gid] |= &atom_weights[i];
+        }
+        debug_log(3, || {
+            format!(
+                "Grouped {} atoms into {} unique DFA components in {:?}",
+                comp_dfas.len(),
+                group_dfas.len(),
+                now_group.elapsed()
+            )
+        });
+
+        // 5) Build product DFA over unique groups (parallel composition).
         let now_product = Instant::now();
-        let product = ProductDFA::from_components(&comp_dfas, &sigma);
+        let product = ProductDFA::from_components(&group_dfas, &sigma);
         debug_log(4, || {
             format!(
-                "Product DFA: states={}, alphabet_size={}, time={:?}",
+                "Product DFA (grouped): states={}, alphabet_size={}, time={:?}",
                 product.n_states, sigma.size(), now_product.elapsed()
             )
         });
 
-        // 5) Convert product DFA to DWA (attach weights).
+        // 6) Convert product DFA to DWA (attach weights using group weights).
         let now_convert = Instant::now();
-        let dwa = product.to_dwa(&sigma, &atoms, &comp_dfas, &comp_sinks);
+        let dwa = product.to_dwa(&sigma, &group_dfas, &group_sinks, &group_weights);
         debug_log(4, || {
             format!("Product->DWA conversion took {:?}", now_convert.elapsed())
         });
 
-        // 6) Simplify DWA
-        let mut dwa = dwa;
+        let dwa = dwa;
 
         debug_log(3, || {
             format!("NWA::determinize_to_dwa total time: {:?}", now_total.elapsed())
@@ -904,6 +926,67 @@ impl DetDFA {
         }
         None
     }
+
+    /// Canonicalize DFA by BFS-order renumbering from start under lexicographic symbol order.
+    /// Returns (renumbered DFA, canonical signature string).
+    fn canonicalize(&self, sigma: &Alphabet) -> (DetDFA, String) {
+        let a = sigma.size();
+        if self.n_states == 0 {
+            let empty = DetDFA { n_states: 0, start: 0, finals: vec![], trans: vec![] };
+            return (empty, String::from("n=0;a=") + &a.to_string());
+        }
+
+        let mut map = vec![usize::MAX; self.n_states];
+        let mut order: Vec<usize> = Vec::with_capacity(self.n_states);
+        let mut q = VecDeque::new();
+
+        map[self.start] = 0;
+        q.push_back(self.start);
+        order.push(self.start);
+
+        while let Some(u) = q.pop_front() {
+            for sym in 0..a {
+                let v = self.trans[u][sym];
+                if map[v] == usize::MAX {
+                    let nid = order.len();
+                    map[v] = nid;
+                    order.push(v);
+                    q.push_back(v);
+                }
+            }
+        }
+
+        // Build canonical DFA data
+        let n = order.len();
+        let mut finals = vec![false; n];
+        let mut trans = vec![vec![0usize; a]; n];
+
+        for (nid, &old) in order.iter().enumerate() {
+            finals[nid] = self.finals[old];
+            for sym in 0..a {
+                let v_old = self.trans[old][sym];
+                trans[nid][sym] = map[v_old];
+            }
+        }
+
+        // Build canonical signature
+        let mut sig = String::with_capacity(n * (a + 1) * 3);
+        sig.push_str(&format!("n={};a={};", n, a));
+        for s in 0..n {
+            sig.push(if finals[s] { '1' } else { '0' });
+            sig.push('|');
+            for sym in 0..a {
+                sig.push_str(&trans[s][sym].to_string());
+                if sym + 1 != a {
+                    sig.push(',');
+                }
+            }
+            sig.push(';');
+        }
+
+        let canon = DetDFA { n_states: n, start: 0, finals, trans };
+        (canon, sig)
+    }
 }
 
 /* ------------------------------
@@ -1014,17 +1097,16 @@ impl ProductDFA {
 
     /// Convert this product DFA into a DWA:
     /// - One DWA state per product DFA state.
-    /// - Edge weights: active indices at source state (union over atoms whose component is not sink).
-    /// - Final weights: union over atoms whose component is accepting at that state.
-    fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, comps: &[DetDFA], comp_sinks: &[Option<usize>]) -> DWA {
+    /// - Edge weights: union of group-weights for components that are not in sink at this state.
+    /// - Final weights: union of group-weights for components in which q_i is accepting at that state.
+    /// comp_weights: vector of Weight (group-weights), comps: representative DFAs (one per group),
+    /// comp_sinks: sink index per group.
+    fn to_dwa(&self, sigma: &Alphabet, comps: &[DetDFA], comp_sinks: &[Option<usize>], comp_weights: &[Weight]) -> DWA {
         let mut dwa_states = DWAStates::default();
         for _ in 0..self.n_states {
             dwa_states.add_state();
         }
         let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: self.start } };
-
-        // Precompute per-atom weight
-        let atom_weights: &Vec<Weight> = &atoms.atoms;
 
         let pb_convert = if PROGRESS_BAR_ENABLED {
             let p = ProgressBar::new(self.n_states as u64);
@@ -1038,7 +1120,7 @@ impl ProductDFA {
             None
         };
 
-        // Helper: compute W_live(state_id) = union of atoms for components that are not in sink at this state.
+        // Helper: compute W_live(state_id) = union of group-weights for components that are not in sink at this state.
         let mut w_live_cache: Vec<Weight> = Vec::with_capacity(self.n_states);
         for sid in 0..self.n_states {
             let mut w = Weight::zeros();
@@ -1048,8 +1130,8 @@ impl ProductDFA {
                         continue;
                     }
                 }
-                // add atom i
-                w |= &atom_weights[i];
+                // add group weight i
+                w |= &comp_weights[i];
             }
             w_live_cache.push(w);
         }
@@ -1062,7 +1144,7 @@ impl ProductDFA {
             let mut w_final = Weight::zeros();
             for (i, &s_i) in self.tuples[sid].iter().enumerate() {
                 if comps[i].finals[s_i] {
-                    w_final |= &atom_weights[i];
+                    w_final |= &comp_weights[i];
                 }
             }
             if !w_final.is_empty() {
@@ -1075,7 +1157,7 @@ impl ProductDFA {
             if let Some(p) = &pb_convert {
                 p.inc(1);
             }
-            // Always emit transitions to keep the DWA total. Use zero weight if no atom is live.
+            // Always emit transitions to keep the DWA total. Use zero weight if no group is live.
             let edge_weight = if w_live_cache[sid].is_empty() {
                 Weight::zeros()
             } else {
