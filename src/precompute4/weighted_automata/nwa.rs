@@ -79,7 +79,7 @@ impl NWAStates {
         Ok(())
     }
 
-    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
         if from >= self.len() {
             return Err(NWABuildError::StateOutOfBounds { state: from });
         }
@@ -89,7 +89,7 @@ impl NWAStates {
         self.0[from].default.push(NWADefaultTransition {
             target: to,
             weight: w,
-            exceptions: BTreeSet::new(),
+            exceptions,
         });
         Ok(())
     }

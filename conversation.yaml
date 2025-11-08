@@ -4466,7 +4466,7 @@ local_system:
               Ok(())
           }
 
-          pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+          pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
               if from >= self.len() {
                   return Err(NWABuildError::StateOutOfBounds { state: from });
               }
@@ -4476,7 +4476,7 @@ local_system:
               self.0[from].default.push(NWADefaultTransition {
                   target: to,
                   weight: w,
-                  exceptions: BTreeSet::new(),
+                  exceptions,
               });
               Ok(())
           }
@@ -11876,5 +11876,203 @@ messages:
     metadata:
   - user: "Changes committed with message: \"Fix: Correctly update default transition
       targets in simplification's epsilon chain bypass\""
+    metadata:
+  - user: |-
+      Diff of src/precompute4/resolve_negatives.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: add_default_transition on nwa should take exceptions.
+    metadata:
+  - assistant: |-
+      You are absolutely correct. The public API for adding a default transition was not updated to allow specifying the exception set, which makes the new structure much less useful for callers. My apologies for that oversight.
+
+      Here are the instructions to correct the signatures of `add_default_transition`.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `src/precompute4/weighted_automata/nwa.rs`**
+
+      2.  **Navigate to the `NWAStates::add_default_transition` method.**
+
+      3.  **Update its signature and implementation** to accept an `exceptions` parameter.
+          *   Change this:
+              ```rust
+              pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+                  if from >= self.len() {
+                      return Err(NWABuildError::StateOutOfBounds { state: from });
+                  }
+                  if to >= self.len() {
+                      return Err(NWABuildError::StateOutOfBounds { state: to });
+                  }
+                  self.0[from].default.push(NWADefaultTransition {
+                      target: to,
+                      weight: w,
+                      exceptions: BTreeSet::new(),
+                  });
+                  Ok(())
+              }
+              ```
+          *   To this:
+              ```rust
+              pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
+                  if from >= self.len() {
+                      return Err(NWABuildError::StateOutOfBounds { state: from });
+                  }
+                  if to >= self.len() {
+                      return Err(NWABuildError::StateOutOfBounds { state: to });
+                  }
+                  self.0[from].default.push(NWADefaultTransition {
+                      target: to,
+                      weight: w,
+                      exceptions,
+                  });
+                  Ok(())
+              }
+              ```
+
+      4.  **Navigate to the `NWA::add_default_transition` method.**
+
+      5.  **Update its signature and the corresponding call** to pass the exceptions through.
+          *   Change this:
+              ```rust
+              pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+                  self.states.add_default_transition(from, to, w)
+              }
+              ```
+          *   To this:
+              ```rust
+              pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
+                  self.states.add_default_transition(from, to, w, exceptions)
+              }
+              ```
+
+      This aligns the public API with the internal data structure, correctly modeling the pre-emption semantics.
+
+      ### Git Diff
+
+      Here is the git diff for the changes:
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/nwa.rs
+      +++ b/src/precompute4/weighted_automata/nwa.rs
+      @@ -82,18 +82,18 @@
+               Ok(())
+           }
+       
+      -    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+      +    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
+               if from >= self.len() {
+                   return Err(NWABuildError::StateOutOfBounds { state: from });
+               }
+               if to >= self.len() {
+                   return Err(NWABuildError::StateOutOfBounds { state: to });
+               }
+               self.0[from].default.push(NWADefaultTransition {
+                   target: to,
+                   weight: w,
+      -            exceptions: BTreeSet::new(),
+      +            exceptions,
+               });
+               Ok(())
+           }
+       269,8 +269,8 @@
+               self.states.add_transition(from, on, to, w)
+           }
+       
+      -    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+      -        self.states.add_default_transition(from, to, w)
+      +    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
+      +        self.states.add_default_transition(from, to, w, exceptions)
+           }
+       
+           pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
+
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      --- a/src/precompute4/weighted_automata/nwa.rs
+      +++ b/src/precompute4/weighted_automata/nwa.rs
+      @@ -82,18 +82,18 @@
+               Ok(())
+           }
+       
+      -    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+      +    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
+               if from >= self.len() {
+                   return Err(NWABuildError::StateOutOfBounds { state: from });
+               }
+               if to >= self.len() {
+                   return Err(NWABuildError::StateOutOfBounds { state: to });
+               }
+               self.0[from].default.push(NWADefaultTransition {
+                   target: to,
+                   weight: w,
+      -            exceptions: BTreeSet::new(),
+      +            exceptions,
+               });
+               Ok(())
+           }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/nwa.rs
+      Applying patch to 'src/precompute4/weighted_automata/nwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/nwa.rs.
+    metadata:
+  - user: 'Changes committed with message: "Update NWAStates::add_default_transition
+      to accept exception set"'
     metadata:
 ...
