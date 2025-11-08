@@ -1886,7 +1886,6 @@ mod determinization_tests {
         // Now, convert A to NWA and back to DWA 'b'.
         let nwa = NWA::from_dwa(&a);
         let mut b = nwa.determinize_to_dwa();
-        b.simplify();
 
         assert_eq!(b.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
         assert!(b.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
