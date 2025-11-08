@@ -658,7 +658,14 @@ impl DWA {
                 }
             }
             let before = st.transitions.exceptions.len();
-            st.transitions.exceptions.retain(|_, tgt| live[*tgt]);
+            let default_goes_live = st.transitions.default.map_or(false, |d| live[d]);
+            st.transitions.exceptions.retain(|_, tgt| {
+                // Keep exception if:
+                // 1. It goes to a live state.
+                // 2. It goes to a dead state, but it needs to override a default transition
+                //    that goes to a live state.
+                live[*tgt] || default_goes_live
+            });
             if st.transitions.exceptions.len() != before {
                 changed = true;
                 st.trans_weights_exceptions.retain(|ch, _| st.transitions.exceptions.contains_key(ch));
