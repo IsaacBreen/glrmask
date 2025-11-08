@@ -912,14 +912,13 @@ impl ProductDFA {
             // Default (OTHER)
             let dst_def = self.trans[sid][sigma.other_index];
             if sid < dwa.states.len() && dst_def < dwa.states.len() {
-                // Create/overwrite default transition
                 let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
             }
 
             // Exceptions for each explicit label
             for (li, &lbl) in sigma.labels.iter().enumerate() {
                 let dst = self.trans[sid][li];
-                if sid < dwa.states.len() && dst < dwa.states.len() {
+                if dst != dst_def && sid < dwa.states.len() && dst < dwa.states.len() {
                     let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
                 }
             }
