@@ -122,13 +122,8 @@ impl NWA {
    Utilities and support structs
    ------------------------------ */
 
-fn debug_log(level: u8, msg: impl FnOnce() -> String) {
-    // Integrate with crate::debug! macro if available; otherwise no-op.
-    // To avoid introducing a dependency here, gate this call.
-    #[allow(unused)]
-    {
-        crate::debug!(level, "{}", msg());
-    }
+fn debug_log(level: usize, msg: impl FnOnce() -> String) {
+    crate::debug!(level, "{}", msg());
 }
 
 /// Alphabet = all labels that appear as exceptions, plus a special OTHER symbol.
