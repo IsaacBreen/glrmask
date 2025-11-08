@@ -588,61 +588,43 @@ impl DetDFA {
         self.trans = trans;
 
         // Hopcroft minimization on complete DFA
-        let n = self.n_states;
-        let a = sigma.size();
-
-        // Special case: 1 state
-        if n <= 1 {
+        if self.n_states <= 1 {
             return;
         }
+
+        let n = self.n_states;
+        let a = sigma.size();
 
         // Initial partition: accepting vs non-accepting
         let mut part_id = vec![0usize; n];
         let mut blocks: Vec<Vec<usize>> = Vec::new();
-        let mut accepting_block = Vec::new();
-        let mut non_accepting_block = Vec::new();
+        let (accepting_block, non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| self.finals[s]);
 
-        for s in 0..n {
-            if self.finals[s] {
-                accepting_block.push(s);
-            } else {
-                non_accepting_block.push(s);
-            }
-        }
         if accepting_block.is_empty() || non_accepting_block.is_empty() {
             // All accepting or all non-accepting -> nothing to split
             return;
         }
         blocks.push(accepting_block);
         blocks.push(non_accepting_block);
-        for (pid, block) in blocks.iter().enumerate() {
-            for &s in block {
-                part_id[s] = pid;
-            }
-        }
+        for (pid, block) in blocks.iter().enumerate() { for &s in block { part_id[s] = pid; } }
 
         // Build inverse transitions for each symbol
         let mut inv: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); n]; a];
-        for s in 0..n {
-            for sym in 0..a {
-                let v = self.trans[s][sym];
-                inv[sym][v].push(s);
-            }
-        }
+        for s in 0..n { for sym in 0..a { let v = self.trans[s][sym]; inv[sym][v].push(s); } }
 
-        // Worklist of (block id, symbol)
-        let mut worklist: Vec<(usize, usize)> = Vec::new();
+        // Worklist of (block id, symbol). Using BTreeSet for efficient presence checks and removal.
+        let mut worklist: BTreeSet<(usize, usize)> = BTreeSet::new();
+        let smaller_initial_set = if blocks[0].len() <= blocks[1].len() { 0 } else { 1 };
         for sym in 0..a {
-            worklist.push((0, sym));
-            worklist.push((1, sym));
+            worklist.insert((smaller_initial_set, sym));
         }
 
-        while let Some((b, sym)) = worklist.pop() {
+        while let Some(&(b, sym)) = worklist.iter().next() {
+            worklist.remove(&(b, sym));
+
             // Compute preimage of block b under symbol sym
             let mut pre: Vec<usize> = Vec::new();
-            for &v in &blocks[b] {
-                pre.extend_from_slice(&inv[sym][v]);
-            }
+            for &v in &blocks[b] { pre.extend_from_slice(&inv[sym][v]); }
             if pre.is_empty() {
                 continue;
             }
@@ -651,21 +633,12 @@ impl DetDFA {
 
             // For each block, split by intersection with pre
             let mut affected: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
-            for &s in &pre {
-                let pid = part_id[s];
-                let entry = affected.entry(pid).or_insert_with(|| (Vec::new(), Vec::new()));
-                entry.0.push(s);
-            }
+            for &s in &pre { let pid = part_id[s]; affected.entry(pid).or_default().0.push(s); }
             for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
                 // Fill not_in_pre
-                for &s in &blocks[*pid] {
-                    if !in_pre.binary_search(&s).is_ok() {
-                        not_in_pre.push(s);
-                    }
-                }
+                for &s in &blocks[*pid] { if !in_pre.binary_search(&s).is_ok() { not_in_pre.push(s); } }
             }
 
-            let mut new_blocks: Vec<Vec<usize>> = Vec::new();
             let mut to_replace: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
 
             for (pid, (in_pre, not_in_pre)) in affected.into_iter() {
@@ -680,40 +653,29 @@ impl DetDFA {
             }
 
             // Apply replacements (block splits)
-            for (pid, in_pre, not_in_pre) in to_replace {
-                let old_block = std::mem::take(&mut blocks[pid]);
-                // Partition old_block into two
-                let new_block1 = in_pre; // must be from pre
-                let mut mark = BTreeSet::new();
-                for &x in &new_block1 {
-                    mark.insert(x);
-                }
-                let new_block2: Vec<usize> = old_block.into_iter().filter(|x| !mark.contains(x)).collect();
+            for (pid, mut in_pre, mut not_in_pre) in to_replace {
+                in_pre.sort_unstable();
+                not_in_pre.sort_unstable();
 
-                // Replace pid with new_block1
-                blocks[pid] = new_block1.clone();
-                for &s in &blocks[pid] {
-                    part_id[s] = pid;
-                }
-
-                // Push new block (pid2)
                 let pid2 = blocks.len();
-                blocks.push(new_block2.clone());
-                for &s in &blocks[pid2] {
-                    part_id[s] = pid2;
-                }
+                blocks.push(not_in_pre);
+                blocks[pid] = in_pre;
 
-                // Update worklist: for each sym, push (pid, sym) or (pid2, sym) appropriately
+                // Update part_id map for all states in the newly created blocks
+                for &s in &blocks[pid] { part_id[s] = pid; }
+                for &s in &blocks[pid2] { part_id[s] = pid2; }
+
+                // Update worklist according to Hopcroft's algorithm
                 for sym2 in 0..a {
-                    // Choose the smaller block to add to worklist (standard optimization).
-                    let (smaller, larger) = if blocks[pid].len() <= blocks[pid2].len() {
-                        (pid, pid2)
+                    if worklist.remove(&(pid, sym2)) {
+                        // The original block was on the worklist. Replace it with both new blocks.
+                        worklist.insert((pid, sym2));
+                        worklist.insert((pid2, sym2));
                     } else {
-                        (pid2, pid)
-                    };
-                    worklist.push((smaller, sym2));
-                    // It's also correct to push (larger, sym2) but not necessary.
-                    let _ = larger; // silence
+                        // The original block was not on the worklist. Add the smaller of the two new blocks.
+                        let (smaller_pid, _) = if blocks[pid].len() <= blocks[pid2].len() { (pid, pid2) } else { (pid2, pid) };
+                        worklist.insert((smaller_pid, sym2));
+                    }
                 }
             }
         }
@@ -721,12 +683,9 @@ impl DetDFA {
         // Build the quotient automaton
         let num_parts = blocks.len();
         let mut repr: Vec<usize> = vec![0; num_parts];
-        for (pid, block) in blocks.iter().enumerate() {
-            // choose representative
-            repr[pid] = block[0];
-        }
+        for (pid, block) in blocks.iter().enumerate() { repr[pid] = block[0]; }
 
-        let mut start_part = part_id[self.start];
+        let start_part = part_id[self.start];
         let mut finals2 = vec![false; num_parts];
         for pid in 0..num_parts {
             finals2[pid] = self.finals[repr[pid]];
