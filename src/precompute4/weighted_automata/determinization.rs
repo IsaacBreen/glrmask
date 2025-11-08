@@ -136,6 +136,11 @@ impl Alphabet {
             for (&lbl, _) in &st.transitions {
                 set.insert(lbl);
             }
+            for def in &st.default {
+                for &lbl in &def.exceptions {
+                    set.insert(lbl);
+                }
+            }
         }
         let labels: Vec<i16> = set.into_iter().collect();
         let other_index = labels.len(); // last slot is OTHER
