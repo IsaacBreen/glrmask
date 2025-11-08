@@ -198,15 +198,14 @@ impl NWA {
             nwa.states[i].final_weight = st.final_weight.clone();
             // Default -> NWA default
             if let Some(to) = st.transitions.default {
-                if let Some(w) = &st.trans_weight_default {
-                    nwa.states.0[i].default.push((to, w.clone()));
-                }
+                // Assume ALL if weight is missing, though this should not happen with current DWA builders.
+                let w = st.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all);
+                nwa.states.0[i].default.push((to, w));
             }
             // Labeled
             for (lbl, to) in &st.transitions.exceptions {
-                if let Some(w) = st.trans_weights_exceptions.get(lbl) {
-                    nwa.states.add_transition(i, *lbl, *to, w.clone()).unwrap();
-                }
+                let w = st.trans_weights_exceptions.get(lbl).cloned().unwrap_or_else(Weight::all);
+                nwa.states.add_transition(i, *lbl, *to, w).unwrap();
             }
         }
         nwa
