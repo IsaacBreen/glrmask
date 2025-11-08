@@ -10,13 +10,13 @@
 
 use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA};
-use super::nwa::{NWAState, NWAStates, NWA};
+use super::nwa::{NWAState, NWADefaultTransition, NWAStates, NWA};
 use crate::precompute4::test_weighted_automata;
 use crate::precompute4::weighted_automata::NWAStateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::Instant;
 
 /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
@@ -798,9 +798,9 @@ impl NWA {
                     if *v < n && !reachable[*v] { reachable[*v] = true; q.push_back(*v); }
                 }
             }
-            for (v, _) in &st.default {
-                if *v < n && !reachable[*v] {
-                    reachable[*v] = true; q.push_back(*v);
+            for def in &st.default {
+                if def.target < n && !reachable[def.target] {
+                    reachable[def.target] = true; q.push_back(def.target);
                 }
             }
         }
@@ -824,8 +824,8 @@ impl NWA {
                     *v = remap[*v];
                 }
             });
-            for (v, _) in &mut st.default {
-                *v = remap[*v]
+            for def in &mut st.default {
+                def.target = remap[def.target]
             }
         }
 
@@ -864,9 +864,9 @@ impl NWA {
                     if new_w != *w { *w = new_w; changed_weights = true; }
                 }
             }
-            for (v, w) in &mut st.default {
-                let new_w = &*w | &not_fut[*v];
-                if new_w != *w { *w = new_w; changed_weights = true; }
+            for def in &mut st.default {
+                let new_w = &def.weight | &not_fut[def.target];
+                if new_w != def.weight { def.weight = new_w; changed_weights = true; }
             }
         }
 
@@ -894,8 +894,8 @@ impl NWA {
             });
             st.transitions.retain(|_, targets| !targets.is_empty());
 
-            st.default.retain(|(v, _)| live[*v]);
-            st.default.iter_mut().for_each(|(v, _)| *v = remap[*v]);
+            st.default.retain(|def| live[def.target]);
+            st.default.iter_mut().for_each(|def| def.target = remap[def.target]);
         }
 
         self.states.0 = new_states_vec;
@@ -943,8 +943,8 @@ impl NWA {
                         Self::add_transition_to_state(&mut new_state, lbl, to_comp, w.clone());
                     }
                 }
-                for (to, w) in &self.states[sid].default {
-                    Self::add_default_transition_to_state(&mut new_state, comp_of[*to], w.clone());
+                for def in &self.states[sid].default {
+                    Self::add_default_transition_to_state(&mut new_state, comp_of[def.target], def.weight.clone(), def.exceptions.clone());
                 }
                 for &(to, ref w) in &self.states[sid].epsilons {
                     let to_comp = comp_of[to];
@@ -954,16 +954,6 @@ impl NWA {
                 }
             }
             new_states_vec.push(new_state);
-        }
-
-        for st in &mut new_states_vec {
-            st.epsilons.iter_mut().for_each(|(v, _)| *v = comp_of[*v]);
-            st.transitions.values_mut().for_each(|targets| {
-                targets.iter_mut().for_each(|(v, _)| *v = comp_of[*v]);
-            });
-            st.default.iter_mut().for_each(|(v, _)| {
-                *v = comp_of[*v];
-            });
         }
 
         self.states.0 = new_states_vec;
@@ -1012,11 +1002,15 @@ impl NWA {
         }
     }
 
-    fn add_default_transition_to_state(state: &mut NWAState, to: NWAStateID, w: Weight) {
-        if let Some((_, old_w)) = state.default.iter_mut().find(|(t, _)| *t == to) {
-            *old_w |= &w;
+    fn add_default_transition_to_state(state: &mut NWAState, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) {
+        if let Some(old_def) = state.default.iter_mut().find(|d| d.target == to && d.exceptions == exceptions) {
+            old_def.weight |= &w;
         } else {
-            state.default.push((to, w));
+            state.default.push(NWADefaultTransition {
+                target: to,
+                weight: w,
+                exceptions,
+            });
         }
     }
 }
@@ -1041,21 +1035,12 @@ impl NWA {
 
             // Remove empty-weight default
             let before_def = st.default.len();
-            st.default.retain(|(_, w)| !w.is_empty());
+            st.default.retain(|def| !def.weight.is_empty());
             if st.default.len() != before_def { changed = true; }
 
-            // Remove labeled transitions that are identical to default (same target, same weight)
-            if !st.default.is_empty() {
-                let mut sorted_default = st.default.clone();
-                sorted_default.sort_unstable();
-                let before = st.transitions.len();
-                st.transitions.retain(|_, targets| {
-                    let mut sorted_targets = targets.clone();
-                    sorted_targets.sort_unstable();
-                    sorted_targets != sorted_default
-                });
-                if st.transitions.len() != before { changed = true; }
-            }
+            // NOTE: The old logic for removing labeled transitions identical to default is no longer valid,
+            // as there can be multiple default transitions with different exception sets. This was an
+            // optimization, so removing it preserves correctness.
         }
         changed
     }
@@ -1205,13 +1190,19 @@ impl NWA {
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
             let mut sig2pid: HashMap<
-                (Option<Weight>, Vec<(usize, Weight)>, Vec<(usize, Weight)>, Vec<(i16, Vec<(usize, Weight)>)>),
+                (
+                    Option<Weight>,
+                    Vec<(usize, Weight, BTreeSet<i16>)>,
+                    Vec<(usize, Weight)>,
+                    Vec<(i16, Vec<(usize, Weight)>)>,
+                ),
                 usize,
             > = HashMap::new();
 
             for i in 0..n {
                 let st = &self.states[i];
-                let mut def_sig = st.default.iter().map(|(to, w)| (part[*to], w.clone())).collect::<Vec<_>>();
+                let mut def_sig =
+                    st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect::<Vec<_>>();
                 def_sig.sort_unstable();
 
                 let eps_sig = st.epsilons.iter()
@@ -1260,9 +1251,13 @@ impl NWA {
             // Fix targets to new partition ids
             // Default
             let mut new_default = Vec::new();
-            for (to, w) in st.default {
-                let cls = part[to];
-                new_default.push((cls, w));
+            for def in st.default {
+                let cls = part[def.target];
+                new_default.push(NWADefaultTransition {
+                    target: cls,
+                    weight: def.weight,
+                    exceptions: def.exceptions,
+                });
             }
             st.default = new_default;
             // Labeled transitions
@@ -1292,8 +1287,12 @@ impl NWA {
         for st in &mut new_states {
             // Default
             let mut new_default = Vec::new();
-            for (cls, w) in &st.default {
-                new_default.push((*pid_to_new.get(cls).expect("missing class"), w.clone()));
+            for def in &st.default {
+                new_default.push(NWADefaultTransition {
+                    target: *pid_to_new.get(&def.target).expect("missing class"),
+                    weight: def.weight.clone(),
+                    exceptions: def.exceptions.clone(),
+                });
             }
             st.default = new_default;
             // Labeled
