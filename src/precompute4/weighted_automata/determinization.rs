@@ -898,13 +898,7 @@ impl ProductDFA {
         for sid in 0..self.n_states {
             // Always emit transitions to keep the DWA total. Use zero weight if no atom is live.
             let edge_weight = if w_live_cache[sid].is_empty() {
-                // This is a sink state where no atoms are live. To ensure totality and
-                // prevent a buggy simplifier from removing the self-loop, we use a
-                // non-empty weight. Weight::all() is safe because the sink state is
-                // non-final, so any path ending here will be rejected. The accumulator
-                // will be preserved, but since it can't escape to a final state,
-                // it doesn't matter.
-                Weight::all()
+                Weight::zeros()
             } else {
                 w_live_cache[sid].clone()
             };
@@ -912,13 +906,14 @@ impl ProductDFA {
             // Default (OTHER)
             let dst_def = self.trans[sid][sigma.other_index];
             if sid < dwa.states.len() && dst_def < dwa.states.len() {
+                // Create/overwrite default transition
                 let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
             }
 
             // Exceptions for each explicit label
             for (li, &lbl) in sigma.labels.iter().enumerate() {
                 let dst = self.trans[sid][li];
-                if dst != dst_def && sid < dwa.states.len() && dst < dwa.states.len() {
+                if sid < dwa.states.len() && dst < dwa.states.len() {
                     let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
                 }
             }
