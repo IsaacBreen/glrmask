@@ -2010,10 +2010,10 @@ mod determinization_tests {
 
         // State 0
         nwa.add_epsilon(0, 19, Weight::all());
-        // State 4
-        nwa.add_epsilon(4, 23, Weight::all());
         // State 19
         nwa.add_transition(19, 9, 4, Weight::all()).unwrap();
+        // State 4
+        nwa.add_epsilon(4, 23, Weight::all());
         // State 23
         nwa.add_transition(23, 0, 24, Weight::all()).unwrap();
         // State 24
@@ -2027,7 +2027,7 @@ mod determinization_tests {
 
         let dwa = nwa.determinize_to_dwa();
 
-        let word = vec![9, 3, 0, neg(0), neg(5), neg(10)];
+        let word = vec![9, 0, neg(0), neg(5), neg(10)];
         let weight = dwa.eval_word_weight(&word);
 
         assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
