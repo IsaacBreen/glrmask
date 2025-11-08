@@ -184,6 +184,105 @@ impl NWA {
         fut
     }
 
+    pub fn remove_unreachable_and_dead_states(&mut self) {
+        if self.states.0.is_empty() {
+            return;
+        }
+
+        // 1. Find reachable states from start_state
+        let mut reachable = vec![false; self.states.len()];
+        let mut q = VecDeque::new();
+
+        if self.body.start_state < self.states.len() {
+            q.push_back(self.body.start_state);
+            reachable[self.body.start_state] = true;
+        }
+
+        while let Some(u) = q.pop_front() {
+            // Epsilon transitions
+            for (v, _) in &self.states[u].epsilons {
+                if *v < self.states.len() && !reachable[*v] {
+                    reachable[*v] = true;
+                    q.push_back(*v);
+                }
+            }
+            // Labeled transitions
+            for (_, targets) in &self.states[u].transitions {
+                for (v, _) in targets {
+                    if *v < self.states.len() && !reachable[*v] {
+                        reachable[*v] = true;
+                        q.push_back(*v);
+                    }
+                }
+            }
+            // Default transitions
+            for def in &self.states[u].default {
+                if def.target < self.states.len() && !reachable[def.target] {
+                    reachable[def.target] = true;
+                    q.push_back(def.target);
+                }
+            }
+        }
+
+        // 2. Find live states (can reach a final state with non-empty weight)
+        let fut = self.compute_future_weights();
+        let live: Vec<bool> = fut.iter().map(|w| !w.is_empty()).collect();
+
+        // 3. Determine states to keep and create mapping
+        let mut old_to_new = vec![None; self.states.len()];
+        let mut new_states_vec = Vec::new();
+        let mut new_id_counter = 0;
+        for i in 0..self.states.len() {
+            if reachable[i] && live[i] {
+                old_to_new[i] = Some(new_id_counter);
+                new_states_vec.push(self.states[i].clone());
+                new_id_counter += 1;
+            }
+        }
+
+        if new_id_counter == self.states.len() {
+            // No states removed
+            return;
+        }
+
+        // Handle case where start state is removed (becomes empty language)
+        if self.body.start_state >= old_to_new.len() || old_to_new[self.body.start_state].is_none() {
+            self.states = NWAStates::default();
+            let new_start = self.states.add_state();
+            self.body.start_state = new_start;
+            return;
+        }
+
+        // 4. Remap transitions in the new states
+        for state in new_states_vec.iter_mut() {
+            state.epsilons.retain_mut(|(target, _)| {
+                if let Some(new_target) = old_to_new.get(*target).and_then(|&x| x) {
+                    *target = new_target;
+                    true
+                } else { false }
+            });
+            for (_, targets) in state.transitions.iter_mut() {
+                targets.retain_mut(|(target, _)| {
+                    if let Some(new_target) = old_to_new.get(*target).and_then(|&x| x) {
+                        *target = new_target;
+                        true
+                    } else { false }
+                });
+            }
+            state.transitions.retain(|_, v| !v.is_empty());
+            state.default.retain_mut(|def| {
+                if let Some(new_target) = old_to_new.get(def.target).and_then(|&x| x) {
+                    def.target = new_target;
+                    true
+                } else { false }
+            });
+        }
+
+        // 5. Update NWA
+        self.body.start_state = old_to_new[self.body.start_state].unwrap();
+        self.states = NWAStates(new_states_vec);
+    }
+
     /// Convert a DWA to a NWA:
     /// - DWA labeled transitions -> NWA labeled transitions (same label, same weight)
     /// - DWA default transitions -> NWA default transitions (weight of default)
