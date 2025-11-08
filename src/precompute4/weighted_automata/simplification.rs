@@ -646,18 +646,6 @@ impl DWA {
             }
         }
 
-        // If the start state is not live, no words can be accepted. The language is empty.
-        if body.start_state >= n || !live[body.start_state] {
-            let already_empty = n == 1 && states[0].final_weight.is_none() && states[0].transitions.default.is_none() && states[0].transitions.exceptions.is_empty();
-            if !already_empty {
-                states.0.clear();
-                body.start_state = states.add_state();
-                return true;
-            } else {
-                return false;
-            }
-        }
-
         // 2. Remove transitions to non-live states.
         let mut changed = false;
         for i in 0..n {
