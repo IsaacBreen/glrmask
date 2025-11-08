@@ -1038,22 +1038,9 @@ impl NWA {
             st.default.retain(|def| !def.weight.is_empty());
             if st.default.len() != before_def { changed = true; }
 
-            // Remove labeled transitions that are redundant with a default transition.
-            let before_trans_count = st.transitions.values().map(|v| v.len()).sum::<usize>();
-            st.transitions.retain(|lbl, targets| {
-                targets.retain(|(tgt, w)| {
-                    // A labeled transition is redundant if a default transition exists
-                    // to the same target with the same weight, and the label is not an exception for it.
-                    !st.default.iter().any(|def| {
-                        def.target == *tgt && &def.weight == w && !def.exceptions.contains(lbl)
-                    })
-                });
-                !targets.is_empty()
-            });
-            let after_trans_count = st.transitions.values().map(|v| v.len()).sum::<usize>();
-            if before_trans_count != after_trans_count {
-                changed = true;
-            }
+            // NOTE: The old logic for removing labeled transitions identical to default is no longer valid,
+            // as there can be multiple default transitions with different exception sets. This was an
+            // optimization, so removing it preserves correctness.
         }
         changed
     }
