@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 
 const EVERYTHING: bool = false;
-const FORCE_LR0_TABLE: bool = false;
+const FORCE_LR0_TABLE: bool = true;
 
 
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
