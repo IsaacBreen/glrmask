@@ -181,11 +181,13 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
                         }
 
                         // Default transitions
-                        for def in &state_br.default {
-                            if !def.exceptions.contains(&c) {
-                                let new_w = w_ab & &w_b_br & &def.weight;
-                                if !new_w.is_empty() {
-                                    pass_epsilons.push((a, def.target, new_w));
+                        if !state_br.transitions.contains_key(&c) {
+                            for def in &state_br.default {
+                                if !def.exceptions.contains(&c) {
+                                    let new_w = w_ab & &w_b_br & &def.weight;
+                                    if !new_w.is_empty() {
+                                        pass_epsilons.push((a, def.target, new_w));
+                                    }
                                 }
                             }
                         }
