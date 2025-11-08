@@ -52,6 +52,36 @@ impl DWA {
         crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
     }
 
+    fn run_pass_with_test<F>(
+        states: &mut DWAStates,
+        body: &mut DWABody,
+        pass_name: &str,
+        mut pass: F,
+    ) -> bool
+    where
+        F: FnMut(&mut DWAStates, &mut DWABody) -> bool,
+    {
+        let is_checking = IN_SIMPLIFY_CHECK.with(|c| c.get());
+        let before_dwa = if !is_checking && STOCHASTIC_DEBUG {
+            Some(DWA { states: states.clone(), body: body.clone() })
+        } else {
+            None
+        };
+
+        let changed = pass(states, body);
+
+        if let Some(before) = before_dwa {
+            if changed {
+                let after_dwa = DWA { states: states.clone(), body: body.clone() };
+                IN_SIMPLIFY_CHECK.with(|c| c.set(true));
+                crate::debug!(1, "Stochastic testing DWA after pass: {}", pass_name);
+                test_weighted_automata::stochastic_equivalence_test(before, after_dwa);
+                IN_SIMPLIFY_CHECK.with(|c| c.set(false));
+            }
+        }
+        changed
+    }
+
     fn simplify_core(states: &mut DWAStates, body: &mut DWABody, large: bool) {
         let max_passes: usize = if large { 2 } else { 50 };
         let pb = if PROGRESS_BAR_ENABLED {
@@ -69,8 +99,12 @@ impl DWA {
 
         // Initial normalize + prune
         if let Some(p) = &pb { p.set_message("normalize/prune".to_string()); }
-        let _ = Self::normalize_edges_inplace(states);
-        let _ = Self::prune_unreachable(states, body);
+        let _ = Self::run_pass_with_test(states, body, "initial normalize_edges_inplace", |s, _b| {
+            Self::normalize_edges_inplace(s)
+        });
+        let _ = Self::run_pass_with_test(states, body, "initial prune_unreachable", |s, b| {
+            Self::prune_unreachable(s, b)
+        });
 
         let mut changed_any = true;
         let mut passes = 0usize;
@@ -80,27 +114,42 @@ impl DWA {
             changed_any = false;
 
             if let Some(p) = &pb { p.set_message("normalize".to_string()); }
-            changed_any |= Self::normalize_edges_inplace(states);
+            changed_any |= Self::run_pass_with_test(states, body, "normalize_edges_inplace", |s, _b| {
+                Self::normalize_edges_inplace(s)
+            });
 
             if let Some(p) = &pb { p.set_message("absorb sink finals".to_string()); }
-            changed_any |= Self::absorb_sink_finals_into_incoming(states);
+            changed_any |=
+                Self::run_pass_with_test(states, body, "absorb_sink_finals_into_incoming", |s, _b| {
+                    Self::absorb_sink_finals_into_incoming(s)
+                });
 
             // Always relax first: this safely enlarges edge weights with ¬future(target),
             // exposing more structural equality opportunities for minimization.
             if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
-            changed_any |= Self::relax_weights_by_local_future(states);
+            changed_any |=
+                Self::run_pass_with_test(states, body, "relax_weights_by_local_future", |s, _b| {
+                    Self::relax_weights_by_local_future(s)
+                });
 
             // For small automata, follow relaxation with a proper minimization pass.
             if !large {
                 if let Some(p) = &pb { p.set_message("minimize".to_string()); }
-                changed_any |= Self::minimize_partition_refinement(states, body);
+                changed_any |=
+                    Self::run_pass_with_test(states, body, "minimize_partition_refinement", |s, b| {
+                        Self::minimize_partition_refinement(s, b)
+                    });
             }
 
             if let Some(p) = &pb { p.set_message("normalize".to_string()); }
-            changed_any |= Self::normalize_edges_inplace(states);
+            changed_any |= Self::run_pass_with_test(states, body, "normalize_edges_inplace", |s, _b| {
+                Self::normalize_edges_inplace(s)
+            });
 
             if let Some(p) = &pb { p.set_message("prune".to_string()); }
-            changed_any |= Self::prune_unreachable(states, body);
+            changed_any |= Self::run_pass_with_test(states, body, "prune_unreachable", |s, b| {
+                Self::prune_unreachable(s, b)
+            });
         }
 
         if let Some(p) = &pb {
