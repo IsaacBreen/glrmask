@@ -1689,16 +1689,10 @@ fn test_dwa_to_nwa_to_dwa_roundtrip() {
     a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
     a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
 
-    println!("Original DWA:\n{}", a);
-
     let nwa = NWA::from_dwa(&a);
     let mut roundtrip_dwa = nwa.determinize_to_dwa();
-    println!("Roundtrip DWA:\n{}", roundtrip_dwa);
-
-    stochastic_equivalence_test(a.clone(), roundtrip_dwa.clone());
-
     roundtrip_dwa.simplify();
-    println!("Simplified Roundtrip DWA:\n{}", roundtrip_dwa);
+
     stochastic_equivalence_test(a, roundtrip_dwa);
 }
 
