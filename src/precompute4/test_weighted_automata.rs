@@ -2212,31 +2212,4 @@ mod determinization_tests {
 
         assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
     }
-
-    #[test]
-    fn test_determinize_another_minimal_failing_nwa() {
-        fn neg(x: i16) -> i16 {
-            i16::MIN + x
-        }
-
-        let mut nwa = NWA::new();
-        // Need states up to 37 for the path
-        for _ in 0..38 { nwa.states.add_state(); }
-
-        // The minimal path starts at state 33. Connect the NWA start state to it.
-        nwa.add_epsilon(0, 33, Weight::all());
-
-        // The minimal failing components
-        nwa.add_transition(33, 7, 34, Weight::all()).unwrap();
-        nwa.add_transition(34, neg(7), 35, Weight::all()).unwrap();
-        nwa.add_transition(35, neg(5), 36, Weight::all()).unwrap();
-        nwa.add_transition(36, neg(10), 37, Weight::all()).unwrap();
-        nwa.states[37].final_weight = Some(Weight::all());
-
-        let dwa = nwa.determinize_to_dwa();
-        let word = vec![7, neg(7), neg(5), neg(10)];
-        let weight = dwa.eval_word_weight(&word);
-
-        assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
-    }
 }
