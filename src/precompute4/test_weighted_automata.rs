@@ -2139,7 +2139,7 @@ mod determinization_tests {
             weight.is_empty() // returns true if it fails (weight is empty)
         }
 
-        let components = vec![
+        let all_components = vec![
             NwaComponent::Epsilon { from: 0, to: 6 }, NwaComponent::Epsilon { from: 0, to: 10 },
             NwaComponent::Epsilon { from: 0, to: 13 }, NwaComponent::Epsilon { from: 0, to: 14 },
             NwaComponent::Epsilon { from: 0, to: 15 }, NwaComponent::Epsilon { from: 0, to: 17 },
@@ -2166,25 +2166,46 @@ mod determinization_tests {
             NwaComponent::Transition { from: 38, on: 5, to: 3 },
         ];
 
-        let mut minimal_components = components.clone();
-        let mut i = minimal_components.len();
+        let essential_components = vec![
+            NwaComponent::Epsilon { from: 0, to: 19 },
+            NwaComponent::Transition { from: 19, on: 9, to: 4 },
+            NwaComponent::Epsilon { from: 4, to: 28 },
+            NwaComponent::Transition { from: 28, on: 3, to: 29 },
+            NwaComponent::Transition { from: 29, on: neg(3), to: 30 },
+            NwaComponent::Transition { from: 30, on: neg(5), to: 31 },
+            NwaComponent::Transition { from: 31, on: neg(10), to: 32 },
+            NwaComponent::FinalWeight { state: 32 },
+        ];
+
+        let essential_set: BTreeSet<_> = essential_components.iter().cloned().collect();
+        let removable_components: Vec<_> = all_components.into_iter().filter(|c| !essential_set.contains(c)).collect();
+
+        let mut minimal_removable = removable_components.clone();
+        let mut i = minimal_removable.len();
         while i > 0 {
             i -= 1;
-            let mut next_try = minimal_components.clone();
-            next_try.remove(i);
+            let mut next_try_removable = minimal_removable.clone();
+            next_try_removable.remove(i);
 
-            let nwa_to_check = build_nwa_from_components(39, &next_try);
+            let mut current_test_components = essential_components.clone();
+            current_test_components.extend_from_slice(&next_try_removable);
+
+            let nwa_to_check = build_nwa_from_components(39, &current_test_components);
             if check(&nwa_to_check) {
-                minimal_components = next_try;
+                minimal_removable = next_try_removable;
             }
         }
 
+        let mut final_minimal_components = essential_components;
+        final_minimal_components.extend(minimal_removable);
+        final_minimal_components.sort();
+
         println!("Minimal set of components to reproduce the bug:");
-        for c in &minimal_components {
+        for c in &final_minimal_components {
             println!("    {:?},", c);
         }
 
-        let minimal_nwa = build_nwa_from_components(39, &minimal_components);
+        let minimal_nwa = build_nwa_from_components(39, &final_minimal_components);
         assert!(check(&minimal_nwa), "Minimal NWA should still fail");
     }
 
