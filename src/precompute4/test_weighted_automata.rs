@@ -1897,9 +1897,9 @@ mod determinization_tests {
         let mut c = b.clone();
         c.simplify();
 
-        assert_eq!(b.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
-        assert!(b.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-        assert!(b.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]).is_empty());
+        assert_eq!(c.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+        assert!(c.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
+        assert!(c.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]).is_empty());
 
         stochastic_equivalence_test(a, c);
     }
