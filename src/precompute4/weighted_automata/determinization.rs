@@ -888,22 +888,18 @@ impl ProductDFA {
 
         // Transitions
         for sid in 0..self.n_states {
-            let w_edge = &w_live_cache[sid];
-            if w_edge.is_empty() {
-                continue; // No active atoms at this state => outgoing weights would be empty
-            }
-
             // Default (OTHER)
             let dst_def = self.trans[sid][sigma.other_index];
-            if sid < dwa.states.len() && dst_def < dwa.states.len() {
-                // Create/overwrite default transition
-                let _ = dwa.set_default_transition(sid, dst_def, w_edge.clone());
+            let w_edge_def = &w_live_cache[dst_def];
+            if !w_edge_def.is_empty() {
+                let _ = dwa.set_default_transition(sid, dst_def, w_edge_def.clone());
             }
 
             // Exceptions for each explicit label
             for (li, &lbl) in sigma.labels.iter().enumerate() {
                 let dst = self.trans[sid][li];
-                if sid < dwa.states.len() && dst < dwa.states.len() {
+                let w_edge = &w_live_cache[dst];
+                if !w_edge.is_empty() {
                     let _ = dwa.add_transition(sid, lbl, dst, w_edge.clone());
                 }
             }
