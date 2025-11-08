@@ -537,17 +537,20 @@ impl DWA {
         for (pid, members) in &groups {
             let rep = members[0];
             let rep_state = &states[rep];
-            let def_cls = rep_state.transitions.default.map(|d| part[d]);
 
             let mut st = DWAState::default();
             st.state_weight = rep_state.state_weight.clone();
             st.final_weight = rep_state.final_weight.clone();
 
-            // Structure: keep default if present, and exceptions that differ from default class
-            st.transitions.default = def_cls.map(|_| Some(0)).flatten();
+            // Structure: keep default if present, and exceptions that differ from default class/weight
+            let def_sig_rep = rep_state.transitions.default.map(|d| {
+                (part[d], rep_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
+            });
+            st.transitions.default = def_sig_rep.as_ref().map(|_| 0);
             for (ch, tgt) in &rep_state.transitions.exceptions {
                 let cls = part[*tgt];
-                if def_cls.map_or(true, |dc| dc != cls) {
+                let ex_weight = rep_state.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all);
+                if def_sig_rep.as_ref().map_or(true, |(dc, dw)| *dc != cls || *dw != ex_weight) {
                     st.transitions.exceptions.insert(*ch, 0);
                 }
             }
