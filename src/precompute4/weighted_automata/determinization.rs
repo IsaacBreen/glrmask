@@ -42,19 +42,30 @@ impl NWA {
 
         // Always work on a simplified copy of the NWA to avoid redundant structure.
         let mut nwa = self.clone();
+        debug_log(3, || format!("Starting determinization for NWA with {} states", nwa.states.len()));
 
         // 1) Build the atomic partition of weights (disjoint contiguous ranges).
+        let now_atoms = Instant::now();
         let atoms = WeightPartition::from_nwa(&nwa);
+        debug_log(4, || {
+            format!("Built weight partition with {} atoms in {:?}", atoms.intervals.len(), now_atoms.elapsed())
+        });
 
         // 2) Build global alphabet (all labels used anywhere) + OTHER
+        let now_sigma = Instant::now();
         let sigma = Alphabet::from_nwa(&nwa);
+        debug_log(4, || {
+            format!("Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed())
+        });
 
         // 3) For each atom, build and minimize a DFA.
         let pb_atoms = if PROGRESS_BAR_ENABLED {
             Some(
                 ProgressBar::new(atoms.intervals.len() as u64).with_style(
                     ProgressStyle::default_bar()
-                        .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (per-atom DFAs)")
+                        .template(
+                            "{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (per-atom DFAs)",
+                        )
                         .unwrap(),
                 ),
             )
@@ -397,6 +408,18 @@ impl PerAtomNFA {
         let mut finals: Vec<bool> = Vec::new();
         let mut trans: Vec<Vec<Option<usize>>> = Vec::new(); // Option for next state; sink if None later
 
+        let pb_subset = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new_spinner();
+            p.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.green} [Determinize/Subset: {elapsed_precise}] States found: {pos}")
+                    .unwrap(),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
         let mut push_state = |subset: Vec<usize>,
                               states: &mut Vec<Vec<usize>>,
                               finals: &mut Vec<bool>,
@@ -415,6 +438,9 @@ impl PerAtomNFA {
         };
 
         let start_id = push_state(start_set, &mut states, &mut finals, &mut trans, &mut map);
+        if let Some(p) = &pb_subset {
+            p.set_position(states.len() as u64);
+        }
 
         let mut q = VecDeque::new();
         q.push_back(start_id);
@@ -474,12 +500,19 @@ impl PerAtomNFA {
                     finals.push(is_final);
                     trans.push(vec![None; sigma.size()]);
                     map.insert(next, id);
+                    if let Some(p) = &pb_subset {
+                        p.set_position(states.len() as u64);
+                    }
                     q.push_back(id);
                     id
                 };
 
                 trans[u][sym] = Some(v);
             }
+        }
+
+        if let Some(p) = pb_subset {
+            p.finish_with_message(format!("Subset construction done, {} states", states.len()));
         }
 
         // Build sink state if any transition is None
@@ -531,6 +564,7 @@ struct DetDFA {
 }
 impl DetDFA {
     fn minimize(&mut self, sigma: &Alphabet) {
+        debug_log(4, || format!("Minimizing DFA with {} states", self.n_states));
         // Remove states unreachable from start first
         let reachable = {
             let mut visited = vec![false; self.n_states];
@@ -619,8 +653,29 @@ impl DetDFA {
             worklist.insert((smaller_initial_set, sym));
         }
 
+        let pb_hopcroft = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new_spinner();
+            p.set_style(
+                ProgressStyle::default_spinner()
+                    .template(
+                        "{spinner:.green} [Determinize/Minimize: {elapsed_precise}] Pass {pos}, worklist size: {msg}",
+                    )
+                    .unwrap(),
+            );
+            Some(p)
+        } else {
+            None
+        };
+        let mut passes = 0u64;
+
         while let Some(&(b, sym)) = worklist.iter().next() {
             worklist.remove(&(b, sym));
+
+            if let Some(p) = &pb_hopcroft {
+                passes += 1;
+                p.set_position(passes);
+                p.set_message(format!("{}", worklist.len()));
+            }
 
             // Compute preimage of block b under symbol sym
             let mut pre: Vec<usize> = Vec::new();
@@ -678,6 +733,10 @@ impl DetDFA {
                     }
                 }
             }
+        }
+
+        if let Some(p) = pb_hopcroft {
+            p.finish_with_message(format!("Hopcroft done, {} partitions", blocks.len()));
         }
 
         // Build the quotient automaton
