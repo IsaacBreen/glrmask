@@ -6,7 +6,7 @@ local_system:
     - src/precompute4/weighted_automata/common.rs
     - src/precompute4/weighted_automata/ops.rs
     - src/precompute4/weighted_automata/simplification.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/precompute4/weighted_automata/mod.rs: |
@@ -1625,8 +1625,18 @@ local_system:
               let mut changed = false;
               for st in &mut states.0 {
                   let before = st.transitions.exceptions.len();
-                  if let Some(def) = st.transitions.default {
-                      st.transitions.exceptions.retain(|_, &mut tgt| tgt != def);
+                  if let (Some(def_tgt), Some(def_w)) = (st.transitions.default, &st.trans_weight_default) {
+                      st.transitions.exceptions.retain(|ch, &mut tgt| {
+                          if tgt != def_tgt {
+                              return true; // Different target, keep.
+                          }
+                          // Same target, check weight. An exception is redundant only if its weight matches the default.
+                          st.trans_weights_exceptions.get(ch) != Some(def_w)
+                      });
+                  } else if let Some(def_tgt) = st.transitions.default {
+                      // Default transition exists but has no weight. This is an inconsistent state.
+                      // For safety, just retain based on target.
+                      st.transitions.exceptions.retain(|_, &mut tgt| tgt != def_tgt);
                   }
                   changed |= st.transitions.exceptions.len() != before;
 
@@ -1702,17 +1712,20 @@ local_system:
               for (pid, members) in &groups {
                   let rep = members[0];
                   let rep_state = &states[rep];
-                  let def_cls = rep_state.transitions.default.map(|d| part[d]);
 
                   let mut st = DWAState::default();
                   st.state_weight = rep_state.state_weight.clone();
                   st.final_weight = rep_state.final_weight.clone();
 
-                  // Structure: keep default if present, and exceptions that differ from default class
-                  st.transitions.default = def_cls.map(|_| Some(0)).flatten();
+                  // Structure: keep default if present, and exceptions that differ from default class/weight
+                  let def_sig_rep = rep_state.transitions.default.map(|d| {
+                      (part[d], rep_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
+                  });
+                  st.transitions.default = def_sig_rep.as_ref().map(|_| 0);
                   for (ch, tgt) in &rep_state.transitions.exceptions {
                       let cls = part[*tgt];
-                      if def_cls.map_or(true, |dc| dc != cls) {
+                      let ex_weight = rep_state.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all);
+                      if def_sig_rep.as_ref().map_or(true, |(dc, dw)| *dc != cls || *dw != ex_weight) {
                           st.transitions.exceptions.insert(*ch, 0);
                       }
                   }
@@ -1878,6 +1891,7 @@ local_system:
           }
 
           pub fn simplify(&mut self) -> bool {
+              return false;
               let now = Instant::now();
               let initial_n = self.states.len();
               let max_passes = 12;
@@ -4275,6 +4289,18 @@ local_system:
                   }
               }
 
+              // If the start state is not live, no words can be accepted. The language is empty.
+              if body.start_state >= n || !live[body.start_state] {
+                  let already_empty = n == 1 && states[0].final_weight.is_none() && states[0].transitions.default.is_none() && states[0].transitions.exceptions.is_empty();
+                  if !already_empty {
+                      states.0.clear();
+                      body.start_state = states.add_state();
+                      return true;
+                  } else {
+                      return false;
+                  }
+              }
+
               // 2. Remove transitions to non-live states.
               let mut changed = false;
               for i in 0..n {
@@ -4960,7 +4986,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -6633,8 +6659,18 @@ messages:
               let mut changed = false;
               for st in &mut states.0 {
                   let before = st.transitions.exceptions.len();
-                  if let Some(def) = st.transitions.default {
-                      st.transitions.exceptions.retain(|_, &mut tgt| tgt != def);
+                  if let (Some(def_tgt), Some(def_w)) = (st.transitions.default, &st.trans_weight_default) {
+                      st.transitions.exceptions.retain(|ch, &mut tgt| {
+                          if tgt != def_tgt {
+                              return true; // Different target, keep.
+                          }
+                          // Same target, check weight. An exception is redundant only if its weight matches the default.
+                          st.trans_weights_exceptions.get(ch) != Some(def_w)
+                      });
+                  } else if let Some(def_tgt) = st.transitions.default {
+                      // Default transition exists but has no weight. This is an inconsistent state.
+                      // For safety, just retain based on target.
+                      st.transitions.exceptions.retain(|_, &mut tgt| tgt != def_tgt);
                   }
                   changed |= st.transitions.exceptions.len() != before;
 
@@ -6710,17 +6746,20 @@ messages:
               for (pid, members) in &groups {
                   let rep = members[0];
                   let rep_state = &states[rep];
-                  let def_cls = rep_state.transitions.default.map(|d| part[d]);
 
                   let mut st = DWAState::default();
                   st.state_weight = rep_state.state_weight.clone();
                   st.final_weight = rep_state.final_weight.clone();
 
-                  // Structure: keep default if present, and exceptions that differ from default class
-                  st.transitions.default = def_cls.map(|_| Some(0)).flatten();
+                  // Structure: keep default if present, and exceptions that differ from default class/weight
+                  let def_sig_rep = rep_state.transitions.default.map(|d| {
+                      (part[d], rep_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
+                  });
+                  st.transitions.default = def_sig_rep.as_ref().map(|_| 0);
                   for (ch, tgt) in &rep_state.transitions.exceptions {
                       let cls = part[*tgt];
-                      if def_cls.map_or(true, |dc| dc != cls) {
+                      let ex_weight = rep_state.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all);
+                      if def_sig_rep.as_ref().map_or(true, |(dc, dw)| *dc != cls || *dw != ex_weight) {
                           st.transitions.exceptions.insert(*ch, 0);
                       }
                   }
@@ -6886,6 +6925,7 @@ messages:
           }
 
           pub fn simplify(&mut self) -> bool {
+              return false;
               let now = Instant::now();
               let initial_n = self.states.len();
               let max_passes = 12;
@@ -7484,68 +7524,8 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata/simplification.rs
-  - user: |+
-      [DEBUG] 1] src/precompute4/weighted_automata/simplification.rs:77: Stochastic testing DWA after pass: minimize_partition_refinement
-
-
-      thread 'precompute4::test_weighted_automata::determinization_tests::test_det_default_transition' (9388412) panicked at src/precompute4/test_weighted_automata.rs:261:13:
-      assertion `left == right` failed: Equivalence fail: A(w) != B(w) for word from A.
-      word: ['a']
-      A(w): [1]
-      B(w): [2]
-
-      DWA A:
-      DWA (start: 0)
-        State 0:
-          * -> 2 (trans_weight: [2])
-          'a' -> 1 (trans_weight: [1])
-        State 1:
-          final_weight: ALL
-        State 2:
-          final_weight: ALL
-
-
-      DWA B:
-      DWA (start: 0)
-        State 0:
-          * -> 1 (trans_weight: [2])
-        State 1:
-          final_weight: ALL
-
-        left: 1..=1
-       right: 2..=2
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::test_weighted_automata::stochastic_equivalence_test
-                   at ./src/precompute4/test_weighted_automata.rs:261:13
-         5: sep1::precompute4::weighted_automata::simplification::<impl sep1::precompute4::weighted_automata::dwa::DWA>::run_pass_with_test
-                   at ./src/precompute4/weighted_automata/simplification.rs:78:17
-         6: sep1::precompute4::weighted_automata::simplification::<impl sep1::precompute4::weighted_automata::dwa::DWA>::simplify_core
-                   at ./src/precompute4/weighted_automata/simplification.rs:139:21
-         7: sep1::precompute4::weighted_automata::simplification::<impl sep1::precompute4::weighted_automata::dwa::DWA>::simplify_components
-                   at ./src/precompute4/weighted_automata/simplification.rs:51:9
-         8: sep1::precompute4::weighted_automata::simplification::<impl sep1::precompute4::weighted_automata::dwa::DWA>::simplify
-                   at ./src/precompute4/weighted_automata/simplification.rs:35:9
-         9: sep1::precompute4::weighted_automata::determinization::<impl sep1::precompute4::weighted_automata::nwa::NWA>::determinize_to_dwa
-                   at ./src/precompute4/weighted_automata/determinization.rs:111:13
-        10: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_default_transition
-                   at ./src/precompute4/test_weighted_automata.rs:1706:23
-        11: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_default_transition::{{closure}}
-                   at ./src/precompute4/test_weighted_automata.rs:1696:37
-        12: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-        13: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-    metadata:
-  - user: Fix this simplification pass.
+  - user: There's an issue with a DWA simplification pass. I think I've narrowed it
+      down to `prune_unreachable`. When that's disabled, it works just fine.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7565,308 +7545,64 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The panic you're seeing is due to a bug in the DWA minimization logic, specifically within the `minimize_partition_refinement` function. The process of reconstructing a merged state was incorrectly dropping exception transitions that targeted the same group of states as the default transition, even when their weights were different. This altered the automaton's behavior for inputs that should have used the exception.
+      Of course. It looks like you've found a subtle bug in the `prune_unreachable` simplification pass for DWAs. An automaton whose start state cannot reach any final state should accept no strings (the empty language), but the existing code could fail to simplify it correctly.
 
-      The fix is to ensure that when reconstructing states, we check both the target partition *and* the weight to determine if an exception is redundant with the default transition. This aligns the reconstruction logic with the state signature logic, which was already correct.
+      Here are the step-by-step instructions to fix the issue, followed by the corresponding git diff.
 
-      Here are the step-by-step instructions to fix the bug, followed by the git diff.
+      ### Step-by-Step Instructions
 
-      ### Step-by-step Instructions
+      1.  **Open the file `src/precompute4/weighted_automata/simplification.rs`**.
 
-      1.  **Open the file:** `src/precompute4/weighted_automata/simplification.rs`.
+      2.  **Locate the `prune_unreachable` function** within the `impl DWA` block.
 
-      2.  **Navigate to the function:** `minimize_partition_refinement`.
+      3.  **Add a check after the liveness analysis.** Inside `prune_unreachable`, find the `while` loop that performs backward reachability to populate the `live` vector. Immediately after this loop, insert a new code block. This block will check if the `start_state` is live. If it isn't, the automaton's language is empty, and we should replace it with a canonical single-state automaton that accepts nothing.
 
-      3.  **Locate the state reconstruction logic:** Inside the `for (pid, members) in &groups` loop, you'll find the code that builds a new `DWAState` for each partition.
-
-      4.  **Replace the faulty transition logic:** The current implementation incorrectly decides which exception transitions to keep. You need to replace this logic.
-
-          Find and delete this block of code:
-          ```rust
-                  let def_cls = rep_state.transitions.default.map(|d| part[d]);
-
-                  let mut st = DWAState::default();
-                  st.state_weight = rep_state.state_weight.clone();
-                  st.final_weight = rep_state.final_weight.clone();
-
-                  // Structure: keep default if present, and exceptions that differ from default class
-                  st.transitions.default = def_cls.map(|_| Some(0)).flatten();
-                  for (ch, tgt) in &rep_state.transitions.exceptions {
-                      let cls = part[*tgt];
-                      if def_cls.map_or(true, |dc| dc != cls) {
-                          st.transitions.exceptions.insert(*ch, 0);
-                      }
-                  }
-          ```
-
-      5.  **Insert the corrected logic:** In its place, insert the following corrected block. This version correctly computes a signature for the default transition (including its weight) and uses it to determine which exceptions are truly redundant.
+          The code to insert is as follows:
 
           ```rust
-                  let rep_state = &states[rep];
-
-                  let mut st = DWAState::default();
-                  st.state_weight = rep_state.state_weight.clone();
-                  st.final_weight = rep_state.final_weight.clone();
-
-                  // Structure: keep default if present, and exceptions that differ from default class/weight
-                  let def_sig_rep = rep_state.transitions.default.map(|d| {
-                      (part[d], rep_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
-                  });
-                  st.transitions.default = def_sig_rep.as_ref().map(|_| 0);
-                  for (ch, tgt) in &rep_state.transitions.exceptions {
-                      let cls = part[*tgt];
-                      let ex_weight = rep_state.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all);
-                      if def_sig_rep.as_ref().map_or(true, |(dc, dw)| *dc != cls || *dw != ex_weight) {
-                          st.transitions.exceptions.insert(*ch, 0);
-                      }
-                  }
+          // If the start state is not live, no words can be accepted. The language is empty.
+          if body.start_state >= n || !live[body.start_state] {
+              let already_empty = n == 1 && states[0].final_weight.is_none() && states[0].transitions.default.is_none() && states[0].transitions.exceptions.is_empty();
+              if !already_empty {
+                  states.0.clear();
+                  body.start_state = states.add_state();
+                  return true;
+              } else {
+                  return false;
+              }
+          }
           ```
 
-      This change will ensure the minimization pass preserves the automaton's semantics correctly.
+          This should be placed right after the `while let Some(u) = q_live.pop_front() { ... }` loop and before the comment that reads `// 2. Remove transitions to non-live states.`.
+
+      This change ensures that if the start state can't reach a final state, the automaton is correctly simplified to represent an empty language, fixing the bug.
 
       ### Git Diff
 
-      Here is the git diff to apply the fix.
+      Here is the git diff for the change.
 
       ```diff
       --- a/src/precompute4/weighted_automata/simplification.rs
       +++ b/src/precompute4/weighted_automata/simplification.rs
-      @@ -614,18 +614,19 @@
-               for (pid, members) in &groups {
-                   let rep = members[0];
-                   let rep_state = &states[rep];
-      -            let def_cls = rep_state.transitions.default.map(|d| part[d]);
-       
-                   let mut st = DWAState::default();
-                   st.state_weight = rep_state.state_weight.clone();
-                   st.final_weight = rep_state.final_weight.clone();
-       
-      -            // Structure: keep default if present, and exceptions that differ from default class
-      -            st.transitions.default = def_cls.map(|_| Some(0)).flatten();
-      +            // Structure: keep default if present, and exceptions that differ from default class/weight
-      +            let def_sig_rep = rep_state.transitions.default.map(|d| {
-      +                (part[d], rep_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
-      +            });
-      +            st.transitions.default = def_sig_rep.as_ref().map(|_| 0);
-                   for (ch, tgt) in &rep_state.transitions.exceptions {
-                       let cls = part[*tgt];
-      -                if def_cls.map_or(true, |dc| dc != cls) {
-      +                let ex_weight = rep_state.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all);
-      +                if def_sig_rep.as_ref().map_or(true, |(dc, dw)| *dc != cls || *dw != ex_weight) {
-                           st.transitions.exceptions.insert(*ch, 0);
-                       }
+      @@ -1030,6 +1030,19 @@
                    }
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/weighted_automata/simplification.rs
-      Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
-    metadata:
-  - user: 'Changes committed with message: "Fix DWA minimization: include transition
-      weight in redundancy check against default"'
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |
-      [DEBUG] 1] src/precompute4/weighted_automata/simplification.rs:77: Stochastic testing DWA after pass: minimize_partition_refinement
-
-
-      thread 'precompute4::test_weighted_automata::determinization_tests::test_det_default_transition' (9395926) panicked at src/precompute4/test_weighted_automata.rs:261:13:
-      assertion `left == right` failed: Equivalence fail: A(w) != B(w) for word from A.
-      word: ['a']
-      A(w): [1]
-      B(w): [2]
-
-      DWA A:
-      DWA (start: 0)
-        State 0:
-          * -> 2 (trans_weight: [2])
-          'a' -> 1 (trans_weight: [1])
-        State 1:
-          final_weight: ALL
-        State 2:
-          final_weight: ALL
-
-
-      DWA B:
-      DWA (start: 0)
-        State 0:
-          * -> 1 (trans_weight: [2])
-        State 1:
-          final_weight: ALL
-
-        left: 1..=1
-       right: 2..=2
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::test_weighted_automata::stochastic_equivalence_test
-                   at ./src/precompute4/test_weighted_automata.rs:261:13
-         5: sep1::precompute4::weighted_automata::simplification::<impl sep1::precompute4::weighted_automata::dwa::DWA>::run_pass_with_test
-                   at ./src/precompute4/weighted_automata/simplification.rs:78:17
-         6: sep1::precompute4::weighted_automata::simplification::<impl sep1::precompute4::weighted_automata::dwa::DWA>::simplify_core
-                   at ./src/precompute4/weighted_automata/simplification.rs:139:21
-         7: sep1::precompute4::weighted_automata::simplification::<impl sep1::precompute4::weighted_automata::dwa::DWA>::simplify_components
-                   at ./src/precompute4/weighted_automata/simplification.rs:51:9
-         8: sep1::precompute4::weighted_automata::simplification::<impl sep1::precompute4::weighted_automata::dwa::DWA>::simplify
-                   at ./src/precompute4/weighted_automata/simplification.rs:35:9
-         9: sep1::precompute4::weighted_automata::determinization::<impl sep1::precompute4::weighted_automata::nwa::NWA>::determinize_to_dwa
-                   at ./src/precompute4/weighted_automata/determinization.rs:111:13
-        10: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_default_transition
-                   at ./src/precompute4/test_weighted_automata.rs:1706:23
-        11: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_default_transition::{{closure}}
-                   at ./src/precompute4/test_weighted_automata.rs:1696:37
-        12: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-        13: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-      error: test failed, to rerun pass `-p sep1 --lib`
-      error: 1 target failed:
-          `-p sep1 --lib`
-
-      Process finished with exit code 101
-    metadata:
-  - assistant: |-
-      It appears my previous fix was incomplete. The root cause of the error is not just in the minimization pass, but also in a utility function it relies on: `normalize_edges_inplace`. This function was incorrectly removing exception transitions that pointed to the same state as a default transition, without checking if their *weights* were also the same. This is what caused the automaton's behavior to change for the input `'a'`.
-
-      The fix is to make `normalize_edges_inplace` aware of transition weights. An exception should only be considered redundant and removed if it has both the same target state and the same weight as the default transition.
-
-      Here are the step-by-step instructions to apply the correct fix.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file:** `src/precompute4/weighted_automata/simplification.rs`.
-
-      2.  **Navigate to the function:** `normalize_edges_inplace`.
-
-      3.  **Replace the function body:** The current implementation is faulty. You will replace the entire body of the `for` loop inside the function.
-
-          Find and delete this block of code inside `normalize_edges_inplace`:
-          ```rust
-              for st in &mut states.0 {
-                  let before = st.transitions.exceptions.len();
-                  if let Some(def) = st.transitions.default {
-                      st.transitions.exceptions.retain(|_, &mut tgt| tgt != def);
-                  }
-                  changed |= st.transitions.exceptions.len() != before;
-
-                  let before_w = st.trans_weights_exceptions.len();
-                  st.trans_weights_exceptions.retain(|ch, _| st.transitions.exceptions.contains_key(ch));
-                  changed |= st.trans_weights_exceptions.len() != before_w;
-              }
-          ```
-
-      4.  **Insert the corrected logic:** In its place, insert the following corrected block. This version correctly checks both the target and the weight before removing an exception.
-
-          ```rust
-              for st in &mut states.0 {
-                  let before = st.transitions.exceptions.len();
-                  if let (Some(def_tgt), Some(def_w)) = (st.transitions.default, &st.trans_weight_default) {
-                      st.transitions.exceptions.retain(|ch, &mut tgt| {
-                          if tgt != def_tgt {
-                              return true; // Different target, keep.
-                          }
-                          // Same target, check weight. An exception is redundant only if its weight matches the default.
-                          st.trans_weights_exceptions.get(ch) != Some(def_w)
-                      });
-                  } else if let Some(def_tgt) = st.transitions.default {
-                      // Default transition exists but has no weight. This is an inconsistent state.
-                      // For safety, just retain based on target.
-                      st.transitions.exceptions.retain(|_, &mut tgt| tgt != def_tgt);
-                  }
-                  changed |= st.transitions.exceptions.len() != before;
-
-                  let before_w = st.trans_weights_exceptions.len();
-                  st.trans_weights_exceptions.retain(|ch, _| st.transitions.exceptions.contains_key(ch));
-                  changed |= st.trans_weights_exceptions.len() != before_w;
-              }
-          ```
-
-      This change ensures that `normalize_edges_inplace` preserves the automaton's semantics, which will allow the `minimize_partition_refinement` pass to function correctly.
-
-      ### Git Diff
-
-      Here is the git diff to apply the fix.
-
-      ```diff
-      --- a/src/precompute4/weighted_automata/simplification.rs
-      +++ b/src/precompute4/weighted_automata/simplification.rs
-      @@ -541,16 +541,25 @@
-           pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
-               let mut changed = false;
-               for st in &mut states.0 {
-                   let before = st.transitions.exceptions.len();
-      -            if let Some(def) = st.transitions.default {
-      -                st.transitions.exceptions.retain(|_, &mut tgt| tgt != def);
-      +            if let (Some(def_tgt), Some(def_w)) = (st.transitions.default, &st.trans_weight_default) {
-      +                st.transitions.exceptions.retain(|ch, &mut tgt| {
-      +                    if tgt != def_tgt {
-      +                        return true; // Different target, keep.
-      +                    }
-      +                    // Same target, check weight. An exception is redundant only if its weight matches the default.
-      +                    st.trans_weights_exceptions.get(ch) != Some(def_w)
-      +                });
-      +            } else if let Some(def_tgt) = st.transitions.default {
-      +                // Default transition exists but has no weight. This is an inconsistent state.
-      +                // For safety, just retain based on target.
-      +                st.transitions.exceptions.retain(|_, &mut tgt| tgt != def_tgt);
-                   }
-                   changed |= st.transitions.exceptions.len() != before;
-       
-                   let before_w = st.trans_weights_exceptions.len();
-                   st.trans_weights_exceptions.retain(|ch, _| st.transitions.exceptions.contains_key(ch));
-                   changed |= st.trans_weights_exceptions.len() != before_w;
                }
-               changed
-           }
        
+      +        // If the start state is not live, no words can be accepted. The language is empty.
+      +        if body.start_state >= n || !live[body.start_state] {
+      +            let already_empty = n == 1 && states[0].final_weight.is_none() && states[0].transitions.default.is_none() && states[0].transitions.exceptions.is_empty();
+      +            if !already_empty {
+      +                states.0.clear();
+      +                body.start_state = states.add_state();
+      +                return true;
+      +            } else {
+      +                return false;
+      +            }
+      +        }
+      +
+               // 2. Remove transitions to non-live states.
+               let mut changed = false;
+               for i in 0..n {
 
       ```
     metadata:
@@ -7879,8 +7615,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix DWA simplification: correctly check
-      transition weights when pruning exceptions against default transitions in normalization
-      and minimization."'
+  - user: 'Changes committed with message: "dwa: Correctly simplify to empty language
+      if start state is not live during pruning"'
     metadata:
 ...
