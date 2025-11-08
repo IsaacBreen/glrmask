@@ -37,16 +37,17 @@ pub type Weight = SimpleBitset;
 pub type NWAStateID = usize;
 
 pub fn format_pos_code(code: i16) -> String {
-    let u = code as u16;
-    if let Some(c) = char::from_u32(u as u32) {
-        if c.is_ascii_graphic() || c == ' ' {
-            format!("'{}'", c)
-        } else {
-            format!("{}", u)
-        }
-    } else {
-        format!("{}", u)
-    }
+    format!("{}", code)
+    // let u = code as u16;
+    // if let Some(c) = char::from_u32(u as u32) {
+    //     if c.is_ascii_graphic() || c == ' ' {
+    //         format!("'{}'", c)
+    //     } else {
+    //         format!("{}", u)
+    //     }
+    // } else {
+    //     format!("{}", u)
+    // }
 }
 pub fn format_i16_char(code: i16) -> String {
     if code >= 0 {
