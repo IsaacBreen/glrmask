@@ -6778,7 +6778,16 @@ local_system:
               for st in &mut states.0 {
                   let before = st.transitions.exceptions.len();
                   if let Some(def) = st.transitions.default {
-                      st.transitions.exceptions.retain(|_, &mut tgt| tgt != def);
+                      // An exception is redundant if it has the same target AND same weight as default.
+                      let def_w = st.trans_weight_default.as_ref();
+                      st.transitions.exceptions.retain(|ch, &mut ex_tgt| {
+                          if ex_tgt != def {
+                              return true; // Keep: different target.
+                          }
+                          // Same target, so check weight.
+                          let ex_w = st.trans_weights_exceptions.get(ch);
+                          ex_w != def_w // Keep if weights are different.
+                      });
                   }
                   changed |= st.transitions.exceptions.len() != before;
 
@@ -17013,5 +17022,380 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Correct edge weight assignment in
       atom-based DWA construction by using target state liveness"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/bitset.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+      --- original version of src/precompute4/weighted_automata/determinization.rs
+      +++ current version of src/precompute4/weighted_automata/determinization.rs
+      @@ -122,7 +122,7 @@
+          Utilities and support structs
+          ------------------------------ */
+       
+      -fn debug_log(level: u8, msg: impl FnOnce() -> String) {
+      +fn debug_log(level: usize, msg: impl FnOnce() -> String) {
+           crate::debug!(level, "{}", msg());
+       }
+       
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/test_weighted_automata.rs since previous turn:
+      ```diff
+      --- original version of src/precompute4/test_weighted_automata.rs
+      +++ current version of src/precompute4/test_weighted_automata.rs
+      @@ -1,4 +1,4 @@
+      -use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, Weight, format_word};
+      +use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, NWA, NWABuildError, Weight, format_word};
+       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+       use std::time::{SystemTime, UNIX_EPOCH};
+       use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
+      @@ -1588,4 +1588,159 @@
+           d.simplify();
+       
+           stochastic_equivalence_test(d, expected);
+      -}+}
+      +
+      +#[cfg(test)]
+      +mod determinization_tests {
+      +    use super::*;
+      +    use crate::precompute4::weighted_automata::{NWA, NWABuildError, Weight};
+      +
+      +    // Helper to build a simple NWA for testing.
+      +    fn nwa_accepts_char(ch: char, weight: Weight) -> NWA {
+      +        let mut nwa = NWA::new();
+      +        let final_state = nwa.states.add_state();
+      +        nwa.add_transition(nwa.body.start_state, ch as i16, final_state, Weight::all()).unwrap();
+      +        nwa.states[final_state].final_weight = Some(weight);
+      +        nwa
+      +    }
+      +
+      +    #[test]
+      +    fn test_det_simple_char() {
+      +        let nwa = nwa_accepts_char('a', Weight::from_item(1));
+      +        let dwa = nwa.determinize_to_dwa();
+      +        let expected = dwa_accepts_char('a', Weight::from_item(1));
+      +        stochastic_equivalence_test(dwa, expected);
+      +    }
+      +
+      +    #[test]
+      +    fn test_det_union_of_chars() {
+      +        // NWA for a|b
+      +        let mut nwa = NWA::new();
+      +        let s_a = nwa.states.add_state();
+      +        let s_b = nwa.states.add_state();
+      +        let final_a = nwa.states.add_state();
+      +        let final_b = nwa.states.add_state();
+      +        nwa.add_epsilon(nwa.body.start_state, s_a, Weight::all());
+      +        nwa.add_epsilon(nwa.body.start_state, s_b, Weight::all());
+      +        nwa.add_transition(s_a, 'a' as i16, final_a, Weight::all()).unwrap();
+      +        nwa.add_transition(s_b, 'b' as i16, final_b, Weight::all()).unwrap();
+      +        nwa.states[final_a].final_weight = Some(Weight::from_item(1));
+      +        nwa.states[final_b].final_weight = Some(Weight::from_item(2));
+      +
+      +        let dwa = nwa.determinize_to_dwa();
+      +
+      +        let mut expected = DWA::new();
+      +        let final_a_dwa = expected.add_state();
+      +        let final_b_dwa = expected.add_state();
+      +        expected.add_transition(expected.body.start_state, 'a' as i16, final_a_dwa, Weight::all()).unwrap();
+      +        expected.add_transition(expected.body.start_state, 'b' as i16, final_b_dwa, Weight::all()).unwrap();
+      +        expected.set_final_weight(final_a_dwa, Weight::from_item(1)).unwrap();
+      +        expected.set_final_weight(final_b_dwa, Weight::from_item(2)).unwrap();
+      +
+      +        stochastic_equivalence_test(dwa, expected);
+      +    }
+      +
+      +    #[test]
+      +    fn test_det_nondeterminism_on_char() {
+      +        // NWA with two transitions on 'a'
+      +        let mut nwa = NWA::new();
+      +        let f1 = nwa.states.add_state();
+      +        let f2 = nwa.states.add_state();
+      +        nwa.add_transition(nwa.body.start_state, 'a' as i16, f1, Weight::from_item(1)).unwrap();
+      +        nwa.add_transition(nwa.body.start_state, 'a' as i16, f2, Weight::from_item(2)).unwrap();
+      +        nwa.states[f1].final_weight = Some(Weight::all());
+      +        nwa.states[f2].final_weight = Some(Weight::all());
+      +
+      +        let dwa = nwa.determinize_to_dwa();
+      +
+      +        // Expected DWA accepts 'a' with weight [1, 2]
+      +        let mut expected = DWA::new();
+      +        let final_state = expected.add_state();
+      +        expected.add_transition(expected.body.start_state, 'a' as i16, final_state, Weight::from_iter([1, 2])).unwrap();
+      +        expected.set_final_weight(final_state, Weight::all()).unwrap();
+      +
+      +        stochastic_equivalence_test(dwa, expected);
+      +    }
+      +
+      +    #[test]
+      +    fn test_det_weight_partitioning() {
+      +        // NWA with overlapping weights on 'a'
+      +        let mut nwa = NWA::new();
+      +        let f1 = nwa.states.add_state();
+      +        let f2 = nwa.states.add_state();
+      +        // 'a' can lead to f1 with weight [0,1] or f2 with weight [1,2]
+      +        nwa.add_transition(nwa.body.start_state, 'a' as i16, f1, Weight::from_iter(0..=1)).unwrap();
+      +        nwa.add_transition(nwa.body.start_state, 'a' as i16, f2, Weight::from_iter(1..=2)).unwrap();
+      +        // f1 is final for its path, f2 is final for its path
+      +        nwa.states[f1].final_weight = Some(Weight::all());
+      +        nwa.states[f2].final_weight = Some(Weight::all());
+      +
+      +        let dwa = nwa.determinize_to_dwa();
+      +
+      +        // Expected DWA:
+      +        // On 'a', we get a state. The final weight of this state should be:
+      +        // Atom [0]: from f1 -> [0]
+      +        // Atom [1]: from f1 and f2 -> [1]
+      +        // Atom [2]: from f2 -> [2]
+      +        // Total final weight: [0,1,2]
+      +        // The edge weight should also be [0,1,2]
+      +        let mut expected = DWA::new();
+      +        let final_state = expected.add_state();
+      +        expected.add_transition(expected.body.start_state, 'a' as i16, final_state, Weight::from_iter(0..=2)).unwrap();
+      +        expected.set_final_weight(final_state, Weight::from_iter(0..=2)).unwrap();
+      +
+      +        stochastic_equivalence_test(dwa, expected);
+      +    }
+      +
+      +    #[test]
+      +    fn test_det_default_transition() {
+      +        let mut nwa = NWA::new();
+      +        let s_a = nwa.states.add_state();
+      +        let s_def = nwa.states.add_state();
+      +        nwa.add_transition(nwa.body.start_state, 'a' as i16, s_a, Weight::all()).unwrap();
+      +        nwa.add_default_transition(nwa.body.start_state, s_def, Weight::all()).unwrap();
+      +        nwa.states[s_a].final_weight = Some(Weight::from_item(1));
+      +        nwa.states[s_def].final_weight = Some(Weight::from_item(2));
+      +
+      +        let dwa = nwa.determinize_to_dwa();
+      +
+      +        let mut expected = DWA::new();
+      +        let s_a_dwa = expected.add_state();
+      +        let s_def_dwa = expected.add_state();
+      +        expected.add_transition(expected.body.start_state, 'a' as i16, s_a_dwa, Weight::all()).unwrap();
+      +        expected.set_default_transition(expected.body.start_state, s_def_dwa, Weight::all()).unwrap();
+      +        expected.set_final_weight(s_a_dwa, Weight::from_item(1)).unwrap();
+      +        expected.set_final_weight(s_def_dwa, Weight::from_item(2)).unwrap();
+      +
+      +        stochastic_equivalence_test(dwa, expected);
+      +    }
+      +
+      +    #[test]
+      +    fn test_det_empty_nwa() {
+      +        let mut nwa = NWA::new();
+      +        nwa.states.0.clear(); // Truly empty
+      +        let dwa = nwa.determinize_to_dwa();
+      +        assert_eq!(dwa.states.len(), 1);
+      +        assert!(dwa.states[dwa.body.start_state].final_weight.is_none());
+      +        assert!(dwa.states[dwa.body.start_state].transitions.default.is_none());
+      +        assert!(dwa.states[dwa.body.start_state].transitions.exceptions.is_empty());
+      +    }
+      +
+      +    #[test]
+      +    fn test_det_accepts_nothing() {
+      +        let nwa = NWA::new(); // start state, but no transitions and not final
+      +        let dwa = nwa.determinize_to_dwa();
+      +        let expected = DWA::new();
+      +        stochastic_equivalence_test(dwa, expected);
+      +    }
+      +
+      +    #[test]
+      +    fn test_det_accepts_empty_word() {
+      +        let mut nwa = NWA::new();
+      +        nwa.states[nwa.body.start_state].final_weight = Some(Weight::from_item(42));
+      +        let dwa = nwa.determinize_to_dwa();
+      +        let mut expected = DWA::new();
+      +        expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
+      +        stochastic_equivalence_test(dwa, expected);
+      +    }
+      +}
+
+      ```
+    metadata:
+  - user: |-
+      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:699: NWA::simplify (3 states -> 4 states) took: 6.546125ms
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:126: Product DFA: states=4, alphabet_size=2, time=14.375µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:126: Product->DWA conversion took 18.75µs
+      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:52: DWA::simplify_components (4 states -> 2 states) took: 652.292µs
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:126: NWA::determinize_to_dwa total time: 8.832584ms
+
+
+      thread 'precompute4::test_weighted_automata::determinization_tests::test_det_default_transition' (9235767) panicked at src/precompute4/test_weighted_automata.rs:271:13:
+      assertion `left == right` failed: Equivalence fail: B(w) != A(w) for word from B.
+      word: ['a']
+      B(w): [1]
+      A(w): [2]
+
+      DWA A:
+      DWA (start: 0)
+        State 0:
+          * -> 1 (trans_weight: [2])
+        State 1:
+          final_weight: ALL
+
+
+      DWA B:
+      DWA (start: 0)
+        State 0:
+          * -> 2 (trans_weight: ALL)
+          'a' -> 1 (trans_weight: ALL)
+        State 1:
+          final_weight: [1]
+        State 2:
+          final_weight: [2]
+
+        left: 1..=1
+       right: 2..=2
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::test_weighted_automata::stochastic_equivalence_test
+                   at ./src/precompute4/test_weighted_automata.rs:271:13
+         5: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_default_transition
+                   at ./src/precompute4/test_weighted_automata.rs:1715:9
+         6: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_default_transition::{{closure}}
+                   at ./src/precompute4/test_weighted_automata.rs:1696:37
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+
+
+      It's still happening.
+    metadata:
+  - assistant: |-
+      I see the issue. The previous fix was on the right track but incomplete, and the core of the problem lies in an incorrect assumption made by one of the simplification passes. The `normalize_edges_inplace` function was too aggressive: it removed exception transitions that went to the same target as the default transition, without considering that their *weights* might be different and thus semantically important.
+
+      The fix is to make `normalize_edges_inplace` smarter. An exception should only be considered redundant and removed if it has both the same target state *and* the same transition weight as the default transition.
+
+      Here are the step-by-step instructions to apply the fix.
+
+      ### Step-by-step Instructions
+
+      1.  **File: `src/precompute4/weighted_automata/simplification.rs`**
+          *   Navigate to the `normalize_edges_inplace` function within the `impl DWA` block.
+          *   Replace the existing implementation of this function with the corrected version below, which compares both the target state and the weight before removing an exception transition.
+
+              ```rust
+              pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
+                  let mut changed = false;
+                  for st in &mut states.0 {
+                      let before = st.transitions.exceptions.len();
+                      if let Some(def_tgt) = st.transitions.default {
+                          // An exception is redundant if it has the same target AND same weight as default.
+                          let def_w = st.trans_weight_default.as_ref();
+                          st.transitions.exceptions.retain(|ch, &mut ex_tgt| {
+                              if ex_tgt != def_tgt {
+                                  return true; // Keep: different target.
+                              }
+                              // Same target, so check weight.
+                              let ex_w = st.trans_weights_exceptions.get(ch);
+                              ex_w != def_w // Keep if weights are different.
+                          });
+                      }
+                      changed |= st.transitions.exceptions.len() != before;
+              
+                      let before_w = st.trans_weights_exceptions.len();
+                      st.trans_weights_exceptions.retain(|ch, _| st.transitions.exceptions.contains_key(ch));
+                      changed |= st.trans_weights_exceptions.len() != before_w;
+                  }
+                  changed
+              }
+              ```
+
+      ### Git Diffs
+
+      Here is the git patch for the change.
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/simplification.rs b/src/precompute4/weighted_automata/simplification.rs
+      index 131110c..131110d 100644
+      --- a/src/precompute4/weighted_automata/simplification.rs
+      +++ b/src/precompute4/weighted_automata/simplification.rs
+      @@ -448,9 +448,18 @@
+               for st in &mut states.0 {
+                   let before = st.transitions.exceptions.len();
+                   if let Some(def) = st.transitions.default {
+      -                st.transitions.exceptions.retain(|_, &mut tgt| tgt != def);
+      +                // An exception is redundant if it has the same target AND same weight as default.
+      +                let def_w = st.trans_weight_default.as_ref();
+      +                st.transitions.exceptions.retain(|ch, &mut ex_tgt| {
+      +                    if ex_tgt != def {
+      +                        return true; // Keep: different target.
+      +                    }
+      +                    // Same target, so check weight.
+      +                    let ex_w = st.trans_weights_exceptions.get(ch);
+      +                    ex_w != def_w // Keep if weights are different.
+      +                });
+                   }
+                   changed |= st.transitions.exceptions.len() != before;
+       
+                   let before_w = st.trans_weights_exceptions.len();
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/simplification.rs
+      Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: DWA edge normalization now checks
+      transition weight, not just target state, against default"'
     metadata:
 ...
