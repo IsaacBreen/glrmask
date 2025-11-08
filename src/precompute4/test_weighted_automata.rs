@@ -1892,7 +1892,7 @@ mod determinization_tests {
         let s_a = nwa.states.add_state();
         let s_def = nwa.states.add_state();
         nwa.add_transition(nwa.body.start_state, 'a' as i16, s_a, Weight::all()).unwrap();
-        nwa.add_default_transition(nwa.body.start_state, s_def, Weight::all(), Default::default()).unwrap();
+        nwa.add_default_transition(nwa.body.start_state, s_def, Weight::all(), BTreeSet::from(['a' as i16])).unwrap();
         nwa.states[s_a].final_weight = Some(Weight::from_item(1));
         nwa.states[s_def].final_weight = Some(Weight::from_item(2));
 
