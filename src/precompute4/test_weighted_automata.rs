@@ -1873,6 +1873,8 @@ mod determinization_tests {
         a.add_transition(s2_default_target, 'c' as i16, s4_final, Weight::all()).unwrap();
         a.set_final_weight(s4_final, Weight::from_item(1)).unwrap();
 
+        println!("Original DWA:\n{}", a);
+
         // The exception path 'b' leads to a non-final sink state s3.
         // So, "ab" is not accepted, and "abc" is not accepted.
 
@@ -1886,6 +1888,7 @@ mod determinization_tests {
         // Now, convert A to NWA and back to DWA 'b'.
         let nwa = NWA::from_dwa(&a);
         let mut b = nwa.determinize_to_dwa();
+        println!("Determinized DWA:\n{}", b);
 
         assert_eq!(b.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
         assert!(b.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
@@ -1896,6 +1899,7 @@ mod determinization_tests {
 
         let mut c = b.clone();
         c.simplify();
+        println!("Simplified DWA:\n{}", c);
 
         assert_eq!(c.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
         assert!(c.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
