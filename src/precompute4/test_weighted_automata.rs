@@ -2102,6 +2102,68 @@ mod determinization_tests {
     }
 
     #[test]
+    fn test_determinize_minimal_failing_nwa_repro() {
+        fn neg(x: i16) -> i16 {
+            i16::MIN + x
+        }
+
+        let mut nwa = NWA::new();
+        // Need states 0 to 37, so 38 states total.
+        for _ in 0..37 { nwa.states.add_state(); }
+        assert_eq!(nwa.states.len(), 38);
+
+        let w_all = Weight::all();
+
+        // Epsilon transitions from state 0
+        nwa.add_epsilon(0, 6, w_all.clone());
+        nwa.add_epsilon(0, 10, w_all.clone());
+        nwa.add_epsilon(0, 14, w_all.clone());
+        nwa.add_epsilon(0, 19, w_all.clone());
+
+        // Epsilon transitions from state 3
+        nwa.add_epsilon(3, 21, w_all.clone());
+
+        // Epsilon transitions from state 4
+        nwa.add_epsilon(4, 28, w_all.clone());
+        nwa.add_epsilon(4, 33, w_all.clone());
+
+        // Path 1: 0 --eps--> 6 --5--> 7 --neg(5)--> 8 --neg(10)--> 9 (Final)
+        nwa.add_transition(6, 5, 7, w_all.clone()).unwrap();
+        nwa.add_transition(7, neg(5), 8, w_all.clone()).unwrap();
+        nwa.add_transition(8, neg(10), 9, w_all.clone()).unwrap();
+        nwa.states[9].final_weight = Some(w_all.clone());
+
+        // Path 2: 0 --eps--> 10 --2--> 11 (sink)
+        nwa.add_transition(10, 2, 11, w_all.clone()).unwrap();
+
+        // Path 3: 0 --eps--> 14 --5--> 3 --eps--> 21 --7--> 4
+        nwa.add_transition(14, 5, 3, w_all.clone()).unwrap();
+        nwa.add_transition(21, 7, 4, w_all.clone()).unwrap();
+
+        // Path 4: 0 --eps--> 19 --9--> 4 --eps--> 28 --3--> 29 --neg(3)--> 30 --neg(5)--> 31 --neg(10)--> 32 (Final)
+        nwa.add_transition(19, 9, 4, w_all.clone()).unwrap();
+        nwa.add_transition(28, 3, 29, w_all.clone()).unwrap();
+        nwa.add_transition(29, neg(3), 30, w_all.clone()).unwrap();
+        nwa.add_transition(30, neg(5), 31, w_all.clone()).unwrap();
+        nwa.add_transition(31, neg(10), 32, w_all.clone()).unwrap();
+        nwa.states[32].final_weight = Some(w_all.clone());
+
+        // Path 5: 0 --eps--> 19 --9--> 4 --eps--> 33 --7--> 34 --neg(7)--> 35 --neg(5)--> 36 --neg(10)--> 37 (Final)
+        nwa.add_transition(33, 7, 34, w_all.clone()).unwrap();
+        nwa.add_transition(34, neg(7), 35, w_all.clone()).unwrap();
+        nwa.add_transition(35, neg(5), 36, w_all.clone()).unwrap();
+        nwa.add_transition(36, neg(10), 37, w_all.clone()).unwrap();
+        nwa.states[37].final_weight = Some(w_all.clone());
+
+        let dwa = nwa.determinize_to_dwa();
+        let word = vec![9, 3, neg(3), neg(5), neg(10)];
+        let weight = dwa.eval_word_weight(&word);
+
+        // The word [9, 3, neg(3), neg(5), neg(10)] should be accepted by Path 4.
+        assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
+    }
+
+    #[test]
     #[ignore] // This test is for finding the minimal repro, it's slow and prints a lot.
     fn test_minimize_failing_nwa() {
         fn neg(x: i16) -> i16 {
