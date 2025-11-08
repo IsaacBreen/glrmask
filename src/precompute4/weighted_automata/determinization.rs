@@ -222,7 +222,7 @@ impl WeightPartition {
         let mut has_tail_to_max = false;
 
         let mut feed_weight = |w: &Weight| {
-            let mut it = w.ranges();
+            let mut it = w.rsb.ranges();
             while let Some(r) = it.next() {
                 let s = *r.start();
                 let e = *r.end();
@@ -1124,8 +1124,8 @@ fn to_dwa_shared_graph(
             start_final |= &atom_weights[i];
         }
     }
-    if !start_live.is_empty() { w_live[start_new] = start_live.clone(); }
-    if !start_final.is_empty() { w_final[start_new] |= &start_final; }
+    w_live[start_new] = start_live;
+    w_final[start_new] = start_final;
 
     // 3) Construct final DWA structure: one state per minimized class, transitions over Sigma'.
     let mut dwa_states = DWAStates::default();
