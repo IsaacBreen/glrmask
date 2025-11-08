@@ -139,7 +139,9 @@ fn build_template_dwas(
     let mut out = BTreeMap::new();
     for (term, bb) in all {
         let nwa = build_template_nwa_from_characterization(&bb)?;
+        println!("Template NWA for terminal {:?}:\n{}", term, nwa);
         let mut dwa = nwa.determinize_to_dwa();
+        println!("Determinized to DWA for terminal {:?}:\n{}", term, dwa);
         dwa.simplify();
         crate::debug!(5, "Built template DWA for terminal {:?}:", term);
         crate::debug!(5, "{}", dwa);
@@ -318,6 +320,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         body: NWABody { start_state: combined_start_state },
     };
     combined_nwa.simplify();
+    println!("Combined NWA before determinization: {}", combined_nwa);
+    let mut dwa = combined_nwa.determinize_to_dwa();
+    dwa.simplify();
+    combined_nwa = NWA::from_dwa(&dwa);
+
     crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
