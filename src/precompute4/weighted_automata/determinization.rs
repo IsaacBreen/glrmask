@@ -21,19 +21,12 @@ use std::time::Instant;
 ///    Sigma' = { all labels appearing anywhere in the NWA } ∪ { OTHER }, where OTHER means:
 ///      "use state's default targets when there is no exception for that label."
 ///    Then minimize the DFA (Hopcroft).
-/// 3) Combine all atom-DFAs into a single deterministic product DFA by parallel composition
-///    across components (one component per atom). The product DFA has a single start state
-///    (tuple of per-atom starts) and reads the original word labels (from Sigma').
-/// 4) Convert the product DFA into a DWA:
-///    - Each product state P = (q_0, q_1, ..., q_{k-1}) has an "active weight" equal to the union of
-///      atom-weights for components i where q_i is not the component's sink state (if any).
-///      We attach this active weight to all outgoing edges from P.
-///    - Each labeled edge (exception label) carries the active weight; the transition target is deterministic.
-///    - The default edge (OTHER) also carries the active weight.
-///    - The final weight of P is the union of atom-weights for components in which q_i is accepting.
-///    This construction yields a correct DWA: for any input word, each atom either remains "alive"
-///    (never falls into its component sink) and ends in a final component, contributing that atom's range
-///    to the final weight; otherwise it is filtered out by the final state's weight.
+/// 3) Combine all atom-DFAs into a single DWA by constructing the product automaton on-the-fly.
+///    - A DWA state represents a tuple of component DFA states `(q_0, ..., q_{k-1})`.
+///    - We explore only the reachable tuples starting from `(start_0, ..., start_{k-1})`.
+///    - The final weight of a DWA state is the union of atom-weights for components `i` where `q_i` is accepting.
+///    - The weight of an outgoing edge from a DWA state is the union of atom-weights for components `i` where `q_i` is not a sink state.
+///    This avoids building a massive intermediate unweighted product automaton, constructing the final DWA directly.
 ///
 /// This DWA is then simplified (minimized structurally and normalized) using the existing passes.
 impl NWA {
@@ -99,30 +92,22 @@ impl NWA {
         // Edge case: If no atoms (i.e., union of all weights is empty), return an empty DWA quickly.
         if atoms.intervals.is_empty() {
             // No weight can ever be produced: produce a trivial 1-state DWA (non-final, no edges).
-            let mut dwa = DWA::new();
+            let dwa = DWA::new();
             return dwa;
         }
 
-        // 4) Build product DFA over components (parallel composition).
+        // 4) Build DWA directly from components via on-the-fly product construction.
         let now_product = Instant::now();
-        let product = ProductDFA::from_components(&comp_dfas, &sigma);
+        let mut dwa = DWA::from_components(&comp_dfas, &sigma, &atoms, &comp_sinks);
         debug_log(4, || {
             format!(
-                "Product DFA: states={}, alphabet_size={}, time={:?}",
-                product.n_states, sigma.size(), now_product.elapsed()
+                "Direct DWA construction: states={}, alphabet_size={}, time={:?}",
+                dwa.states.len(), sigma.size(), now_product.elapsed()
             )
         });
 
-        // 5) Convert product DFA to DWA (attach weights).
-        let now_convert = Instant::now();
-        let dwa = product.to_dwa(&sigma, &atoms, &comp_dfas, &comp_sinks);
-        debug_log(4, || {
-            format!("Product->DWA conversion took {:?}", now_convert.elapsed())
-        });
-
-        // 6) Simplify DWA
-        let mut dwa = dwa;
-
+        // 5) Simplify DWA
+        // (This step is now external to determinization, but let's keep the log)
         debug_log(3, || {
             format!("NWA::determinize_to_dwa total time: {:?}", now_total.elapsed())
         });
@@ -130,6 +115,9 @@ impl NWA {
         dwa
     }
 }
+
+// ... (Alphabet, WeightPartition, PerAtomNFA, DetDFA structs and impls remain unchanged) ...
+// ... (They are all correct and necessary for the new approach) ...
 
 /* ------------------------------
    Utilities and support structs
@@ -907,37 +895,29 @@ impl DetDFA {
 }
 
 /* ------------------------------
-   Product DFA and conversion to DWA
+   Direct DWA Construction from Components
    ------------------------------ */
 
-#[derive(Clone, Debug)]
-struct ProductDFA {
-    n_states: usize,
-    start: usize,
-    finals: Vec<bool>,
-    trans: Vec<Vec<usize>>, // [state][symbol] -> next state
-    // Additionally keep the tuple of component states for each product state:
-    tuples: Vec<Vec<usize>>, // tuples[state] = [q0, q1, ..., q_{k-1}]
-}
-impl ProductDFA {
-    fn from_components(comps: &[DetDFA], sigma: &Alphabet) -> Self {
+impl DWA {
+    /// Build a DWA by performing an on-the-fly product construction of component DFAs.
+    /// This avoids creating a large intermediate unweighted automaton.
+    fn from_components(comps: &[DetDFA], sigma: &Alphabet, atoms: &WeightPartition, comp_sinks: &[Option<usize>]) -> Self {
         let k = comps.len();
-        // Starting tuple: [start0, start1, ..., start_{k-1}]
-        let mut start_tuple = Vec::with_capacity(k);
-        for c in comps {
-            start_tuple.push(c.start);
-        }
+        let mut dwa = DWA::new();
+        dwa.states.0.clear(); // Start fresh
 
+        // Map from a tuple of component states to a DWA state ID.
         let mut map: HashMap<Vec<usize>, usize> = HashMap::new();
-        let mut tuples: Vec<Vec<usize>> = Vec::new();
-        let mut finals: Vec<bool> = Vec::new();
-        let mut trans: Vec<Vec<usize>> = Vec::new();
+        let mut q = VecDeque::new();
+
+        // The start state is the tuple of component start states.
+        let start_tuple: Vec<usize> = comps.iter().map(|c| c.start).collect();
 
         let pb_product = if PROGRESS_BAR_ENABLED {
             let p = ProgressBar::new_spinner();
             p.set_style(
                 ProgressStyle::default_spinner()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] Building product DFA... States found: {pos}")
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] Building DWA directly... States found: {pos}")
                     .unwrap(),
             );
             Some(p)
@@ -945,166 +925,79 @@ impl ProductDFA {
             None
         };
 
-        let mut intern = |tuple: Vec<usize>,
-                          map: &mut HashMap<Vec<usize>, usize>,
-                          tuples: &mut Vec<Vec<usize>>,
-                          finals: &mut Vec<bool>,
-                          trans: &mut Vec<Vec<usize>>| {
-            if let Some(&id) = map.get(&tuple) {
-                return id;
-            }
-            let id = tuples.len();
-            let is_final = tuple.iter().enumerate().any(|(i, &s)| comps[i].finals[s]);
-            tuples.push(tuple.clone());
-            finals.push(is_final);
-            trans.push(vec![0usize; sigma.size()]);
-            map.insert(tuple, id);
-            id
-        };
-
-        let start = intern(start_tuple, &mut map, &mut tuples, &mut finals, &mut trans);
+        // Intern the start tuple and create the first DWA state.
+        let start_id = dwa.add_state();
+        map.insert(start_tuple.clone(), start_id);
+        q.push_back((start_id, start_tuple));
+        dwa.body.start_state = start_id;
         if let Some(p) = &pb_product {
-            p.set_position(tuples.len() as u64);
+            p.set_position(dwa.states.len() as u64);
         }
 
-        let mut q = VecDeque::new();
-        q.push_back(start);
+        // Precompute atom weights for efficiency
+        let atom_weights: &Vec<Weight> = &atoms.atoms;
 
-        while let Some(u) = q.pop_front() {
-            let tuple = tuples[u].clone();
+        while let Some((u_id, u_tuple)) = q.pop_front() {
+            // For the current state `u`, calculate its final weight and the active weight for its outgoing edges.
+            let mut w_final = Weight::zeros();
+            let mut w_active = Weight::zeros();
+            for (i, &comp_state) in u_tuple.iter().enumerate() {
+                // Final weight is the union of atoms whose component is in a final state.
+                if comps[i].finals[comp_state] {
+                    w_final |= &atom_weights[i];
+                }
+                // Active weight is the union of atoms whose component is not in a sink state.
+                if comp_sinks[i].map_or(true, |sink| comp_state != sink) {
+                    w_active |= &atom_weights[i];
+                }
+            }
+
+            if !w_final.is_empty() {
+                dwa.states[u_id].final_weight = Some(w_final);
+            }
+
+            // If no atoms are active, all outgoing edges will have zero weight.
+            // We still create them to maintain a total automaton, which simplifies other algorithms.
+            let edge_weight = if w_active.is_empty() { Weight::zeros() } else { w_active };
+
+            // For each symbol in the alphabet, compute the next tuple and create the transition.
             for sym in 0..sigma.size() {
-                // build next tuple by composing per-component transitions
                 let mut next_tuple = Vec::with_capacity(k);
                 for (i, comp) in comps.iter().enumerate() {
-                    let s = tuple[i];
+                    let s = u_tuple[i];
                     let v = comp.trans[s][sym];
                     next_tuple.push(v);
                 }
-                let v = if let Some(&id) = map.get(&next_tuple) {
-                    id
-                } else {
-                    let id = tuples.len();
-                    let is_final = next_tuple.iter().enumerate().any(|(i, &s)| comps[i].finals[s]);
-                    tuples.push(next_tuple.clone());
-                    finals.push(is_final);
-                    trans.push(vec![0usize; sigma.size()]);
-                    map.insert(next_tuple, id);
+
+                // Check if we've seen this destination tuple before.
+                let v_id = *map.entry(next_tuple.clone()).or_insert_with(|| {
+                    // It's a new state. Create it and add it to the worklist.
+                    let new_id = dwa.add_state();
+                    q.push_back((new_id, next_tuple));
                     if let Some(p) = &pb_product {
-                        p.set_position(tuples.len() as u64);
+                        p.set_position(dwa.states.len() as u64);
                     }
-                    q.push_back(id);
-                    id
-                };
-                trans[u][sym] = v;
+                    new_id
+                });
+
+                // Add the transition to the DWA.
+                if sigma.is_other(sym) {
+                    dwa.set_default_transition(u_id, v_id, edge_weight.clone()).unwrap();
+                } else {
+                    let lbl = sigma.label_at(sym).unwrap();
+                    dwa.add_transition(u_id, lbl, v_id, edge_weight.clone()).unwrap();
+                }
             }
         }
 
         if let Some(p) = pb_product {
-            p.finish_with_message(format!("Product DFA built with {} states", tuples.len()));
-        }
-
-        ProductDFA {
-            n_states: tuples.len(),
-            start,
-            finals,
-            trans,
-            tuples,
-        }
-    }
-
-    /// Convert this product DFA into a DWA:
-    /// - One DWA state per product DFA state.
-    /// - Edge weights: active indices at source state (union over atoms whose component is not sink).
-    /// - Final weights: union over atoms whose component is accepting at that state.
-    fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, comps: &[DetDFA], comp_sinks: &[Option<usize>]) -> DWA {
-        let mut dwa_states = DWAStates::default();
-        for _ in 0..self.n_states {
-            dwa_states.add_state();
-        }
-        let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: self.start } };
-
-        // Precompute per-atom weight
-        let atom_weights: &Vec<Weight> = &atoms.atoms;
-
-        let pb_convert = if PROGRESS_BAR_ENABLED {
-            let p = ProgressBar::new(self.n_states as u64);
-            p.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Attaching DWA weights)")
-                    .unwrap(),
-            );
-            Some(p)
-        } else {
-            None
-        };
-
-        // Helper: compute W_live(state_id) = union of atoms for components that are not in sink at this state.
-        let mut w_live_cache: Vec<Weight> = Vec::with_capacity(self.n_states);
-        for sid in 0..self.n_states {
-            let mut w = Weight::zeros();
-            for (i, &s_i) in self.tuples[sid].iter().enumerate() {
-                if let Some(sink_idx) = comp_sinks[i] {
-                    if s_i == sink_idx {
-                        continue;
-                    }
-                }
-                // add atom i
-                w |= &atom_weights[i];
-            }
-            w_live_cache.push(w);
-        }
-
-        // Final weights
-        for sid in 0..self.n_states {
-            if !self.finals[sid] {
-                continue;
-            }
-            let mut w_final = Weight::zeros();
-            for (i, &s_i) in self.tuples[sid].iter().enumerate() {
-                if comps[i].finals[s_i] {
-                    w_final |= &atom_weights[i];
-                }
-            }
-            if !w_final.is_empty() {
-                let _ = dwa.set_final_weight(sid, w_final);
-            }
-        }
-
-        // Transitions
-        for sid in 0..self.n_states {
-            if let Some(p) = &pb_convert {
-                p.inc(1);
-            }
-            // Always emit transitions to keep the DWA total. Use zero weight if no atom is live.
-            let edge_weight = if w_live_cache[sid].is_empty() {
-                Weight::zeros()
-            } else {
-                w_live_cache[sid].clone()
-            };
-
-            // Default (OTHER)
-            let dst_def = self.trans[sid][sigma.other_index];
-            if sid < dwa.states.len() && dst_def < dwa.states.len() {
-                // Create/overwrite default transition
-                let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
-            }
-
-            // Exceptions for each explicit label
-            for (li, &lbl) in sigma.labels.iter().enumerate() {
-                let dst = self.trans[sid][li];
-                if sid < dwa.states.len() && dst < dwa.states.len() {
-                    let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
-                }
-            }
-        }
-
-        if let Some(p) = pb_convert {
-            p.finish_with_message("Attached DWA weights");
+            p.finish_with_message(format!("Direct DWA construction done, {} states", dwa.states.len()));
         }
 
         dwa
     }
 }
+
 
 /* ------------------------------
    End of determinization.rs
