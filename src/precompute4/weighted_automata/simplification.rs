@@ -451,7 +451,7 @@ impl DWA {
 
         // Initial partition by outputs (state_weight, final_weight).
         let mut part: Vec<usize> = vec![0; n];
-        let mut canon0: HashMap<(Option<Weight>, Option<Weight>), usize> = HashMap::new();
+        let mut canon0: BTreeMap<(Option<Weight>, Option<Weight>), usize> = BTreeMap::new();
         for i in 0..n {
             let key = (states[i].state_weight.clone(), states[i].final_weight.clone());
             let next_id = canon0.len();
@@ -465,12 +465,12 @@ impl DWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: HashMap<(
+            let mut sig2pid: BTreeMap<(
                 Option<Weight>,
                 Option<Weight>,
                 Option<(usize, Weight)>,
                 Vec<(i16, (usize, Weight))>,
-            ), usize> = HashMap::new();
+            ), usize> = BTreeMap::new();
 
             for i in 0..n {
                 let st = &states[i];
@@ -1140,7 +1140,7 @@ impl NWA {
         }
         // Initial partition by final_weight only (coarse).
         let mut part: Vec<usize> = vec![0; n];
-        let mut canon0: HashMap<Option<Weight>, usize> = HashMap::new();
+        let mut canon0: BTreeMap<Option<Weight>, usize> = BTreeMap::new();
         for i in 0..n {
             let key = self.states[i].final_weight.clone();
             let next_id = canon0.len();
@@ -1154,10 +1154,10 @@ impl NWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: HashMap<
+            let mut sig2pid: BTreeMap<
                 (Option<Weight>, Vec<(usize, Weight)>, Vec<(usize, Weight)>, Vec<(i16, Vec<(usize, Weight)>)>),
                 usize,
-            > = HashMap::new();
+            > = BTreeMap::new();
 
             for i in 0..n {
                 let st = &self.states[i];
