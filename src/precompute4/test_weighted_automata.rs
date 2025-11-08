@@ -2155,10 +2155,13 @@ mod determinization_tests {
         nwa.add_transition(36, neg(10), 37, w_all.clone()).unwrap();
         nwa.states[37].final_weight = Some(w_all.clone());
 
+        println!("Constructed NWA:\n{}", nwa);
+
         let dwa = nwa.determinize_to_dwa();
+        println!("Determinized DWA:\n{}", dwa);
+
         let word = vec![9, 3, neg(3), neg(5), neg(10)];
         let weight = dwa.eval_word_weight(&word);
-
         // The word [9, 3, neg(3), neg(5), neg(10)] should be accepted by Path 4.
         assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
     }
