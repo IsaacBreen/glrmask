@@ -601,12 +601,13 @@ impl DetDFA {
                 non_accepting_block.push(s);
             }
         }
-        if accepting_block.is_empty() || non_accepting_block.is_empty() {
-            // All accepting or all non-accepting -> nothing to split
-            return;
+        // Build initial blocks. If one of them is empty, proceed with a single block.
+        if !accepting_block.is_empty() {
+            blocks.push(accepting_block);
         }
-        blocks.push(accepting_block);
-        blocks.push(non_accepting_block);
+        if !non_accepting_block.is_empty() {
+            blocks.push(non_accepting_block);
+        }
         for (pid, block) in blocks.iter().enumerate() {
             for &s in block {
                 part_id[s] = pid;
@@ -624,9 +625,10 @@ impl DetDFA {
 
         // Worklist of (block id, symbol)
         let mut worklist: Vec<(usize, usize)> = Vec::new();
-        for sym in 0..a {
-            worklist.push((0, sym));
-            worklist.push((1, sym));
+        for b in 0..blocks.len() {
+            for sym in 0..a {
+                worklist.push((b, sym));
+            }
         }
 
         while let Some((b, sym)) = worklist.pop() {
@@ -649,9 +651,12 @@ impl DetDFA {
                 entry.0.push(s);
             }
             for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
-                // Fill not_in_pre
+                // Ensure in_pre is sorted/deduped for correct membership checks.
+                in_pre.sort_unstable();
+                in_pre.dedup();
+                // Fill not_in_pre as complement within the block.
                 for &s in &blocks[*pid] {
-                    if !in_pre.binary_search(&s).is_ok() {
+                    if in_pre.binary_search(&s).is_err() {
                         not_in_pre.push(s);
                     }
                 }
