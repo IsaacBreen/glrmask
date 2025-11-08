@@ -2095,7 +2095,7 @@ mod determinization_tests {
 
         let dwa = nwa.determinize_to_dwa();
 
-        let word = vec![9, 3, 0, neg(0), neg(5), neg(10)];
+        let word = vec![9, 3, neg(3), neg(5), neg(10)];
         let weight = dwa.eval_word_weight(&word);
 
         assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
