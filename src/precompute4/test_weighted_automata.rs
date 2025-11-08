@@ -1747,6 +1747,36 @@ fn test_simplify_loses_exception() {
     stochastic_equivalence_test(original, d);
 }
 
+#[test]
+fn test_simplify_preserves_exception_to_dead_end() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2_live_final = d.add_state();
+    let s3_dead_sink = d.add_state();
+
+    // 0 --'a'--> 1
+    d.add_transition(0, 'a' as i16, s1, Weight::all()).unwrap();
+
+    // 1 --*--> 2 (live)
+    d.set_default_transition(s1, s2_live_final, Weight::all()).unwrap();
+    // 1 --'b'--> 3 (dead)
+    d.add_transition(s1, 'b' as i16, s3_dead_sink, Weight::all()).unwrap();
+
+    d.set_final_weight(s2_live_final, Weight::from_item(1)).unwrap();
+
+    let original = d.clone();
+    // Word "ax" (x != 'b') should be accepted.
+    assert_eq!(original.eval_word_weight(&['a' as i16, 'x' as i16]), Weight::from_item(1));
+    // Word "ab" should be rejected.
+    assert_eq!(original.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
+
+    d.simplify();
+
+    // After simplify, "ab" should still be rejected.
+    let simplified_ab_weight = d.eval_word_weight(&['a' as i16, 'b' as i16]);
+    assert_eq!(simplified_ab_weight, Weight::zeros(), "Simplification made rejecting path 'ab' accepting.\nOriginal:\n{}\nSimplified:\n{}", original, d);
+}
+
 #[cfg(test)]
 mod determinization_tests {
     use super::*;
