@@ -412,7 +412,26 @@ impl DWA {
         for st in &mut states.0 {
             let before = st.transitions.exceptions.len();
             if let Some(def) = st.transitions.default {
-                st.transitions.exceptions.retain(|_, &mut tgt| tgt != def);
+                if let Some(def_w) = &st.trans_weight_default {
+                    let mut to_remove = Vec::new();
+                    for (ch, ex_tgt) in &st.transitions.exceptions {
+                        if *ex_tgt == def {
+                            if let Some(ex_w) = st.trans_weights_exceptions.get(ch) {
+                                if ex_w == def_w {
+                                    to_remove.push(*ch);
+                                }
+                            }
+                        }
+                    }
+                    if !to_remove.is_empty() {
+                        for ch in to_remove {
+                            st.transitions.exceptions.remove(&ch);
+                        }
+                    }
+                } else {
+                    // Fallback for inconsistent state (default target but no weight)
+                    st.transitions.exceptions.retain(|_, &mut tgt| tgt != def);
+                }
             }
             changed |= st.transitions.exceptions.len() != before;
 
