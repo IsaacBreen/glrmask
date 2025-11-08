@@ -1702,7 +1702,9 @@ mod determinization_tests {
         nwa.states[s_a].final_weight = Some(Weight::from_item(1));
         nwa.states[s_def].final_weight = Some(Weight::from_item(2));
 
+        println!("{}", nwa);
         let dwa = nwa.determinize_to_dwa();
+        println!("{}", dwa);
 
         let mut expected = DWA::new();
         let s_a_dwa = expected.add_state();
