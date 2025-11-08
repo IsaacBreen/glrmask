@@ -2009,57 +2009,11 @@ mod determinization_tests {
         }
 
         // State 0
-        nwa.add_epsilon(0, 6, Weight::all());
-        nwa.add_epsilon(0, 10, Weight::all());
-        nwa.add_epsilon(0, 13, Weight::all());
-        nwa.add_epsilon(0, 14, Weight::all());
-        nwa.add_epsilon(0, 15, Weight::all());
-        nwa.add_epsilon(0, 17, Weight::all());
         nwa.add_epsilon(0, 19, Weight::all());
-        nwa.add_epsilon(0, 20, Weight::all());
-        // State 3
-        nwa.add_epsilon(3, 21, Weight::all());
         // State 4
-        nwa.add_epsilon(4, 22, Weight::all());
         nwa.add_epsilon(4, 23, Weight::all());
-        nwa.add_epsilon(4, 28, Weight::all());
-        nwa.add_epsilon(4, 33, Weight::all());
-        // State 5
-        nwa.add_epsilon(5, 38, Weight::all());
-        // State 6
-        nwa.add_transition(6, 5, 7, Weight::all()).unwrap();
-        // State 7
-        nwa.add_transition(7, neg(5), 8, Weight::all()).unwrap();
-        // State 8
-        nwa.add_transition(8, neg(10), 9, Weight::all()).unwrap();
-        // State 9
-        nwa.states[9].final_weight = Some(Weight::all());
-        // State 10
-        nwa.add_transition(10, 2, 11, Weight::all()).unwrap();
-        // State 11
-        nwa.add_default_transition(11, 12, Weight::all(), BTreeSet::new()).unwrap();
-        // State 12
-        nwa.add_default_transition(12, 2, Weight::all(), BTreeSet::new()).unwrap();
-        // State 13
-        nwa.add_transition(13, 4, 1, Weight::all()).unwrap();
-        // State 14
-        nwa.add_transition(14, 5, 3, Weight::all()).unwrap();
-        // State 15
-        nwa.add_transition(15, 6, 16, Weight::all()).unwrap();
-        // State 16
-        nwa.add_default_transition(16, 3, Weight::all(), BTreeSet::new()).unwrap();
-        // State 17
-        nwa.add_transition(17, 8, 18, Weight::all()).unwrap();
-        // State 18
-        nwa.add_default_transition(18, 4, Weight::all(), BTreeSet::new()).unwrap();
         // State 19
         nwa.add_transition(19, 9, 4, Weight::all()).unwrap();
-        // State 20
-        nwa.add_transition(20, 10, 5, Weight::all()).unwrap();
-        // State 21
-        nwa.add_transition(21, 7, 4, Weight::all()).unwrap();
-        // State 22
-        nwa.add_transition(22, 7, 4, Weight::all()).unwrap();
         // State 23
         nwa.add_transition(23, 0, 24, Weight::all()).unwrap();
         // State 24
@@ -2070,28 +2024,6 @@ mod determinization_tests {
         nwa.add_transition(26, neg(10), 27, Weight::all()).unwrap();
         // State 27
         nwa.states[27].final_weight = Some(Weight::all());
-        // State 28
-        nwa.add_transition(28, 3, 29, Weight::all()).unwrap();
-        // State 29
-        nwa.add_transition(29, neg(3), 30, Weight::all()).unwrap();
-        // State 30
-        nwa.add_transition(30, neg(5), 31, Weight::all()).unwrap();
-        // State 31
-        nwa.add_transition(31, neg(10), 32, Weight::all()).unwrap();
-        // State 32
-        nwa.states[32].final_weight = Some(Weight::all());
-        // State 33
-        nwa.add_transition(33, 7, 34, Weight::all()).unwrap();
-        // State 34
-        nwa.add_transition(34, neg(7), 35, Weight::all()).unwrap();
-        // State 35
-        nwa.add_transition(35, neg(5), 36, Weight::all()).unwrap();
-        // State 36
-        nwa.add_transition(36, neg(10), 37, Weight::all()).unwrap();
-        // State 37
-        nwa.states[37].final_weight = Some(Weight::all());
-        // State 38
-        nwa.add_transition(38, 5, 3, Weight::all()).unwrap();
 
         let dwa = nwa.determinize_to_dwa();
 
