@@ -44,6 +44,9 @@ impl NWA {
         let mut nwa = self.clone();
         debug_log(3, || format!("Starting determinization for NWA with {} states", nwa.states.len()));
 
+        // Compute future-acceptance masks once. We will use them to prune atoms and shrink the alphabet.
+        let fut = nwa.compute_future_weights();
+
         // 1) Build the atomic partition of weights (disjoint contiguous ranges).
         let now_atoms = Instant::now();
         let atoms = WeightPartition::from_nwa(&nwa);
@@ -53,7 +56,9 @@ impl NWA {
 
         // 2) Build global alphabet (all labels used anywhere) + OTHER
         let now_sigma = Instant::now();
-        let sigma = Alphabet::from_nwa(&nwa);
+        // Filter the alphabet using the future-acceptance masks:
+        // we only keep labels that can contribute to acceptance along some path
+        let sigma = Alphabet::from_nwa_with_future(&nwa, &fut);
         debug_log(4, || {
             format!("Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed())
         });
@@ -76,7 +81,7 @@ impl NWA {
         let mut comp_dfas: Vec<DetDFA> = Vec::with_capacity(atoms.intervals.len());
         let mut comp_sinks: Vec<Option<usize>> = Vec::with_capacity(atoms.intervals.len());
         for (i, atom) in atoms.intervals.iter().enumerate() {
-            let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom);
+            let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
             let mut dfa = nfa.determinize(&sigma);
             dfa.minimize(&sigma);
             let sink = dfa.find_sink_index(&sigma);
@@ -155,6 +160,41 @@ impl Alphabet {
         }
         let labels: Vec<i16> = set.into_iter().collect();
         let other_index = labels.len(); // last slot is OTHER
+        Alphabet { labels, other_index }
+    }
+
+    /// Build an alphabet filtered by future-acceptance masks:
+    /// only keep labels that can actually contribute to acceptance along some path.
+    /// A label is kept if there exists some edge s --lbl/w--> t with (w ∧ F[t]) ≠ ∅,
+    /// or a default s --wdef--> t with (wdef ∧ F[t]) ≠ ∅, in which case we keep the defaults'
+    /// exception labels too (they must be separated from OTHER).
+    fn from_nwa_with_future(nwa: &NWA, fut: &Vec<Weight>) -> Self {
+        let mut set = BTreeSet::new();
+        for (s, st) in nwa.states.0.iter().enumerate() {
+            // labeled transitions
+            for (&lbl, targets) in &st.transitions {
+                let mut relevant = false;
+                for (t, w) in targets {
+                    if !(&fut[*t] & w).is_empty() {
+                        relevant = true;
+                        break;
+                    }
+                }
+                if relevant {
+                    set.insert(lbl);
+                }
+            }
+            // defaults: if relevant, keep their exception labels
+            for def in &st.default {
+                if !(&fut[def.target] & &def.weight).is_empty() {
+                    for &lbl in &def.exceptions {
+                        set.insert(lbl);
+                    }
+                }
+            }
+        }
+        let labels: Vec<i16> = set.into_iter().collect();
+        let other_index = labels.len();
         Alphabet { labels, other_index }
     }
     #[inline]
@@ -307,50 +347,133 @@ struct PerAtomNFA {
     eps_by_state: Vec<Vec<usize>>,
 }
 impl PerAtomNFA {
-    fn from_nwa(states: &NWAStates, start: usize, sigma: &Alphabet, atom: &RangeInclusive<usize>) -> Self {
-        let n = states.len();
-        let mut finals = vec![false; n];
-        let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); n];
-        let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); n];
-        let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); n];
-
+    fn from_nwa(states: &NWAStates, start: usize, _sigma: &Alphabet, atom: &RangeInclusive<usize>, fut: &[Weight]) -> Self {
+        let n_total = states.len();
         let atom_w: Weight = std::iter::once((*atom.start())..=(*atom.end())).collect();
 
-        for s in 0..n {
-            // final
-            if let Some(w) = &states[s].final_weight {
-                if !(&atom_w & w).is_empty() {
-                    finals[s] = true;
+        // Live states for this atom: those with F[s] ∧ atom ≠ ∅
+        let mut live = vec![false; n_total];
+        for s in 0..n_total {
+            if !(&fut[s] & &atom_w).is_empty() {
+                live[s] = true;
+            }
+        }
+
+        // If start is not live, return a trivial 1-state NFA (non-final, no edges).
+        if start >= n_total || !live[start] {
+            return PerAtomNFA {
+                n: 1,
+                start: 0,
+                finals: vec![false],
+                ex_by_state: vec![BTreeMap::new()],
+                def_by_state: vec![Vec::new()],
+                eps_by_state: vec![Vec::new()],
+            };
+        }
+
+        // BFS to collect only states reachable from start via edges that intersect atom and lead to live targets.
+        let mut visited = vec![false; n_total];
+        let mut order: Vec<usize> = Vec::new();
+        let mut q = VecDeque::new();
+        visited[start] = true;
+        q.push_back(start);
+        order.push(start);
+
+        while let Some(u) = q.pop_front() {
+            // Epsilons
+            for (v, w) in &states[u].epsilons {
+                if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
+                    visited[*v] = true;
+                    q.push_back(*v);
+                    order.push(*v);
                 }
             }
-            // epsilons
-            for (to, w) in &states[s].epsilons {
-                if !(&atom_w & w).is_empty() {
-                    eps_by_state[s].push(*to);
-                }
-            }
-            // defaults
-            for def in &states[s].default {
-                if !(&atom_w & &def.weight).is_empty() {
-                    def_by_state[s].push((def.target, def.exceptions.clone()));
-                }
-            }
-            // exceptions
-            for (&lbl, targets) in &states[s].transitions {
-                // If lbl is not in global alphabet we still treat it as exception (but by construction, sigma.labels contains all).
-                let mut keep_targets = Vec::new();
-                for (to, w) in targets {
-                    if !(&atom_w & w).is_empty() {
-                        keep_targets.push(*to);
+            // Labeled
+            for (_lbl, targets) in &states[u].transitions {
+                for (v, w) in targets {
+                    if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
+                        visited[*v] = true;
+                        q.push_back(*v);
+                        order.push(*v);
                     }
                 }
-                if !keep_targets.is_empty() {
-                    ex_by_state[s].insert(lbl, keep_targets);
+            }
+            // Defaults
+            for def in &states[u].default {
+                let v = def.target;
+                if v < n_total && live[v] && !(&atom_w & &def.weight).is_empty() && !visited[v] {
+                    visited[v] = true;
+                    q.push_back(v);
+                    order.push(v);
                 }
             }
         }
 
-        Self { n, start, finals, ex_by_state, def_by_state, eps_by_state }
+        // Compact IDs
+        let m = order.len();
+        let mut id_of = vec![usize::MAX; n_total];
+        for (i, &old) in order.iter().enumerate() {
+            id_of[old] = i;
+        }
+
+        let mut finals = vec![false; m];
+        let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); m];
+        let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); m];
+        let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); m];
+
+        for (new_s, &old_s) in order.iter().enumerate() {
+            // final
+            if let Some(w) = &states[old_s].final_weight {
+                if !(&atom_w & w).is_empty() {
+                    finals[new_s] = true;
+                }
+            }
+            // exceptions for this atom
+            let mut local_ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+            for (&lbl, targets) in &states[old_s].transitions {
+                let mut kept: Vec<usize> = Vec::new();
+                for (to_old, w) in targets {
+                    if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
+                        let to_new = id_of[*to_old];
+                        if to_new != usize::MAX {
+                            kept.push(to_new);
+                        }
+                    }
+                }
+                if !kept.is_empty() {
+                    kept.sort_unstable();
+                    kept.dedup();
+                    local_ex.insert(lbl, kept);
+                }
+            }
+            ex_by_state[new_s] = local_ex.clone();
+
+            // default(s) for this atom: use per-atom exceptions = keys of local_ex
+            let ex_for_def: BTreeSet<i16> = local_ex.keys().copied().collect();
+            for def in &states[old_s].default {
+                let to_old = def.target;
+                if to_old < n_total && live[to_old] && !(&atom_w & &def.weight).is_empty() {
+                    let to_new = id_of[to_old];
+                    if to_new != usize::MAX {
+                        def_by_state[new_s].push((to_new, ex_for_def.clone()));
+                    }
+                }
+            }
+
+            // epsilons
+            for (to_old, w) in &states[old_s].epsilons {
+                if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
+                    let to_new = id_of[*to_old];
+                    if to_new != usize::MAX {
+                        eps_by_state[new_s].push(to_new);
+                    }
+                }
+            }
+        }
+
+        let new_start = id_of[start];
+        debug_assert!(new_start != usize::MAX, "start must be visited when live[start] is true");
+        Self { n: m, start: new_start, finals, ex_by_state, def_by_state, eps_by_state }
     }
 
     /// Epsilon closure precomputation for each single state.
