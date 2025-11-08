@@ -289,7 +289,7 @@ fn test_simple_bitset_ops() {
     assert!((&set1 & &all).contains(1));
     assert!((&set1 | &zeros).contains(1));
     assert_eq!((&set1 | &zeros).len(), 3);
-    assert!((&set1 & &zeros).is_empty());
+    assert_eq!((&set1 & &zeros), Weight::zeros());
 }
 
 #[test]
@@ -1242,16 +1242,16 @@ fn test_concatenate_disjoint_weights() {
     let wb = dwa_b.eval_word_weight(&word_b);
     assert_eq!(wa, Weight::from_item(1));
     assert_eq!(wb, Weight::from_item(0));
-    assert!((&wa & &wb).is_empty());
+    assert_eq!((&wa & &wb), Weight::zeros());
 
     // The concatenated DWA should not accept the combined word, because there are no other
     // accepting paths/splits.
     let wc = c.eval_word_weight(&combined_word);
-    assert!(wc.is_empty());
+    assert_eq!(wc, Weight::zeros());
 
     // The expected weight over all splits should also be empty.
     let expected = DWA::expected_concat_weight(&dwa_a, &dwa_b, &combined_word, &Weight::all());
-    assert!(expected.is_empty());
+    assert_eq!(expected, Weight::zeros());
     assert_eq!(wc, expected);
 }
 
@@ -1505,7 +1505,7 @@ fn test_concatenate_default_path_to_final() {
 
     // Word "x" should not be accepted by C.
     let weight_x = c.eval_word_weight(&['x' as i16]);
-    assert!(weight_x.is_empty());
+    assert_eq!(weight_x, Weight::zeros());
 }
 
 #[test]
@@ -1934,8 +1934,8 @@ mod determinization_tests {
         // A word taking the default path should be accepted.
         assert_eq!(a.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
         // Words taking the exception path should be rejected.
-        assert!(a.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-        assert!(a.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]).is_empty());
+        assert_eq!(a.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
+        assert_eq!(a.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
 
         // Now, convert A to NWA and back to DWA 'b'.
         let nwa = NWA::from_dwa(&a);
@@ -1943,8 +1943,8 @@ mod determinization_tests {
         println!("Determinized DWA:\n{}", b);
 
         assert_eq!(b.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
-        assert!(b.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-        assert!(b.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]).is_empty());
+        assert_eq!(b.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
+        assert_eq!(b.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
 
         // Run the full stochastic equivalence test for good measure.
         stochastic_equivalence_test(a.clone(), b.clone());
@@ -1954,8 +1954,8 @@ mod determinization_tests {
         println!("Simplified DWA:\n{}", c);
 
         assert_eq!(c.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
-        assert!(c.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-        assert!(c.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]).is_empty());
+        assert_eq!(c.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
+        assert_eq!(c.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
 
         stochastic_equivalence_test(a, c);
     }
