@@ -191,8 +191,10 @@ impl PerAtomNFA {
 
         let live: Vec<bool> = (0..n_total).map(|s| !(&fut[s] & &atom_w).is_empty()).collect();
 
+        let trivial_nfa = || PerAtomNFA { n: 1, start: 0, finals: vec![false], ex_by_state: vec![BTreeMap::new()], def_by_state: vec![], eps_by_state: vec![] };
+
         if start >= n_total || !live[start] {
-            return PerAtomNFA { n: 1, start: 0, finals: vec![false], ex_by_state: vec![BTreeMap::new()], def_by_state: vec![], eps_by_state: vec![] };
+            return trivial_nfa();
         }
 
         let mut q = VecDeque::new();
@@ -219,6 +221,10 @@ impl PerAtomNFA {
             for (v, w) in &states[u].epsilons { if !(&atom_w & w).is_empty() { check_and_add(*v, &mut q, &mut visited, &mut order); } }
             for (_, targets) in &states[u].transitions { for (v, w) in targets { if !(&atom_w & w).is_empty() { check_and_add(*v, &mut q, &mut visited, &mut order); } } }
             for def in &states[u].default { if !(&atom_w & &def.weight).is_empty() { check_and_add(def.target, &mut q, &mut visited, &mut order); } }
+        }
+
+        if order.is_empty() {
+            return trivial_nfa();
         }
 
         let m = order.len();
@@ -318,7 +324,6 @@ impl PerAtomNFA {
         while head < q.len() {
             let u_id = q[head];
             head += 1;
-            // This clone is expensive but necessary because of borrowing rules.
             let subset = map.iter().find(|(_, &v)| v == u_id).map(|(k, _)| k.clone()).unwrap();
 
             for sym in 0..sigma.size() {
