@@ -12,16 +12,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::RangeInclusive;
 use std::time::Instant;
 
-/// This determinization follows a principled construction using an on-the-fly product:
-/// 1) Extract a minimal disjoint partition of the weight space (atoms).
-/// 2) For each atom, build and minimize a component DFA.
-/// 3) Construct the final DWA by exploring the reachable state space of the product of these
-///    component DFAs. A state in the DWA corresponds to a tuple of states `(q_0, ..., q_{k-1})`
-///    from the component DFAs.
-/// 4) This exploration is done "on-the-fly", creating DWA states and their weighted transitions
-///    directly, avoiding a bloated intermediate unweighted automaton.
-/// 5) The resulting DWA is then passed to simplification passes, which can further reduce it by
-///    merging structurally equivalent states.
+/// New determinization strategy:
+/// 1) Build per-atom DFAs (as before).
+/// 2) Combine them into a single "pre-DFA" by adding a super-start with unique entry symbols to each component start.
+/// 3) Minimize the combined DFA (with entry symbols included in the alphabet).
+/// 4) Interpret the minimized DFA directly as the structure of the target DWA:
+///    - For each minimized state s:
+///        - final_weight[s] = union of atom_i for which a final state of DFA_i was merged into s.
+///        - outgoing edge weights W_edge[s] = union of atom_i for which a non-sink state of DFA_i was merged into s.
+///    - Transitions use the original alphabet only (ignore special entry symbols).
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now_total = Instant::now();
@@ -29,46 +28,188 @@ impl NWA {
         let nwa = self.clone();
         debug_log(3, || format!("Starting determinization for NWA with {} states", nwa.states.len()));
 
+        // 0) Future weights and weight partition (atoms).
         let fut = nwa.compute_future_weights();
         let atoms = WeightPartition::from_nwa(&nwa);
         debug_log(4, || format!("Built weight partition with {} atoms in {:?}", atoms.intervals.len(), now_total.elapsed()));
-
-        if atoms.intervals.is_empty() {
+        let k = atoms.intervals.len();
+        if k == 0 {
+            // No useful weight mass -> empty automaton
             return DWA::new();
         }
 
+        // 1) Build alphabet and per-atom DFAs.
         let sigma = Alphabet::from_nwa_with_future(&nwa, &fut);
         debug_log(4, || format!("Built alphabet with {} labels", sigma.labels.len()));
 
-        // 1. Build and minimize a DFA for each atom.
         let pb_atoms = if PROGRESS_BAR_ENABLED {
             Some(
-                ProgressBar::new(atoms.intervals.len() as u64).with_style(
+                ProgressBar::new(k as u64).with_style(
                     ProgressStyle::default_bar()
                         .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (per-atom DFAs)")
                         .unwrap(),
                 ),
             )
-        } else { None };
+        } else {
+            None
+        };
 
-        let mut comp_dfas: Vec<DetDFA> = Vec::with_capacity(atoms.intervals.len());
+        let mut comp_dfas: Vec<DetDFA> = Vec::with_capacity(k);
         for (i, atom) in atoms.intervals.iter().enumerate() {
             let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
             let mut dfa = nfa.determinize(&sigma);
-            dfa.minimize(&sigma);
+            // We only need the minimized structure for each atom
+            let _ = dfa.minimize(&sigma);
             crate::debug!(5, "Atom {}: interval={:?}, DFA states={}", i, atom, dfa.n_states);
             comp_dfas.push(dfa);
-            if let Some(p) = &pb_atoms { p.inc(1); }
+            if let Some(p) = &pb_atoms {
+                p.inc(1);
+            }
         }
-        if let Some(p) = pb_atoms { p.finish_with_message("Per-atom DFAs built & minimized"); }
+        if let Some(p) = pb_atoms {
+            p.finish_with_message("Per-atom DFAs built & minimized");
+        }
 
-        // 2. Build the DWA directly from the components via on-the-fly product construction.
-        let now_dwa = Instant::now();
-        let mut dwa = DWA::from_components(&comp_dfas, &sigma, &atoms);
-        debug_log(4, || format!("Constructed initial DWA from components ({} states) in {:?}", dwa.states.len(), now_dwa.elapsed()));
+        // 2) Build a combined "pre-DFA":
+        //    - Alphabet: original symbols + k "entry" symbols (synthetic)
+        //    - States: [super_start] + disjoint union of component DFA states + [global_sink]
+        //    - From super_start: on entry_i -> go to start of comp_dfas[i]; otherwise -> sink
+        //    - From comp states: for original symbols -> copy comp transitions; for entry symbols -> sink
+        //    - Sink: loops on all symbols
+        let base_a = sigma.size();
+        let combined_a = base_a + k;
+
+        // Build a "combined" alphabet by cloning the base and appending k synthetic labels.
+        // Note: DetDFA::minimize only uses alphabet size; label values are irrelevant here.
+        let mut combined_sigma = sigma.clone();
+        for i in 0..k {
+            combined_sigma.labels.push(i16::MIN.wrapping_add(i as i16));
+        }
+
+        // Layout: 0 is super_start, then component states, then one global sink at the end.
+        let mut offsets: Vec<usize> = Vec::with_capacity(k);
+        let mut next = 1usize;
+        for d in &comp_dfas {
+            offsets.push(next);
+            next += d.n_states;
+        }
+        let sink_id = next;
+        let total_states = sink_id + 1;
+
+        let mut pre = DetDFA {
+            n_states: total_states,
+            start: 0, // super_start
+            finals: vec![false; total_states],
+            trans: vec![vec![sink_id; combined_a]; total_states],
+        };
+
+        // Mark finals from components
+        for (i, d) in comp_dfas.iter().enumerate() {
+            let off = offsets[i];
+            for s in 0..d.n_states {
+                pre.finals[off + s] = d.finals[s];
+            }
+        }
+        pre.finals[sink_id] = false; // sink is non-final
+
+        // Transitions from super_start:
+        // - on base alphabet (original symbols including OTHER): to sink
+        // - on entry_i (symbols in [base_a, base_a + k)): to start of component i
+        for i in 0..k {
+            pre.trans[0][base_a + i] = offsets[i] + comp_dfas[i].start;
+        }
+
+        // Transitions for component states:
+        // - base alphabet: copy from component (shifted by offset)
+        // - entry symbols: to sink
+        for (i, d) in comp_dfas.iter().enumerate() {
+            let off = offsets[i];
+            for s in 0..d.n_states {
+                for sym in 0..base_a {
+                    let t = d.trans[s][sym];
+                    pre.trans[off + s][sym] = off + t;
+                }
+                for sym in base_a..combined_a {
+                    pre.trans[off + s][sym] = sink_id;
+                }
+            }
+        }
+
+        // Sink loops
+        for sym in 0..combined_a {
+            pre.trans[sink_id][sym] = sink_id;
+        }
+
+        // 3) Minimize the combined DFA and get a partition map from old-state -> minimized-state.
+        let map_old_to_min = pre.minimize_with_map(&combined_sigma);
+        debug_log(4, || format!("Combined DFA minimized to {} states", pre.n_states));
+
+        // 4) Build the DWA from the minimized structure:
+        // Compute final weights and uniform outgoing weights per state by aggregating over pre-min states.
+        let mut final_w: Vec<Weight> = vec![Weight::zeros(); pre.n_states];
+        let mut edge_w: Vec<Weight> = vec![Weight::zeros(); pre.n_states];
+
+        // Determine which states in each component are "non-sink"
+        let comp_sinks: Vec<Option<usize>> = comp_dfas.iter().map(|c| c.find_sink_index(&sigma)).collect();
+
+        let atom_weights = &atoms.atoms;
+
+        for (i, d) in comp_dfas.iter().enumerate() {
+            let off = offsets[i];
+            let sink_opt = comp_sinks[i];
+            let atom_w = &atom_weights[i];
+
+            for s in 0..d.n_states {
+                let old_id = off + s;
+                let new_id = map_old_to_min.get(old_id).copied().unwrap_or(usize::MAX);
+                if new_id == usize::MAX {
+                    continue;
+                }
+                // Final weight aggregation
+                if d.finals[s] {
+                    final_w[new_id] |= atom_w;
+                }
+                // Edge weight aggregation: union over atoms for non-sink states
+                let non_sink = sink_opt.map_or(true, |sink| s != sink);
+                if non_sink {
+                    edge_w[new_id] |= atom_w;
+                }
+            }
+        }
+
+        // Create DWA with the minimized state's structure (original alphabet only).
+        let mut dwa = DWA::new();
+        dwa.states.0.clear();
+        for _ in 0..pre.n_states {
+            dwa.add_state();
+        }
+        dwa.body.start_state = pre.start;
+
+        // Set final weights
+        for s in 0..pre.n_states {
+            if !final_w[s].is_empty() {
+                dwa.states[s].final_weight = Some(final_w[s].clone());
+            }
+        }
+
+        // Copy transitions: ignore the synthetic entry symbols; use only original alphabet.
+        for s in 0..pre.n_states {
+            let w = edge_w[s].clone();
+            for sym in 0..base_a {
+                let t = pre.trans[s][sym];
+                if sym == sigma.other_index {
+                    // Default transition
+                    let _ = dwa.set_default_transition(s, t, w.clone());
+                } else {
+                    // Exception label
+                    if let Some(lbl) = sigma.label_at(sym) {
+                        let _ = dwa.add_transition(s, lbl, t, w.clone());
+                    }
+                }
+            }
+        }
 
         debug_log(3, || format!("NWA::determinize_to_dwa total time: {:?}", now_total.elapsed()));
-
         dwa
     }
 }
@@ -369,8 +510,19 @@ struct DetDFA {
     trans: Vec<Vec<usize>>,
 }
 impl DetDFA {
-    fn minimize(&mut self, sigma: &Alphabet) {
-        if self.n_states == 0 { return; }
+    /// Standard minimize, discarding the old->new mapping.
+    fn minimize(&mut self, sigma: &Alphabet) -> Vec<usize> {
+        self.minimize_with_map(sigma)
+    }
+
+    /// Minimize and return a mapping from old state indices (pre-minimization) to new minimized state indices.
+    /// Unreachable states are mapped to usize::MAX.
+    fn minimize_with_map(&mut self, sigma: &Alphabet) -> Vec<usize> {
+        if self.n_states == 0 {
+            return vec![];
+        }
+
+        // Reachability from start
         let mut q = VecDeque::new();
         if self.start < self.n_states {
             q.push_back(self.start);
@@ -392,30 +544,52 @@ impl DetDFA {
             }
         }
 
-        let mut old_to_new = vec![usize::MAX; self.n_states];
-        let mut new_to_old = Vec::new();
+        // Map old -> pruned index
+        let mut old_to_pruned = vec![usize::MAX; self.n_states];
+        let mut pruned_to_old = Vec::new();
         for i in 0..self.n_states {
             if reachable[i] {
-                old_to_new[i] = new_to_old.len();
-                new_to_old.push(i);
+                old_to_pruned[i] = pruned_to_old.len();
+                pruned_to_old.push(i);
             }
         }
 
-        if new_to_old.is_empty() {
-            self.n_states = 1; self.start = 0; self.finals = vec![false]; self.trans = vec![vec![0; sigma.size()]];
-            return;
+        // If nothing reachable, collapse to trivial DFA
+        if pruned_to_old.is_empty() {
+            self.n_states = 1;
+            self.start = 0;
+            self.finals = vec![false];
+            self.trans = vec![vec![0; sigma.size()]];
+            return vec![usize::MAX; old_to_pruned.len()];
         }
 
-        let n = new_to_old.len();
-        let pruned_dfa = DetDFA {
+        // Build pruned DFA
+        let n = pruned_to_old.len();
+        let pruned = DetDFA {
             n_states: n,
-            start: old_to_new[self.start],
-            finals: new_to_old.iter().map(|&old| self.finals[old]).collect(),
-            trans: new_to_old.iter().map(|&old| self.trans[old].iter().map(|&v| old_to_new[v]).collect()).collect(),
+            start: old_to_pruned[self.start],
+            finals: pruned_to_old.iter().map(|&old| self.finals[old]).collect(),
+            trans: pruned_to_old
+                .iter()
+                .map(|&old| self.trans[old].iter().map(|&v| old_to_pruned[v]).collect())
+                .collect(),
         };
 
-        let (quotient_dfa, _) = Self::hopcroft_minimize(&pruned_dfa, sigma);
+        // Minimize pruned DFA
+        let (quotient_dfa, pruned_to_block) = Self::hopcroft_minimize(&pruned, sigma);
+
+        // Build final mapping from old to minimized: old -> pruned -> block
+        let mut old_to_min = vec![usize::MAX; self.n_states];
+        for old in 0..self.n_states {
+            if old_to_pruned[old] != usize::MAX {
+                old_to_min[old] = pruned_to_block[old_to_pruned[old]];
+            }
+        }
+
+        // Replace self with quotient
         *self = quotient_dfa;
+
+        old_to_min
     }
 
     fn find_sink_index(&self, sigma: &Alphabet) -> Option<usize> {
@@ -513,9 +687,11 @@ impl DetDFA {
 
 /* ------------------------------
    Direct DWA Construction from Components
+   (kept for reference; unused by the new pipeline)
    ------------------------------ */
 
 impl DWA {
+    #[allow(unused)]
     fn from_components(comps: &[DetDFA], sigma: &Alphabet, atoms: &WeightPartition) -> Self {
         let k = comps.len();
         let mut dwa = DWA::new();
