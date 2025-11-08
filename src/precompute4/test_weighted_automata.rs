@@ -1850,4 +1850,52 @@ mod determinization_tests {
         expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
         stochastic_equivalence_test(dwa, expected);
     }
+
+    #[test]
+    fn test_determinize_default_vs_exception_bug() {
+        // This test creates a DWA where a state `s1` has a default transition
+        // and an exception. The exception path leads to a dead end for char 'c'.
+        // The default path leads to an accepting state after char 'c'.
+        // The bug is that after taking the exception path ('b'), the determinized
+        // automaton might behave as if it also took the default path, thus incorrectly
+        // accepting "abc".
+
+        // DWA 'a' (the ground truth)
+        let mut a = DWA::new();
+        let s1 = a.add_state();
+        let s2_default_target = a.add_state();
+        let s3_exception_target = a.add_state();
+        let s4_final = a.add_state();
+
+        // Path: start --'a'--> s1
+        a.add_transition(a.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
+
+        // From s1:
+        // - Default transition to s2
+        // - Exception on 'b' to s3
+        a.set_default_transition(s1, s2_default_target, Weight::all()).unwrap();
+        a.add_transition(s1, 'b' as i16, s3_exception_target, Weight::all()).unwrap();
+
+        // The default path continues and is accepting.
+        a.add_transition(s2_default_target, 'c' as i16, s4_final, Weight::all()).unwrap();
+        a.set_final_weight(s4_final, Weight::from_item(1)).unwrap();
+
+        // The exception path 'b' leads to a non-final sink state s3.
+        // So, "ab" is not accepted, and "abc" is not accepted.
+
+        // Check A's behavior.
+        // A word taking the default path should be accepted.
+        assert_eq!(a.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+        // Words taking the exception path should be rejected.
+        assert!(a.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
+        assert!(a.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]).is_empty());
+
+        // Now, convert A to NWA and back to DWA 'b'.
+        let nwa = NWA::from_dwa(&a);
+        let mut b = nwa.determinize_to_dwa();
+        b.simplify();
+
+        // Run the full stochastic equivalence test for good measure.
+        stochastic_equivalence_test(a, b);
+    }
 }

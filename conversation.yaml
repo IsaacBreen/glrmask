@@ -4079,6 +4079,111 @@ local_system:
           stochastic_equivalence_test(d, expected);
       }
 
+      #[test]
+      fn test_dwa_to_nwa_to_dwa_roundtrip() {
+          fn neg(x: i16) -> i16 {
+              i16::MIN + x
+          }
+
+          // --- Build DWA A ---
+          let mut a = DWA::new();
+          for _ in 0..23 { a.add_state(); }
+          assert_eq!(a.states.len(), 24);
+
+          // State 0:
+          a.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+          a.add_transition(0, 1, 2, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 2, 3, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 3, 4, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 4, 5, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 5, 6, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 7, 7, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 8, 8, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
+
+          // State 1:
+          a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
+
+          // State 2:
+          a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
+
+          // State 3:
+          a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
+          a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
+
+          // State 4:
+          a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
+          a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
+
+          // State 5:
+          a.add_transition(5, 1, 15, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(5, 5, 16, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(5, 8, 17, Weight::from_iter(1..=2)).unwrap();
+
+          // State 6:
+          a.add_transition(6, neg(5), 11, Weight::from_item(0)).unwrap();
+
+          // State 7:
+          a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
+
+          // State 8:
+          a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
+
+          // State 9:
+          a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
+
+          // State 10:
+          a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
+
+          // State 11:
+          a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
+
+          // State 12:
+          a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
+
+          // State 13:
+          a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
+
+          // State 14:
+          a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
+
+          // State 15:
+          a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
+          a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
+
+          // State 16:
+          a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
+
+          // State 17:
+          a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
+
+          // State 18:
+          a.set_final_weight(18, Weight::from_item(1)).unwrap();
+
+          // State 19:
+          a.set_final_weight(19, Weight::from_item(0)).unwrap();
+
+          // State 20:
+          a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
+
+          // State 21:
+          a.set_final_weight(21, Weight::from_item(2)).unwrap();
+
+          // State 22:
+          a.add_transition(22, neg(2), 13, Weight::from_item(2)).unwrap();
+
+          // State 23:
+          a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
+          a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
+
+          let nwa = NWA::from_dwa(&a);
+          let mut roundtrip_dwa = nwa.determinize_to_dwa();
+          roundtrip_dwa.simplify();
+
+          stochastic_equivalence_test(a, roundtrip_dwa);
+      }
+
       #[cfg(test)]
       mod determinization_tests {
           use super::*;
@@ -8565,6 +8670,54 @@ local_system:
               expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
               stochastic_equivalence_test(dwa, expected);
           }
+
+          #[test]
+          fn test_determinize_default_vs_exception_bug() {
+              // This test creates a DWA where a state `s1` has a default transition
+              // and an exception. The exception path leads to a dead end for char 'c'.
+              // The default path leads to an accepting state after char 'c'.
+              // The bug is that after taking the exception path ('b'), the determinized
+              // automaton might behave as if it also took the default path, thus incorrectly
+              // accepting "abc".
+
+              // DWA 'a' (the ground truth)
+              let mut a = DWA::new();
+              let s1 = a.add_state();
+              let s2_default_target = a.add_state();
+              let s3_exception_target = a.add_state();
+              let s4_final = a.add_state();
+
+              // Path: start --'a'--> s1
+              a.add_transition(a.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
+
+              // From s1:
+              // - Default transition to s2
+              // - Exception on 'b' to s3
+              a.set_default_transition(s1, s2_default_target, Weight::all()).unwrap();
+              a.add_transition(s1, 'b' as i16, s3_exception_target, Weight::all()).unwrap();
+
+              // The default path continues and is accepting.
+              a.add_transition(s2_default_target, 'c' as i16, s4_final, Weight::all()).unwrap();
+              a.set_final_weight(s4_final, Weight::from_item(1)).unwrap();
+
+              // The exception path 'b' leads to a non-final sink state s3.
+              // So, "ab" is not accepted, and "abc" is not accepted.
+
+              // Check A's behavior.
+              // A word taking the default path should be accepted.
+              assert_eq!(a.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+              // Words taking the exception path should be rejected.
+              assert!(a.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
+              assert!(a.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]).is_empty());
+
+              // Now, convert A to NWA and back to DWA 'b'.
+              let nwa = NWA::from_dwa(&a);
+              let mut b = nwa.determinize_to_dwa();
+              b.simplify();
+
+              // Run the full stochastic equivalence test for good measure.
+              stochastic_equivalence_test(a, b);
+          }
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -12708,6 +12861,111 @@ messages:
           stochastic_equivalence_test(d, expected);
       }
 
+      #[test]
+      fn test_dwa_to_nwa_to_dwa_roundtrip() {
+          fn neg(x: i16) -> i16 {
+              i16::MIN + x
+          }
+
+          // --- Build DWA A ---
+          let mut a = DWA::new();
+          for _ in 0..23 { a.add_state(); }
+          assert_eq!(a.states.len(), 24);
+
+          // State 0:
+          a.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+          a.add_transition(0, 1, 2, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 2, 3, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 3, 4, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 4, 5, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 5, 6, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 7, 7, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(0, 8, 8, Weight::from_item(0)).unwrap();
+          a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
+
+          // State 1:
+          a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
+
+          // State 2:
+          a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
+
+          // State 3:
+          a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
+          a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
+
+          // State 4:
+          a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
+          a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
+
+          // State 5:
+          a.add_transition(5, 1, 15, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(5, 5, 16, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(5, 8, 17, Weight::from_iter(1..=2)).unwrap();
+
+          // State 6:
+          a.add_transition(6, neg(5), 11, Weight::from_item(0)).unwrap();
+
+          // State 7:
+          a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
+          a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
+
+          // State 8:
+          a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
+
+          // State 9:
+          a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
+
+          // State 10:
+          a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
+
+          // State 11:
+          a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
+
+          // State 12:
+          a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
+
+          // State 13:
+          a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
+
+          // State 14:
+          a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
+
+          // State 15:
+          a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
+          a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
+
+          // State 16:
+          a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
+
+          // State 17:
+          a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
+
+          // State 18:
+          a.set_final_weight(18, Weight::from_item(1)).unwrap();
+
+          // State 19:
+          a.set_final_weight(19, Weight::from_item(0)).unwrap();
+
+          // State 20:
+          a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
+
+          // State 21:
+          a.set_final_weight(21, Weight::from_item(2)).unwrap();
+
+          // State 22:
+          a.add_transition(22, neg(2), 13, Weight::from_item(2)).unwrap();
+
+          // State 23:
+          a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
+          a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
+
+          let nwa = NWA::from_dwa(&a);
+          let mut roundtrip_dwa = nwa.determinize_to_dwa();
+          roundtrip_dwa.simplify();
+
+          stochastic_equivalence_test(a, roundtrip_dwa);
+      }
+
       #[cfg(test)]
       mod determinization_tests {
           use super::*;
@@ -12868,7 +13126,30 @@ messages:
       ```
     metadata:
       filename: src/precompute4/test_weighted_automata.rs
-  - user: |-
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --package sep1 --lib precompute4::test_weighted_automata::test_dwa_to_nwa_to_dwa_roundtrip --profile test --no-fail-fast -- --format=json --exact -Z unstable-options --show-output
+      Testing started at 1:28 pm ...
+          Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+           Running unittests src/lib.rs (target/debug/deps/sep1-8216215debb7bbe7)
+      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:761: NWA::simplify (24 states -> 25 states) took: 1.428167ms
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:126: Product DFA: states=29, alphabet_size=17, time=363.791µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:126: Product->DWA conversion took 537.583µs
+      [DEBUG] 1] src/precompute4/weighted_automata/simplification.rs:77: Stochastic testing DWA after pass: initial normalize_edges_inplace
+      [DEBUG] 1] src/precompute4/weighted_automata/simplification.rs:77: Stochastic testing DWA after pass: initial prune_unreachable
+      [DEBUG] 1] src/precompute4/weighted_automata/simplification.rs:77: Stochastic testing DWA after pass: absorb_sink_finals_into_incoming
+      [DEBUG] 1] src/precompute4/weighted_automata/simplification.rs:77: Stochastic testing DWA after pass: relax_weights_by_local_future
+      [DEBUG] 1] src/precompute4/weighted_automata/simplification.rs:77: Stochastic testing DWA after pass: minimize_partition_refinement
+      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:52: DWA::simplify_components (29 states -> 22 states) took: 51.435708ms
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:126: NWA::determinize_to_dwa total time: 73.310125ms
+      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:52: DWA::simplify_components (22 states -> 22 states) took: 688.209µs
+
+
+      thread 'precompute4::test_weighted_automata::test_dwa_to_nwa_to_dwa_roundtrip' (9562349) panicked at src/precompute4/test_weighted_automata.rs:271:13:
+      assertion `left == right` failed: Equivalence fail: B(w) != A(w) for word from B.
+      word: [4, 1, neg(1), 5, neg(5), neg(0), neg(1)]
+      B(w): [1]
+      A(w): []
+
       DWA A:
       DWA (start: 0)
         State 0:
@@ -12934,9 +13215,102 @@ messages:
         State 23:
           neg(0) -> 10 (trans_weight: [1])
           neg(3) -> 13 (trans_weight: [2])
+
+
+      DWA B:
+      DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: ALL)
+          1 -> 2 (trans_weight: ALL)
+          2 -> 3 (trans_weight: ALL)
+          3 -> 4 (trans_weight: ALL)
+          4 -> 5 (trans_weight: ALL)
+          5 -> 6 (trans_weight: ALL)
+          7 -> 7 (trans_weight: ALL)
+          8 -> 8 (trans_weight: ALL)
+          9 -> 9 (trans_weight: ALL)
+        State 1:
+          neg(0) -> 10 (trans_weight: ALL)
+        State 2:
+          neg(1) -> 11 (trans_weight: ALL)
+        State 3:
+          * -> 12 (trans_weight: ALL)
+          neg(2) -> 13 (trans_weight: ALL)
+        State 4:
+          neg(3) -> 13 (trans_weight: ALL)
+          5 -> 14 (trans_weight: ALL)
+        State 5:
+          1 -> 15 (trans_weight: ALL)
+          5 -> 16 (trans_weight: ALL)
+          8 -> 17 (trans_weight: ALL)
+        State 6:
+          neg(5) -> 11 (trans_weight: ALL)
+        State 7:
+          1 -> 15 (trans_weight: ALL)
+          5 -> 16 (trans_weight: ALL)
+        State 8:
+          neg(8) -> 11 (trans_weight: ALL)
+        State 9:
+          * -> 17 (trans_weight: ALL)
+        State 10:
+          neg(1) -> 18 (trans_weight: [1])
+        State 11:
+          neg(4) -> 18 (trans_weight: [0])
+        State 12:
+          * -> 19 (trans_weight: ALL)
+        State 13:
+          neg(8) -> 18 (trans_weight: [2])
+        State 14:
+          neg(5) -> 1 (trans_weight: ALL)
+        State 15:
+          * -> 19 (trans_weight: ALL)
+          neg(1) -> 20 (trans_weight: ALL)
+        State 16:
+          neg(5) -> 21 (trans_weight: ALL)
+        State 17:
+          * -> 7 (trans_weight: ALL)
+        State 18:
+          final_weight: ALL
+        State 19:
+          5 -> 14 (trans_weight: ALL)
+        State 20:
+          neg(2) -> 13 (trans_weight: ALL)
+          5 -> 14 (trans_weight: ALL)
+        State 21:
+          neg(0) -> 10 (trans_weight: ALL)
+          neg(3) -> 13 (trans_weight: ALL)
+
+        left: 1..=1
+       right: 
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::test_weighted_automata::stochastic_equivalence_test
+                   at ./src/precompute4/test_weighted_automata.rs:271:13
+         5: sep1::precompute4::test_weighted_automata::test_dwa_to_nwa_to_dwa_roundtrip
+                   at ./src/precompute4/test_weighted_automata.rs:1695:5
+         6: sep1::precompute4::test_weighted_automata::test_dwa_to_nwa_to_dwa_roundtrip::{{closure}}
+                   at ./src/precompute4/test_weighted_automata.rs:1594:38
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      error: test failed, to rerun pass `-p sep1 --lib`
+      error: 1 target failed:
+          `-p sep1 --lib`
+
+      Process finished with exit code 101
     metadata:
-  - user: Add a test that takes this exact DWA, converts to NWA using NWA::from_dwa,
-      and determinizes back to DWA, and stochastically asserts equality.
+  - user: There's obvioiusly some kind of problem with determinization and default
+      transitions. Don't try to fix it. Instead, try to come up with a minimial test
+      that reproduces it.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -12956,240 +13330,137 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the requested test case, followed by the corresponding git diff.
+      Of course. Based on the failing test case, it appears there's an issue in the DWA-to-NWA-to-DWA roundtrip, specifically related to how default transitions are handled during determinization. Here is a minimal test case designed to isolate and reproduce this bug, along with the necessary changes to add it to your test suite.
 
-      ### Instructions
+      ### Step-by-step Instructions
 
-      1.  **Open the file `src/precompute4/test_weighted_automata.rs`**.
+      1.  **Open the test file**
+          Open `src/precompute4/test_weighted_automata.rs`.
 
-      2.  **Add the new test case**. Scroll to the end of the file and insert the following new test function just before the `#[cfg(test)] mod determinization_tests {` line.
+      2.  **Add the new test case**
+          Navigate to the end of the `determinization_tests` module (inside the `mod determinization_tests { ... }` block). Add the following new `#[test]` function. This test constructs a simple DWA where a state has both a default transition and an exception. The exception path leads to a dead end, while the default path leads to an accepting state. The test verifies that the determinized automaton correctly rejects a word that follows the exception path, which would expose the suspected bug.
 
           ```rust
-          #[test]
-          fn test_dwa_to_nwa_to_dwa_roundtrip() {
-              fn neg(x: i16) -> i16 {
-                  i16::MIN + x
+              #[test]
+              fn test_determinize_default_vs_exception_bug() {
+                  // This test creates a DWA where a state `s1` has a default transition
+                  // and an exception. The exception path leads to a dead end for char 'c'.
+                  // The default path leads to an accepting state after char 'c'.
+                  // The bug is that after taking the exception path ('b'), the determinized
+                  // automaton might behave as if it also took the default path, thus incorrectly
+                  // accepting "abc".
+          
+                  // DWA 'a' (the ground truth)
+                  let mut a = DWA::new();
+                  let s1 = a.add_state();
+                  let s2_default_target = a.add_state();
+                  let s3_exception_target = a.add_state();
+                  let s4_final = a.add_state();
+          
+                  // Path: start --'a'--> s1
+                  a.add_transition(a.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
+          
+                  // From s1:
+                  // - Default transition to s2
+                  // - Exception on 'b' to s3
+                  a.set_default_transition(s1, s2_default_target, Weight::all()).unwrap();
+                  a.add_transition(s1, 'b' as i16, s3_exception_target, Weight::all()).unwrap();
+          
+                  // The default path continues and is accepting.
+                  a.add_transition(s2_default_target, 'c' as i16, s4_final, Weight::all()).unwrap();
+                  a.set_final_weight(s4_final, Weight::from_item(1)).unwrap();
+          
+                  // The exception path 'b' leads to a non-final sink state s3.
+                  // So, "ab" is not accepted, and "abc" is not accepted.
+          
+                  // Check A's behavior.
+                  // A word taking the default path should be accepted.
+                  assert_eq!(a.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+                  // Words taking the exception path should be rejected.
+                  assert!(a.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
+                  assert!(a.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]).is_empty());
+          
+                  // Now, convert A to NWA and back to DWA 'b'.
+                  let nwa = NWA::from_dwa(&a);
+                  let mut b = nwa.determinize_to_dwa();
+                  b.simplify();
+          
+                  // The bug would be if B accepts "abc".
+                  // This would happen if after "ab", the DWA state in B corresponds to a
+                  // macrostate that incorrectly includes s2_default_target.
+                  let weight_abc_b = b.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]);
+          
+                  assert!(
+                      weight_abc_b.is_empty(),
+                      "Determinized DWA incorrectly accepts 'abc'. It should be rejected. B('abc') = {}",
+                      weight_abc_b
+                  );
+          
+                  // Run the full stochastic equivalence test for good measure.
+                  stochastic_equivalence_test(a, b);
               }
-          
-              // --- Build DWA A ---
-              let mut a = DWA::new();
-              for _ in 0..23 { a.add_state(); }
-              assert_eq!(a.states.len(), 24);
-          
-              // State 0:
-              a.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-              a.add_transition(0, 1, 2, Weight::from_item(0)).unwrap();
-              a.add_transition(0, 2, 3, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(0, 3, 4, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(0, 4, 5, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(0, 5, 6, Weight::from_item(0)).unwrap();
-              a.add_transition(0, 7, 7, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(0, 8, 8, Weight::from_item(0)).unwrap();
-              a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
-          
-              // State 1:
-              a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
-          
-              // State 2:
-              a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
-          
-              // State 3:
-              a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
-              a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
-          
-              // State 4:
-              a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
-              a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
-          
-              // State 5:
-              a.add_transition(5, 1, 15, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(5, 5, 16, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(5, 8, 17, Weight::from_iter(1..=2)).unwrap();
-          
-              // State 6:
-              a.add_transition(6, neg(5), 11, Weight::from_item(0)).unwrap();
-          
-              // State 7:
-              a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
-              a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
-          
-              // State 8:
-              a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
-          
-              // State 9:
-              a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
-          
-              // State 10:
-              a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
-          
-              // State 11:
-              a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
-          
-              // State 12:
-              a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
-          
-              // State 13:
-              a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
-          
-              // State 14:
-              a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
-          
-              // State 15:
-              a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
-              a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
-          
-              // State 16:
-              a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
-          
-              // State 17:
-              a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
-          
-              // State 18:
-              a.set_final_weight(18, Weight::from_item(1)).unwrap();
-          
-              // State 19:
-              a.set_final_weight(19, Weight::from_item(0)).unwrap();
-          
-              // State 20:
-              a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
-          
-              // State 21:
-              a.set_final_weight(21, Weight::from_item(2)).unwrap();
-          
-              // State 22:
-              a.add_transition(22, neg(2), 13, Weight::from_item(2)).unwrap();
-          
-              // State 23:
-              a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
-              a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
-          
-              let nwa = NWA::from_dwa(&a);
-              let mut roundtrip_dwa = nwa.determinize_to_dwa();
-              roundtrip_dwa.simplify();
-          
-              stochastic_equivalence_test(a, roundtrip_dwa);
-          }
           ```
 
       ### Git Diff
 
-      Here is the git diff for the change:
+      Here is the patch to apply to your file:
 
       ```diff
       --- a/src/precompute4/test_weighted_automata.rs
       +++ b/src/precompute4/test_weighted_automata.rs
-      @@ -1004,6 +1004,91 @@
-           stochastic_equivalence_test(d, expected);
-       }
-       
-      +#[test]
-      +fn test_dwa_to_nwa_to_dwa_roundtrip() {
-      +    fn neg(x: i16) -> i16 {
-      +        i16::MIN + x
+      @@ -1791,4 +1791,52 @@
+               expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
+               stochastic_equivalence_test(dwa, expected);
+           }
+      +
+      +    #[test]
+      +    fn test_determinize_default_vs_exception_bug() {
+      +        // This test creates a DWA where a state `s1` has a default transition
+      +        // and an exception. The exception path leads to a dead end for char 'c'.
+      +        // The default path leads to an accepting state after char 'c'.
+      +        // The bug is that after taking the exception path ('b'), the determinized
+      +        // automaton might behave as if it also took the default path, thus incorrectly
+      +        // accepting "abc".
+      +
+      +        // DWA 'a' (the ground truth)
+      +        let mut a = DWA::new();
+      +        let s1 = a.add_state();
+      +        let s2_default_target = a.add_state();
+      +        let s3_exception_target = a.add_state();
+      +        let s4_final = a.add_state();
+      +
+      +        // Path: start --'a'--> s1
+      +        a.add_transition(a.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
+      +
+      +        // From s1:
+      +        // - Default transition to s2
+      +        // - Exception on 'b' to s3
+      +        a.set_default_transition(s1, s2_default_target, Weight::all()).unwrap();
+      +        a.add_transition(s1, 'b' as i16, s3_exception_target, Weight::all()).unwrap();
+      +
+      +        // The default path continues and is accepting.
+      +        a.add_transition(s2_default_target, 'c' as i16, s4_final, Weight::all()).unwrap();
+      +        a.set_final_weight(s4_final, Weight::from_item(1)).unwrap();
+      +
+      +        // The exception path 'b' leads to a non-final sink state s3.
+      +        // So, "ab" is not accepted, and "abc" is not accepted.
+      +
+      +        // Check A's behavior.
+      +        // A word taking the default path should be accepted.
+      +        assert_eq!(a.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+      +        // Words taking the exception path should be rejected.
+      +        assert!(a.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
+      +        assert!(a.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]).is_empty());
+      +
+      +        // Now, convert A to NWA and back to DWA 'b'.
+      +        let nwa = NWA::from_dwa(&a);
+      +        let mut b = nwa.determinize_to_dwa();
+      +        b.simplify();
+      +
+      +        // Run the full stochastic equivalence test for good measure.
+      +        stochastic_equivalence_test(a, b);
       +    }
-      +
-      +    // --- Build DWA A ---
-      +    let mut a = DWA::new();
-      +    for _ in 0..23 { a.add_state(); }
-      +    assert_eq!(a.states.len(), 24);
-      +
-      +    // State 0:
-      +    a.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
-      +    a.add_transition(0, 1, 2, Weight::from_item(0)).unwrap();
-      +    a.add_transition(0, 2, 3, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(0, 3, 4, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(0, 4, 5, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(0, 5, 6, Weight::from_item(0)).unwrap();
-      +    a.add_transition(0, 7, 7, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(0, 8, 8, Weight::from_item(0)).unwrap();
-      +    a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
-      +
-      +    // State 1:
-      +    a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
-      +
-      +    // State 2:
-      +    a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
-      +
-      +    // State 3:
-      +    a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
-      +    a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
-      +
-      +    // State 4:
-      +    a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
-      +    a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
-      +
-      +    // State 5:
-      +    a.add_transition(5, 1, 15, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(5, 5, 16, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(5, 8, 17, Weight::from_iter(1..=2)).unwrap();
-      +
-      +    // State 6:
-      +    a.add_transition(6, neg(5), 11, Weight::from_item(0)).unwrap();
-      +
-      +    // State 7:
-      +    a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
-      +    a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
-      +
-      +    // State 8:
-      +    a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
-      +
-      +    // State 9:
-      +    a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
-      +
-      +    // State 10:
-      +    a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
-      +
-      +    // State 11:
-      +    a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
-      +
-      +    // State 12:
-      +    a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
-      +
-      +    // State 13:
-      +    a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
-      +
-      +    // State 14:
-      +    a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
-      +
-      +    // State 15:
-      +    a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
-      +    a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
-      +
-      +    // State 16:
-      +    a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
-      +
-      +    // State 17:
-      +    a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
-      +
-      +    // State 18:
-      +    a.set_final_weight(18, Weight::from_item(1)).unwrap();
-      +
-      +    // State 19:
-      +    a.set_final_weight(19, Weight::from_item(0)).unwrap();
-      +
-      +    // State 20:
-      +    a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
-      +
-      +    // State 21:
-      +    a.set_final_weight(21, Weight::from_item(2)).unwrap();
-      +
-      +    // State 22:
-      +    a.add_transition(22, neg(2), 13, Weight::from_item(2)).unwrap();
-      +
-      +    // State 23:
-      +    a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
-      +    a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
-      +
-      +    let nwa = NWA::from_dwa(&a);
-      +    let mut roundtrip_dwa = nwa.determinize_to_dwa();
-      +    roundtrip_dwa.simplify();
-      +
-      +    stochastic_equivalence_test(a, roundtrip_dwa);
-      +}
-      +
-       #[cfg(test)]
-       mod determinization_tests {
-           use super::*;
+       }
 
       ```
     metadata:
@@ -13202,7 +13473,7 @@ messages:
       Applying patch to 'src/precompute4/test_weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/test_weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Add stochastic round-trip test for
-      DWA -> NWA -> DWA conversion"'
+  - user: 'Changes committed with message: "test: Add test case to isolate DWA->NWA->DWA
+      bug with default/exception transitions"'
     metadata:
 ...
