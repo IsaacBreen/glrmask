@@ -2100,4 +2100,116 @@ mod determinization_tests {
 
         assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
     }
+
+    #[test]
+    #[ignore] // This test is for finding the minimal repro, it's slow and prints a lot.
+    fn test_minimize_failing_nwa() {
+        fn neg(x: i16) -> i16 {
+            i16::MIN + x
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        enum NwaComponent {
+            Epsilon { from: usize, to: usize },
+            Transition { from: usize, on: i16, to: usize },
+            Default { from: usize, to: usize },
+            FinalWeight { state: usize },
+        }
+
+        fn build_nwa_from_components(num_states: usize, components: &[NwaComponent]) -> NWA {
+            let mut nwa = NWA::new();
+            while nwa.states.len() < num_states {
+                nwa.states.add_state();
+            }
+            for component in components {
+                match component {
+                    NwaComponent::Epsilon { from, to } => nwa.add_epsilon(*from, *to, Weight::all()),
+                    NwaComponent::Transition { from, on, to } => nwa.add_transition(*from, *on, *to, Weight::all()).unwrap(),
+                    NwaComponent::Default { from, to } => nwa.add_default_transition(*from, *to, Weight::all(), BTreeSet::new()).unwrap(),
+                    NwaComponent::FinalWeight { state } => nwa.states[*state].final_weight = Some(Weight::all()),
+                }
+            }
+            nwa
+        }
+
+        fn check(nwa: &NWA) -> bool {
+            let dwa = nwa.determinize_to_dwa();
+            let word = vec![9, 3, neg(3), neg(5), neg(10)];
+            let weight = dwa.eval_word_weight(&word);
+            weight.is_empty() // returns true if it fails (weight is empty)
+        }
+
+        let components = vec![
+            NwaComponent::Epsilon { from: 0, to: 6 }, NwaComponent::Epsilon { from: 0, to: 10 },
+            NwaComponent::Epsilon { from: 0, to: 13 }, NwaComponent::Epsilon { from: 0, to: 14 },
+            NwaComponent::Epsilon { from: 0, to: 15 }, NwaComponent::Epsilon { from: 0, to: 17 },
+            NwaComponent::Epsilon { from: 0, to: 19 }, NwaComponent::Epsilon { from: 0, to: 20 },
+            NwaComponent::Epsilon { from: 3, to: 21 }, NwaComponent::Epsilon { from: 4, to: 22 },
+            NwaComponent::Epsilon { from: 4, to: 23 }, NwaComponent::Epsilon { from: 4, to: 28 },
+            NwaComponent::Epsilon { from: 4, to: 33 }, NwaComponent::Epsilon { from: 5, to: 38 },
+            NwaComponent::Transition { from: 6, on: 5, to: 7 }, NwaComponent::Transition { from: 7, on: neg(5), to: 8 },
+            NwaComponent::Transition { from: 8, on: neg(10), to: 9 }, NwaComponent::FinalWeight { state: 9 },
+            NwaComponent::Transition { from: 10, on: 2, to: 11 }, NwaComponent::Default { from: 11, to: 12 },
+            NwaComponent::Default { from: 12, to: 2 }, NwaComponent::Transition { from: 13, on: 4, to: 1 },
+            NwaComponent::Transition { from: 14, on: 5, to: 3 }, NwaComponent::Transition { from: 15, on: 6, to: 16 },
+            NwaComponent::Default { from: 16, to: 3 }, NwaComponent::Transition { from: 17, on: 8, to: 18 },
+            NwaComponent::Default { from: 18, to: 4 }, NwaComponent::Transition { from: 19, on: 9, to: 4 },
+            NwaComponent::Transition { from: 20, on: 10, to: 5 }, NwaComponent::Transition { from: 21, on: 7, to: 4 },
+            NwaComponent::Transition { from: 22, on: 7, to: 4 }, NwaComponent::Transition { from: 23, on: 0, to: 24 },
+            NwaComponent::Transition { from: 24, on: neg(0), to: 25 }, NwaComponent::Transition { from: 25, on: neg(5), to: 26 },
+            NwaComponent::Transition { from: 26, on: neg(10), to: 27 }, NwaComponent::FinalWeight { state: 27 },
+            NwaComponent::Transition { from: 28, on: 3, to: 29 }, NwaComponent::Transition { from: 29, on: neg(3), to: 30 },
+            NwaComponent::Transition { from: 30, on: neg(5), to: 31 }, NwaComponent::Transition { from: 31, on: neg(10), to: 32 },
+            NwaComponent::FinalWeight { state: 32 }, NwaComponent::Transition { from: 33, on: 7, to: 34 },
+            NwaComponent::Transition { from: 34, on: neg(7), to: 35 }, NwaComponent::Transition { from: 35, on: neg(5), to: 36 },
+            NwaComponent::Transition { from: 36, on: neg(10), to: 37 }, NwaComponent::FinalWeight { state: 37 },
+            NwaComponent::Transition { from: 38, on: 5, to: 3 },
+        ];
+
+        let mut minimal_components = components.clone();
+        let mut i = minimal_components.len();
+        while i > 0 {
+            i -= 1;
+            let mut next_try = minimal_components.clone();
+            next_try.remove(i);
+
+            let nwa_to_check = build_nwa_from_components(39, &next_try);
+            if check(&nwa_to_check) {
+                minimal_components = next_try;
+            }
+        }
+
+        println!("Minimal set of components to reproduce the bug:");
+        for c in &minimal_components {
+            println!("    {:?},", c);
+        }
+
+        let minimal_nwa = build_nwa_from_components(39, &minimal_components);
+        assert!(check(&minimal_nwa), "Minimal NWA should still fail");
+    }
+
+    #[test]
+    fn test_determinize_minimal_failing_nwa() {
+        fn neg(x: i16) -> i16 {
+            i16::MIN + x
+        }
+
+        let mut nwa = NWA::new();
+        for _ in 0..33 { nwa.states.add_state(); }
+
+        nwa.add_epsilon(0, 19, Weight::all());
+        nwa.add_transition(19, 9, 4, Weight::all()).unwrap();
+        nwa.add_epsilon(4, 28, Weight::all());
+        nwa.add_transition(28, 3, 29, Weight::all()).unwrap();
+        nwa.add_transition(29, neg(3), 30, Weight::all()).unwrap();
+        nwa.add_transition(30, neg(5), 31, Weight::all()).unwrap();
+        nwa.add_transition(31, neg(10), 32, Weight::all()).unwrap();
+        nwa.states[32].final_weight = Some(Weight::all());
+
+        let dwa = nwa.determinize_to_dwa();
+        let word = vec![9, 3, neg(3), neg(5), neg(10)];
+        let weight = dwa.eval_word_weight(&word);
+
+        assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
+    }
 }
