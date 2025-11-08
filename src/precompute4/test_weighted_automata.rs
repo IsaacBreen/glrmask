@@ -1590,6 +1590,111 @@ fn test_simplify() {
     stochastic_equivalence_test(d, expected);
 }
 
+#[test]
+fn test_dwa_to_nwa_to_dwa_roundtrip() {
+    fn neg(x: i16) -> i16 {
+        i16::MIN + x
+    }
+
+    // --- Build DWA A ---
+    let mut a = DWA::new();
+    for _ in 0..23 { a.add_state(); }
+    assert_eq!(a.states.len(), 24);
+
+    // State 0:
+    a.add_transition(0, 0, 1, Weight::from_item(1)).unwrap();
+    a.add_transition(0, 1, 2, Weight::from_item(0)).unwrap();
+    a.add_transition(0, 2, 3, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(0, 3, 4, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(0, 4, 5, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(0, 5, 6, Weight::from_item(0)).unwrap();
+    a.add_transition(0, 7, 7, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(0, 8, 8, Weight::from_item(0)).unwrap();
+    a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
+
+    // State 1:
+    a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
+
+    // State 2:
+    a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
+
+    // State 3:
+    a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
+    a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
+
+    // State 4:
+    a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
+    a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
+
+    // State 5:
+    a.add_transition(5, 1, 15, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(5, 5, 16, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(5, 8, 17, Weight::from_iter(1..=2)).unwrap();
+
+    // State 6:
+    a.add_transition(6, neg(5), 11, Weight::from_item(0)).unwrap();
+
+    // State 7:
+    a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
+
+    // State 8:
+    a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
+
+    // State 9:
+    a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
+
+    // State 10:
+    a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
+
+    // State 11:
+    a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
+
+    // State 12:
+    a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
+
+    // State 13:
+    a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
+
+    // State 14:
+    a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
+
+    // State 15:
+    a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
+    a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
+
+    // State 16:
+    a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
+
+    // State 17:
+    a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
+
+    // State 18:
+    a.set_final_weight(18, Weight::from_item(1)).unwrap();
+
+    // State 19:
+    a.set_final_weight(19, Weight::from_item(0)).unwrap();
+
+    // State 20:
+    a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
+
+    // State 21:
+    a.set_final_weight(21, Weight::from_item(2)).unwrap();
+
+    // State 22:
+    a.add_transition(22, neg(2), 13, Weight::from_item(2)).unwrap();
+
+    // State 23:
+    a.add_transition(23, neg(0), 10, Weight::from_item(1)).unwrap();
+    a.add_transition(23, neg(3), 13, Weight::from_item(2)).unwrap();
+
+    let nwa = NWA::from_dwa(&a);
+    let mut roundtrip_dwa = nwa.determinize_to_dwa();
+    roundtrip_dwa.simplify();
+
+    stochastic_equivalence_test(a, roundtrip_dwa);
+}
+
 #[cfg(test)]
 mod determinization_tests {
     use super::*;
