@@ -1888,6 +1888,10 @@ mod determinization_tests {
         let mut b = nwa.determinize_to_dwa();
         b.simplify();
 
+        assert_eq!(b.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+        assert!(b.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
+        assert!(b.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]).is_empty());
+
         // Run the full stochastic equivalence test for good measure.
         stochastic_equivalence_test(a, b);
     }
