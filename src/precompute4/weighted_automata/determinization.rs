@@ -84,6 +84,7 @@ impl NWA {
             let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
             let mut dfa = nfa.determinize(&sigma);
             dfa.minimize(&sigma);
+            crate::debug!(4, "Atom {}: interval={:?}, DFA states={}", i, atom, dfa.n_states);
             let sink = dfa.find_sink_index(&sigma);
             comp_sinks.push(sink);
             comp_dfas.push(dfa);
