@@ -1146,9 +1146,12 @@ impl NWA {
                     if nv != *v { *v = nv; changed = true; }
                 }
             }
-            for (v, _) in &mut st.default {
-                let nv = ultimate[*v];
-                if nv != *v { *v = nv; changed = true; }
+            for def in &mut st.default {
+                let nv = ultimate[def.target];
+                if nv != def.target {
+                    def.target = nv;
+                    changed = true;
+                }
             }
         }
         let new_start = ultimate[self.body.start_state];
