@@ -677,15 +677,7 @@ impl DetDFA {
             }
 
             // Apply replacements (block splits)
-            for (pid, in_pre, not_in_pre) in to_replace {
-                let old_block = std::mem::take(&mut blocks[pid]);
-                // Partition old_block into two
-                let new_block1 = in_pre; // must be from pre
-                let mut mark = BTreeSet::new();
-                for &x in &new_block1 {
-                    mark.insert(x);
-                }
-                let new_block2: Vec<usize> = old_block.into_iter().filter(|x| !mark.contains(x)).collect();
+            for (pid, new_block1, new_block2) in to_replace {
 
                 // Replace pid with new_block1
                 blocks[pid] = new_block1.clone();
