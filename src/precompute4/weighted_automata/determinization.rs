@@ -601,13 +601,12 @@ impl DetDFA {
                 non_accepting_block.push(s);
             }
         }
-        // Build initial blocks. If one of them is empty, proceed with a single block.
-        if !accepting_block.is_empty() {
-            blocks.push(accepting_block);
+        if accepting_block.is_empty() || non_accepting_block.is_empty() {
+            // All accepting or all non-accepting -> nothing to split
+            return;
         }
-        if !non_accepting_block.is_empty() {
-            blocks.push(non_accepting_block);
-        }
+        blocks.push(accepting_block);
+        blocks.push(non_accepting_block);
         for (pid, block) in blocks.iter().enumerate() {
             for &s in block {
                 part_id[s] = pid;
@@ -625,10 +624,9 @@ impl DetDFA {
 
         // Worklist of (block id, symbol)
         let mut worklist: Vec<(usize, usize)> = Vec::new();
-        for b in 0..blocks.len() {
-            for sym in 0..a {
-                worklist.push((b, sym));
-            }
+        for sym in 0..a {
+            worklist.push((0, sym));
+            worklist.push((1, sym));
         }
 
         while let Some((b, sym)) = worklist.pop() {
@@ -651,12 +649,9 @@ impl DetDFA {
                 entry.0.push(s);
             }
             for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
-                // Ensure in_pre is sorted/deduped for correct membership checks.
-                in_pre.sort_unstable();
-                in_pre.dedup();
-                // Fill not_in_pre as complement within the block.
+                // Fill not_in_pre
                 for &s in &blocks[*pid] {
-                    if in_pre.binary_search(&s).is_err() {
+                    if !in_pre.binary_search(&s).is_ok() {
                         not_in_pre.push(s);
                     }
                 }
@@ -677,7 +672,15 @@ impl DetDFA {
             }
 
             // Apply replacements (block splits)
-            for (pid, new_block1, new_block2) in to_replace {
+            for (pid, in_pre, not_in_pre) in to_replace {
+                let old_block = std::mem::take(&mut blocks[pid]);
+                // Partition old_block into two
+                let new_block1 = in_pre; // must be from pre
+                let mut mark = BTreeSet::new();
+                for &x in &new_block1 {
+                    mark.insert(x);
+                }
+                let new_block2: Vec<usize> = old_block.into_iter().filter(|x| !mark.contains(x)).collect();
 
                 // Replace pid with new_block1
                 blocks[pid] = new_block1.clone();
