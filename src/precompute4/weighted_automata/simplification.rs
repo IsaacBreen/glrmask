@@ -412,16 +412,7 @@ impl DWA {
         for st in &mut states.0 {
             let before = st.transitions.exceptions.len();
             if let Some(def) = st.transitions.default {
-                // An exception is redundant if it has the same target AND same weight as default.
-                let def_w = st.trans_weight_default.as_ref();
-                st.transitions.exceptions.retain(|ch, &mut ex_tgt| {
-                    if ex_tgt != def {
-                        return true; // Keep: different target.
-                    }
-                    // Same target, so check weight.
-                    let ex_w = st.trans_weights_exceptions.get(ch);
-                    ex_w != def_w // Keep if weights are different.
-                });
+                st.transitions.exceptions.retain(|_, &mut tgt| tgt != def);
             }
             changed |= st.transitions.exceptions.len() != before;
 
