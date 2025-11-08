@@ -81,7 +81,6 @@ impl DWA {
 
         let union_nwa = NWA { states: combined_states, body: union_body };
         let mut result_dwa = union_nwa.determinize_to_dwa();
-        result_dwa.simplify();
 
         if STOCHASTIC_DEBUG {
             DWA::stochastic_validate_union(&self, other, &result_dwa);
@@ -106,7 +105,6 @@ impl DWA {
 
         let concat_nwa = NWA { states: combined_states, body: concat_body };
         let mut result_dwa = concat_nwa.determinize_to_dwa();
-        result_dwa.simplify();
 
         if STOCHASTIC_DEBUG {
             DWA::stochastic_validate_concatenate(&self, other, &result_dwa, &Weight::all());
@@ -234,11 +232,8 @@ impl NWA {
             let union_nwa = NWA { states: states_after_union, body: union_body };
 
             let mut dwa1 = nwa1.determinize_to_dwa();
-            dwa1.simplify();
             let mut dwa2 = nwa2.determinize_to_dwa();
-            dwa2.simplify();
             let mut result_dwa = union_nwa.determinize_to_dwa();
-            result_dwa.simplify();
 
             DWA::stochastic_validate_union(&dwa1, &dwa2, &result_dwa);
         }
@@ -309,11 +304,8 @@ impl NWA {
             let concat_nwa = NWA { states: states_after_concat, body: concat_body };
 
             let mut dwa1 = nwa1.determinize_to_dwa();
-            dwa1.simplify();
             let mut dwa2 = nwa2.determinize_to_dwa();
-            dwa2.simplify();
             let mut result_dwa = concat_nwa.determinize_to_dwa();
-            result_dwa.simplify();
 
 
             DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
