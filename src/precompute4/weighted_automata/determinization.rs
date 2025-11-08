@@ -42,11 +42,6 @@ impl NWA {
 
         // Always work on a simplified copy of the NWA to avoid redundant structure.
         let mut nwa = self.clone();
-        let old_state_count = nwa.states.len();
-        nwa.remove_unreachable_and_dead_states();
-        if old_state_count > nwa.states.len() {
-            debug_log(3, || format!("NWA simplified from {} to {} states", old_state_count, nwa.states.len()));
-        }
         debug_log(3, || format!("Starting determinization for NWA with {} states", nwa.states.len()));
 
         // 1) Build the atomic partition of weights (disjoint contiguous ranges).
