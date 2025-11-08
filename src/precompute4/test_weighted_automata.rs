@@ -1,4 +1,4 @@
-use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, Weight, format_word};
+use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, NWA, NWABuildError, Weight, format_word};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
@@ -1588,4 +1588,159 @@ fn test_simplify() {
     d.simplify();
 
     stochastic_equivalence_test(d, expected);
+}
+
+#[cfg(test)]
+mod determinization_tests {
+    use super::*;
+    use crate::precompute4::weighted_automata::{NWA, NWABuildError, Weight};
+
+    // Helper to build a simple NWA for testing.
+    fn nwa_accepts_char(ch: char, weight: Weight) -> NWA {
+        let mut nwa = NWA::new();
+        let final_state = nwa.states.add_state();
+        nwa.add_transition(nwa.body.start_state, ch as i16, final_state, Weight::all()).unwrap();
+        nwa.states[final_state].final_weight = Some(weight);
+        nwa
+    }
+
+    #[test]
+    fn test_det_simple_char() {
+        let nwa = nwa_accepts_char('a', Weight::from_item(1));
+        let dwa = nwa.determinize_to_dwa();
+        let expected = dwa_accepts_char('a', Weight::from_item(1));
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_union_of_chars() {
+        // NWA for a|b
+        let mut nwa = NWA::new();
+        let s_a = nwa.states.add_state();
+        let s_b = nwa.states.add_state();
+        let final_a = nwa.states.add_state();
+        let final_b = nwa.states.add_state();
+        nwa.add_epsilon(nwa.body.start_state, s_a, Weight::all());
+        nwa.add_epsilon(nwa.body.start_state, s_b, Weight::all());
+        nwa.add_transition(s_a, 'a' as i16, final_a, Weight::all()).unwrap();
+        nwa.add_transition(s_b, 'b' as i16, final_b, Weight::all()).unwrap();
+        nwa.states[final_a].final_weight = Some(Weight::from_item(1));
+        nwa.states[final_b].final_weight = Some(Weight::from_item(2));
+
+        let dwa = nwa.determinize_to_dwa();
+
+        let mut expected = DWA::new();
+        let final_a_dwa = expected.add_state();
+        let final_b_dwa = expected.add_state();
+        expected.add_transition(expected.body.start_state, 'a' as i16, final_a_dwa, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, 'b' as i16, final_b_dwa, Weight::all()).unwrap();
+        expected.set_final_weight(final_a_dwa, Weight::from_item(1)).unwrap();
+        expected.set_final_weight(final_b_dwa, Weight::from_item(2)).unwrap();
+
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_nondeterminism_on_char() {
+        // NWA with two transitions on 'a'
+        let mut nwa = NWA::new();
+        let f1 = nwa.states.add_state();
+        let f2 = nwa.states.add_state();
+        nwa.add_transition(nwa.body.start_state, 'a' as i16, f1, Weight::from_item(1)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as i16, f2, Weight::from_item(2)).unwrap();
+        nwa.states[f1].final_weight = Some(Weight::all());
+        nwa.states[f2].final_weight = Some(Weight::all());
+
+        let dwa = nwa.determinize_to_dwa();
+
+        // Expected DWA accepts 'a' with weight [1, 2]
+        let mut expected = DWA::new();
+        let final_state = expected.add_state();
+        expected.add_transition(expected.body.start_state, 'a' as i16, final_state, Weight::from_iter([1, 2])).unwrap();
+        expected.set_final_weight(final_state, Weight::all()).unwrap();
+
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_weight_partitioning() {
+        // NWA with overlapping weights on 'a'
+        let mut nwa = NWA::new();
+        let f1 = nwa.states.add_state();
+        let f2 = nwa.states.add_state();
+        // 'a' can lead to f1 with weight [0,1] or f2 with weight [1,2]
+        nwa.add_transition(nwa.body.start_state, 'a' as i16, f1, Weight::from_iter(0..=1)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as i16, f2, Weight::from_iter(1..=2)).unwrap();
+        // f1 is final for its path, f2 is final for its path
+        nwa.states[f1].final_weight = Some(Weight::all());
+        nwa.states[f2].final_weight = Some(Weight::all());
+
+        let dwa = nwa.determinize_to_dwa();
+
+        // Expected DWA:
+        // On 'a', we get a state. The final weight of this state should be:
+        // Atom [0]: from f1 -> [0]
+        // Atom [1]: from f1 and f2 -> [1]
+        // Atom [2]: from f2 -> [2]
+        // Total final weight: [0,1,2]
+        // The edge weight should also be [0,1,2]
+        let mut expected = DWA::new();
+        let final_state = expected.add_state();
+        expected.add_transition(expected.body.start_state, 'a' as i16, final_state, Weight::from_iter(0..=2)).unwrap();
+        expected.set_final_weight(final_state, Weight::from_iter(0..=2)).unwrap();
+
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_default_transition() {
+        let mut nwa = NWA::new();
+        let s_a = nwa.states.add_state();
+        let s_def = nwa.states.add_state();
+        nwa.add_transition(nwa.body.start_state, 'a' as i16, s_a, Weight::all()).unwrap();
+        nwa.add_default_transition(nwa.body.start_state, s_def, Weight::all()).unwrap();
+        nwa.states[s_a].final_weight = Some(Weight::from_item(1));
+        nwa.states[s_def].final_weight = Some(Weight::from_item(2));
+
+        let dwa = nwa.determinize_to_dwa();
+
+        let mut expected = DWA::new();
+        let s_a_dwa = expected.add_state();
+        let s_def_dwa = expected.add_state();
+        expected.add_transition(expected.body.start_state, 'a' as i16, s_a_dwa, Weight::all()).unwrap();
+        expected.set_default_transition(expected.body.start_state, s_def_dwa, Weight::all()).unwrap();
+        expected.set_final_weight(s_a_dwa, Weight::from_item(1)).unwrap();
+        expected.set_final_weight(s_def_dwa, Weight::from_item(2)).unwrap();
+
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_empty_nwa() {
+        let mut nwa = NWA::new();
+        nwa.states.0.clear(); // Truly empty
+        let dwa = nwa.determinize_to_dwa();
+        assert_eq!(dwa.states.len(), 1);
+        assert!(dwa.states[dwa.body.start_state].final_weight.is_none());
+        assert!(dwa.states[dwa.body.start_state].transitions.default.is_none());
+        assert!(dwa.states[dwa.body.start_state].transitions.exceptions.is_empty());
+    }
+
+    #[test]
+    fn test_det_accepts_nothing() {
+        let nwa = NWA::new(); // start state, but no transitions and not final
+        let dwa = nwa.determinize_to_dwa();
+        let expected = DWA::new();
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_accepts_empty_word() {
+        let mut nwa = NWA::new();
+        nwa.states[nwa.body.start_state].final_weight = Some(Weight::from_item(42));
+        let dwa = nwa.determinize_to_dwa();
+        let mut expected = DWA::new();
+        expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
+        stochastic_equivalence_test(dwa, expected);
+    }
 }
