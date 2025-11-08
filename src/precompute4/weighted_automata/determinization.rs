@@ -297,7 +297,8 @@ fn determinize_nfa(nfa: UnweightedNFA) -> UnweightedDFA {
             let next_nfa_states = epsilon_closure(&next_nfa_states_raw, &nfa);
 
             if next_nfa_states.is_empty() {
-                dfa_states[current_dfa_id].transitions.insert(label, get_sink(&mut sink_id, &mut dfa_states, &nfa.alphabet));
+                let sink_state_id = get_sink(&mut sink_id, &mut dfa_states, &nfa.alphabet);
+                dfa_states[current_dfa_id].transitions.insert(label, sink_state_id);
             } else {
                 let next_dfa_id = *dfa_map.entry(next_nfa_states.clone()).or_insert_with(|| {
                     let new_id = dfa_states.len();
@@ -317,7 +318,8 @@ fn determinize_nfa(nfa: UnweightedNFA) -> UnweightedDFA {
         }
         let next_default_states = epsilon_closure(&next_default_raw, &nfa);
         if next_default_states.is_empty() {
-            dfa_states[current_dfa_id].default_transition = Some(get_sink(&mut sink_id, &mut dfa_states, &nfa.alphabet));
+            let sink_state_id = get_sink(&mut sink_id, &mut dfa_states, &nfa.alphabet);
+            dfa_states[current_dfa_id].default_transition = Some(sink_state_id);
         } else {
             let next_dfa_id = *dfa_map.entry(next_default_states.clone()).or_insert_with(|| {
                 let new_id = dfa_states.len();
@@ -456,11 +458,14 @@ fn build_product_dwa(minimal_dfas: Vec<UnweightedDFA>, partition: Vec<Weight>) -
             .enumerate()
             .map(|(i, &s)| minimal_dfas[i].states[s].default_transition.expect("DFA must be complete"))
             .collect();
-        let default_target_dwa_id = *product_state_map.entry(next_default_product_state.clone()).or_insert_with(|| {
-            let new_id = dwa.add_state();
-            worklist.push_back(next_default_product_state);
-            new_id
-        });
+        let default_target_dwa_id = match product_state_map.entry(next_default_product_state.clone()) {
+            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let new_id = dwa.add_state();
+                worklist.push_back(v.key().clone());
+                *v.insert(new_id)
+            }
+        };
         dwa.set_default_transition(current_dwa_id, default_target_dwa_id, Weight::all()).unwrap();
 
         for &label in &alphabet {
