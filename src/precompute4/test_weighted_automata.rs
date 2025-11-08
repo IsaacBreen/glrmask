@@ -1853,13 +1853,6 @@ mod determinization_tests {
 
     #[test]
     fn test_determinize_default_vs_exception_bug() {
-        // This test creates a DWA where a state `s1` has a default transition
-        // and an exception. The exception path leads to a dead end for char 'c'.
-        // The default path leads to an accepting state after char 'c'.
-        // The bug is that after taking the exception path ('b'), the determinized
-        // automaton might behave as if it also took the default path, thus incorrectly
-        // accepting "abc".
-
         // DWA 'a' (the ground truth)
         let mut a = DWA::new();
         let s1 = a.add_state();
