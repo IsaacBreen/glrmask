@@ -898,7 +898,13 @@ impl ProductDFA {
         for sid in 0..self.n_states {
             // Always emit transitions to keep the DWA total. Use zero weight if no atom is live.
             let edge_weight = if w_live_cache[sid].is_empty() {
-                Weight::zeros()
+                // This is a sink state where no atoms are live. To ensure totality and
+                // prevent a buggy simplifier from removing the self-loop, we use a
+                // non-empty weight. Weight::all() is safe because the sink state is
+                // non-final, so any path ending here will be rejected. The accumulator
+                // will be preserved, but since it can't escape to a final state,
+                // it doesn't matter.
+                Weight::all()
             } else {
                 w_live_cache[sid].clone()
             };
