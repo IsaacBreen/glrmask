@@ -78,7 +78,7 @@ fn build_template_nwa_from_characterization(
 
         for i in 0..len {
             let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
-            nwa.add_default_transition(from, to, w_all.clone())?;
+            nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
             from = to;
         }
     }
@@ -102,7 +102,7 @@ fn build_template_nwa_from_characterization(
 
             for i in 0..len {
                 let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
-                nwa.add_default_transition(from, to, w_all.clone())?;
+                nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
                 from = to;
             }
         }

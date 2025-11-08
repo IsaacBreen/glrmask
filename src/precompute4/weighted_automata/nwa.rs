@@ -294,8 +294,8 @@ impl NWA {
         self.states.add_transition(from, on, to, w)
     }
 
-    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
-        self.states.add_default_transition(from, to, w)
+    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
+        self.states.add_default_transition(from, to, w, exceptions)
     }
 
     pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
