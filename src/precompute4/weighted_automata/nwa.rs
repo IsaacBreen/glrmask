@@ -4,7 +4,7 @@
 #![allow(clippy::needless_borrow)]
 
 use super::common::{format_i16_char, NWAStateID, Weight};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
 
@@ -21,13 +21,6 @@ impl Display for NWABuildError {
     }
 }
 
-/// A default transition in an NWA. It is taken for any symbol that is NOT in its `exceptions` set.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct NWADefaultTransition {
-    pub target: NWAStateID,
-    pub weight: Weight,
-    pub exceptions: BTreeSet<i16>,
-}
 /// - Non-epsilon transitions: unique target per input symbol.
 /// - Each transition carries a weight (Weight), which is intersected along the path; final states
 ///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
@@ -40,7 +33,17 @@ pub struct NWAState {
     /// Epsilon transitions: list of (target, weight).
     pub epsilons: Vec<(NWAStateID, Weight)>,
     /// Default transitions: used when a labeled transition for a symbol is absent.
-    pub default: Vec<NWADefaultTransition>,
+    pub default: Vec<(NWAStateID, Weight)>,
+}
+
+impl NWAState {
+    pub fn get_transition(&self, on: i16) -> &[(NWAStateID, Weight)] {
+        if let Some(targets) = self.transitions.get(&on) {
+            targets
+        } else {
+            &self.default
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -79,18 +82,14 @@ impl NWAStates {
         Ok(())
     }
 
-    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
+    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
         if from >= self.len() {
             return Err(NWABuildError::StateOutOfBounds { state: from });
         }
         if to >= self.len() {
             return Err(NWABuildError::StateOutOfBounds { state: to });
         }
-        self.0[from].default.push(NWADefaultTransition {
-            target: to,
-            weight: w,
-            exceptions,
-        });
+        self.0[from].default.push((to, w));
         Ok(())
     }
 
@@ -139,19 +138,14 @@ impl NWAStates {
             // Default edge
             let def_old = other.0[old].default.clone();
             self.0[new].default.clear();
-            for def in def_old {
-                let to_old = def.target;
+            for (to_old, w) in def_old {
                 let to_new = *remap.entry(to_old).or_insert_with(|| {
                     let n = self.add_state();
                     self.0[n] = other.0[to_old].clone();
                     q.push_back((to_old, n));
                     n
                 });
-                self.0[new].default.push(NWADefaultTransition {
-                    target: to_new,
-                    weight: def.weight,
-                    exceptions: def.exceptions,
-                });
+                self.0[new].default.push((to_new, w));
             }
         }
 
@@ -176,12 +170,8 @@ impl Display for NWAStates {
                 writeln!(f, "    final_weight: {}", w)?;
             }
             if !state.default.is_empty() {
-                for def in &state.default {
-                    if def.exceptions.is_empty() {
-                        writeln!(f, "    * -> {} (weight: {})", def.target, def.weight)?;
-                    } else {
-                        writeln!(f, "    * -> {} (weight: {}, except for {:?})", def.target, def.weight, def.exceptions)?;
-                    }
+                for (to, w) in &state.default {
+                    writeln!(f, "    * -> {} (weight: {})", to, w)?;
                 }
             }
             for (on, targets) in &state.transitions {
@@ -294,8 +284,8 @@ impl NWA {
         self.states.add_transition(from, on, to, w)
     }
 
-    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
-        self.states.add_default_transition(from, to, w, exceptions)
+    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+        self.states.add_default_transition(from, to, w)
     }
 
     pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
@@ -312,12 +302,8 @@ impl Display for NWA {
                 writeln!(f, "    final_weight: {}", w)?;
             }
             if !state.default.is_empty() {
-                for def in &state.default {
-                    if def.exceptions.is_empty() {
-                        writeln!(f, "    * -> {} (weight: {})", def.target, def.weight)?;
-                    } else {
-                        writeln!(f, "    * -> {} (weight: {}, except for {:?})", def.target, def.weight, def.exceptions)?;
-                    }
+                for (to, w) in &state.default {
+                    writeln!(f, "    * -> {} (weight: {})", to, w)?;
                 }
             }
             for (on, targets) in &state.transitions {

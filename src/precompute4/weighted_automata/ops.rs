@@ -5,9 +5,9 @@
 
 use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
 use super::dwa::DWA;
-use super::nwa::{NWABody, NWADefaultTransition, NWAStates, NWA};
+use super::nwa::{NWABody, NWAStates, NWA};
 use crate::precompute4::weighted_automata::NWAStateID;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 
 impl DWA {
     /// Evaluate a word's weight in this DWA by intersecting per-edge weights, optional state-entry weights, and the final state's weight.
@@ -149,9 +149,9 @@ impl NWA {
                 }
             }
             // Default
-            for def in &self.states[p].default {
-                if def.target < n {
-                    rev[def.target].push((p, def.weight.clone()));
+            for (t, w) in &self.states[p].default {
+                if *t < n {
+                    rev[*t].push((p, w.clone()));
                 }
             }
         }
@@ -200,12 +200,7 @@ impl NWA {
             if let Some(to) = st.transitions.default {
                 // Assume ALL if weight is missing, though this should not happen with current DWA builders.
                 let w = st.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all);
-                let exceptions = st.transitions.exceptions.keys().copied().collect();
-                nwa.states.0[i].default.push(NWADefaultTransition {
-                    target: to,
-                    weight: w,
-                    exceptions,
-                });
+                nwa.states.0[i].default.push((to, w));
             }
             // Labeled
             for (lbl, to) in &st.transitions.exceptions {
@@ -269,10 +264,12 @@ impl NWA {
                     }
                 }
             }
-            for def in &states[u].default {
-                if def.target < states.len() && !visited[def.target] {
-                    visited[def.target] = true;
-                    q.push_back(def.target);
+            if !states[u].default.is_empty() {
+                for (v, _) in &states[u].default {
+                    if *v < states.len() && !visited[*v] {
+                        visited[*v] = true;
+                        q.push_back(*v);
+                    }
                 }
             }
         }
