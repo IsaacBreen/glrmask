@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 
 const EVERYTHING: bool = false;
+const FORCE_LR0_TABLE: bool = false;
 
 
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
@@ -1526,8 +1527,61 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let reduce_goto_map = stage_10(&stage_8_table);
 
     crate::debug!(2, "Finalizing table");
-    let final_table = stage_8_table;
+    let mut final_table = stage_8_table;
 
+    if FORCE_LR0_TABLE {
+        crate::debug!(2, "Forcing LR(0) table by broadcasting reductions.");
+        let all_terminal_ids: Vec<TerminalID> = terminal_map.right_values().copied().collect();
+
+        for row in final_table.values_mut() {
+            // 1. Collect all reduce actions in this state.
+            let mut all_reduces_for_state: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+            for action in row.shifts_and_reduces_full.values() {
+                match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                        all_reduces_for_state.entry(*len).or_default().entry(*nonterminal_id).or_default().extend(production_ids.iter().cloned());
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
+                        for (&len, nts) in reduces {
+                            for (&nt_id, pids) in nts {
+                                all_reduces_for_state.entry(len).or_default().entry(nt_id).or_default().extend(pids.iter().cloned());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if all_reduces_for_state.is_empty() {
+                continue;
+            }
+
+            // 2. Update actions for all terminals.
+            for &terminal_id in &all_terminal_ids {
+                let existing_action = row.shifts_and_reduces_full.get(&terminal_id);
+                let shift_part = if let Some(action) = existing_action {
+                    match action {
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(*sid),
+                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                let mut new_action = Stage7ShiftsAndReducesLookaheadValue::Split {
+                    shift: shift_part,
+                    reduces: all_reduces_for_state.clone(),
+                };
+                new_action.simplify();
+                row.shifts_and_reduces_full.insert(terminal_id, new_action);
+            }
+
+            // 3. For LR(0), there are no default reductions; all actions are explicit.
+            row.shifts_and_reduces_without_default_reduce = row.shifts_and_reduces_full.clone();
+            row.default_reduce = DefaultReduce { clone_and_merge: false, reduce: None };
+        }
+    }
     let hallucinated_row = stage_11_create_hallucinated_row(&final_table);
     let hallucinated_state_id = StateID(usize::MAX);
 
