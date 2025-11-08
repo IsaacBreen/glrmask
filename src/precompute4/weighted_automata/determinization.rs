@@ -750,6 +750,18 @@ impl ProductDFA {
         let mut finals: Vec<bool> = Vec::new();
         let mut trans: Vec<Vec<usize>> = Vec::new();
 
+        let pb_product = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new_spinner();
+            p.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] Building product DFA... States found: {pos}")
+                    .unwrap(),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
         let mut intern = |tuple: Vec<usize>,
                           map: &mut HashMap<Vec<usize>, usize>,
                           tuples: &mut Vec<Vec<usize>>,
@@ -768,6 +780,9 @@ impl ProductDFA {
         };
 
         let start = intern(start_tuple, &mut map, &mut tuples, &mut finals, &mut trans);
+        if let Some(p) = &pb_product {
+            p.set_position(tuples.len() as u64);
+        }
 
         let mut q = VecDeque::new();
         q.push_back(start);
@@ -791,11 +806,18 @@ impl ProductDFA {
                     finals.push(is_final);
                     trans.push(vec![0usize; sigma.size()]);
                     map.insert(next_tuple, id);
+                    if let Some(p) = &pb_product {
+                        p.set_position(tuples.len() as u64);
+                    }
                     q.push_back(id);
                     id
                 };
                 trans[u][sym] = v;
             }
+        }
+
+        if let Some(p) = pb_product {
+            p.finish_with_message(format!("Product DFA built with {} states", tuples.len()));
         }
 
         ProductDFA {
@@ -820,6 +842,18 @@ impl ProductDFA {
 
         // Precompute per-atom weight
         let atom_weights: &Vec<Weight> = &atoms.atoms;
+
+        let pb_convert = if PROGRESS_BAR_ENABLED {
+            let p = ProgressBar::new(self.n_states as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Attaching DWA weights)")
+                    .unwrap(),
+            );
+            Some(p)
+        } else {
+            None
+        };
 
         // Helper: compute W_live(state_id) = union of atoms for components that are not in sink at this state.
         let mut w_live_cache: Vec<Weight> = Vec::with_capacity(self.n_states);
@@ -855,6 +889,9 @@ impl ProductDFA {
 
         // Transitions
         for sid in 0..self.n_states {
+            if let Some(p) = &pb_convert {
+                p.inc(1);
+            }
             // Always emit transitions to keep the DWA total. Use zero weight if no atom is live.
             let edge_weight = if w_live_cache[sid].is_empty() {
                 Weight::zeros()
@@ -876,6 +913,10 @@ impl ProductDFA {
                     let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
                 }
             }
+        }
+
+        if let Some(p) = pb_convert {
+            p.finish_with_message("Attached DWA weights");
         }
 
         dwa
