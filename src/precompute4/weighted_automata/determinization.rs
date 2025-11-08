@@ -6,6 +6,7 @@ use super::dwa::{DWAState, DWAStates, DWA, DWABody};
 use super::nwa::{NWA, NWAStates};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
+use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::RangeInclusive;
 use std::time::Instant;
@@ -221,7 +222,7 @@ impl WeightPartition {
         let mut has_tail_to_max = false;
 
         let mut feed_weight = |w: &Weight| {
-            let mut it = w.rsb.ranges();
+            let mut it = w.ranges();
             while let Some(r) = it.next() {
                 let s = *r.start();
                 let e = *r.end();
