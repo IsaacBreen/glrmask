@@ -42,7 +42,6 @@ impl NWA {
 
         // Always work on a simplified copy of the NWA to avoid redundant structure.
         let mut nwa = self.clone();
-        nwa.simplify();
 
         // 1) Build the atomic partition of weights (disjoint contiguous ranges).
         let atoms = WeightPartition::from_nwa(&nwa);
@@ -84,8 +83,6 @@ impl NWA {
         if atoms.intervals.is_empty() {
             // No weight can ever be produced: produce a trivial 1-state DWA (non-final, no edges).
             let mut dwa = DWA::new();
-            // Already one start added by DWA::new
-            dwa.simplify();
             return dwa;
         }
 
@@ -108,7 +105,6 @@ impl NWA {
 
         // 6) Simplify DWA
         let mut dwa = dwa;
-        dwa.simplify();
 
         debug_log(3, || {
             format!("NWA::determinize_to_dwa total time: {:?}", now_total.elapsed())
