@@ -211,9 +211,9 @@ impl WeightPartition {
                 }
             }
             // defaults
-            for (_, w) in &st.default {
-                if !w.is_empty() {
-                    feed_weight(w);
+            for def in &st.default {
+                if !def.weight.is_empty() {
+                    feed_weight(&def.weight);
                 }
             }
             // exceptions
@@ -287,7 +287,7 @@ struct PerAtomNFA {
     start: usize,
     finals: Vec<bool>,
     ex_by_state: Vec<BTreeMap<i16, Vec<usize>>>,
-    def_by_state: Vec<Vec<usize>>,
+    def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>>, // list of (target, exceptions)
     eps_by_state: Vec<Vec<usize>>,
 }
 impl PerAtomNFA {
@@ -295,7 +295,7 @@ impl PerAtomNFA {
         let n = states.len();
         let mut finals = vec![false; n];
         let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); n];
-        let mut def_by_state: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); n];
         let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); n];
 
         let atom_w: Weight = std::iter::once((*atom.start())..=(*atom.end())).collect();
@@ -314,9 +314,9 @@ impl PerAtomNFA {
                 }
             }
             // defaults
-            for (to, w) in &states[s].default {
-                if !(&atom_w & w).is_empty() {
-                    def_by_state[s].push(*to);
+            for def in &states[s].default {
+                if !(&atom_w & &def.weight).is_empty() {
+                    def_by_state[s].push((def.target, def.exceptions.clone()));
                 }
             }
             // exceptions
@@ -423,19 +423,26 @@ impl PerAtomNFA {
 
                 match sigma.label_at(sym) {
                     Some(lbl) => {
-                        // Label 'lbl': for each s in subset: if s has exception on lbl, use it; else use defaults.
+                        // Label 'lbl': for each s in subset: take explicit transitions on lbl,
+                        // and any default transitions for which lbl is not an exception.
                         for &s in &subset {
                             if let Some(ts) = self.ex_by_state[s].get(&lbl) {
                                 next_raw.extend_from_slice(ts);
-                            } else {
-                                next_raw.extend_from_slice(&self.def_by_state[s]);
+                            }
+                            for (target, exceptions) in &self.def_by_state[s] {
+                                if !exceptions.contains(&lbl) {
+                                    next_raw.push(*target);
+                                }
                             }
                         }
                     }
                     None => {
-                        // OTHER: use defaults only
+                        // OTHER: for any symbol not in sigma.labels, no state has an exception,
+                        // so we take all default transitions.
                         for &s in &subset {
-                            next_raw.extend_from_slice(&self.def_by_state[s]);
+                            for (target, _) in &self.def_by_state[s] {
+                                next_raw.push(*target);
+                            }
                         }
                     }
                 }

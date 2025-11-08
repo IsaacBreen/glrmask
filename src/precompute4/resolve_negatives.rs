@@ -168,16 +168,25 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
 
                     for (b_reachable, w_b_br) in eps_closure_of_b {
                         if b_reachable >= states.len() { continue; }
-                        let targets_to_use = if let Some(targets) = states[b_reachable].transitions.get(&c) {
-                            targets
-                        } else {
-                            &states[b_reachable].default
-                        };
+                        let state_br = &states[b_reachable];
 
-                        for (c_target, w_br_c) in targets_to_use {
-                            let new_w = w_ab & &w_b_br & w_br_c;
-                            if !new_w.is_empty() {
-                                pass_epsilons.push((a, *c_target, new_w));
+                        // Labeled transitions
+                        if let Some(targets) = state_br.transitions.get(&c) {
+                            for (c_target, w_br_c) in targets {
+                                let new_w = w_ab & &w_b_br & w_br_c;
+                                if !new_w.is_empty() {
+                                    pass_epsilons.push((a, *c_target, new_w));
+                                }
+                            }
+                        }
+
+                        // Default transitions
+                        for def in &state_br.default {
+                            if !def.exceptions.contains(&c) {
+                                let new_w = w_ab & &w_b_br & &def.weight;
+                                if !new_w.is_empty() {
+                                    pass_epsilons.push((a, def.target, new_w));
+                                }
                             }
                         }
                     }
