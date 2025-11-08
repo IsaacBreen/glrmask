@@ -12,58 +12,97 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::RangeInclusive;
 use std::time::Instant;
 
-/// This determinization is a complete rewrite. It follows a principled construction:
-/// 1) Extract a minimal disjoint partition of the weight space (atoms), by splitting at
-///    all range boundaries appearing in any edge/default/epsilon/final weight of the NWA.
-///    Each "atom" is a contiguous usize interval; every original weight is a union of atoms.
-/// 2) For each atom, build an unweighted NFA by keeping only those edges/defaults/epsilons/finals
-///    whose weights intersect that atom. Determinize this NFA to a DFA over a finite alphabet
-///    Sigma' = { all labels appearing anywhere in the NWA } ∪ { OTHER }, where OTHER means:
-///      "use state's default targets when there is no exception for that label."
-///    Then minimize the DFA (Hopcroft).
-/// 3) Combine all atom-DFAs into a single deterministic product DFA by parallel composition
-///    across components (one component per atom). The product DFA has a single start state
-///    (tuple of per-atom starts) and reads the original word labels (from Sigma').
-/// 4) Convert the product DFA into a DWA:
-///    - Each product state P = (q_0, q_1, ..., q_{k-1}) has an "active weight" equal to the union of
-///      atom-weights for components i where q_i is not the component's sink state (if any).
-///      We attach this active weight to all outgoing edges from P.
-///    - Each labeled edge (exception label) carries the active weight; the transition target is deterministic.
-///    - The default edge (OTHER) also carries the active weight.
-///    - The final weight of P is the union of atom-weights for components in which q_i is accepting.
-///    This construction yields a correct DWA: for any input word, each atom either remains "alive"
-///    (never falls into its component sink) and ends in a final component, contributing that atom's range
-///    to the final weight; otherwise it is filtered out by the final state's weight.
-///
-/// This DWA is then simplified (minimized structurally and normalized) using the existing passes.
+/*
+Shared-minimization determinization (NO synchronous product):
+
+High-level outline:
+1) Compute weight atoms: a disjoint partition of the weight space (Vec<RangeInclusive<usize>>),
+   with a cached Weight for each atom. Let k = number of atoms.
+
+2) Build the alphabet Sigma' = (all explicit labels used anywhere in NWA) ∪ {OTHER}, filtered
+   by future-acceptance masks as before. Its size is base_a = labels.len() + 1 (OTHER).
+
+3) For each atom i (0..k-1):
+   - Build an NFA restricted to that atom (keep only edges whose weights intersect the atom).
+   - Determinize to a complete DFA over Sigma'.
+   - Minimize the DFA.
+   - Optionally record a sink state index in this DFA (complete self-loop, non-accepting).
+
+4) Combine all k minimized DFAs into a single "combined" complete DFA over an extended alphabet:
+   - Extended alphabet size A_ext = base_a + k, where the last k symbols are "ENTRY_i" (one per atom).
+   - Add a fresh super_start (id=0) and a global sink (id=1).
+   - From super_start, on symbol ENTRY_i, jump to the start state of DFA_i (offset in the combined graph).
+   - All base symbols from super_start go to the sink.
+   - For every state of DFA_i, base-symbol transitions copy over; ENTRY_* symbols lead to the global sink.
+   - All sink transitions loop to itself.
+
+   Keep an "origin" vector mapping each combined-old-state to (component_index, local_state_index)
+   for states originating from some DFA_i; super_start and sink have None.
+
+5) Minimize the combined DFA once (Hopcroft), getting a partition mapping old->new states.
+
+6) Compute per-minimized-state weights:
+   - For each old combined state that originated from component i and local state s:
+       let new = old_to_new[old].
+       If s is not the sink of component i, add atom_weight[i] to w_live[new].
+       If s is accepting in component i, add atom_weight[i] to w_final[new].
+
+7) Choose a DWA start state: image of (most common) component-start among i=0..k-1.
+   - Ideally all component starts map to the same minimized state; if not, choose the most frequent one
+     and continue. We log a debug message when starts disagree.
+
+8) Build the final DWA:
+   - Number of states = number of states in the minimized combined DFA.
+   - For each state s, set its final_weight = w_final[s] (if non-empty).
+   - For each state s, set a default transition on OTHER to minimized_dfa.trans[s][other_index],
+     with trans weight = w_live[s]. Then, for each explicit label l, let dst = trans[s][l_index];
+     if dst != default_dst, add exception transition on label l to dst with the same w_live[s].
+   - Set DWA.start_state = chosen minimized start.
+
+This construction shares as much structure as possible across per-atom components, avoids the
+explicit synchronous product blow-up, and assigns weights per edge (and finals) by aggregating
+over the atoms for which that edge/state is relevant.
+
+Note: This approach relies on the fact that DFA minimization merges only states whose full
+transition behavior (on the base alphabet) is identical, so using a single target per label
+per state is always consistent.
+*/
+
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now_total = Instant::now();
 
-        // Always work on a simplified copy of the NWA to avoid redundant structure.
+        // Work on a clone of the NWA.
         let mut nwa = self.clone();
         debug_log(3, || format!("Starting determinization for NWA with {} states", nwa.states.len()));
 
-        // Compute future-acceptance masks once. We will use them to prune atoms and shrink the alphabet.
+        // Compute future-acceptance masks (used to filter the alphabet).
         let fut = nwa.compute_future_weights();
 
-        // 1) Build the atomic partition of weights (disjoint contiguous ranges).
+        // 1) Weight atoms (disjoint partition)
         let now_atoms = Instant::now();
         let atoms = WeightPartition::from_nwa(&nwa);
         debug_log(4, || {
             format!("Built weight partition with {} atoms in {:?}", atoms.intervals.len(), now_atoms.elapsed())
         });
 
-        // 2) Build global alphabet (all labels used anywhere) + OTHER
+        // Edge case: no atoms => no weight can be produced => return trivial DWA.
+        if atoms.intervals.is_empty() {
+            let dwa = DWA::new();
+            debug_log(3, || format!("No atoms -> returning trivial DWA in {:?}", now_total.elapsed()));
+            return dwa;
+        }
+
+        // 2) Base alphabet Sigma' over explicit labels plus OTHER
         let now_sigma = Instant::now();
-        // Filter the alphabet using the future-acceptance masks:
-        // we only keep labels that can contribute to acceptance along some path
         let sigma = Alphabet::from_nwa_with_future(&nwa, &fut);
+        let base_a = sigma.size();
+        let other_index = sigma.other_index;
         debug_log(4, || {
-            format!("Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed())
+            format!("Built alphabet with {} labels (base size {}) in {:?}", sigma.labels.len(), base_a, now_sigma.elapsed())
         });
 
-        // 3) For each atom, build and minimize a DFA.
+        // 3) For each atom, build and minimize DFA_i
         let pb_atoms = if PROGRESS_BAR_ENABLED {
             Some(
                 ProgressBar::new(atoms.intervals.len() as u64).with_style(
@@ -96,35 +135,131 @@ impl NWA {
             p.finish_with_message("Per-atom DFAs built & minimized");
         }
 
-        // Edge case: If no atoms (i.e., union of all weights is empty), return an empty DWA quickly.
-        if atoms.intervals.is_empty() {
-            // No weight can ever be produced: produce a trivial 1-state DWA (non-final, no edges).
-            let mut dwa = DWA::new();
-            return dwa;
-        }
-
-        // 4) Build product DFA over components (parallel composition).
-        let now_product = Instant::now();
-        let product = ProductDFA::from_components(&comp_dfas, &sigma);
+        // 4) Build combined pre-DFA (with ENTRY symbols)
+        let now_comb = Instant::now();
+        let combined = CombinedPreDFA::build(&comp_dfas, base_a, other_index);
         debug_log(4, || {
             format!(
-                "Product DFA: states={}, alphabet_size={}, time={:?}",
-                product.n_states, sigma.size(), now_product.elapsed()
+                "Combined pre-DFA: states={}, alphabet_size={}, (base={}, entries={}), time={:?}",
+                combined.dfa.n_states,
+                combined.alphabet_size(),
+                base_a,
+                combined.num_entries(),
+                now_comb.elapsed()
             )
         });
 
-        // 5) Convert product DFA to DWA (attach weights).
-        let now_convert = Instant::now();
-        let dwa = product.to_dwa(&sigma, &atoms, &comp_dfas, &comp_sinks);
-        debug_log(4, || {
-            format!("Product->DWA conversion took {:?}", now_convert.elapsed())
-        });
+        // 5) Minimize combined DFA once, and capture old->new mapping.
+        let now_min = Instant::now();
+        let (min_dfa, old_to_new) = combined.dfa.clone().minimized_with_mapping(combined.alphabet_size());
+        crate::debug!(4,
+            format!(
+                "Combined DFA minimized: states {} -> {} in {:?}",
+                combined.dfa.n_states,
+                min_dfa.n_states,
+                now_min.elapsed()
+            )
+        );
 
-        // 6) Simplify DWA
-        let mut dwa = dwa;
+        // 6) Compute per-minimized-state weights (live and final) by aggregating origins.
+        let mut w_live = vec![Weight::zeros(); min_dfa.n_states];
+        let mut w_final = vec![Weight::zeros(); min_dfa.n_states];
+
+        for old in 0..combined.dfa.n_states {
+            let new = old_to_new[old];
+            if new == usize::MAX {
+                continue;
+            }
+            if let Some((ci, si)) = combined.origin[old] {
+                let atom_w = &atoms.atoms[ci];
+
+                // Live if not sink in component ci
+                let is_sink = match comp_sinks[ci] {
+                    Some(sk) => si == sk,
+                    None => false,
+                };
+                if !is_sink {
+                    w_live[new] |= atom_w;
+                }
+
+                // Final if accepting in component ci
+                if comp_dfas[ci].finals[si] {
+                    w_final[new] |= atom_w;
+                }
+            }
+        }
+
+        // 7) Choose a start state: ideally all per-atom starts map to the same minimized state.
+        // Count per minimized state the number of component starts that mapped to it.
+        let mut start_counts: HashMap<usize, usize> = HashMap::new();
+        for (ci, dfa) in comp_dfas.iter().enumerate() {
+            let old_start = combined.offsets[ci] + dfa.start;
+            let new = old_to_new[old_start];
+            if new != usize::MAX {
+                *start_counts.entry(new).or_insert(0) += 1;
+            }
+        }
+        let (chosen_start, total_starts, distinct_start_targets) = {
+            let mut best = (0usize, 0usize);
+            for (sid, cnt) in &start_counts {
+                if *cnt > best.1 {
+                    best = (*sid, *cnt);
+                }
+            }
+            (best.0, comp_dfas.len(), start_counts.len())
+        };
+        if distinct_start_targets > 1 {
+            crate::debug!(
+                2,
+                "Shared-minimization: component start states map to {} distinct minimized states; \
+                 choosing the most frequent one (sid={} with {}/{} starts).",
+                distinct_start_targets,
+                chosen_start,
+                start_counts.get(&chosen_start).copied().unwrap_or(0),
+                total_starts
+            );
+        } else {
+            crate::debug!(4, "All component starts map to common minimized state {}", chosen_start);
+        }
+
+        // 8) Build the final DWA: states = min_dfa.n_states; transitions copy min_dfa (base alphabet);
+        //    weights = w_live for edges and w_final for finals.
+        let mut dwa_states = DWAStates::default();
+        for _ in 0..min_dfa.n_states {
+            dwa_states.add_state();
+        }
+        let mut dwa = DWA {
+            states: dwa_states,
+            body: DWABody { start_state: chosen_start },
+        };
+
+        // Assign final weights
+        for sid in 0..min_dfa.n_states {
+            if !w_final[sid].is_empty() {
+                let _ = dwa.set_final_weight(sid, w_final[sid].clone());
+            }
+        }
+
+        // Assign transitions & edge-weights using base alphabet only.
+        // Default transition = OTHER column; exceptions for labels that differ from default target.
+        for sid in 0..min_dfa.n_states {
+            let edge_weight = w_live[sid].clone();
+
+            // Default
+            let def_dst = min_dfa.trans[sid][other_index];
+            let _ = dwa.set_default_transition(sid, def_dst, edge_weight.clone());
+
+            // Exceptions
+            for (li, &lbl) in sigma.labels.iter().enumerate() {
+                let dst = min_dfa.trans[sid][li];
+                if dst != def_dst {
+                    let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
+                }
+            }
+        }
 
         debug_log(3, || {
-            format!("NWA::determinize_to_dwa total time: {:?}", now_total.elapsed())
+            format!("NWA::determinize_to_dwa (shared-minimization) total time: {:?}", now_total.elapsed())
         });
 
         dwa
@@ -205,10 +340,6 @@ impl Alphabet {
     #[inline]
     fn index_of_label(&self, l: i16) -> Option<usize> {
         self.labels.binary_search(&l).ok()
-    }
-    #[inline]
-    fn is_other(&self, sym: usize) -> bool {
-        sym == self.other_index
     }
     #[inline]
     fn label_at(&self, sym: usize) -> Option<i16> {
@@ -331,7 +462,7 @@ impl WeightPartition {
 }
 
 /* ------------------------------
-   Per-atom NFA and DFA
+   Per-atom NFA and DFA (unchanged core)
    ------------------------------ */
 
 /// An NFA specialized for a single atom:
@@ -592,8 +723,7 @@ impl PerAtomNFA {
                         }
                     }
                     None => {
-                        // OTHER: for any symbol not in sigma.labels, no state has an exception,
-                        // so we take all default transitions.
+                        // OTHER: take all default transitions.
                         for &s in &subset {
                             for (target, _) in &self.def_by_state[s] {
                                 next_raw.push(*target);
@@ -689,6 +819,114 @@ struct DetDFA {
 impl DetDFA {
     fn minimize(&mut self, sigma: &Alphabet) {
         debug_log(4, || format!("Minimizing DFA with {} states", self.n_states));
+        self.minimize_inner(sigma.size());
+    }
+
+    fn find_sink_index(&self, sigma: &Alphabet) -> Option<usize> {
+        'outer: for s in 0..self.n_states {
+            if self.finals[s] {
+                continue;
+            }
+            for sym in 0..sigma.size() {
+                if self.trans[s][sym] != s {
+                    continue 'outer;
+                }
+            }
+            return Some(s);
+        }
+        None
+    }
+
+    /// Minimize and return mapping from old to new indices.
+    fn minimized_with_mapping(mut self, alphabet_size: usize) -> (DetDFA, Vec<usize>) {
+        // 1) Remove unreachable from start
+        let reachable = {
+            let mut visited = vec![false; self.n_states];
+            let mut q = VecDeque::new();
+            visited[self.start] = true;
+            q.push_back(self.start);
+            while let Some(u) = q.pop_front() {
+                for sym in 0..alphabet_size {
+                    let v = self.trans[u][sym];
+                    if !visited[v] {
+                        visited[v] = true;
+                        q.push_back(v);
+                    }
+                }
+            }
+            visited
+        };
+        let mut old_to_compact = vec![usize::MAX; self.n_states];
+        let mut n_compact = 0usize;
+        for s in 0..self.n_states {
+            if reachable[s] {
+                old_to_compact[s] = n_compact;
+                n_compact += 1;
+            }
+        }
+        if n_compact == 0 {
+            // Create trivial dead DFA
+            let out = DetDFA {
+                n_states: 1,
+                start: 0,
+                finals: vec![false],
+                trans: vec![vec![0; alphabet_size]],
+            };
+            let mapping = vec![0usize; self.n_states];
+            return (out, mapping);
+        }
+
+        let mut finals_c = vec![false; n_compact];
+        let mut trans_c = vec![vec![0usize; alphabet_size]; n_compact];
+        for old in 0..self.n_states {
+            let nc = old_to_compact[old];
+            if nc == usize::MAX {
+                continue;
+            }
+            finals_c[nc] = self.finals[old];
+            for sym in 0..alphabet_size {
+                trans_c[nc][sym] = old_to_compact[self.trans[old][sym]];
+            }
+        }
+        let start_c = old_to_compact[self.start];
+
+        // 2) Hopcroft on compact DFA
+        let (part_id, reps, num_parts) = hopcroft_minimize(&finals_c, &trans_c, alphabet_size);
+
+        // 3) Build quotient DFA
+        let mut finals2 = vec![false; num_parts];
+        for pid in 0..num_parts {
+            finals2[pid] = finals_c[reps[pid]];
+        }
+        let mut trans2 = vec![vec![0usize; alphabet_size]; num_parts];
+        for pid in 0..num_parts {
+            let s = reps[pid];
+            for sym in 0..alphabet_size {
+                let v = trans_c[s][sym];
+                trans2[pid][sym] = part_id[v];
+            }
+        }
+        let start2 = part_id[start_c];
+        let minimized = DetDFA {
+            n_states: num_parts,
+            start: start2,
+            finals: finals2,
+            trans: trans2,
+        };
+
+        // 4) Build mapping old->new
+        let mut old_to_new = vec![usize::MAX; self.n_states];
+        for old in 0..self.n_states {
+            let c = old_to_compact[old];
+            if c != usize::MAX {
+                old_to_new[old] = part_id[c];
+            }
+        }
+
+        (minimized, old_to_new)
+    }
+
+    fn minimize_inner(&mut self, alphabet_size: usize) {
         // Remove states unreachable from start first
         let reachable = {
             let mut visited = vec![false; self.n_states];
@@ -696,7 +934,8 @@ impl DetDFA {
             visited[self.start] = true;
             q.push_back(self.start);
             while let Some(u) = q.pop_front() {
-                for &v in &self.trans[u] {
+                for sym in 0..alphabet_size {
+                    let v = self.trans[u][sym];
                     if !visited[v] {
                         visited[v] = true;
                         q.push_back(v);
@@ -721,12 +960,12 @@ impl DetDFA {
             self.n_states = 1;
             self.start = 0;
             self.finals = vec![false];
-            self.trans = vec![vec![0; sigma.size()]];
+            self.trans = vec![vec![0; alphabet_size]];
             return;
         }
 
         let mut finals = vec![false; new_states];
-        let mut trans = vec![vec![0usize; sigma.size()]; new_states];
+        let mut trans = vec![vec![0usize; alphabet_size]; new_states];
 
         for i in 0..self.n_states {
             if !reachable[i] {
@@ -734,7 +973,7 @@ impl DetDFA {
             }
             let ni = map[i];
             finals[ni] = self.finals[i];
-            for a in 0..sigma.size() {
+            for a in 0..alphabet_size {
                 let v = self.trans[i][a];
                 trans[ni][a] = map[v];
             }
@@ -751,7 +990,7 @@ impl DetDFA {
         }
 
         let n = self.n_states;
-        let a = sigma.size();
+        let a = alphabet_size;
 
         // Initial partition: accepting vs non-accepting
         let mut part_id = vec![0usize; n];
@@ -770,7 +1009,7 @@ impl DetDFA {
         let mut inv: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); n]; a];
         for s in 0..n { for sym in 0..a { let v = self.trans[s][sym]; inv[sym][v].push(s); } }
 
-        // Worklist of (block id, symbol). Using BTreeSet for efficient presence checks and removal.
+        // Worklist of (block id, symbol).
         let mut worklist: BTreeSet<(usize, usize)> = BTreeSet::new();
         let smaller_initial_set = if blocks[0].len() <= blocks[1].len() { 0 } else { 1 };
         for sym in 0..a {
@@ -888,224 +1127,252 @@ impl DetDFA {
         self.finals = finals2;
         self.trans = trans2;
     }
+}
 
-    /// Find an index of a sink state (if any), defined as a non-accepting state whose transitions on all symbols loop to itself.
-    fn find_sink_index(&self, sigma: &Alphabet) -> Option<usize> {
-        'outer: for s in 0..self.n_states {
-            if self.finals[s] {
-                continue;
-            }
-            for sym in 0..sigma.size() {
-                if self.trans[s][sym] != s {
-                    continue 'outer;
+/// Hopcroft minimization for complete DFAs (returns partition id per state, representatives, and count)
+fn hopcroft_minimize(
+    finals: &Vec<bool>,
+    trans: &Vec<Vec<usize>>,
+    alphabet_size: usize,
+) -> (Vec<usize>, Vec<usize>, usize) {
+    let n = finals.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new(), 0);
+    }
+    if n == 1 {
+        return (vec![0], vec![0], 1);
+    }
+
+    // Initial partition: accepting vs non-accepting
+    let mut part_id = vec![0usize; n];
+    let mut blocks: Vec<Vec<usize>> = Vec::new();
+    let (accepting_block, non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| finals[s]);
+
+    if accepting_block.is_empty() || non_accepting_block.is_empty() {
+        // All accepting or all non-accepting -> nothing to split
+        let mut reps = vec![0usize];
+        reps[0] = 0;
+        for i in 0..n {
+            part_id[i] = 0;
+        }
+        return (part_id, reps, 1);
+    }
+
+    blocks.push(accepting_block);
+    blocks.push(non_accepting_block);
+    for (pid, block) in blocks.iter().enumerate() {
+        for &s in block {
+            part_id[s] = pid;
+        }
+    }
+
+    // Build inverse transitions for each symbol
+    let mut inv: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); n]; alphabet_size];
+    for s in 0..n {
+        for sym in 0..alphabet_size {
+            let v = trans[s][sym];
+            inv[sym][v].push(s);
+        }
+    }
+
+    // Worklist
+    let mut worklist: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let smaller_initial_set = if blocks[0].len() <= blocks[1].len() { 0 } else { 1 };
+    for sym in 0..alphabet_size {
+        worklist.insert((smaller_initial_set, sym));
+    }
+
+    while let Some(&(b, sym)) = worklist.iter().next() {
+        worklist.remove(&(b, sym));
+
+        // Compute preimage of block b under symbol sym
+        let mut pre: Vec<usize> = Vec::new();
+        for &v in &blocks[b] {
+            pre.extend_from_slice(&inv[sym][v]);
+        }
+        if pre.is_empty() {
+            continue;
+        }
+        pre.sort_unstable();
+        pre.dedup();
+
+        // For each block, split by intersection with pre
+        let mut affected: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
+        for &s in &pre {
+            let pid = part_id[s];
+            affected.entry(pid).or_default().0.push(s);
+        }
+        for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
+            // Fill not_in_pre
+            for &s in &blocks[*pid] {
+                if !in_pre.binary_search(&s).is_ok() {
+                    not_in_pre.push(s);
                 }
             }
-            return Some(s);
         }
-        None
+
+        let mut to_replace: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
+
+        for (pid, (in_pre, not_in_pre)) in affected.into_iter() {
+            if in_pre.is_empty() || not_in_pre.is_empty() {
+                continue;
+            }
+            to_replace.push((pid, in_pre, not_in_pre));
+        }
+
+        if to_replace.is_empty() {
+            continue;
+        }
+
+        // Apply replacements (block splits)
+        for (pid, mut in_pre, mut not_in_pre) in to_replace {
+            in_pre.sort_unstable();
+            not_in_pre.sort_unstable();
+
+            let pid2 = blocks.len();
+            blocks.push(not_in_pre);
+            blocks[pid] = in_pre;
+
+            // Update part_id map for all states in the newly created blocks
+            for &s in &blocks[pid] {
+                part_id[s] = pid;
+            }
+            for &s in &blocks[pid2] {
+                part_id[s] = pid2;
+            }
+
+            // Update worklist according to Hopcroft's algorithm
+            for sym2 in 0..alphabet_size {
+                if worklist.remove(&(pid, sym2)) {
+                    worklist.insert((pid, sym2));
+                    worklist.insert((pid2, sym2));
+                } else {
+                    let (smaller_pid, _) = if blocks[pid].len() <= blocks[pid2].len() { (pid, pid2) } else { (pid2, pid) };
+                    worklist.insert((smaller_pid, sym2));
+                }
+            }
+        }
     }
+
+    let num_parts = blocks.len();
+    let mut reps: Vec<usize> = vec![0; num_parts];
+    for (pid, block) in blocks.iter().enumerate() {
+        reps[pid] = block[0];
+    }
+
+    (part_id, reps, num_parts)
 }
 
 /* ------------------------------
-   Product DFA and conversion to DWA
+   Combined pre-DFA builder (ENTRY trick)
    ------------------------------ */
 
-#[derive(Clone, Debug)]
-struct ProductDFA {
-    n_states: usize,
-    start: usize,
-    finals: Vec<bool>,
-    trans: Vec<Vec<usize>>, // [state][symbol] -> next state
-    // Additionally keep the tuple of component states for each product state:
-    tuples: Vec<Vec<usize>>, // tuples[state] = [q0, q1, ..., q_{k-1}]
+/// Combined pre-DFA built from component DFAs and k ENTRY symbols.
+///
+/// Alphabet size = base_a + k (k entry symbols).
+/// State 0 = super_start; State 1 = global sink.
+/// For each component i:
+///   - offset[i] is starting index of DFA_i's states inside the combined graph
+///   - For state s in DFA_i:
+///       - base transitions copied from DFA_i
+///       - all ENTRY_* transitions go to sink
+/// Super_start:
+///   - on base symbols -> sink
+///   - on ENTRY_i -> offset[i] + DFA_i.start
+///
+/// Also stores 'origin' per old-state: Some((comp_i, local_state)) for component states; None for super_start and sink.
+struct CombinedPreDFA {
+    dfa: DetDFA,
+    origin: Vec<Option<(usize, usize)>>, // length = dfa.n_states
+    offsets: Vec<usize>,                  // per component i, offset
+    base_a: usize,
+    other_index: usize,
+    k_entries: usize,
+    super_start: usize,
+    sink: usize,
 }
-impl ProductDFA {
-    fn from_components(comps: &[DetDFA], sigma: &Alphabet) -> Self {
+impl CombinedPreDFA {
+    fn build(comps: &[DetDFA], base_a: usize, other_index: usize) -> Self {
         let k = comps.len();
-        // Starting tuple: [start0, start1, ..., start_{k-1}]
-        let mut start_tuple = Vec::with_capacity(k);
-        for c in comps {
-            start_tuple.push(c.start);
+        let a_ext = base_a + k;
+
+        // Reserve 0: super_start, 1: sink
+        let super_start = 0usize;
+        let sink = 1usize;
+
+        let mut offsets: Vec<usize> = Vec::with_capacity(k);
+        let mut next = 2usize;
+        for dfa in comps {
+            offsets.push(next);
+            next += dfa.n_states;
         }
+        let n_total = next;
 
-        let mut map: HashMap<Vec<usize>, usize> = HashMap::new();
-        let mut tuples: Vec<Vec<usize>> = Vec::new();
-        let mut finals: Vec<bool> = Vec::new();
-        let mut trans: Vec<Vec<usize>> = Vec::new();
+        // Initialize
+        let mut trans = vec![vec![sink; a_ext]; n_total];
+        let mut finals = vec![false; n_total];
+        let mut origin = vec![None; n_total];
 
-        let pb_product = if PROGRESS_BAR_ENABLED {
-            let p = ProgressBar::new_spinner();
-            p.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] Building product DFA... States found: {pos}")
-                    .unwrap(),
-            );
-            Some(p)
-        } else {
-            None
-        };
-
-        let mut intern = |tuple: Vec<usize>,
-                          map: &mut HashMap<Vec<usize>, usize>,
-                          tuples: &mut Vec<Vec<usize>>,
-                          finals: &mut Vec<bool>,
-                          trans: &mut Vec<Vec<usize>>| {
-            if let Some(&id) = map.get(&tuple) {
-                return id;
-            }
-            let id = tuples.len();
-            let is_final = tuple.iter().enumerate().any(|(i, &s)| comps[i].finals[s]);
-            tuples.push(tuple.clone());
-            finals.push(is_final);
-            trans.push(vec![0usize; sigma.size()]);
-            map.insert(tuple, id);
-            id
-        };
-
-        let start = intern(start_tuple, &mut map, &mut tuples, &mut finals, &mut trans);
-        if let Some(p) = &pb_product {
-            p.set_position(tuples.len() as u64);
+        // Sink loops
+        for sym in 0..a_ext {
+            trans[sink][sym] = sink;
         }
+        finals[sink] = false;
 
-        let mut q = VecDeque::new();
-        q.push_back(start);
+        // Super_start: base -> sink (already), ENTRY_i -> component i start
+        for i in 0..k {
+            let entry_col = base_a + i;
+            let target = offsets[i] + comps[i].start;
+            trans[super_start][entry_col] = target;
+        }
+        finals[super_start] = false;
 
-        while let Some(u) = q.pop_front() {
-            let tuple = tuples[u].clone();
-            for sym in 0..sigma.size() {
-                // build next tuple by composing per-component transitions
-                let mut next_tuple = Vec::with_capacity(k);
-                for (i, comp) in comps.iter().enumerate() {
-                    let s = tuple[i];
-                    let v = comp.trans[s][sym];
-                    next_tuple.push(v);
+        // Components
+        for (ci, dfa) in comps.iter().enumerate() {
+            let off = offsets[ci];
+            for s in 0..dfa.n_states {
+                let csid = off + s;
+                origin[csid] = Some((ci, s));
+                finals[csid] = dfa.finals[s];
+                // Base transitions
+                for sym in 0..base_a {
+                    let v = dfa.trans[s][sym];
+                    trans[csid][sym] = off + v;
                 }
-                let v = if let Some(&id) = map.get(&next_tuple) {
-                    id
-                } else {
-                    let id = tuples.len();
-                    let is_final = next_tuple.iter().enumerate().any(|(i, &s)| comps[i].finals[s]);
-                    tuples.push(next_tuple.clone());
-                    finals.push(is_final);
-                    trans.push(vec![0usize; sigma.size()]);
-                    map.insert(next_tuple, id);
-                    if let Some(p) = &pb_product {
-                        p.set_position(tuples.len() as u64);
-                    }
-                    q.push_back(id);
-                    id
-                };
-                trans[u][sym] = v;
+                // ENTRY transitions -> sink (already initialized)
+                for ent in base_a..a_ext {
+                    trans[csid][ent] = sink;
+                }
             }
         }
 
-        if let Some(p) = pb_product {
-            p.finish_with_message(format!("Product DFA built with {} states", tuples.len()));
-        }
-
-        ProductDFA {
-            n_states: tuples.len(),
-            start,
-            finals,
-            trans,
-            tuples,
+        CombinedPreDFA {
+            dfa: DetDFA {
+                n_states: n_total,
+                start: super_start,
+                finals,
+                trans,
+            },
+            origin,
+            offsets,
+            base_a,
+            other_index,
+            k_entries: k,
+            super_start,
+            sink,
         }
     }
 
-    /// Convert this product DFA into a DWA:
-    /// - One DWA state per product DFA state.
-    /// - Edge weights: active indices at source state (union over atoms whose component is not sink).
-    /// - Final weights: union over atoms whose component is accepting at that state.
-    fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, comps: &[DetDFA], comp_sinks: &[Option<usize>]) -> DWA {
-        let mut dwa_states = DWAStates::default();
-        for _ in 0..self.n_states {
-            dwa_states.add_state();
-        }
-        let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: self.start } };
-
-        // Precompute per-atom weight
-        let atom_weights: &Vec<Weight> = &atoms.atoms;
-
-        let pb_convert = if PROGRESS_BAR_ENABLED {
-            let p = ProgressBar::new(self.n_states as u64);
-            p.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Attaching DWA weights)")
-                    .unwrap(),
-            );
-            Some(p)
-        } else {
-            None
-        };
-
-        // Helper: compute W_live(state_id) = union of atoms for components that are not in sink at this state.
-        let mut w_live_cache: Vec<Weight> = Vec::with_capacity(self.n_states);
-        for sid in 0..self.n_states {
-            let mut w = Weight::zeros();
-            for (i, &s_i) in self.tuples[sid].iter().enumerate() {
-                if let Some(sink_idx) = comp_sinks[i] {
-                    if s_i == sink_idx {
-                        continue;
-                    }
-                }
-                // add atom i
-                w |= &atom_weights[i];
-            }
-            w_live_cache.push(w);
-        }
-
-        // Final weights
-        for sid in 0..self.n_states {
-            if !self.finals[sid] {
-                continue;
-            }
-            let mut w_final = Weight::zeros();
-            for (i, &s_i) in self.tuples[sid].iter().enumerate() {
-                if comps[i].finals[s_i] {
-                    w_final |= &atom_weights[i];
-                }
-            }
-            if !w_final.is_empty() {
-                let _ = dwa.set_final_weight(sid, w_final);
-            }
-        }
-
-        // Transitions
-        for sid in 0..self.n_states {
-            if let Some(p) = &pb_convert {
-                p.inc(1);
-            }
-            // Always emit transitions to keep the DWA total. Use zero weight if no atom is live.
-            let edge_weight = if w_live_cache[sid].is_empty() {
-                Weight::zeros()
-            } else {
-                w_live_cache[sid].clone()
-            };
-
-            // Default (OTHER)
-            let dst_def = self.trans[sid][sigma.other_index];
-            if sid < dwa.states.len() && dst_def < dwa.states.len() {
-                // Create/overwrite default transition
-                let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
-            }
-
-            // Exceptions for each explicit label
-            for (li, &lbl) in sigma.labels.iter().enumerate() {
-                let dst = self.trans[sid][li];
-                if sid < dwa.states.len() && dst < dwa.states.len() {
-                    let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
-                }
-            }
-        }
-
-        if let Some(p) = pb_convert {
-            p.finish_with_message("Attached DWA weights");
-        }
-
-        dwa
+    #[inline]
+    fn alphabet_size(&self) -> usize {
+        self.base_a + self.k_entries
+    }
+    #[inline]
+    fn num_entries(&self) -> usize {
+        self.k_entries
     }
 }
 
 /* ------------------------------
-   End of determinization.rs
+   End of combined-shared determinization
    ------------------------------ */
