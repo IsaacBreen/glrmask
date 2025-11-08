@@ -711,55 +711,95 @@ impl DWA {
 }
 
 impl NWA {
-    fn run_pass(
+    fn run_pass_with_test<F>(
+        &mut self,
         pb: &Option<ProgressBar>,
         msg: &str,
         changed_any: &mut bool,
-        mut pass: impl FnMut() -> bool,
-    ) {
+        mut pass: F,
+    ) where
+        F: FnMut(&mut NWA) -> bool,
+    {
         if let Some(p) = pb {
             p.set_message(msg.to_string());
         }
-        if pass() {
+
+        let is_checking = IN_SIMPLIFY_CHECK.with(|c| c.get());
+        let before_nwa = if !is_checking && STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
+
+        let changed = pass(self);
+
+        if let Some(before) = before_nwa {
+            if changed {
+                let after_nwa = self.clone();
+                IN_SIMPLIFY_CHECK.with(|c| c.set(true));
+                crate::debug!(1, "Stochastic testing NWA after pass: {}", msg);
+                test_weighted_automata::stochastic_equivalence_test(
+                    DWA::from(before),
+                    DWA::from(after_nwa),
+                );
+                IN_SIMPLIFY_CHECK.with(|c| c.set(false));
+            }
+        }
+
+        if changed {
             *changed_any = true;
         }
     }
 
     pub fn simplify(&mut self) -> bool {
+        let is_checking = IN_SIMPLIFY_CHECK.with(|c| c.get());
+        let before_simplify = if !is_checking && STOCHASTIC_DEBUG { Some(self.clone()) } else { None };
+
         let now = Instant::now();
         let initial_n = self.states.len();
         let max_passes = 12;
         let pb = if PROGRESS_BAR_ENABLED {
             let p = ProgressBar::new(max_passes as u64);
             p.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Simplifying NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
-                    .expect("progress-bar"),
+                ProgressStyle::default_bar().template("{spinner:.green} [Simplifying NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})").expect("progress-bar"),
             );
             Some(p)
         } else {
             None
         };
 
-        let mut changed = true;
+        let mut changed_ever = false;
+        let mut changed_in_pass = true;
         let mut passes = 0;
-        while changed && passes < max_passes {
+        while changed_in_pass && passes < max_passes {
             passes += 1;
             if let Some(p) = &pb { p.inc(1); }
-            changed = false;
-            Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
-            Self::run_pass(&pb, "unify final states", &mut changed, || self.unify_final_states());
-            Self::run_pass(&pb, "dedup epsilons", &mut changed, || self.dedup_epsilon_edges());
-            Self::run_pass(&pb, "bypass ε-chains", &mut changed, || self.bypass_trivial_epsilon_chains());
-            Self::run_pass(&pb, "collapse SCCs", &mut changed, || self.collapse_all_weight_epsilon_sccs());
-            Self::run_pass(&pb, "prune unreachable", &mut changed, || self.prune_unreachable());
-            Self::run_pass(&pb, "prune dead ends", &mut changed, || self.prune_dead_ends());
-            Self::run_pass(&pb, "merge equivalent", &mut changed, || self.merge_equivalent_states_partition());
-            Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
+            changed_in_pass = false;
+            self.run_pass_with_test(&pb, "normalize", &mut changed_in_pass, |s| s.normalize_edges_inplace());
+            self.run_pass_with_test(&pb, "unify final states", &mut changed_in_pass, |s| s.unify_final_states());
+            self.run_pass_with_test(&pb, "dedup epsilons", &mut changed_in_pass, |s| s.dedup_epsilon_edges());
+            self.run_pass_with_test(&pb, "bypass ε-chains", &mut changed_in_pass, |s| s.bypass_trivial_epsilon_chains());
+            self.run_pass_with_test(&pb, "collapse SCCs", &mut changed_in_pass, |s| s.collapse_all_weight_epsilon_sccs());
+            self.run_pass_with_test(&pb, "prune unreachable", &mut changed_in_pass, |s| s.prune_unreachable());
+            self.run_pass_with_test(&pb, "prune dead ends", &mut changed_in_pass, |s| s.prune_dead_ends());
+            self.run_pass_with_test(&pb, "merge equivalent", &mut changed_in_pass, |s| s.merge_equivalent_states_partition());
+            self.run_pass_with_test(&pb, "normalize", &mut changed_in_pass, |s| s.normalize_edges_inplace());
+
+            if changed_in_pass {
+                changed_ever = true;
+            }
         }
         if let Some(p) = &pb { p.finish_with_message(format!("Simplified to {} states", self.states.len())); }
         crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
-        self.states.len() != initial_n
+
+        if let Some(before) = before_simplify {
+            if changed_ever {
+                IN_SIMPLIFY_CHECK.with(|c| c.set(true));
+                test_weighted_automata::stochastic_equivalence_test(
+                    DWA::from(before),
+                    DWA::from(self.clone()),
+                );
+                IN_SIMPLIFY_CHECK.with(|c| c.set(false));
+            }
+        }
+
+        changed_ever
     }
 
     fn prune_unreachable(&mut self) -> bool {
