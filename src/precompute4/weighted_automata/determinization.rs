@@ -538,6 +538,7 @@ impl PerAtomNFA {
     }
 }
 
+/// Deterministic complete DFA (over Sigma').
 #[derive(Clone, Debug)]
 struct DetDFA {
     n_states: usize,
@@ -581,7 +582,7 @@ impl DetDFA {
             self.n_states = 1;
             self.start = 0;
             self.finals = vec![false];
-            self.trans = vec![vec![Some(0); sigma.size()]];
+            self.trans = vec![vec![None; sigma.size()]];
             return;
         }
 
@@ -796,6 +797,7 @@ impl DetDFA {
     }
 }
 
+/// Product DFA and conversion to DWA
 #[derive(Clone, Debug)]
 struct ProductDFA {
     n_states: usize,
@@ -854,7 +856,7 @@ impl ProductDFA {
         // Step 2: Group tuples by their canonical key (the map of active components)
         let mut classes: HashMap<BTreeMap<usize, usize>, Vec<usize>> = HashMap::new();
         for i in 0..n {
-            let key = all_tuples[i]
+            let key: BTreeMap<usize, usize> = all_tuples[i]
                 .iter()
                 .enumerate()
                 .filter_map(|(i, s_opt)| s_opt.map(|s| (i, s)))
@@ -903,11 +905,6 @@ impl ProductDFA {
             }
         }
 
-        crate::debug!(5, "ProductDFA: Merged {} tuples into {} states", n, n_states);
-        for (id, (ref members, ref repr, _active)) in class_list.iter().enumerate() {
-            crate::debug!(5, " State {}: representative {:?}, members {:?}", id, repr, members.iter().map(|&idx| &all_tuples[idx]).collect::<Vec<_>>());
-        }
-
         let start_id = tuple_to_id[&start_tuple];
 
         // Step 6: Build Product DFA structures
@@ -952,6 +949,10 @@ impl ProductDFA {
         }
     }
 
+    /// Convert this product DFA into a DWA:
+    /// - One DWA state per product DFA state.
+    /// - Edge weights: active indices at source state (union over atoms whose component is not sink).
+    /// - Final weights: union over atoms whose component is accepting at that state.
     fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, comps: &[DetDFA]) -> DWA {
         let mut dwa_states = DWAStates::default();
         for _ in 0..self.n_states {
