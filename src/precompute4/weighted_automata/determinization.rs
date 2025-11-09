@@ -1029,25 +1029,44 @@ impl ProductDFA {
     /// Groups product state tuples into equivalence classes.
     /// Returns a vector where `result[i]` is the group ID for `all_tuples[i]`.
     fn group_product_states(all_tuples: &[Vec<Option<usize>>]) -> Vec<usize> {
+        // This is a greedy, order-dependent implementation for clique partitioning.
+        // Two tuples can be in the same group if for any component, their states are
+        // either the same, or one of them is a sink (None).
         let n = all_tuples.len();
-        let mut group_ids = vec![0; n];
-        let mut key_to_group_id: HashMap<BTreeMap<usize, usize>, usize> = HashMap::new();
+        let mut group_ids = vec![usize::MAX; n];
+        // Each group is represented by its canonical "core", which is the superposition of the cores of its members.
+        let mut group_cores: Vec<BTreeMap<usize, usize>> = Vec::new();
         let mut next_group_id = 0;
 
         for (i, tuple) in all_tuples.iter().enumerate() {
-            // The key is the map of active components: component_idx -> state_idx
-            let key: BTreeMap<usize, usize> = tuple
+            let core: BTreeMap<usize, usize> = tuple
                 .iter()
                 .enumerate()
                 .filter_map(|(comp_idx, s_opt)| s_opt.map(|s| (comp_idx, s)))
                 .collect();
 
-            let group_id = *key_to_group_id.entry(key).or_insert_with(|| {
-                let id = next_group_id;
+            let mut assigned_gid = None;
+            // Find the first existing group that this tuple is compatible with.
+            for (gid, g_core) in group_cores.iter_mut().enumerate() {
+                let compatible = core.iter().all(|(k, v)| g_core.get(k).map_or(true, |v2| v == v2))
+                    && g_core.iter().all(|(k, v)| core.get(k).map_or(true, |v2| v == v2));
+
+                if compatible {
+                    // Add to this group and update the group's canonical core.
+                    g_core.extend(core.clone());
+                    assigned_gid = Some(gid);
+                    break;
+                }
+            }
+
+            let gid = assigned_gid.unwrap_or_else(|| {
+                // No compatible group found, create a new one.
+                let new_gid = next_group_id;
                 next_group_id += 1;
-                id
+                group_cores.push(core);
+                new_gid
             });
-            group_ids[i] = group_id;
+            group_ids[i] = gid;
         }
         group_ids
     }
