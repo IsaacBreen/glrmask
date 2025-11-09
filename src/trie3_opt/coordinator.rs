@@ -262,7 +262,7 @@ pub(crate) fn export_to_mini(
         desc = "Trie3 Export (create nodes)",
         total = all_nodes.len(),
         disable = !PROGRESS_BAR_ENABLED,
-        leave = true
+        leave = false
     );
     #[cfg(rustrover)]
     let it_create = all_nodes.iter();
@@ -296,29 +296,27 @@ pub(crate) fn export_to_mini(
 
         for (ek, dm) in r.children() {
             // Build token set
-            let mut toks = SortedSet::new();
-            if ek.1.is_all() {
-                toks = SortedSet::from_iter(0..=max_llm_token_id);
+            let toks = if ek.1.is_all() {
+                SortedSet::from_iter(0..=max_llm_token_id)
             } else {
-                for t in ek.1.iter() {
-                    toks.insert(t);
-                }
-            }
+                let valid_token_range: LLMTokenBV = (0..=max_llm_token_id).collect();
+                let relevant_tokens = &ek.1 & &valid_token_range;
+                SortedSet::from_iter(relevant_tokens.iter())
+            };
             if toks.is_empty() {
                 continue;
             }
-            let key = crate::trie3_opt::core::EdgeKey::new(ek.0, toks.clone());
+            let key = crate::trie3_opt::core::EdgeKey::new(ek.0, toks);
             for (dst, sids) in dm {
                 let dst_id = *map_old_to_new.get(dst).unwrap();
                 // Build state set
-                let mut st = SortedSet::new();
-                if sids.is_all() {
-                    st = SortedSet::from_iter(0..=max_state_id);
+                let st = if sids.is_all() {
+                    SortedSet::from_iter(0..=max_state_id)
                 } else {
-                    for s in sids.iter() {
-                        st.insert(s);
-                    }
-                }
+                    let valid_state_range: StateIDBV = (0..=max_state_id).collect();
+                    let relevant_states = sids & &valid_state_range;
+                    SortedSet::from_iter(relevant_states.iter())
+                };
                 if !st.is_empty() {
                     mini.add_edge(new_id, key.clone(), dst_id, st);
                 }
