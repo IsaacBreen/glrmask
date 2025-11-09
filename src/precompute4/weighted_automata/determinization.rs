@@ -1003,11 +1003,11 @@ impl ProductDFA {
                 p.inc(1);
             }
 
-            let edge_weight = &self.active_weights[sid];
 
             // Default (OTHER)
             let dst_def = self.trans[sid][sigma.other_index];
             if sid < dwa.states.len() && dst_def < dwa.states.len() {
+                let edge_weight = &self.active_weights[sid] & &self.active_weights[dst_def];
                 let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
             }
 
@@ -1015,6 +1015,7 @@ impl ProductDFA {
             for (li, &lbl) in sigma.labels.iter().enumerate() {
                 let dst = self.trans[sid][li];
                 if sid < dwa.states.len() && dst < dwa.states.len() {
+                    let edge_weight = &self.active_weights[sid] & &self.active_weights[dst];
                     let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
                 }
             }
