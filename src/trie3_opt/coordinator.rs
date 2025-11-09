@@ -253,6 +253,8 @@ pub(crate) fn export_to_mini(
 
     let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
+    crate::debug!(5, "[Trie3 Opt] Trie3:\n{}", Trie::pretty_print(trie3_god, &roots.values().cloned().collect::<Vec<_>>()));
+
     // First, create all nodes in MiniTrie and map old to new
     #[cfg(not(rustrover))]
     let it_create = kdam::tqdm!(
