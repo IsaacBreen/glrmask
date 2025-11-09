@@ -864,6 +864,14 @@ impl ProductDFA {
             classes.entry(key).or_default().push(i);
         }
 
+        debug_log(4, || format!("Grouped into {} classes", classes.len()));
+        for (_key, members) in classes.iter() {
+            debug_log(5, || format!(" Class of size {}:", members.len()));
+            for &idx in members {
+                debug_log(5, || format!("  {:?}", all_tuples[idx]));
+            }
+        }
+
         // Step 4: For each class, pick representative and compute active weight
         let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
         // (members, representative, active_weight)
