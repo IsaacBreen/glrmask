@@ -10,6 +10,7 @@ pub mod json;
 pub mod nwa;
 pub mod ops;
 pub mod simplification;
+mod test_determinization;
 
 pub use self::bitset::SimpleBitset;
 pub use self::common::{format_i16_char, format_pos_code, format_word, I16Map, NWAStateID, StateID, Weight};
