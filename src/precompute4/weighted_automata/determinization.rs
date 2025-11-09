@@ -47,14 +47,11 @@ impl NWA {
         };
 
         let mut comp_dfas: Vec<DetDFA> = Vec::with_capacity(atoms.intervals.len());
-        let mut comp_sinks: Vec<Option<usize>> = Vec::with_capacity(atoms.intervals.len());
         for (i, atom) in atoms.intervals.iter().enumerate() {
             let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
             let mut dfa = nfa.determinize(&sigma);
             dfa.minimize(&sigma);
             crate::debug!(4, "Atom {}: interval={:?}, DFA states={}", i, atom, dfa.n_states);
-            let sink = dfa.find_sink_index(&sigma);
-            comp_sinks.push(sink);
             comp_dfas.push(dfa);
             if let Some(p) = &pb_atoms {
                 p.inc(1);
@@ -70,7 +67,7 @@ impl NWA {
         }
 
         let now_product = Instant::now();
-        let product = ProductDFA::from_components(&comp_dfas, &sigma, &atoms, &comp_sinks);
+        let product = ProductDFA::from_components(&comp_dfas, &sigma, &atoms);
         debug_log(4, || {
             format!(
                 "Product DFA: states={}, alphabet_size={}, time={:?}",
@@ -532,39 +529,11 @@ impl PerAtomNFA {
             p.finish_with_message(format!("Subset construction done, {} states", states.len()));
         }
 
-        let needs_sink = trans.iter().any(|row| row.iter().any(|x| x.is_none()));
-        let mut sink_index: Option<usize> = None;
-
-        if needs_sink {
-            sink_index = Some(trans.len());
-            trans.push(vec![None; sigma.size()]);
-            finals.push(false);
-            states.push(Vec::new());
-        }
-
-        let mut out_trans: Vec<Vec<usize>> = Vec::with_capacity(trans.len());
-        for (i, row) in trans.iter().enumerate() {
-            let mut new_row = Vec::with_capacity(row.len());
-            for (_sym, dst) in row.iter().enumerate() {
-                match dst {
-                    Some(v) => new_row.push(*v),
-                    None => {
-                        if let Some(sink) = sink_index {
-                            new_row.push(sink);
-                        } else {
-                            new_row.push(i);
-                        }
-                    }
-                }
-            }
-            out_trans.push(new_row);
-        }
-
         DetDFA {
-            n_states: out_trans.len(),
+            n_states: states.len(),
             start: start_id,
             finals,
-            trans: out_trans,
+            trans,
         }
     }
 }
@@ -574,11 +543,11 @@ struct DetDFA {
     n_states: usize,
     start: usize,
     finals: Vec<bool>,
-    trans: Vec<Vec<usize>>,
+    trans: Vec<Vec<Option<usize>>>,
 }
 
 impl DetDFA {
-    fn minimize(&mut self, sigma: &Alphabet) {
+    fn minimize(&mut self, sigma: &Alphabet) { // TODO: This is complex, check if it's correct
         debug_log(4, || format!("Minimizing DFA with {} states", self.n_states));
         
         let reachable = {
@@ -587,7 +556,9 @@ impl DetDFA {
             visited[self.start] = true;
             q.push_back(self.start);
             while let Some(u) = q.pop_front() {
-                for &v in &self.trans[u] {
+                for &v_opt in &self.trans[u] {
+                    if v_opt.is_none() { continue; }
+                    let v = v_opt.unwrap();
                     if !visited[v] {
                         visited[v] = true;
                         q.push_back(v);
@@ -610,7 +581,7 @@ impl DetDFA {
             self.n_states = 1;
             self.start = 0;
             self.finals = vec![false];
-            self.trans = vec![vec![0; sigma.size()]];
+            self.trans = vec![vec![Some(0); sigma.size()]];
             return;
         }
 
@@ -624,8 +595,10 @@ impl DetDFA {
             let ni = map[i];
             finals[ni] = self.finals[i];
             for a in 0..sigma.size() {
-                let v = self.trans[i][a];
-                trans[ni][a] = map[v];
+                if let Some(v) = self.trans[i][a] {
+                    trans[ni][a] = Some(map[v]);
+                }
+                // None remains None
             }
         }
 
@@ -638,12 +611,36 @@ impl DetDFA {
             return;
         }
 
-        let n = self.n_states;
+        // Hopcroft requires a complete DFA. We add a temporary sink state.
+        let has_none = self.trans.iter().any(|row| row.iter().any(|x| x.is_none()));
+        let (mut n, sink_id) = if has_none {
+            (self.n_states + 1, Some(self.n_states))
+        } else {
+            (self.n_states, None)
+        };
+
+        let mut trans_complete = vec![vec![0; sigma.size()]; n];
+        for i in 0..self.n_states {
+            for j in 0..sigma.size() {
+                trans_complete[i][j] = self.trans[i][j].unwrap_or(sink_id.unwrap());
+            }
+        }
+        if let Some(sid) = sink_id {
+            for j in 0..sigma.size() {
+                trans_complete[sid][j] = sid;
+            }
+        }
+
+        let mut finals_complete = self.finals.clone();
+        if sink_id.is_some() {
+            finals_complete.push(false);
+        }
+
         let a = sigma.size();
 
         let mut part_id = vec![0usize; n];
         let mut blocks: Vec<Vec<usize>> = Vec::new();
-        let (accepting_block, non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| self.finals[s]);
+        let (accepting_block, non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| finals_complete[s]);
 
         if accepting_block.is_empty() || non_accepting_block.is_empty() {
             return;
@@ -658,8 +655,8 @@ impl DetDFA {
 
         let mut inv: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); n]; a];
         for s in 0..n { 
-            for sym in 0..a { 
-                let v = self.trans[s][sym]; 
+            for sym in 0..a {
+                let v = trans_complete[s][sym];
                 inv[sym][v].push(s); 
             } 
         }
@@ -772,17 +769,23 @@ impl DetDFA {
         }
 
         let start_part = part_id[self.start];
+        let sink_part = sink_id.map(|sid| part_id[sid]);
+
         let mut finals2 = vec![false; num_parts];
         for pid in 0..num_parts {
-            finals2[pid] = self.finals[repr[pid]];
+            finals2[pid] = finals_complete[repr[pid]];
         }
 
-        let mut trans2 = vec![vec![0usize; a]; num_parts];
+        let mut trans2 = vec![vec![None; a]; num_parts];
         for pid in 0..num_parts {
             let s = repr[pid];
             for sym in 0..a {
-                let v = self.trans[s][sym];
-                trans2[pid][sym] = part_id[v];
+                let v_part = part_id[trans_complete[s][sym]];
+                if Some(v_part) == sink_part {
+                    trans2[pid][sym] = None;
+                } else {
+                    trans2[pid][sym] = Some(v_part);
+                }
             }
         }
 
@@ -790,21 +793,6 @@ impl DetDFA {
         self.start = start_part;
         self.finals = finals2;
         self.trans = trans2;
-    }
-
-    fn find_sink_index(&self, sigma: &Alphabet) -> Option<usize> {
-        'outer: for s in 0..self.n_states {
-            if self.finals[s] {
-                continue;
-            }
-            for sym in 0..sigma.size() {
-                if self.trans[s][sym] != s {
-                    continue 'outer;
-                }
-            }
-            return Some(s);
-        }
-        None
     }
 }
 
@@ -814,12 +802,12 @@ struct ProductDFA {
     start: usize,
     finals: Vec<bool>,
     trans: Vec<Vec<usize>>,
-    tuples: Vec<Vec<usize>>,
+    tuples: Vec<Vec<Option<usize>>>,
     active_weights: Vec<Weight>,
 }
 
 impl ProductDFA {
-    fn from_components(comps: &[DetDFA], sigma: &Alphabet, atoms: &WeightPartition, comp_sinks: &[Option<usize>]) -> Self {
+    fn from_components(comps: &[DetDFA], sigma: &Alphabet, atoms: &WeightPartition) -> Self {
         let k = comps.len();
 
         let pb_product = if PROGRESS_BAR_ENABLED {
@@ -835,16 +823,18 @@ impl ProductDFA {
         };
 
         // Step 1: Collect all reachable tuples
-        let start_tuple: Vec<usize> = comps.iter().map(|c| c.start).collect();
-        let mut visited: HashSet<Vec<usize>> = HashSet::new();
-        let mut queue: VecDeque<Vec<usize>> = VecDeque::new();
+        let start_tuple: Vec<Option<usize>> = comps.iter().map(|c| Some(c.start)).collect();
+        let mut visited: HashSet<Vec<Option<usize>>> = HashSet::new();
+        let mut queue: VecDeque<Vec<Option<usize>>> = VecDeque::new();
 
         visited.insert(start_tuple.clone());
         queue.push_back(start_tuple.clone());
 
         while let Some(current) = queue.pop_front() {
             for sym in 0..sigma.size() {
-                let next_tuple: Vec<usize> = (0..k).map(|i| comps[i].trans[current[i]][sym]).collect();
+                let next_tuple: Vec<Option<usize>> = (0..k)
+                    .map(|i| current[i].and_then(|s| comps[i].trans[s][sym]))
+                    .collect();
                 if visited.insert(next_tuple.clone()) {
                     queue.push_back(next_tuple);
                     if let Some(p) = &pb_product {
@@ -854,7 +844,7 @@ impl ProductDFA {
             }
         }
 
-        let all_tuples: Vec<Vec<usize>> = visited.into_iter().collect();
+        let all_tuples: Vec<Vec<Option<usize>>> = visited.into_iter().collect();
         let n = all_tuples.len();
 
         if let Some(p) = &pb_product {
@@ -865,7 +855,7 @@ impl ProductDFA {
         let mut uf = UnionFind::new(n);
         for i in 0..n {
             for j in i + 1..n {
-                if can_merge(&all_tuples[i], &all_tuples[j], comp_sinks) {
+                if can_merge(&all_tuples[i], &all_tuples[j]) {
                     uf.union(i, j);
                 }
             }
@@ -880,7 +870,7 @@ impl ProductDFA {
         }
 
         // Step 4: For each class, pick representative and compute active weight
-        let mut class_list: Vec<(Vec<usize>, Vec<usize>, Weight)> = Vec::new();
+        let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
         // (members, representative, active_weight)
 
         for (_root, members) in classes.into_iter() {
@@ -890,8 +880,7 @@ impl ProductDFA {
                 .min_by_key(|&&idx| {
                     all_tuples[idx]
                         .iter()
-                        .enumerate()
-                        .filter(|(i, &s)| comp_sinks[*i] == Some(s))
+                        .filter(|s| s.is_none())
                         .count()
                 })
                 .unwrap();
@@ -901,8 +890,8 @@ impl ProductDFA {
             let mut active = Weight::zeros();
             for &member_idx in &members {
                 let tuple = &all_tuples[member_idx];
-                for (comp_idx, &state) in tuple.iter().enumerate() {
-                    if comp_sinks[comp_idx] != Some(state) {
+                for (comp_idx, state) in tuple.iter().enumerate() {
+                    if state.is_some() {
                         active |= &atoms.atoms[comp_idx];
                     }
                 }
@@ -913,7 +902,7 @@ impl ProductDFA {
 
         // Step 5: Build mappings
         let n_states = class_list.len();
-        let mut tuple_to_id: HashMap<Vec<usize>, usize> = HashMap::new();
+        let mut tuple_to_id: HashMap<Vec<Option<usize>>, usize> = HashMap::new();
 
         for (id, (ref members, _repr, _active)) in class_list.iter().enumerate() {
             for &member_idx in members {
@@ -931,7 +920,7 @@ impl ProductDFA {
         // Step 6: Build Product DFA structures
         let mut finals = vec![false; n_states];
         let mut trans = vec![vec![0; sigma.size()]; n_states];
-        let mut tuples = vec![vec![]; n_states];
+        let mut tuples = vec![vec![]; n_states]; // Vec<Vec<Option<usize>>>
         let mut active_weights = vec![Weight::zeros(); n_states];
 
         for (id, (members, repr, active_weight)) in class_list.into_iter().enumerate() {
@@ -941,12 +930,16 @@ impl ProductDFA {
             // Check if any member is final (has at least one accepting component)
             finals[id] = members.iter().any(|&idx| {
                 let tuple = &all_tuples[idx];
-                tuple.iter().enumerate().any(|(i, &s)| comps[i].finals[s])
+                tuple.iter().enumerate().any(|(i, s_opt)| {
+                    if let Some(s) = s_opt { comps[i].finals[*s] } else { false }
+                })
             });
 
             // Build transitions from representative
             for sym in 0..sigma.size() {
-                let next_tuple: Vec<usize> = (0..k).map(|i| comps[i].trans[repr[i]][sym]).collect();
+                let next_tuple: Vec<Option<usize>> = (0..k)
+                    .map(|i| repr[i].and_then(|s| comps[i].trans[s][sym]))
+                    .collect();
                 let next_id = tuple_to_id[&next_tuple];
                 trans[id][sym] = next_id;
             }
@@ -998,9 +991,11 @@ impl ProductDFA {
                 continue;
             }
             let mut w_final = Weight::zeros();
-            for (i, &s_i) in self.tuples[sid].iter().enumerate() {
-                if comps[i].finals[s_i] {
-                    w_final |= &atoms.atoms[i];
+            for (i, s_opt) in self.tuples[sid].iter().enumerate() {
+                if let Some(s_i) = s_opt {
+                    if comps[i].finals[*s_i] {
+                        w_final |= &atoms.atoms[i];
+                    }
                 }
             }
             if !w_final.is_empty() {
@@ -1039,17 +1034,12 @@ impl ProductDFA {
     }
 }
 
-fn can_merge(t1: &[usize], t2: &[usize], sinks: &[Option<usize>]) -> bool {
+fn can_merge(t1: &[Option<usize>], t2: &[Option<usize>]) -> bool {
     for i in 0..t1.len() {
-        let s1 = t1[i];
-        let s2 = t2[i];
-        if s1 == s2 {
-            continue;
+        // If they are different, but not because one is None, they can't merge.
+        if t1[i] != t2[i] && t1[i].is_some() && t2[i].is_some() {
+            return false;
         }
-        if sinks[i] == Some(s1) || sinks[i] == Some(s2) {
-            continue;
-        }
-        return false;
     }
     true
 }
