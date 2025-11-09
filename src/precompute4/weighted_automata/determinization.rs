@@ -874,8 +874,8 @@ impl ProductDFA {
         // Step 3: Group by equivalence class
         let mut classes: HashMap<usize, Vec<usize>> = HashMap::new();
         for i in 0..n {
-            // let root = uf.find(i);
-            let root = i;
+            let root = uf.find(i);
+            // let root = i;
             classes.entry(root).or_default().push(i);
         }
 
