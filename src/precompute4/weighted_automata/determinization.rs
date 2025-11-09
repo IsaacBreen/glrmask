@@ -864,6 +864,11 @@ impl ProductDFA {
         let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
         // (members, representative, active_weight)
 
+        crate::debug!(5, "ProductDFA: Atoms: {}", atoms.intervals.len());
+        for (i, a) in atoms.atoms.iter().enumerate() {
+            crate::debug!(5, " Atom {}: {:?}", i, a);
+        }
+
         for members in classes.into_iter() {
             if members.is_empty() {
                 continue;
@@ -905,8 +910,14 @@ impl ProductDFA {
         }
 
         crate::debug!(5, "ProductDFA: Merged {} tuples into {} states", n, n_states);
-        for (id, (ref members, ref repr, _active)) in class_list.iter().enumerate() {
-            crate::debug!(5, " State {}: representative {:?}, members {:?}", id, repr, members.iter().map(|&idx| &all_tuples[idx]).collect::<Vec<_>>());
+        for (id, (ref members, ref repr, active)) in class_list.iter().enumerate() {
+            crate::debug!(5, " State {}:", id);
+            crate::debug!(5, "  Representative: {:?}", repr);
+            crate::debug!(5, "  Members ({}):", members.len());
+            for &member_idx in members {
+                crate::debug!(5, "   {:?}", all_tuples[member_idx]);
+            }
+            crate::debug!(5, "  Active weight: {:?}", active);
         }
 
         let start_id = tuple_to_id[&start_tuple];
