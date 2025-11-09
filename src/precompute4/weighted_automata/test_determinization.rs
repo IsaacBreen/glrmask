@@ -7,7 +7,7 @@ fn test_determinize_simple_divergence() {
     let mut nwa = NWA::new(); // new() creates a start state 0
     nwa.states.0.clear(); // but we'll manage states manually for clarity
 
-    // NWA for "ac" with weight A1 (0..=0)
+    // NWA for "ac" with weight A1 (0)
     let s0 = nwa.states.add_state();
     let s1 = nwa.states.add_state();
     let s2 = nwa.states.add_state();
@@ -15,7 +15,7 @@ fn test_determinize_simple_divergence() {
     nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
     nwa.states[s2].final_weight = Some(Weight::from_item(0));
 
-    // NWA for "bc" with weight A2 (1..=1)
+    // NWA for "bc" with weight A2 (1)
     let s3 = nwa.states.add_state();
     let s4 = nwa.states.add_state();
     let s5 = nwa.states.add_state();
@@ -31,10 +31,7 @@ fn test_determinize_simple_divergence() {
 
     let dwa = nwa.determinize_to_dwa();
 
-    // The product construction would yield 6 states (start, a, b, ac, bc, sink).
-    // An efficient DWA could be smaller, but without minimization of the final DWA,
-    // this is a reasonable expectation from the product construction.
-    // Let's check the accepted words and their weights first.
+    // Check accepted words and their weights.
     assert_eq!(
         dwa.eval_word_weight(&['a' as i16, 'c' as i16]),
         Weight::from_item(0)
@@ -47,13 +44,12 @@ fn test_determinize_simple_divergence() {
     assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
     assert!(dwa.eval_word_weight(&[]).is_empty());
 
-    // Assert on state count. Based on product construction of two 3-state NFAs (plus sink),
-    // we expect a handful of states.
-    // Reachable states in product: (s0,t0), (s1,t_sink), (s_sink,t1), (s2,t_sink), (s_sink,t2), (s_sink,t_sink) -> 6 states
-    // The implementation might be slightly different.
+    // An efficient DWA should merge states with similar future behavior,
+    // resulting in a small automaton.
+    // Allowing for a sink state, we assert a small number.
     assert!(
-        dwa.states.len() <= 10,
-        "Expected a small number of states, got {}",
+        dwa.states.len() <= 4,
+        "Expected a small number of states for simple divergence, got {}",
         dwa.states.len()
     );
 }
@@ -62,7 +58,7 @@ fn test_determinize_simple_divergence() {
 fn test_determinize_hypercube_catastrophe() {
     const N: usize = 4;
     let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
-    let atoms: Vec<Weight> = (0..N).map(|i| Weight::from_item(i)).collect();
+    let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
 
     let mut nwa = NWA::new();
     nwa.states.0.clear();
@@ -91,14 +87,13 @@ fn test_determinize_hypercube_catastrophe() {
 
     let dwa = nwa.determinize_to_dwa();
 
-    // The product construction should create 2^N states, as it needs to track
-    // for each component language whether the forbidden character has been seen.
-    // Each component DFA has 2 states (accepting, sink). The product has 2^N states.
-    let expected_states = 1 << N;
-    assert_eq!(
-        dwa.states.len(),
-        expected_states,
-        "Expected 2^N states for hypercube"
+    // An efficient DWA construction should avoid the 2^N state explosion by
+    // encoding the history of seen characters within the accumulated weight,
+    // not in the state space.
+    assert!(
+        dwa.states.len() <= 2,
+        "Expected a very small DWA (1-2 states) for hypercube, but got {} states. State explosion was not avoided.",
+        dwa.states.len()
     );
 
     // Test some words
@@ -108,7 +103,7 @@ fn test_determinize_hypercube_catastrophe() {
     let expected_weight_ac = &atoms[1] | &atoms[3];
     assert_eq!(dwa.eval_word_weight(&word_ac), expected_weight_ac);
 
-    // word "abcd" -> contains all symbols. Should be rejected.
+    // word "abcd" -> contains all symbols. Should be rejected by all components.
     let word_all = alphabet.clone();
     assert!(dwa.eval_word_weight(&word_all).is_empty());
 
