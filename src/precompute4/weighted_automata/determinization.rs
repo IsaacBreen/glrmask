@@ -538,7 +538,6 @@ impl PerAtomNFA {
     }
 }
 
-/// Deterministic complete DFA (over Sigma').
 #[derive(Clone, Debug)]
 struct DetDFA {
     n_states: usize,
@@ -582,7 +581,7 @@ impl DetDFA {
             self.n_states = 1;
             self.start = 0;
             self.finals = vec![false];
-            self.trans = vec![vec![None; sigma.size()]];
+            self.trans = vec![vec![Some(0); sigma.size()]];
             return;
         }
 
@@ -797,7 +796,6 @@ impl DetDFA {
     }
 }
 
-/// Product DFA and conversion to DWA
 #[derive(Clone, Debug)]
 struct ProductDFA {
     n_states: usize,
@@ -856,20 +854,12 @@ impl ProductDFA {
         // Step 2: Group tuples by their canonical key (the map of active components)
         let mut classes: HashMap<BTreeMap<usize, usize>, Vec<usize>> = HashMap::new();
         for i in 0..n {
-            let key: BTreeMap<usize, usize> = all_tuples[i]
+            let key = all_tuples[i]
                 .iter()
                 .enumerate()
                 .filter_map(|(i, s_opt)| s_opt.map(|s| (i, s)))
                 .collect();
             classes.entry(key).or_default().push(i);
-        }
-
-        debug_log(4, || format!("Grouped into {} classes", classes.len()));
-        for (_key, members) in classes.iter() {
-            debug_log(5, || format!(" Class of size {}:", members.len()));
-            for &idx in members {
-                debug_log(5, || format!("  {:?}", all_tuples[idx]));
-            }
         }
 
         // Step 4: For each class, pick representative and compute active weight
@@ -911,6 +901,11 @@ impl ProductDFA {
             for &member_idx in members {
                 tuple_to_id.insert(all_tuples[member_idx].clone(), id);
             }
+        }
+
+        crate::debug!(5, "ProductDFA: Merged {} tuples into {} states", n, n_states);
+        for (id, (ref members, ref repr, _active)) in class_list.iter().enumerate() {
+            crate::debug!(5, " State {}: representative {:?}, members {:?}", id, repr, members.iter().map(|&idx| &all_tuples[idx]).collect::<Vec<_>>());
         }
 
         let start_id = tuple_to_id[&start_tuple];
@@ -957,10 +952,6 @@ impl ProductDFA {
         }
     }
 
-    /// Convert this product DFA into a DWA:
-    /// - One DWA state per product DFA state.
-    /// - Edge weights: active indices at source state (union over atoms whose component is not sink).
-    /// - Final weights: union over atoms whose component is accepting at that state.
     fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, comps: &[DetDFA]) -> DWA {
         let mut dwa_states = DWAStates::default();
         for _ in 0..self.n_states {
