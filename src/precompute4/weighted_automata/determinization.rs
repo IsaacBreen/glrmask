@@ -589,7 +589,7 @@ impl DetDFA {
         if self.n_states == 0 {
             return;
         }
-        let mut part = vec![if self.finals[s] { 0 } else { 1 } for s in 0..self.n_states];
+        let mut part: Vec<usize> = (0..self.n_states).map(|s| if self.finals[s] { 0 } else { 1 }).collect();
         let mut num_parts = 2;
         loop {
             let mut changed = false;
