@@ -2040,6 +2040,11 @@ local_system:
               let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
               // (members, representative, active_weight)
 
+              crate::debug!(5, "ProductDFA: Atoms: {}", atoms.intervals.len());
+              for (i, a) in atoms.atoms.iter().enumerate() {
+                  crate::debug!(5, " Atom {}: {:?}", i, a);
+              }
+
               for members in classes.into_iter() {
                   if members.is_empty() {
                       continue;
@@ -2081,8 +2086,14 @@ local_system:
               }
 
               crate::debug!(5, "ProductDFA: Merged {} tuples into {} states", n, n_states);
-              for (id, (ref members, ref repr, _active)) in class_list.iter().enumerate() {
-                  crate::debug!(5, " State {}: representative {:?}, members {:?}", id, repr, members.iter().map(|&idx| &all_tuples[idx]).collect::<Vec<_>>());
+              for (id, (ref members, ref repr, active)) in class_list.iter().enumerate() {
+                  crate::debug!(5, " State {}:", id);
+                  crate::debug!(5, "  Representative: {:?}", repr);
+                  crate::debug!(5, "  Members ({}):", members.len());
+                  for &member_idx in members {
+                      crate::debug!(5, "   {:?}", all_tuples[member_idx]);
+                  }
+                  crate::debug!(5, "  Active weight: {:?}", active);
               }
 
               let start_id = tuple_to_id[&start_tuple];
@@ -2179,11 +2190,11 @@ local_system:
                       p.inc(1);
                   }
 
-                  let edge_weight = &self.active_weights[sid];
 
                   // Default (OTHER)
                   let dst_def = self.trans[sid][sigma.other_index];
                   if sid < dwa.states.len() && dst_def < dwa.states.len() {
+                      let edge_weight = &self.active_weights[sid] & &self.active_weights[dst_def];
                       let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
                   }
 
@@ -2191,6 +2202,7 @@ local_system:
                   for (li, &lbl) in sigma.labels.iter().enumerate() {
                       let dst = self.trans[sid][li];
                       if sid < dwa.states.len() && dst < dwa.states.len() {
+                          let edge_weight = &self.active_weights[sid] & &self.active_weights[dst];
                           let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
                       }
                   }
@@ -2205,25 +2217,44 @@ local_system:
           /// Groups product state tuples into equivalence classes.
           /// Returns a vector where `result[i]` is the group ID for `all_tuples[i]`.
           fn group_product_states(all_tuples: &[Vec<Option<usize>>]) -> Vec<usize> {
+              // This is a greedy, order-dependent implementation for clique partitioning.
+              // Two tuples can be in the same group if for any component, their states are
+              // either the same, or one of them is a sink (None).
               let n = all_tuples.len();
-              let mut group_ids = vec![0; n];
-              let mut key_to_group_id: HashMap<BTreeMap<usize, usize>, usize> = HashMap::new();
+              let mut group_ids = vec![usize::MAX; n];
+              // Each group is represented by its canonical "core", which is the superposition of the cores of its members.
+              let mut group_cores: Vec<BTreeMap<usize, usize>> = Vec::new();
               let mut next_group_id = 0;
 
               for (i, tuple) in all_tuples.iter().enumerate() {
-                  // The key is the map of active components: component_idx -> state_idx
-                  let key: BTreeMap<usize, usize> = tuple
+                  let core: BTreeMap<usize, usize> = tuple
                       .iter()
                       .enumerate()
                       .filter_map(|(comp_idx, s_opt)| s_opt.map(|s| (comp_idx, s)))
                       .collect();
 
-                  let group_id = *key_to_group_id.entry(key).or_insert_with(|| {
-                      let id = next_group_id;
+                  let mut assigned_gid = None;
+                  // Find the first existing group that this tuple is compatible with.
+                  for (gid, g_core) in group_cores.iter_mut().enumerate() {
+                      let compatible = core.iter().all(|(k, v)| g_core.get(k).map_or(true, |v2| v == v2))
+                          && g_core.iter().all(|(k, v)| core.get(k).map_or(true, |v2| v == v2));
+
+                      if compatible {
+                          // Add to this group and update the group's canonical core.
+                          g_core.extend(core.clone());
+                          assigned_gid = Some(gid);
+                          break;
+                      }
+                  }
+
+                  let gid = assigned_gid.unwrap_or_else(|| {
+                      // No compatible group found, create a new one.
+                      let new_gid = next_group_id;
                       next_group_id += 1;
-                      id
+                      group_cores.push(core);
+                      new_gid
                   });
-                  group_ids[i] = group_id;
+                  group_ids[i] = gid;
               }
               group_ids
           }
@@ -4315,8 +4346,8 @@ local_system:
           start: usize,
           finals: Vec<bool>,
           trans: Vec<Vec<usize>>,
+          trans_weights: Vec<Vec<Weight>>,
           tuples: Vec<Vec<Option<usize>>>,
-          active_weights: Vec<Weight>,
       }
 
       impl ProductDFA {
@@ -4373,53 +4404,40 @@ local_system:
               }
 
 
-              // Step 4: For each class, pick representative and compute active weight
-              let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
-              // (members, representative, active_weight)
+              // Step 4: For each class, pick representative
+              let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>)> = Vec::new();
+              // (members, representative)
 
               for members in classes.into_iter() {
                   if members.is_empty() {
                       continue;
                   }
                   // Pick representative (tuple with fewest sinks)
-                  let best_idx = members
-                      .iter()
-                      .min_by_key(|&&idx| {
-                          all_tuples[idx]
-                              .iter()
-                              .filter(|s| s.is_none())
-                              .count()
-                      })
-                      .unwrap();
+                  let best_idx =
+                      members.iter().min_by_key(|&&idx| all_tuples[idx].iter().filter(|s| s.is_none()).count()).unwrap();
                   let repr = all_tuples[*best_idx].clone();
 
-                  // Compute active weight: union of atoms for all non-sink positions across all members
-                  let mut active = Weight::zeros();
-                  for &member_idx in &members {
-                      let tuple = &all_tuples[member_idx];
-                      for (comp_idx, state) in tuple.iter().enumerate() {
-                          if state.is_some() {
-                              active |= &atoms.atoms[comp_idx];
-                          }
-                      }
-                  }
-
-                  class_list.push((members, repr, active));
+                  class_list.push((members, repr));
               }
 
               // Step 5: Build mappings
               let n_states = class_list.len();
               let mut tuple_to_id: HashMap<Vec<Option<usize>>, usize> = HashMap::new();
 
-              for (id, (ref members, _repr, _active)) in class_list.iter().enumerate() {
+              for (id, (ref members, _repr)) in class_list.iter().enumerate() {
                   for &member_idx in members {
                       tuple_to_id.insert(all_tuples[member_idx].clone(), id);
                   }
               }
 
               crate::debug!(5, "ProductDFA: Merged {} tuples into {} states", n, n_states);
-              for (id, (ref members, ref repr, _active)) in class_list.iter().enumerate() {
-                  crate::debug!(5, " State {}: representative {:?}, members {:?}", id, repr, members.iter().map(|&idx| &all_tuples[idx]).collect::<Vec<_>>());
+              for (id, (ref members, ref repr)) in class_list.iter().enumerate() {
+                  crate::debug!(5, " State {}:", id);
+                  crate::debug!(5, "  Representative: {:?}", repr);
+                  crate::debug!(5, "  Members ({}):", members.len());
+                  for &member_idx in members {
+                      crate::debug!(5, "   {:?}", all_tuples[member_idx]);
+                  }
               }
 
               let start_id = tuple_to_id[&start_tuple];
@@ -4427,12 +4445,11 @@ local_system:
               // Step 6: Build Product DFA structures
               let mut finals = vec![false; n_states];
               let mut trans = vec![vec![0; sigma.size()]; n_states];
+              let mut trans_weights = vec![vec![Weight::zeros(); sigma.size()]; n_states];
               let mut tuples = vec![vec![]; n_states]; // Vec<Vec<Option<usize>>>
-              let mut active_weights = vec![Weight::zeros(); n_states];
 
-              for (id, (members, repr, active_weight)) in class_list.into_iter().enumerate() {
+              for (id, (members, repr)) in class_list.into_iter().enumerate() {
                   tuples[id] = repr.clone();
-                  active_weights[id] = active_weight;
 
                   // Check if any member is final (has at least one accepting component)
                   finals[id] = members.iter().any(|&idx| {
@@ -4449,6 +4466,15 @@ local_system:
                           .collect();
                       let next_id = tuple_to_id[&next_tuple];
                       trans[id][sym] = next_id;
+
+                      // Compute transition weight
+                      let mut edge_weight = Weight::zeros();
+                      for (i, s_opt) in next_tuple.iter().enumerate() {
+                          if s_opt.is_some() {
+                              edge_weight |= &atoms.atoms[i];
+                          }
+                      }
+                      trans_weights[id][sym] = edge_weight;
                   }
               }
 
@@ -4461,8 +4487,8 @@ local_system:
                   start: start_id,
                   finals,
                   trans,
+                  trans_weights,
                   tuples,
-                  active_weights,
               }
           }
 
@@ -4516,19 +4542,18 @@ local_system:
                       p.inc(1);
                   }
 
-                  let edge_weight = &self.active_weights[sid];
 
                   // Default (OTHER)
                   let dst_def = self.trans[sid][sigma.other_index];
                   if sid < dwa.states.len() && dst_def < dwa.states.len() {
-                      let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
+                      let _ = dwa.set_default_transition(sid, dst_def, self.trans_weights[sid][sigma.other_index].clone());
                   }
 
                   // Exceptions for each explicit label
                   for (li, &lbl) in sigma.labels.iter().enumerate() {
                       let dst = self.trans[sid][li];
                       if sid < dwa.states.len() && dst < dwa.states.len() {
-                          let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
+                          let _ = dwa.add_transition(sid, lbl, dst, self.trans_weights[sid][li].clone());
                       }
                   }
               }
@@ -6800,6 +6825,11 @@ messages:
               let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
               // (members, representative, active_weight)
 
+              crate::debug!(5, "ProductDFA: Atoms: {}", atoms.intervals.len());
+              for (i, a) in atoms.atoms.iter().enumerate() {
+                  crate::debug!(5, " Atom {}: {:?}", i, a);
+              }
+
               for members in classes.into_iter() {
                   if members.is_empty() {
                       continue;
@@ -6841,8 +6871,14 @@ messages:
               }
 
               crate::debug!(5, "ProductDFA: Merged {} tuples into {} states", n, n_states);
-              for (id, (ref members, ref repr, _active)) in class_list.iter().enumerate() {
-                  crate::debug!(5, " State {}: representative {:?}, members {:?}", id, repr, members.iter().map(|&idx| &all_tuples[idx]).collect::<Vec<_>>());
+              for (id, (ref members, ref repr, active)) in class_list.iter().enumerate() {
+                  crate::debug!(5, " State {}:", id);
+                  crate::debug!(5, "  Representative: {:?}", repr);
+                  crate::debug!(5, "  Members ({}):", members.len());
+                  for &member_idx in members {
+                      crate::debug!(5, "   {:?}", all_tuples[member_idx]);
+                  }
+                  crate::debug!(5, "  Active weight: {:?}", active);
               }
 
               let start_id = tuple_to_id[&start_tuple];
@@ -6939,11 +6975,11 @@ messages:
                       p.inc(1);
                   }
 
-                  let edge_weight = &self.active_weights[sid];
 
                   // Default (OTHER)
                   let dst_def = self.trans[sid][sigma.other_index];
                   if sid < dwa.states.len() && dst_def < dwa.states.len() {
+                      let edge_weight = &self.active_weights[sid] & &self.active_weights[dst_def];
                       let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
                   }
 
@@ -6951,6 +6987,7 @@ messages:
                   for (li, &lbl) in sigma.labels.iter().enumerate() {
                       let dst = self.trans[sid][li];
                       if sid < dwa.states.len() && dst < dwa.states.len() {
+                          let edge_weight = &self.active_weights[sid] & &self.active_weights[dst];
                           let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
                       }
                   }
@@ -6965,25 +7002,44 @@ messages:
           /// Groups product state tuples into equivalence classes.
           /// Returns a vector where `result[i]` is the group ID for `all_tuples[i]`.
           fn group_product_states(all_tuples: &[Vec<Option<usize>>]) -> Vec<usize> {
+              // This is a greedy, order-dependent implementation for clique partitioning.
+              // Two tuples can be in the same group if for any component, their states are
+              // either the same, or one of them is a sink (None).
               let n = all_tuples.len();
-              let mut group_ids = vec![0; n];
-              let mut key_to_group_id: HashMap<BTreeMap<usize, usize>, usize> = HashMap::new();
+              let mut group_ids = vec![usize::MAX; n];
+              // Each group is represented by its canonical "core", which is the superposition of the cores of its members.
+              let mut group_cores: Vec<BTreeMap<usize, usize>> = Vec::new();
               let mut next_group_id = 0;
 
               for (i, tuple) in all_tuples.iter().enumerate() {
-                  // The key is the map of active components: component_idx -> state_idx
-                  let key: BTreeMap<usize, usize> = tuple
+                  let core: BTreeMap<usize, usize> = tuple
                       .iter()
                       .enumerate()
                       .filter_map(|(comp_idx, s_opt)| s_opt.map(|s| (comp_idx, s)))
                       .collect();
 
-                  let group_id = *key_to_group_id.entry(key).or_insert_with(|| {
-                      let id = next_group_id;
+                  let mut assigned_gid = None;
+                  // Find the first existing group that this tuple is compatible with.
+                  for (gid, g_core) in group_cores.iter_mut().enumerate() {
+                      let compatible = core.iter().all(|(k, v)| g_core.get(k).map_or(true, |v2| v == v2))
+                          && g_core.iter().all(|(k, v)| core.get(k).map_or(true, |v2| v == v2));
+
+                      if compatible {
+                          // Add to this group and update the group's canonical core.
+                          g_core.extend(core.clone());
+                          assigned_gid = Some(gid);
+                          break;
+                      }
+                  }
+
+                  let gid = assigned_gid.unwrap_or_else(|| {
+                      // No compatible group found, create a new one.
+                      let new_gid = next_group_id;
                       next_group_id += 1;
-                      id
+                      group_cores.push(core);
+                      new_gid
                   });
-                  group_ids[i] = group_id;
+                  group_ids[i] = gid;
               }
               group_ids
           }
@@ -7115,9 +7171,10 @@ messages:
     metadata:
       filename: src/precompute4/weighted_automata/test_determinization.rs
   - user: |-
-      Modify group_product_states. This is the group condition:
-      - Two items can be merged if their corresponding non-sink state IDs (non-None items) are all equal. If one of the two corresponding tuple items (at the same tuple position) is a sink, that's fine - the test passes for that tuple item. (Although it must pass for all tuple items to be eligible to merge.) (Likewise if both are sinks. If neither is a sink then that's when equality matters.)
-      ('sink state ID' is really a misnomer because our DFA don't have sink states. We just use None to represent them.)
+      The way weights for transitions are computed is wrong.
+      They need to be stored in ProductDFA. It isn't enough to store state weights. In fact, state weights are largely meaningless. We need per-transition weights.
+
+      Transition weights are for the atoms for which the given transition exists.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7137,122 +7194,187 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. I can help you with that. Here are the step-by-step instructions to modify `group_product_states` and the corresponding git diff.
+      Of course. You've correctly identified that the transition weights in the determinized automaton were being calculated incorrectly. Storing per-state "active weights" and intersecting them is not sufficient. We need to calculate and store per-transition weights in the `ProductDFA` based on which component automata contribute to each transition.
 
-      The requested change is to modify the grouping condition for product DFA states. The current implementation groups tuples that have the exact same set of non-sink states. The new logic will merge any two tuples as long as their non-sink states do not conflict. This is not a transitive relation, so a simple key-based grouping is not sufficient. The implementation will be changed to a greedy algorithm that finds cliques in the compatibility graph.
+      Here are the step-by-step instructions to fix this, followed by the corresponding git diff.
 
-      ### Step-by-step instructions:
+      ### Step-by-step Instructions
 
-      1.  **Open the file `src/precompute4/weighted_automata/determinization.rs`**.
-      2.  **Locate the `group_product_states` function**. It is inside the `impl ProductDFA` block.
-      3.  **Replace the entire body of the `group_product_states` function** with the new implementation below. The new implementation iterates through all tuples and assigns them to the first compatible group it finds.
+      I will modify `src/precompute4/weighted_automata/determinization.rs` to correctly calculate and use transition weights.
 
-          ```rust
-          // src/precompute4/weighted_automata/determinization.rs
+      1.  **Modify the `ProductDFA` struct:**
+          In `src/precompute4/weighted_automata/determinization.rs`, I will change the definition of the `ProductDFA` struct.
+          -   I'll remove the `active_weights: Vec<Weight>` field.
+          -   I'll add a new `trans_weights: Vec<Vec<Weight>>` field to store the weight for each transition.
 
-          fn group_product_states(all_tuples: &[Vec<Option<usize>>]) -> Vec<usize> {
-              let n = all_tuples.len();
-              let mut group_ids = vec![usize::MAX; n];
-              // Each group is represented by its canonical "core", which is the superposition of the cores of its members.
-              let mut group_cores: Vec<BTreeMap<usize, usize>> = Vec::new();
-              let mut next_group_id = 0;
+      2.  **Update the `ProductDFA::from_components` method:**
+          This is where the product automaton is constructed. I will adjust it to compute transition weights.
+          -   **Step 4:** The logic for computing a per-state `active` weight will be removed. The `class_list` will now only store member tuples and the representative tuple for each class.
+          -   **Step 6:** When building the `ProductDFA` structures, I will:
+              -   Remove the `active_weights` vector.
+              -   Initialize a new `trans_weights` vector.
+              -   Inside the loop that builds transitions (`for sym in ...`), I will calculate the correct `edge_weight` for each transition. This weight is the union of all atoms `i` for which the `i`-th component DFA has a non-sink transition for the given symbol.
+              -   This computed `edge_weight` will be stored in `trans_weights`.
+          -   The returned `ProductDFA` instance will be updated to include `trans_weights`.
 
-              for i in 0..n {
-                  let tuple = &all_tuples[i];
-                  let core: BTreeMap<usize, usize> = tuple
-                      .iter()
-                      .enumerate()
-                      .filter_map(|(comp_idx, s_opt)| s_opt.map(|s| (comp_idx, s)))
-                      .collect();
+      3.  **Update the `ProductDFA::to_dwa` method:**
+          This method converts the `ProductDFA` into the final `DWA`.
+          -   When creating default and exception transitions for the `DWA`, instead of intersecting `active_weights`, I will now directly use the pre-calculated transition weights from `self.trans_weights`.
 
-                  let mut assigned_gid = None;
-                  // Find the first existing group that this tuple is compatible with.
-                  for (gid, g_core) in group_cores.iter_mut().enumerate() {
-                      let compatible = core.iter().all(|(k, v)| g_core.get(k).map_or(true, |v2| v == v2))
-                          && g_core.iter().all(|(k, v)| core.get(k).map_or(true, |v2| v == v2));
+      These changes will ensure that each transition in the final DWA has the correct weight, reflecting the union of weights from all paths in the original NWA that could produce it.
 
-                      if compatible {
-                          // Add to this group and update the group's canonical core.
-                          g_core.extend(core.clone());
-                          assigned_gid = Some(gid);
-                          break;
-                      }
-                  }
+      ### Git Diff
 
-                  let gid = assigned_gid.unwrap_or_else(|| {
-                      // No compatible group found, create a new one.
-                      let new_gid = next_group_id;
-                      next_group_id += 1;
-                      group_cores.push(core);
-                      new_gid
-                  });
-                  group_ids[i] = gid;
-              }
-              group_ids
-          }
-          ```
-
-      ### Git Diff:
-
-      Here is the git diff for the change.
+      Here is the git diff to apply these changes.
 
       ```diff
       --- a/src/precompute4/weighted_automata/determinization.rs
       +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -1071,26 +1071,38 @@
-           /// Groups product state tuples into equivalence classes.
-           /// Returns a vector where `result[i]` is the group ID for `all_tuples[i]`.
-           fn group_product_states(all_tuples: &[Vec<Option<usize>>]) -> Vec<usize> {
-      +        // This is a greedy, order-dependent implementation for clique partitioning.
-      +        // Two tuples can be in the same group if for any component, their states are
-      +        // either the same, or one of them is a sink (None).
-               let n = all_tuples.len();
-      -        let mut group_ids = vec![0; n];
-      -        let mut key_to_group_id: HashMap<BTreeMap<usize, usize>, usize> = HashMap::new();
-      +        let mut group_ids = vec![usize::MAX; n];
-      +        // Each group is represented by its canonical "core", which is the superposition of the cores of its members.
-      +        let mut group_cores: Vec<BTreeMap<usize, usize>> = Vec::new();
-               let mut next_group_id = 0;
+      @@ -1402,9 +1402,8 @@
+           start: usize,
+           finals: Vec<bool>,
+           trans: Vec<Vec<usize>>,
+      +    trans_weights: Vec<Vec<Weight>>,
+           tuples: Vec<Vec<Option<usize>>>,
+      -    active_weights: Vec<Weight>,
+       }
        
-               for (i, tuple) in all_tuples.iter().enumerate() {
-      -            // The key is the map of active components: component_idx -> state_idx
-      -            let key: BTreeMap<usize, usize> = tuple
-      +            let core: BTreeMap<usize, usize> = tuple
-                       .iter()
-                       .enumerate()
-                       .filter_map(|(comp_idx, s_opt)| s_opt.map(|s| (comp_idx, s)))
-                       .collect();
-       
-      -            let group_id = *key_to_group_id.entry(key).or_insert_with(|| {
-      -                let id = next_group_id;
-      -                next_group_id += 1;
-      -                id
-      +            let mut assigned_gid = None;
-      +            // Find the first existing group that this tuple is compatible with.
-      +            for (gid, g_core) in group_cores.iter_mut().enumerate() {
-      +                let compatible = core.iter().all(|(k, v)| g_core.get(k).map_or(true, |v2| v == v2))
-      +                    && g_core.iter().all(|(k, v)| core.get(k).map_or(true, |v2| v == v2));
-      +
-      +                if compatible {
-      +                    // Add to this group and update the group's canonical core.
-      +                    g_core.extend(core.clone());
-      +                    assigned_gid = Some(gid);
-      +                    break;
-      +                }
-      +            }
-      +
-      +            let gid = assigned_gid.unwrap_or_else(|| {
-      +                // No compatible group found, create a new one.
-      +                let new_gid = next_group_id;
-      +                next_group_id += 1;
-      +                group_cores.push(core);
-      +                new_gid
-                   });
-      -            group_ids[i] = group_id;
-      +            group_ids[i] = gid;
+       impl ProductDFA {
+      @@ -1445,40 +1444,22 @@
                }
-               group_ids
+       
+       
+      -        // Step 4: For each class, pick representative and compute active weight
+      -        let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
+      -        // (members, representative, active_weight)
+      -
+      -        crate::debug!(5, "ProductDFA: Atoms: {}", atoms.intervals.len());
+      -        for (i, a) in atoms.atoms.iter().enumerate() {
+      -            crate::debug!(5, " Atom {}: {:?}", i, a);
+      -        }
+      +        // Step 4: For each class, pick representative
+      +        let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>)> = Vec::new();
+      +        // (members, representative)
+       
+               for members in classes.into_iter() {
+                   if members.is_empty() {
+                       continue;
+                   }
+                   // Pick representative (tuple with fewest sinks)
+      -            let best_idx = members
+      -                .iter()
+      -                .min_by_key(|&&idx| {
+      -                    all_tuples[idx]
+      -                        .iter()
+      -                        .filter(|s| s.is_none())
+      -                        .count()
+      -                })
+      -                .unwrap();
+      +            let best_idx =
+      +                members.iter().min_by_key(|&&idx| all_tuples[idx].iter().filter(|s| s.is_none()).count()).unwrap();
+                   let repr = all_tuples[*best_idx].clone();
+       
+      -            // Compute active weight: union of atoms for all non-sink positions across all members
+      -            let mut active = Weight::zeros();
+      -            for &member_idx in &members {
+      -                let tuple = &all_tuples[member_idx];
+      -                for (comp_idx, state) in tuple.iter().enumerate() {
+      -                    if state.is_some() {
+      -                        active |= &atoms.atoms[comp_idx];
+      -                    }
+      -                }
+      -            }
+      -
+      -            class_list.push((members, repr, active));
+      +            class_list.push((members, repr));
+               }
+       
+               // Step 5: Build mappings
+               let n_states = class_list.len();
+               let mut tuple_to_id: HashMap<Vec<Option<usize>>, usize> = HashMap::new();
+       
+      -        for (id, (ref members, _repr, _active)) in class_list.iter().enumerate() {
+      +        for (id, (ref members, _repr)) in class_list.iter().enumerate() {
+                   for &member_idx in members {
+                       tuple_to_id.insert(all_tuples[member_idx].clone(), id);
+                   }
+               }
+       
+               crate::debug!(5, "ProductDFA: Merged {} tuples into {} states", n, n_states);
+      -        for (id, (ref members, ref repr, active)) in class_list.iter().enumerate() {
+      +        for (id, (ref members, ref repr)) in class_list.iter().enumerate() {
+                   crate::debug!(5, " State {}:", id);
+                   crate::debug!(5, "  Representative: {:?}", repr);
+                   crate::debug!(5, "  Members ({}):", members.len());
+                   for &member_idx in members {
+                       crate::debug!(5, "   {:?}", all_tuples[member_idx]);
+                   }
+      -            crate::debug!(5, "  Active weight: {:?}", active);
+               }
+       
+               let start_id = tuple_to_id[&start_tuple];
+      @@ -1486,13 +1467,12 @@
+               // Step 6: Build Product DFA structures
+               let mut finals = vec![false; n_states];
+               let mut trans = vec![vec![0; sigma.size()]; n_states];
+      +        let mut trans_weights = vec![vec![Weight::zeros(); sigma.size()]; n_states];
+               let mut tuples = vec![vec![]; n_states]; // Vec<Vec<Option<usize>>>
+      -        let mut active_weights = vec![Weight::zeros(); n_states];
+      -
+      -        for (id, (members, repr, active_weight)) in class_list.into_iter().enumerate() {
+      +
+      +        for (id, (members, repr)) in class_list.into_iter().enumerate() {
+                   tuples[id] = repr.clone();
+      -            active_weights[id] = active_weight;
+       
+                   // Check if any member is final (has at least one accepting component)
+                   finals[id] = members.iter().any(|&idx| {
+      @@ -1507,6 +1487,14 @@
+                           .map(|i| repr[i].and_then(|s| comps[i].trans[s][sym]))
+                           .collect();
+                       let next_id = tuple_to_id[&next_tuple];
+                       trans[id][sym] = next_id;
+      +
+      +                // Compute transition weight
+      +                let mut edge_weight = Weight::zeros();
+      +                for (i, s_opt) in next_tuple.iter().enumerate() {
+      +                    if s_opt.is_some() {
+      +                        edge_weight |= &atoms.atoms[i];
+      +                    }
+      +                }
+      +                trans_weights[id][sym] = edge_weight;
+                   }
+               }
+       
+      @@ -1519,8 +1507,8 @@
+                   start: start_id,
+                   finals,
+                   trans,
+      +            trans_weights,
+                   tuples,
+      -            active_weights,
+               }
            }
+       
+      @@ -1578,16 +1566,14 @@
+                   // Default (OTHER)
+                   let dst_def = self.trans[sid][sigma.other_index];
+                   if sid < dwa.states.len() && dst_def < dwa.states.len() {
+      -                let edge_weight = &self.active_weights[sid] & &self.active_weights[dst_def];
+      -                let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
+      +                let _ = dwa.set_default_transition(sid, dst_def, self.trans_weights[sid][sigma.other_index].clone());
+                   }
+       
+                   // Exceptions for each explicit label
+                   for (li, &lbl) in sigma.labels.iter().enumerate() {
+                       let dst = self.trans[sid][li];
+                       if sid < dwa.states.len() && dst < dwa.states.len() {
+      -                    let edge_weight = &self.active_weights[sid] & &self.active_weights[dst];
+      -                    let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
+      +                    let _ = dwa.add_transition(sid, lbl, dst, self.trans_weights[sid][li].clone());
+                       }
+                   }
+               }
 
       ```
     metadata:
@@ -7265,7 +7387,8 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
     metadata:
-  - user: 'Changes committed with message: "Determinization: Refactor `group_product_states`
-      to use greedy compatibility check based on core union"'
+  - user: 'Changes committed with message: "Determinization: Fix transition weight
+      calculation by using per-transition weights instead of intersecting active state
+      weights."'
     metadata:
 ...

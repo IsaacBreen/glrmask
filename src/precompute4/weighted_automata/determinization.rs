@@ -802,8 +802,8 @@ struct ProductDFA {
     start: usize,
     finals: Vec<bool>,
     trans: Vec<Vec<usize>>,
+    trans_weights: Vec<Vec<Weight>>,
     tuples: Vec<Vec<Option<usize>>>,
-    active_weights: Vec<Weight>,
 }
 
 impl ProductDFA {
@@ -860,64 +860,40 @@ impl ProductDFA {
         }
 
 
-        // Step 4: For each class, pick representative and compute active weight
-        let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
-        // (members, representative, active_weight)
-
-        crate::debug!(5, "ProductDFA: Atoms: {}", atoms.intervals.len());
-        for (i, a) in atoms.atoms.iter().enumerate() {
-            crate::debug!(5, " Atom {}: {:?}", i, a);
-        }
+        // Step 4: For each class, pick representative
+        let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>)> = Vec::new();
+        // (members, representative)
 
         for members in classes.into_iter() {
             if members.is_empty() {
                 continue;
             }
             // Pick representative (tuple with fewest sinks)
-            let best_idx = members
-                .iter()
-                .min_by_key(|&&idx| {
-                    all_tuples[idx]
-                        .iter()
-                        .filter(|s| s.is_none())
-                        .count()
-                })
-                .unwrap();
+            let best_idx =
+                members.iter().min_by_key(|&&idx| all_tuples[idx].iter().filter(|s| s.is_none()).count()).unwrap();
             let repr = all_tuples[*best_idx].clone();
 
-            // Compute active weight: union of atoms for all non-sink positions across all members
-            let mut active = Weight::zeros();
-            for &member_idx in &members {
-                let tuple = &all_tuples[member_idx];
-                for (comp_idx, state) in tuple.iter().enumerate() {
-                    if state.is_some() {
-                        active |= &atoms.atoms[comp_idx];
-                    }
-                }
-            }
-
-            class_list.push((members, repr, active));
+            class_list.push((members, repr));
         }
 
         // Step 5: Build mappings
         let n_states = class_list.len();
         let mut tuple_to_id: HashMap<Vec<Option<usize>>, usize> = HashMap::new();
 
-        for (id, (ref members, _repr, _active)) in class_list.iter().enumerate() {
+        for (id, (ref members, _repr)) in class_list.iter().enumerate() {
             for &member_idx in members {
                 tuple_to_id.insert(all_tuples[member_idx].clone(), id);
             }
         }
 
         crate::debug!(5, "ProductDFA: Merged {} tuples into {} states", n, n_states);
-        for (id, (ref members, ref repr, active)) in class_list.iter().enumerate() {
+        for (id, (ref members, ref repr)) in class_list.iter().enumerate() {
             crate::debug!(5, " State {}:", id);
             crate::debug!(5, "  Representative: {:?}", repr);
             crate::debug!(5, "  Members ({}):", members.len());
             for &member_idx in members {
                 crate::debug!(5, "   {:?}", all_tuples[member_idx]);
             }
-            crate::debug!(5, "  Active weight: {:?}", active);
         }
 
         let start_id = tuple_to_id[&start_tuple];
@@ -925,12 +901,11 @@ impl ProductDFA {
         // Step 6: Build Product DFA structures
         let mut finals = vec![false; n_states];
         let mut trans = vec![vec![0; sigma.size()]; n_states];
+        let mut trans_weights = vec![vec![Weight::zeros(); sigma.size()]; n_states];
         let mut tuples = vec![vec![]; n_states]; // Vec<Vec<Option<usize>>>
-        let mut active_weights = vec![Weight::zeros(); n_states];
 
-        for (id, (members, repr, active_weight)) in class_list.into_iter().enumerate() {
+        for (id, (members, repr)) in class_list.into_iter().enumerate() {
             tuples[id] = repr.clone();
-            active_weights[id] = active_weight;
 
             // Check if any member is final (has at least one accepting component)
             finals[id] = members.iter().any(|&idx| {
@@ -947,6 +922,15 @@ impl ProductDFA {
                     .collect();
                 let next_id = tuple_to_id[&next_tuple];
                 trans[id][sym] = next_id;
+
+                // Compute transition weight
+                let mut edge_weight = Weight::zeros();
+                for (i, s_opt) in next_tuple.iter().enumerate() {
+                    if s_opt.is_some() {
+                        edge_weight |= &atoms.atoms[i];
+                    }
+                }
+                trans_weights[id][sym] = edge_weight;
             }
         }
 
@@ -959,8 +943,8 @@ impl ProductDFA {
             start: start_id,
             finals,
             trans,
+            trans_weights,
             tuples,
-            active_weights,
         }
     }
 
@@ -1018,16 +1002,14 @@ impl ProductDFA {
             // Default (OTHER)
             let dst_def = self.trans[sid][sigma.other_index];
             if sid < dwa.states.len() && dst_def < dwa.states.len() {
-                let edge_weight = &self.active_weights[sid] & &self.active_weights[dst_def];
-                let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
+                let _ = dwa.set_default_transition(sid, dst_def, self.trans_weights[sid][sigma.other_index].clone());
             }
 
             // Exceptions for each explicit label
             for (li, &lbl) in sigma.labels.iter().enumerate() {
                 let dst = self.trans[sid][li];
                 if sid < dwa.states.len() && dst < dwa.states.len() {
-                    let edge_weight = &self.active_weights[sid] & &self.active_weights[dst];
-                    let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
+                    let _ = dwa.add_transition(sid, lbl, dst, self.trans_weights[sid][li].clone());
                 }
             }
         }
