@@ -124,7 +124,7 @@ impl Determinizer {
                 if !sig.final_weight.is_empty() {
                     self.dwa_states[id].final_weight = Some(sig.final_weight);
                 }
-                let mut transitions = BTreeMap::new();
+                let mut transitions: BTreeMap<i16, usize> = BTreeMap::new();
                 let mut default_target = None;
                 let mut default_weight = None;
 
