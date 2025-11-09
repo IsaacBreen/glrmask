@@ -916,22 +916,32 @@ impl ProductDFA {
                 })
             });
 
-            // Build transitions from representative
+            // Build transitions
             for sym in 0..sigma.size() {
-                let next_tuple: Vec<Option<usize>> = (0..k)
+                // Determine target state using the representative
+                let next_tuple_from_repr: Vec<Option<usize>> = (0..k)
                     .map(|i| repr[i].and_then(|s| comps[i].trans[s][sym]))
                     .collect();
-                let next_id = tuple_to_id[&next_tuple];
+                let next_id = tuple_to_id[&next_tuple_from_repr];
                 trans[id][sym] = next_id;
 
-                // Compute transition weight
-                let mut edge_weight = Weight::zeros();
-                for (i, s_opt) in next_tuple.iter().enumerate() {
-                    if s_opt.is_some() {
-                        edge_weight |= &atoms.atoms[i];
+                // Compute aggregate transition weight from all members
+                let mut total_edge_weight = Weight::zeros();
+                for member_tuple in &members {
+                    let next_tuple_from_member: Vec<Option<usize>> = (0..k)
+                        .map(|i| member_tuple[i].and_then(|s| comps[i].trans[s][sym]))
+                        .collect();
+
+                    // All members must transition to the same group.
+                    debug_assert_eq!(tuple_to_id.get(&next_tuple_from_member), Some(&next_id));
+
+                    for (i, s_opt) in next_tuple_from_member.iter().enumerate() {
+                        if s_opt.is_some() {
+                            total_edge_weight |= &atoms.atoms[i];
+                        }
                     }
                 }
-                trans_weights[id][sym] = edge_weight;
+                trans_weights[id][sym] = total_edge_weight;
             }
         }
 
