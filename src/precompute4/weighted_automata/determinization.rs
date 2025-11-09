@@ -586,7 +586,7 @@ impl DetDFA {
         }
 
         let mut finals = vec![false; new_states];
-        let mut trans = vec![vec![0usize; sigma.size()]; new_states];
+        let mut trans: Vec<Vec<Option<usize>>> = vec![vec![None; sigma.size()]; new_states];
 
         for i in 0..self.n_states {
             if !reachable[i] {
