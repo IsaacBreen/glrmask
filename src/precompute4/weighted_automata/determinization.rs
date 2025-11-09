@@ -353,13 +353,12 @@ impl PerAtomNFA {
             }
             ex_by_state[new_s] = local_ex.clone();
 
-            let ex_for_def: BTreeSet<i16> = local_ex.keys().copied().collect();
             for def in &states[old_s].default {
                 let to_old = def.target;
                 if to_old < n_total && live[to_old] && !(&atom_w & &def.weight).is_empty() {
                     let to_new = id_of[to_old];
                     if to_new != usize::MAX {
-                        def_by_state[new_s].push((to_new, ex_for_def.clone()));
+                        def_by_state[new_s].push((to_new, def.exceptions.clone()));
                     }
                 }
             }

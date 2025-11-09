@@ -3897,13 +3897,12 @@ local_system:
                   }
                   ex_by_state[new_s] = local_ex.clone();
 
-                  let ex_for_def: BTreeSet<i16> = local_ex.keys().copied().collect();
                   for def in &states[old_s].default {
                       let to_old = def.target;
                       if to_old < n_total && live[to_old] && !(&atom_w & &def.weight).is_empty() {
                           let to_new = id_of[to_old];
                           if to_new != usize::MAX {
-                              def_by_state[new_s].push((to_new, ex_for_def.clone()));
+                              def_by_state[new_s].push((to_new, def.exceptions.clone()));
                           }
                       }
                   }
@@ -7681,5 +7680,375 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Determinization: Correctly calculate final
       weights using all member tuples and use pre-calculated per-transition weights."'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |2+
+          #[test]
+          fn test_det_default_transition() {
+              let mut nwa = NWA::new();
+              let s_a = nwa.states.add_state();
+              let s_def = nwa.states.add_state();
+              nwa.add_transition(nwa.body.start_state, 'a' as i16, s_a, Weight::all()).unwrap();
+              nwa.add_default_transition(nwa.body.start_state, s_def, Weight::all(), BTreeSet::from(['a' as i16])).unwrap();
+              nwa.states[s_a].final_weight = Some(Weight::from_item(1));
+              nwa.states[s_def].final_weight = Some(Weight::from_item(2));
+
+              println!("{}", nwa);
+              let dwa = nwa.determinize_to_dwa();
+              println!("{}", dwa);
+
+              let mut expected = DWA::new();
+              let s_a_dwa = expected.add_state();
+              let s_def_dwa = expected.add_state();
+              expected.add_transition(expected.body.start_state, 'a' as i16, s_a_dwa, Weight::all()).unwrap();
+              expected.set_default_transition(expected.body.start_state, s_def_dwa, Weight::all()).unwrap();
+              expected.set_final_weight(s_a_dwa, Weight::from_item(1)).unwrap();
+              expected.set_final_weight(s_def_dwa, Weight::from_item(2)).unwrap();
+
+              stochastic_equivalence_test(dwa, expected);
+          }
+      NWA (start: 0)
+
+
+          #[test]
+          fn test_determinize_default_vs_exception_bug() {
+              // DWA 'a' (the ground truth)
+              let mut a = DWA::new();
+              let s1 = a.add_state();
+              let s2_default_target = a.add_state();
+              let s3_exception_target = a.add_state();
+              let s4_final = a.add_state();
+
+              // Path: start --'a'--> s1
+              a.add_transition(a.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
+
+              // From s1:
+              // - Default transition to s2
+              // - Exception on 'b' to s3
+              a.set_default_transition(s1, s2_default_target, Weight::all()).unwrap();
+              a.add_transition(s1, 'b' as i16, s3_exception_target, Weight::all()).unwrap();
+
+              // The default path continues and is accepting.
+              a.add_transition(s2_default_target, 'c' as i16, s4_final, Weight::all()).unwrap();
+              a.set_final_weight(s4_final, Weight::from_item(1)).unwrap();
+
+              println!("Original DWA:\n{}", a);
+
+              // The exception path 'b' leads to a non-final sink state s3.
+              // So, "ab" is not accepted, and "abc" is not accepted.
+
+              // Check A's behavior.
+              // A word taking the default path should be accepted.
+              assert_eq!(a.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+              // Words taking the exception path should be rejected.
+              assert_eq!(a.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
+              assert_eq!(a.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
+
+              // Now, convert A to NWA and back to DWA 'b'.
+              let nwa = NWA::from_dwa(&a);
+              let mut b = nwa.determinize_to_dwa();
+              println!("Determinized DWA:\n{}", b);
+
+              assert_eq!(b.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+              assert_eq!(b.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
+              assert_eq!(b.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
+
+              // Run the full stochastic equivalence test for good measure.
+              stochastic_equivalence_test(a.clone(), b.clone());
+
+              let mut c = b.clone();
+              c.simplify();
+              println!("Simplified DWA:\n{}", c);
+
+              assert_eq!(c.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+              assert_eq!(c.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
+              assert_eq!(c.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
+
+              stochastic_equivalence_test(a, c);
+          }
+
+
+
+        State 0:
+          * -> 2 (weight: ALL, except for {97})
+          97 -> 1 (weight: ALL)
+        State 1:
+          final_weight: [1]
+        State 2:
+          final_weight: [2]
+
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:95: Starting determinization for NWA with 3 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Built weight partition with 4 atoms in 176.584µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Built alphabet with 1 labels in 512.292µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Minimizing DFA with 1 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Atom 0: interval=0..=0, DFA states=1
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Minimizing DFA with 2 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Atom 1: interval=1..=1, DFA states=3
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Minimizing DFA with 2 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Atom 2: interval=2..=2, DFA states=3
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Minimizing DFA with 1 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Atom 3: interval=3..=18446744073709551615, DFA states=1
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:890: ProductDFA: Merged 4 tuples into 2 states
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:892:  State 0:
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:893:   Representative: [Some(0), Some(1), Some(1), Some(0)]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:894:   Members (2):
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:896:    [Some(0), Some(1), Some(1), Some(0)]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:896:    [None, None, None, None]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:892:  State 1:
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:893:   Representative: [None, Some(0), Some(0), None]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:894:   Members (2):
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:896:    [None, None, Some(0), None]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:896:    [None, Some(0), Some(0), None]
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Product DFA: states=2, alphabet_size=2, time=846.917µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Product->DWA conversion took 232.25µs
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:95: NWA::determinize_to_dwa total time: 5.878792ms
+      DWA (start: 0)
+        State 0:
+          * -> 1 (trans_weight: [2])
+          97 -> 1 (trans_weight: [1..=2])
+        State 1:
+          * -> 0 (trans_weight: [])
+          final_weight: [1..=2]
+          97 -> 0 (trans_weight: [])
+
+      [DEBUG] 5] src/precompute4/test_weighted_automata.rs:256: Starting stochastic equivalence test
+
+
+      thread 'precompute4::test_weighted_automata::determinization_tests::test_det_default_transition' (12839472) panicked at src/precompute4/test_weighted_automata.rs:272:13:
+      assertion `left == right` failed: Equivalence fail: B(w) != A(w) for word from B.
+      word: [97]
+      B(w): [1]
+      A(w): [1..=2]
+
+      DWA A:
+      DWA (start: 0)
+        State 0:
+          * -> 1 (trans_weight: [2])
+          97 -> 1 (trans_weight: [1..=2])
+        State 1:
+          * -> 0 (trans_weight: [])
+          final_weight: [1..=2]
+          97 -> 0 (trans_weight: [])
+
+
+      DWA B:
+      DWA (start: 0)
+        State 0:
+          * -> 2 (trans_weight: ALL)
+          97 -> 1 (trans_weight: ALL)
+        State 1:
+          final_weight: [1]
+        State 2:
+          final_weight: [2]
+
+        left: 1..=1
+       right: 1..=2
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::test_weighted_automata::stochastic_equivalence_test
+                   at ./src/precompute4/test_weighted_automata.rs:272:13
+         5: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_default_transition
+                   at ./src/precompute4/test_weighted_automata.rs:1911:9
+         6: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_default_transition::{{closure}}
+                   at ./src/precompute4/test_weighted_automata.rs:1890:37
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+
+      Original DWA:
+      DWA (start: 0)
+        State 0:
+          97 -> 1 (trans_weight: ALL)
+        State 1:
+          * -> 2 (trans_weight: ALL)
+          98 -> 3 (trans_weight: ALL)
+        State 2:
+          99 -> 4 (trans_weight: ALL)
+        State 3:
+        State 4:
+          final_weight: [1]
+
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:95: Starting determinization for NWA with 5 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Built weight partition with 3 atoms in 798.625µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Built alphabet with 3 labels in 401.542µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Minimizing DFA with 1 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Atom 0: interval=0..=0, DFA states=1
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Minimizing DFA with 4 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Atom 1: interval=1..=1, DFA states=5
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Minimizing DFA with 1 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Atom 2: interval=2..=18446744073709551615, DFA states=1
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:890: ProductDFA: Merged 5 tuples into 4 states
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:892:  State 0:
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:893:   Representative: [None, Some(0), None]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:894:   Members (2):
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:896:    [None, None, None]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:896:    [None, Some(0), None]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:892:  State 1:
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:893:   Representative: [None, Some(1), None]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:894:   Members (1):
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:896:    [None, Some(1), None]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:892:  State 2:
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:893:   Representative: [Some(0), Some(3), Some(0)]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:894:   Members (1):
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:896:    [Some(0), Some(3), Some(0)]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:892:  State 3:
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:893:   Representative: [None, Some(2), None]
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:894:   Members (1):
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:896:    [None, Some(2), None]
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Product DFA: states=4, alphabet_size=4, time=852.833µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:95: Product->DWA conversion took 581.834µs
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:95: NWA::determinize_to_dwa total time: 4.941625ms
+      Determinized DWA:
+      DWA (start: 2)
+        State 0:
+          * -> 0 (trans_weight: [])
+          final_weight: [1]
+          97 -> 0 (trans_weight: [])
+          98 -> 0 (trans_weight: [])
+          99 -> 0 (trans_weight: [])
+        State 1:
+          * -> 0 (trans_weight: [])
+          97 -> 0 (trans_weight: [])
+          98 -> 0 (trans_weight: [])
+          99 -> 0 (trans_weight: [1])
+        State 2:
+          * -> 0 (trans_weight: [])
+          97 -> 3 (trans_weight: [1])
+          98 -> 0 (trans_weight: [])
+          99 -> 0 (trans_weight: [])
+        State 3:
+          * -> 1 (trans_weight: [1])
+          97 -> 1 (trans_weight: [1])
+          98 -> 1 (trans_weight: [1])
+          99 -> 1 (trans_weight: [1])
+
+
+
+      thread 'precompute4::test_weighted_automata::determinization_tests::test_determinize_default_vs_exception_bug' (12839479) panicked at src/precompute4/test_weighted_automata.rs:1984:9:
+      assertion `left == right` failed
+        left: 1..=1
+       right: 
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::test_weighted_automata::determinization_tests::test_determinize_default_vs_exception_bug
+                   at ./src/precompute4/test_weighted_automata.rs:1984:9
+         5: sep1::precompute4::test_weighted_automata::determinization_tests::test_determinize_default_vs_exception_bug::{{closure}}
+                   at ./src/precompute4/test_weighted_automata.rs:1944:51
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - assistant: |-
+      It appears my previous fixes introduced a subtle bug in how default transitions were handled during the construction of the per-atom NFAs. The exception set for a default transition was being incorrectly recalculated based on which labeled transitions survived pruning for a given atom, instead of using the original exception set from the NWA. This caused the determinized automaton to follow incorrect paths.
+
+      I will now correct this logic.
+
+      ### Step-by-step Instructions
+
+      The fix is a small but critical change in `src/precompute4/weighted_automata/determinization.rs`.
+
+      1.  **Locate the `PerAtomNFA::from_nwa` function.**
+      2.  Inside the main loop that iterates over the NWA states to build the per-atom NFA (`for (new_s, &old_s) in order.iter().enumerate()`), find the section that handles default transitions.
+      3.  You will see a commented-out line `let ex_for_def: BTreeSet<i16> = local_ex.keys().copied().collect();`. This was the source of the bug. I will remove it.
+      4.  In the loop over `states[old_s].default`, I will change the line that pushes to `def_by_state`. Instead of using a locally computed (and incorrect) exception set, it will now use `def.exceptions.clone()`, which is the correct, original exception set from the NWA's default transition definition.
+
+      This ensures that the semantics of default transitions are correctly preserved in each per-atom NFA, leading to a correctly determinized final DWA.
+
+      ### Git Diff
+
+      Here is the git diff to apply the fix.
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -582,14 +582,12 @@
+                   }
+                   ex_by_state[new_s] = local_ex.clone();
+       
+      -            let ex_for_def: BTreeSet<i16> = local_ex.keys().copied().collect();
+                   for def in &states[old_s].default {
+                       let to_old = def.target;
+                       if to_old < n_total && live[to_old] && !(&atom_w & &def.weight).is_empty() {
+                           let to_new = id_of[to_old];
+                           if to_new != usize::MAX {
+      -                        def_by_state[new_s].push((to_new, ex_for_def.clone()));
+      +                        def_by_state[new_s].push((to_new, def.exceptions.clone()));
+                           }
+                       }
+                   }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Determinization: Fix final weight aggregation,
+      transition weights, and default exception handling in per-atom NFAs."'
     metadata:
 ...
