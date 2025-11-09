@@ -131,6 +131,10 @@ impl SimpleBitset {
         self.update_cached();
     }
 
+    pub fn add(&mut self, item: usize) {
+        self.insert(item);
+    }
+
     pub fn remove(&mut self, item: usize) {
         if self.is_empty() { return; }
         if self.is_all_fast() {
