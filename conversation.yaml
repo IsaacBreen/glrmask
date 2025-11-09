@@ -4593,22 +4593,23 @@ local_system:
                   p.set_message(format!("Collected {} tuples, now merging...", n));
               }
 
-              // Step 2: Group tuples by their canonical key (the map of active components)
-              let mut classes: HashMap<BTreeMap<usize, usize>, Vec<usize>> = HashMap::new();
-              for i in 0..n {
-                  let key = all_tuples[i]
-                      .iter()
-                      .enumerate()
-                      .filter_map(|(i, s_opt)| s_opt.map(|s| (i, s)))
-                      .collect();
-                  classes.entry(key).or_default().push(i);
+              // Step 2: Group tuples by their canonical key
+              let group_ids = Self::group_product_states(&all_tuples);
+              let num_groups = group_ids.iter().max().map_or(0, |&max| max + 1);
+              let mut classes: Vec<Vec<usize>> = vec![vec![]; num_groups];
+              for (tuple_idx, group_id) in group_ids.iter().enumerate() {
+                  classes[*group_id].push(tuple_idx);
               }
+
 
               // Step 4: For each class, pick representative and compute active weight
               let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
               // (members, representative, active_weight)
 
-              for (_key, members) in classes.into_iter() {
+              for members in classes.into_iter() {
+                  if members.is_empty() {
+                      continue;
+                  }
                   // Pick representative (tuple with fewest sinks)
                   let best_idx = members
                       .iter()
@@ -4764,8 +4765,33 @@ local_system:
               if let Some(p) = pb_convert {
                   p.finish_with_message("Attached DWA weights");
               }
-
               dwa
+          }
+
+          /// Groups product state tuples into equivalence classes.
+          /// Returns a vector where `result[i]` is the group ID for `all_tuples[i]`.
+          fn group_product_states(all_tuples: &[Vec<Option<usize>>]) -> Vec<usize> {
+              let n = all_tuples.len();
+              let mut group_ids = vec![0; n];
+              let mut key_to_group_id: HashMap<BTreeMap<usize, usize>, usize> = HashMap::new();
+              let mut next_group_id = 0;
+
+              for (i, tuple) in all_tuples.iter().enumerate() {
+                  // The key is the map of active components: component_idx -> state_idx
+                  let key: BTreeMap<usize, usize> = tuple
+                      .iter()
+                      .enumerate()
+                      .filter_map(|(comp_idx, s_opt)| s_opt.map(|s| (comp_idx, s)))
+                      .collect();
+
+                  let group_id = *key_to_group_id.entry(key).or_insert_with(|| {
+                      let id = next_group_id;
+                      next_group_id += 1;
+                      id
+                  });
+                  group_ids[i] = group_id;
+              }
+              group_ids
           }
       }
     src/precompute4/weighted_automata/test_determinization.rs: |-
@@ -9748,5 +9774,167 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Implement efficient NWA to DWA determinization
       via product state merging and active weight encoding"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/Efficient Weighted Automata Determinization.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Make the part of the code that decides how states are group kind of self-contained.
+      Its own method. It should take a `Vec<Vec<Option<usize>>>` and return `Vec<usize>`
+      - the groupings as indices.
+    metadata:
+  - assistant: |-
+      Of course. I will refactor the state grouping logic into its own self-contained method as requested. This improves modularity and makes the `from_components` method easier to read.
+
+      ### Step-by-step Instructions
+
+      Here are the edits for `src/precompute4/weighted_automata/determinization.rs`:
+
+      1.  **Create the `group_product_states` method**:
+          Inside the `impl ProductDFA` block, add a new standalone method named `group_product_states`. This method will take a slice of tuples (`&[Vec<Option<usize>>]`) and return a `Vec<usize>` where each element is the group ID for the corresponding tuple.
+
+      2.  **Implement the grouping logic**:
+          The new method will iterate through the input tuples. For each tuple, it will generate a canonical key representing its active (non-`None`) components. It will use a `HashMap` to assign a unique, incrementing group ID to each unique key it encounters. The final vector of group IDs is then returned.
+
+      3.  **Refactor `ProductDFA::from_components`**:
+          -   After collecting all reachable tuples into `all_tuples`, replace the existing inline grouping logic with a call to the new `Self::group_product_states(&all_tuples)` method.
+          -   The result of this call is a `group_ids` vector.
+          -   Use this `group_ids` vector to construct the `classes` structure (a `Vec<Vec<usize>>` where `classes[group_id]` contains the list of tuple indices for that group).
+          -   The rest of the method, which processes these classes, remains unchanged.
+
+      ---
+
+      ### Git Diff
+
+      Here is the git diff that applies these changes.
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -848,22 +848,39 @@
+                   p.set_message(format!("Collected {} tuples, now merging...", n));
+               }
+       
+      -        // Step 2: Group tuples by their canonical key (the map of active components)
+      -        let mut classes: HashMap<BTreeMap<usize, usize>, Vec<usize>> = HashMap::new();
+      -        for i in 0..n {
+      -            let key = all_tuples[i]
+      -                .iter()
+      -                .enumerate()
+      -                .filter_map(|(i, s_opt)| s_opt.map(|s| (i, s)))
+      -                .collect();
+      -            classes.entry(key).or_default().push(i);
+      -        }
+      +        // Step 2: Group tuples by their canonical key
+      +        let group_ids = Self::group_product_states(&all_tuples);
+      +        let num_groups = group_ids.iter().max().map_or(0, |&max| max + 1);
+      +        let mut classes: Vec<Vec<usize>> = vec![vec![]; num_groups];
+      +        for (tuple_idx, group_id) in group_ids.iter().enumerate() {
+      +            classes[*group_id].push(tuple_idx);
+      +        }
+      +
+       
+               // Step 4: For each class, pick representative and compute active weight
+               let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
+               // (members, representative, active_weight)
+       
+      -        for (_key, members) in classes.into_iter() {
+      +        for members in classes.into_iter() {
+      +            if members.is_empty() {
+      +                continue;
+      +            }
+                   // Pick representative (tuple with fewest sinks)
+                   let best_idx = members
+                       .iter()
+      @@ -957,4 +974,29 @@
+               }
+               dwa
+           }
+      -}
+      +
+      +    /// Groups product state tuples into equivalence classes.
+      +    /// Returns a vector where `result[i]` is the group ID for `all_tuples[i]`.
+      +    fn group_product_states(all_tuples: &[Vec<Option<usize>>]) -> Vec<usize> {
+      +        let n = all_tuples.len();
+      +        let mut group_ids = vec![0; n];
+      +        let mut key_to_group_id: HashMap<BTreeMap<usize, usize>, usize> = HashMap::new();
+      +        let mut next_group_id = 0;
+      +
+      +        for (i, tuple) in all_tuples.iter().enumerate() {
+      +            // The key is the map of active components: component_idx -> state_idx
+      +            let key: BTreeMap<usize, usize> = tuple
+      +                .iter()
+      +                .enumerate()
+      +                .filter_map(|(comp_idx, s_opt)| s_opt.map(|s| (comp_idx, s)))
+      +                .collect();
+      +
+      +            let group_id = *key_to_group_id.entry(key).or_insert_with(|| {
+      +                let id = next_group_id;
+      +                next_group_id += 1;
+      +                id
+      +            });
+      +            group_ids[i] = group_id;
+      +        }
+      +        group_ids
+      +    }
+      +}
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor NWA to DWA determinization: Implement
+      efficient product state grouping via canonical key"'
     metadata:
 ...

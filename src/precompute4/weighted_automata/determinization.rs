@@ -851,22 +851,23 @@ impl ProductDFA {
             p.set_message(format!("Collected {} tuples, now merging...", n));
         }
 
-        // Step 2: Group tuples by their canonical key (the map of active components)
-        let mut classes: HashMap<BTreeMap<usize, usize>, Vec<usize>> = HashMap::new();
-        for i in 0..n {
-            let key = all_tuples[i]
-                .iter()
-                .enumerate()
-                .filter_map(|(i, s_opt)| s_opt.map(|s| (i, s)))
-                .collect();
-            classes.entry(key).or_default().push(i);
+        // Step 2: Group tuples by their canonical key
+        let group_ids = Self::group_product_states(&all_tuples);
+        let num_groups = group_ids.iter().max().map_or(0, |&max| max + 1);
+        let mut classes: Vec<Vec<usize>> = vec![vec![]; num_groups];
+        for (tuple_idx, group_id) in group_ids.iter().enumerate() {
+            classes[*group_id].push(tuple_idx);
         }
+
 
         // Step 4: For each class, pick representative and compute active weight
         let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
         // (members, representative, active_weight)
 
-        for (_key, members) in classes.into_iter() {
+        for members in classes.into_iter() {
+            if members.is_empty() {
+                continue;
+            }
             // Pick representative (tuple with fewest sinks)
             let best_idx = members
                 .iter()
@@ -1022,7 +1023,32 @@ impl ProductDFA {
         if let Some(p) = pb_convert {
             p.finish_with_message("Attached DWA weights");
         }
-
         dwa
+    }
+
+    /// Groups product state tuples into equivalence classes.
+    /// Returns a vector where `result[i]` is the group ID for `all_tuples[i]`.
+    fn group_product_states(all_tuples: &[Vec<Option<usize>>]) -> Vec<usize> {
+        let n = all_tuples.len();
+        let mut group_ids = vec![0; n];
+        let mut key_to_group_id: HashMap<BTreeMap<usize, usize>, usize> = HashMap::new();
+        let mut next_group_id = 0;
+
+        for (i, tuple) in all_tuples.iter().enumerate() {
+            // The key is the map of active components: component_idx -> state_idx
+            let key: BTreeMap<usize, usize> = tuple
+                .iter()
+                .enumerate()
+                .filter_map(|(comp_idx, s_opt)| s_opt.map(|s| (comp_idx, s)))
+                .collect();
+
+            let group_id = *key_to_group_id.entry(key).or_insert_with(|| {
+                let id = next_group_id;
+                next_group_id += 1;
+                id
+            });
+            group_ids[i] = group_id;
+        }
+        group_ids
     }
 }
