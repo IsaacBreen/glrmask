@@ -504,9 +504,10 @@ impl DWA {
         for (sid, st) in states.iter().enumerate() {
             for (label, target, weight) in st.iter_edges() {
                 let symbol = (label, weight.clone());
+                let next_idx = alphabet.len();
                 let symbol_idx = *alphabet.entry(symbol).or_insert_with(|| {
                     inv_trans.push(vec![Vec::new(); n]);
-                    alphabet.len()
+                    next_idx
                 });
                 if target < n {
                     inv_trans[symbol_idx][target].push(sid);
