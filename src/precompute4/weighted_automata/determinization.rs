@@ -920,6 +920,11 @@ impl ProductDFA {
             }
         }
 
+        crate::debug!(5, "ProductDFA: Merged {} tuples into {} states", n, n_states);
+        for (id, (ref members, ref repr, _active)) in class_list.iter().enumerate() {
+            crate::debug!(5, " State {}: representative {:?}, members {:?}", id, repr, members.iter().map(|&idx| &all_tuples[idx]).collect::<Vec<_>>());
+        }
+
         let start_id = tuple_to_id[&start_tuple];
 
         // Step 6: Build Product DFA structures
