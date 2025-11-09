@@ -2,7 +2,7 @@
 #![allow(clippy::needless_borrow)]
 
 use super::bitset::SimpleBitset as Weight;
-use super::dwa::{DWAState, DWAStates, DWA, DWABody};
+use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use super::nwa::{NWA, NWAStates};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -21,19 +21,17 @@ use std::time::Instant;
 ///    Sigma' = { all labels appearing anywhere in the NWA } ∪ { OTHER }, where OTHER means:
 ///      "use state's default targets when there is no exception for that label."
 ///    Then minimize the DFA (Hopcroft).
-/// 3) Combine all atom-DFAs into a single deterministic product DFA by parallel composition
-///    across components (one component per atom). The product DFA has a single start state
-///    (tuple of per-atom starts) and reads the original word labels (from Sigma').
-/// 4) Convert the product DFA into a DWA:
+/// 3) Combine all atom-DFAs into a single deterministic product automaton. To avoid state space
+///    explosion, this is not a direct product. Instead, we build the product state space on-the-fly.
+///    When a transition in a component DFA leads to a sink state, we substitute the component's
+///    start state instead. This allows many product states to be identified, dramatically
+///    reducing the size of the resulting automaton, especially for automata like the "hypercube"
+///    example where distinctions are primarily managed by weights.
+/// 4) Convert the resulting compact product automaton into a DWA:
 ///    - Each product state P = (q_0, q_1, ..., q_{k-1}) has an "active weight" equal to the union of
-///      atom-weights for components i where q_i is not the component's sink state (if any).
+///      atom-weights for components i where q_i is not the component's sink state.
 ///      We attach this active weight to all outgoing edges from P.
-///    - Each labeled edge (exception label) carries the active weight; the transition target is deterministic.
-///    - The default edge (OTHER) also carries the active weight.
 ///    - The final weight of P is the union of atom-weights for components in which q_i is accepting.
-///    This construction yields a correct DWA: for any input word, each atom either remains "alive"
-///    (never falls into its component sink) and ends in a final component, contributing that atom's range
-///    to the final weight; otherwise it is filtered out by the final state's weight.
 ///
 /// This DWA is then simplified (minimized structurally and normalized) using the existing passes.
 impl NWA {
@@ -105,7 +103,7 @@ impl NWA {
 
         // 4) Build product DFA over components (parallel composition).
         let now_product = Instant::now();
-        let product = ProductDFA::from_components(&comp_dfas, &sigma);
+        let product = ProductDFA::from_components(&comp_dfas, &sigma, &comp_sinks);
         debug_log(4, || {
             format!(
                 "Product DFA: states={}, alphabet_size={}, time={:?}",
@@ -693,11 +691,13 @@ impl DetDFA {
         let reachable = {
             let mut visited = vec![false; self.n_states];
             let mut q = VecDeque::new();
-            visited[self.start] = true;
-            q.push_back(self.start);
+            if self.start < self.n_states {
+                visited[self.start] = true;
+                q.push_back(self.start);
+            }
             while let Some(u) = q.pop_front() {
                 for &v in &self.trans[u] {
-                    if !visited[v] {
+                    if v < self.n_states && !visited[v] {
                         visited[v] = true;
                         q.push_back(v);
                     }
@@ -815,7 +815,8 @@ impl DetDFA {
             for &s in &pre { let pid = part_id[s]; affected.entry(pid).or_default().0.push(s); }
             for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
                 // Fill not_in_pre
-                for &s in &blocks[*pid] { if !in_pre.binary_search(&s).is_ok() { not_in_pre.push(s); } }
+                let mut in_pre_set: BTreeSet<usize> = in_pre.iter().copied().collect();
+                for &s in &blocks[*pid] { if !in_pre_set.contains(&s) { not_in_pre.push(s); } }
             }
 
             let mut to_replace: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
@@ -866,7 +867,7 @@ impl DetDFA {
         // Build the quotient automaton
         let num_parts = blocks.len();
         let mut repr: Vec<usize> = vec![0; num_parts];
-        for (pid, block) in blocks.iter().enumerate() { repr[pid] = block[0]; }
+        for (pid, block) in blocks.iter().enumerate() { if !block.is_empty() { repr[pid] = block[0]; } }
 
         let start_part = part_id[self.start];
         let mut finals2 = vec![false; num_parts];
@@ -920,7 +921,7 @@ struct ProductDFA {
     tuples: Vec<Vec<usize>>, // tuples[state] = [q0, q1, ..., q_{k-1}]
 }
 impl ProductDFA {
-    fn from_components(comps: &[DetDFA], sigma: &Alphabet) -> Self {
+    fn from_components(comps: &[DetDFA], sigma: &Alphabet, comp_sinks: &[Option<usize>]) -> Self {
         let k = comps.len();
         // Starting tuple: [start0, start1, ..., start_{k-1}]
         let mut start_tuple = Vec::with_capacity(k);
@@ -980,15 +981,21 @@ impl ProductDFA {
                     let v = comp.trans[s][sym];
                     next_tuple.push(v);
                 }
+
+                // Optimization: if a component transitions to a sink, substitute its start state.
+                // This avoids creating distinct product states that only differ in their sink components.
+                for i in 0..k {
+                    if let Some(sink_idx) = comp_sinks[i] {
+                        if next_tuple[i] == sink_idx {
+                            next_tuple[i] = comps[i].start;
+                        }
+                    }
+                }
+
                 let v = if let Some(&id) = map.get(&next_tuple) {
                     id
                 } else {
-                    let id = tuples.len();
-                    let is_final = next_tuple.iter().enumerate().any(|(i, &s)| comps[i].finals[s]);
-                    tuples.push(next_tuple.clone());
-                    finals.push(is_final);
-                    trans.push(vec![0usize; sigma.size()]);
-                    map.insert(next_tuple, id);
+                    let id = intern(next_tuple.clone(), &mut map, &mut tuples, &mut finals, &mut trans);
                     if let Some(p) = &pb_product {
                         p.set_position(tuples.len() as u64);
                     }
