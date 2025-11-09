@@ -47,13 +47,13 @@ impl NWA {
         };
 
         let mut comp_dfas: Vec<DetDFA> = Vec::with_capacity(atoms.intervals.len());
-        let mut comp_sinks: Vec<usize> = Vec::with_capacity(atoms.intervals.len());
+        let mut comp_sinks: Vec<Option<usize>> = Vec::with_capacity(atoms.intervals.len());
         for (i, atom) in atoms.intervals.iter().enumerate() {
             let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
             let mut dfa = nfa.determinize(&sigma);
             dfa.minimize(&sigma);
             crate::debug!(4, "Atom {}: interval={:?}, DFA states={}", i, atom, dfa.n_states);
-            let sink = dfa.find_sink_index(&sigma).unwrap_or(usize::MAX);
+            let sink = dfa.find_sink_index(&sigma);
             comp_sinks.push(sink);
             comp_dfas.push(dfa);
             if let Some(p) = &pb_atoms {
@@ -819,7 +819,7 @@ struct ProductDFA {
 }
 
 impl ProductDFA {
-    fn from_components(comps: &[DetDFA], sigma: &Alphabet, atoms: &WeightPartition, comp_sinks: &[usize]) -> Self {
+    fn from_components(comps: &[DetDFA], sigma: &Alphabet, atoms: &WeightPartition, comp_sinks: &[Option<usize>]) -> Self {
         let k = comps.len();
 
         let pb_product = if PROGRESS_BAR_ENABLED {
@@ -891,7 +891,7 @@ impl ProductDFA {
                     all_tuples[idx]
                         .iter()
                         .enumerate()
-                        .filter(|(i, &s)| comp_sinks[*i] != usize::MAX && comp_sinks[*i] == s)
+                        .filter(|(i, &s)| comp_sinks[*i] == Some(s))
                         .count()
                 })
                 .unwrap();
@@ -902,7 +902,7 @@ impl ProductDFA {
             for &member_idx in &members {
                 let tuple = &all_tuples[member_idx];
                 for (comp_idx, &state) in tuple.iter().enumerate() {
-                    if comp_sinks[comp_idx] == usize::MAX || comp_sinks[comp_idx] != state {
+                    if comp_sinks[comp_idx] != Some(state) {
                         active |= &atoms.atoms[comp_idx];
                     }
                 }
@@ -1039,14 +1039,14 @@ impl ProductDFA {
     }
 }
 
-fn can_merge(t1: &[usize], t2: &[usize], sinks: &[usize]) -> bool {
+fn can_merge(t1: &[usize], t2: &[usize], sinks: &[Option<usize>]) -> bool {
     for i in 0..t1.len() {
         let s1 = t1[i];
         let s2 = t2[i];
         if s1 == s2 {
             continue;
         }
-        if sinks[i] != usize::MAX && (s1 == sinks[i] || s2 == sinks[i]) {
+        if sinks[i] == Some(s1) || sinks[i] == Some(s2) {
             continue;
         }
         return false;
