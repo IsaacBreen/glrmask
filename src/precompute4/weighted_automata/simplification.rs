@@ -134,10 +134,10 @@ impl DWA {
 
             // For small automata, follow relaxation with a proper minimization pass.
             if !large {
-                if let Some(p) = &pb { p.set_message("minimize".to_string()); }
+                if let Some(p) = &pb { p.set_message("minimize canonical".to_string()); }
                 changed_any |=
-                    Self::run_pass_with_test(states, body, "minimize_partition_refinement", |s, b| {
-                        Self::minimize_partition_refinement(s, b)
+                    Self::run_pass_with_test(states, body, "minimize_canonical", |s, b| {
+                        Self::minimize_canonical(s, b)
                     });
             }
 
@@ -482,139 +482,162 @@ impl DWA {
         changed
     }
 
-    /// Partition-refinement minimization (structure-only), aggregating weights by union.
-    pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> bool {
-        let n = states.0.len();
+    /// Canonical minimization of a DWA using Hopcroft's algorithm, as described by Mohri.
+    /// This is a two-step process:
+    /// 1. Weight Pushing: We use `relax_weights_by_local_future` as a practical implementation
+    ///    of this principle, which normalizes weights to expose structural equivalence. This
+    ///    should be run before calling this function.
+    /// 2. Unweighted Minimization: We treat the DWA as an unweighted DFA where the alphabet
+    ///    consists of `(label, weight)` pairs, and apply partition refinement.
+    pub fn minimize_canonical(states: &mut DWAStates, body: &mut DWABody) -> bool {
+        let n = states.len();
         if n <= 1 {
             return false;
         }
 
-        // Initial partition by outputs (state_weight, final_weight).
-        let mut part: Vec<usize> = vec![0; n];
-        let mut canon0: HashMap<(Option<Weight>, Option<Weight>), usize> = HashMap::new();
-        for i in 0..n {
-            let key = (states[i].state_weight.clone(), states[i].final_weight.clone());
-            let next_id = canon0.len();
-            part[i] = *canon0.entry(key).or_insert(next_id);
-        }
+        // --- 1. Build Alphabet and Inverse Transitions ---
+        // The "alphabet" for this minimization is the set of unique (label, weight) pairs.
+        // `None` for label represents the default transition.
+        let mut alphabet: HashMap<(Option<i16>, Weight), usize> = HashMap::new();
+        let mut inv_trans: Vec<Vec<Vec<StateID>>> = Vec::new();
 
-        // Refine until stable
-        let mut changed = true;
-        let mut rounds = 0usize;
-        while changed && rounds < 30 {
-            rounds += 1;
-            changed = false;
-            let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: HashMap<(
-                Option<Weight>,
-                Option<Weight>,
-                Option<(usize, Weight)>,
-                Vec<(i16, (usize, Weight))>,
-            ), usize> = HashMap::new();
-
-            for i in 0..n {
-                let st = &states[i];
-                let def_sig = st.transitions.default.map(|d| {
-                    (part[d], st.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
+        for (sid, st) in states.iter().enumerate() {
+            for (label, target, weight) in st.iter_edges() {
+                let symbol = (label, weight.clone());
+                let symbol_idx = *alphabet.entry(symbol).or_insert_with(|| {
+                    inv_trans.push(vec![Vec::new(); n]);
+                    alphabet.len()
                 });
-                let ex_sig: Vec<_> = st.transitions.exceptions.iter()
-                    .map(|(ch, &tgt)| (*ch, (part[tgt], st.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all))))
-                    .filter(|(_, (cls, w))| def_sig.as_ref().map_or(true, |(dc, dw)| *dc != *cls || dw != w))
-                    .collect();
-                let sig = (st.state_weight.clone(), st.final_weight.clone(), def_sig, ex_sig);
-                let next_pid = sig2pid.len();
-                next_part[i] = *sig2pid.entry(sig).or_insert(next_pid);
-            }
-            if next_part != part {
-                part = next_part;
-                changed = true;
+                if target < n {
+                    inv_trans[symbol_idx][target].push(sid);
+                }
             }
         }
+        let alphabet_size = alphabet.len();
 
-        // Build groups
-        let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for (i, p) in part.iter().enumerate() {
-            groups.entry(*p).or_default().push(i);
-        }
-        if groups.len() == n {
-            return false;
-        }
+        // --- 2. Initial Partition ---
+        // States are initially partitioned by their final weight.
+        let mut partitions: Vec<Vec<StateID>> = Vec::new();
+        let mut part_map: HashMap<Option<Weight>, usize> = HashMap::new();
+        let mut part_id: Vec<usize> = vec![0; n];
 
-        // Map partition id -> new state id
-        let mut pid_to_new: HashMap<usize, usize> = HashMap::new();
-        let mut new_states: Vec<DWAState> = Vec::with_capacity(groups.len());
-
-        for (pid, members) in &groups {
-            let rep = members[0];
-            let rep_state = &states[rep];
-
-            let mut st = DWAState::default();
-            st.state_weight = rep_state.state_weight.clone();
-            st.final_weight = rep_state.final_weight.clone();
-
-            // Structure: keep default if present, and exceptions that differ from default class/weight
-            let def_sig_rep = rep_state.transitions.default.map(|d| {
-                (part[d], rep_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
+        for (sid, st) in states.iter().enumerate() {
+            let key = st.final_weight.clone();
+            let pid = *part_map.entry(key).or_insert_with(|| {
+                partitions.push(Vec::new());
+                partitions.len() - 1
             });
-            st.transitions.default = def_sig_rep.as_ref().map(|_| 0);
-            for (ch, tgt) in &rep_state.transitions.exceptions {
-                let cls = part[*tgt];
-                let ex_weight = rep_state.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all);
-                if def_sig_rep.as_ref().map_or(true, |(dc, dw)| *dc != cls || *dw != ex_weight) {
-                    st.transitions.exceptions.insert(*ch, 0);
-                }
-            }
-
-            // Aggregate weights (union) across members: default and per-label exceptions
-            if st.transitions.default.is_some() {
-                let mut agg_def: Option<Weight> = None;
-                for &old in members {
-                    if let Some(w) = states[old].trans_weight_default.as_ref() {
-                        if let Some(ref mut a) = agg_def { *a |= w; } else { agg_def = Some(w.clone()); }
-                    }
-                }
-                st.trans_weight_default = agg_def;
-            }
-            for ch in st.transitions.exceptions.keys().cloned().collect::<Vec<_>>() {
-                let mut agg: Option<Weight> = None;
-                for &old in members {
-                    if let Some(w) = states[old].trans_weights_exceptions.get(&ch) {
-                        if let Some(ref mut a) = agg { *a |= w; } else { agg = Some(w.clone()); }
-                    }
-                }
-                if let Some(w) = agg {
-                    st.trans_weights_exceptions.insert(ch, w);
-                }
-            }
-
-            let new_id = new_states.len();
-            pid_to_new.insert(*pid, new_id);
-            new_states.push(st);
+            partitions[pid].push(sid);
+            part_id[sid] = pid;
         }
 
-        // Fix transition targets
-        for (pid, members) in &groups {
-            let new_id = *pid_to_new.get(pid).unwrap();
-            let rep = members[0];
-            let rep_state = &states[rep];
+        // --- 3. Initialize Worklist ---
+        // The worklist contains partition IDs to be used as splitters.
+        // Initialize with all but the largest initial partition.
+        let mut worklist: BTreeSet<usize> = (0..partitions.len()).collect();
+        if let Some(largest_pid) = (0..partitions.len()).max_by_key(|&pid| partitions[pid].len()) {
+            worklist.remove(&largest_pid);
+        }
 
-            if let Some(d) = rep_state.transitions.default {
-                let cls = part[d];
-                new_states[new_id].transitions.default = Some(*pid_to_new.get(&cls).unwrap());
-            }
+        // --- 4. Partition Refinement Loop (Hopcroft's Algorithm) ---
+        while let Some(splitter_pid) = worklist.iter().next().copied() {
+            worklist.remove(&splitter_pid);
+            let splitter = partitions[splitter_pid].clone();
 
-            let ex_old = new_states[new_id].transitions.exceptions.clone();
-            new_states[new_id].transitions.exceptions.clear();
-            for (ch, _) in ex_old {
-                let cls = part[*rep_state.transitions.exceptions.get(&ch).unwrap()];
-                new_states[new_id].transitions.exceptions.insert(ch, *pid_to_new.get(&cls).unwrap());
+            for symbol_idx in 0..alphabet_size {
+                // Compute the preimage: states that transition to the splitter on this symbol.
+                let mut preimage = BTreeSet::new();
+                for &target_state in &splitter {
+                    for &pred_state in &inv_trans[symbol_idx][target_state] {
+                        preimage.insert(pred_state);
+                    }
+                }
+
+                if preimage.is_empty() {
+                    continue;
+                }
+
+                // For each partition B that intersects the preimage, split it.
+                let mut affected_partitions: BTreeSet<usize> = BTreeSet::new();
+                for &state_in_preimage in &preimage {
+                    affected_partitions.insert(part_id[state_in_preimage]);
+                }
+
+                for b_pid in affected_partitions {
+                    let b = partitions[b_pid].clone();
+                    let mut b1 = Vec::new(); // B ∩ Preimage
+                    let mut b2 = Vec::new(); // B \ Preimage
+
+                    for &state in &b {
+                        if preimage.contains(&state) {
+                            b1.push(state);
+                        } else {
+                            b2.push(state);
+                        }
+                    }
+
+                    if b1.is_empty() || b2.is_empty() {
+                        continue; // No split occurred.
+                    }
+
+                    // Perform the split.
+                    let b2_pid = partitions.len();
+                    partitions.push(b2);
+                    partitions[b_pid] = b1;
+
+                    // Update part_id for the newly created partition.
+                    for &state in &partitions[b2_pid] {
+                        part_id[state] = b2_pid;
+                    }
+
+                    // Update the worklist.
+                    if worklist.contains(&b_pid) {
+                        worklist.insert(b2_pid);
+                    } else {
+                        if partitions[b_pid].len() <= partitions[b2_pid].len() {
+                            worklist.insert(b_pid);
+                        } else {
+                            worklist.insert(b2_pid);
+                        }
+                    }
+                }
             }
         }
 
-        states.0 = new_states;
-        let _ = Self::normalize_edges_inplace(states);
-        let start_pid = part[body.start_state];
-        body.start_state = *pid_to_new.get(&start_pid).unwrap();
+        // --- 5. Reconstruct the Minimized DWA ---
+        if partitions.len() == n {
+            return false; // No states were merged.
+        }
+
+        let mut new_states_vec = Vec::with_capacity(partitions.len());
+        let mut pid_to_new_id = vec![0; partitions.len()];
+        let mut old_id_to_new_id = vec![0; n];
+
+        for (pid, part) in partitions.iter().enumerate() {
+            let new_id = new_states_vec.len();
+            pid_to_new_id[pid] = new_id;
+            for &old_id in part {
+                old_id_to_new_id[old_id] = new_id;
+            }
+            // All states in a partition are equivalent, so we can use any as a representative.
+            new_states_vec.push(states[part[0]].clone());
+        }
+
+        // Remap transitions in the new states.
+        for new_st in &mut new_states_vec {
+            if let Some(target) = &mut new_st.transitions.default {
+                *target = old_id_to_new_id[*target];
+            }
+            for target in new_st.transitions.exceptions.values_mut() {
+                *target = old_id_to_new_id[*target];
+            }
+        }
+
+        states.0 = new_states_vec;
+        body.start_state = old_id_to_new_id[body.start_state];
+
+        // Final normalization is good practice.
+        Self::normalize_edges_inplace(states);
 
         true
     }
