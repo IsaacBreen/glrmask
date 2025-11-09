@@ -157,6 +157,24 @@ impl SimpleBitset {
         self.fp = FP_ZERO;
         self.is_all = false;
     }
+
+    pub fn clip_to_range(&mut self, min: usize, max: usize) {
+        if self.is_empty() { return; }
+        if self.is_all_fast() {
+            self.rsb = universe_rsb();
+        }
+        let clip_rsb = RangeSetBlaze::from_iter([min..=max]);
+        self.rsb = &self.rsb & &clip_rsb;
+        self.update_cached();
+    }
+
+    pub fn clip_min(&mut self, min: usize) {
+        self.clip_to_range(min, usize::MAX);
+    }
+
+    pub fn clip_max(&mut self, max: usize) {
+        self.clip_to_range(0, max);
+    }
 }
 
 impl Hash for SimpleBitset {

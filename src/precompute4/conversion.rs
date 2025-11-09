@@ -69,6 +69,7 @@ fn convert_dwa_subgraph(
             if dwa_id == start_dwa_id {
                 weight &= &start_weight;
             }
+            weight.clip_max(internal_max_llm_token);
             let weight_bv = LLMTokenBV::from(weight.rsb);
             if !weight_bv.is_empty() {
                 let edge_key = (0, weight_bv); // pop 0
@@ -90,6 +91,7 @@ fn convert_dwa_subgraph(
             if dwa_id == start_dwa_id {
                 weight &= &start_weight;
             }
+            weight.clip_max(internal_max_llm_token);
             let weight_bv = LLMTokenBV::from(weight.rsb);
 
             if !weight_bv.is_empty() {
@@ -106,6 +108,7 @@ fn convert_dwa_subgraph(
             if dwa_id == start_dwa_id {
                 weight &= &start_weight;
             }
+            weight.clip_max(internal_max_llm_token);
             let weight_bv = LLMTokenBV::from(weight.rsb);
 
             if !weight_bv.is_empty() {
