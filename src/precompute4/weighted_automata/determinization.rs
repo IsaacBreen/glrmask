@@ -851,29 +851,22 @@ impl ProductDFA {
             p.set_message(format!("Collected {} tuples, now merging...", n));
         }
 
-        // Step 2: Merge tuples using Union-Find
-        let mut uf = UnionFind::new(n);
+        // Step 2: Group tuples by their canonical key (the map of active components)
+        let mut classes: HashMap<BTreeMap<usize, usize>, Vec<usize>> = HashMap::new();
         for i in 0..n {
-            for j in i + 1..n {
-                if can_merge(&all_tuples[i], &all_tuples[j]) {
-                    uf.union(i, j);
-                }
-            }
-        }
-
-        // Step 3: Group by equivalence class
-        let mut classes: HashMap<usize, Vec<usize>> = HashMap::new();
-        for i in 0..n {
-            let root = uf.find(i);
-            // let root = i;
-            classes.entry(root).or_default().push(i);
+            let key = all_tuples[i]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s_opt)| s_opt.map(|s| (i, s)))
+                .collect();
+            classes.entry(key).or_default().push(i);
         }
 
         // Step 4: For each class, pick representative and compute active weight
         let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
         // (members, representative, active_weight)
 
-        for (_root, members) in classes.into_iter() {
+        for (_key, members) in classes.into_iter() {
             // Pick representative (tuple with fewest sinks)
             let best_idx = members
                 .iter()
@@ -1031,52 +1024,5 @@ impl ProductDFA {
         }
 
         dwa
-    }
-}
-
-fn can_merge(t1: &[Option<usize>], t2: &[Option<usize>]) -> bool {
-    for i in 0..t1.len() {
-        // If they are different, but not because one is None, they can't merge.
-        if t1[i] != t2[i] && t1[i].is_some() && t2[i].is_some() {
-            return false;
-        }
-    }
-    true
-}
-
-struct UnionFind {
-    parent: Vec<usize>,
-    rank: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        UnionFind {
-            parent: (0..n).collect(),
-            rank: vec![0; n],
-        }
-    }
-
-    fn find(&mut self, x: usize) -> usize {
-        if self.parent[x] != x {
-            self.parent[x] = self.find(self.parent[x]);
-        }
-        self.parent[x]
-    }
-
-    fn union(&mut self, x: usize, y: usize) {
-        let rx = self.find(x);
-        let ry = self.find(y);
-        if rx == ry {
-            return;
-        }
-        if self.rank[rx] < self.rank[ry] {
-            self.parent[rx] = ry;
-        } else if self.rank[rx] > self.rank[ry] {
-            self.parent[ry] = rx;
-        } else {
-            self.parent[ry] = rx;
-            self.rank[rx] += 1;
-        }
     }
 }

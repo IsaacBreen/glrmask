@@ -4593,29 +4593,22 @@ local_system:
                   p.set_message(format!("Collected {} tuples, now merging...", n));
               }
 
-              // Step 2: Merge tuples using Union-Find
-              let mut uf = UnionFind::new(n);
+              // Step 2: Group tuples by their canonical key (the map of active components)
+              let mut classes: HashMap<BTreeMap<usize, usize>, Vec<usize>> = HashMap::new();
               for i in 0..n {
-                  for j in i + 1..n {
-                      if can_merge(&all_tuples[i], &all_tuples[j]) {
-                          uf.union(i, j);
-                      }
-                  }
-              }
-
-              // Step 3: Group by equivalence class
-              let mut classes: HashMap<usize, Vec<usize>> = HashMap::new();
-              for i in 0..n {
-                  let root = uf.find(i);
-                  // let root = i;
-                  classes.entry(root).or_default().push(i);
+                  let key = all_tuples[i]
+                      .iter()
+                      .enumerate()
+                      .filter_map(|(i, s_opt)| s_opt.map(|s| (i, s)))
+                      .collect();
+                  classes.entry(key).or_default().push(i);
               }
 
               // Step 4: For each class, pick representative and compute active weight
               let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
               // (members, representative, active_weight)
 
-              for (_root, members) in classes.into_iter() {
+              for (_key, members) in classes.into_iter() {
                   // Pick representative (tuple with fewest sinks)
                   let best_idx = members
                       .iter()
@@ -4773,53 +4766,6 @@ local_system:
               }
 
               dwa
-          }
-      }
-
-      fn can_merge(t1: &[Option<usize>], t2: &[Option<usize>]) -> bool {
-          for i in 0..t1.len() {
-              // If they are different, but not because one is None, they can't merge.
-              if t1[i] != t2[i] && t1[i].is_some() && t2[i].is_some() {
-                  return false;
-              }
-          }
-          true
-      }
-
-      struct UnionFind {
-          parent: Vec<usize>,
-          rank: Vec<usize>,
-      }
-
-      impl UnionFind {
-          fn new(n: usize) -> Self {
-              UnionFind {
-                  parent: (0..n).collect(),
-                  rank: vec![0; n],
-              }
-          }
-
-          fn find(&mut self, x: usize) -> usize {
-              if self.parent[x] != x {
-                  self.parent[x] = self.find(self.parent[x]);
-              }
-              self.parent[x]
-          }
-
-          fn union(&mut self, x: usize, y: usize) {
-              let rx = self.find(x);
-              let ry = self.find(y);
-              if rx == ry {
-                  return;
-              }
-              if self.rank[rx] < self.rank[ry] {
-                  self.parent[rx] = ry;
-              } else if self.rank[rx] > self.rank[ry] {
-                  self.parent[ry] = rx;
-              } else {
-                  self.parent[ry] = rx;
-                  self.rank[rx] += 1;
-              }
           }
       }
     src/precompute4/weighted_automata/test_determinization.rs: |-
@@ -9599,6 +9545,195 @@ messages:
        
                for i in 0..self.n_states {
                    if !reachable[i] {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Implement efficient NWA to DWA determinization
+      via product state merging and active weight encoding"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/Efficient Weighted Automata Determinization.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:913: ProductDFA: Merged 5 tuples into 1 states
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:915:  State 0: representative [Some(2)], members [[Some(2)], [Some(1)], [Some(3)], [None], [Some(0)]]
+    metadata:
+  - user: That doesn't make sense.
+    metadata:
+  - assistant: |-
+      You are right, the debug output indicates a fundamental flaw in the merging logic. Using `UnionFind` with that pairwise `can_merge` check incorrectly merges states that are not behaviorally equivalent due to transitive associations through `None` (sink) states.
+
+      The correct approach is to group product state tuples into equivalence classes based on a canonical representation that captures their active components. Tuples should only be in the same class if they are active on the exact same set of component DFAs and are in the exact same states within those components.
+
+      I will replace the `UnionFind` logic with a grouping based on a `BTreeMap` key, which represents the "active core" of a product state tuple. This is a more robust way to define equivalence and will fix the bug you've pointed out.
+
+      ### Step-by-step Instructions
+
+      Here are the edits for `src/precompute4/weighted_automata/determinization.rs`:
+
+      1.  **Remove the `can_merge` function and the `UnionFind` struct and implementation.** These are being replaced entirely by the new key-based grouping logic.
+
+      2.  **Rewrite the `ProductDFA::from_components` method.** The core of the method, from "Step 2: Merge tuples" onwards, needs to be replaced.
+          -   Instead of using `UnionFind`, we will create a `HashMap` where the key is the canonical representation of a tuple's active states (`BTreeMap<usize, usize>`) and the value is a list of tuple indices belonging to that equivalence class.
+          -   Iterate through all reachable tuples found in Step 1.
+          -   For each tuple, generate its key by creating a map of its `Some(state)` components, mapping the component index to the state index.
+          -   Group the indices of the original tuples by this key.
+          -   The rest of the logic (picking a representative, calculating active weight, and building the final DWA structures) remains conceptually similar but will operate on these correctly formed equivalence classes.
+
+      ---
+
+      ### Git Diff
+
+      Here is the git diff that applies the changes.
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -848,22 +848,16 @@
+                   p.set_message(format!("Collected {} tuples, now merging...", n));
+               }
+       
+      -        // Step 2: Merge tuples using Union-Find
+      -        let mut uf = UnionFind::new(n);
+      -        for i in 0..n {
+      -            for j in i + 1..n {
+      -                if can_merge(&all_tuples[i], &all_tuples[j]) {
+      -                    uf.union(i, j);
+      -                }
+      -            }
+      -        }
+      -
+      -        // Step 3: Group by equivalence class
+      -        let mut classes: HashMap<usize, Vec<usize>> = HashMap::new();
+      +        // Step 2: Group tuples by their canonical key (the map of active components)
+      +        let mut classes: HashMap<BTreeMap<usize, usize>, Vec<usize>> = HashMap::new();
+               for i in 0..n {
+      -            let root = uf.find(i);
+      -            // let root = i;
+      -            classes.entry(root).or_default().push(i);
+      +            let key = all_tuples[i]
+      +                .iter()
+      +                .enumerate()
+      +                .filter_map(|(i, s_opt)| s_opt.map(|s| (i, s)))
+      +                .collect();
+      +            classes.entry(key).or_default().push(i);
+               }
+       
+               // Step 4: For each class, pick representative and compute active weight
+      @@ -871,7 +865,7 @@
+               let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
+               // (members, representative, active_weight)
+       
+      -        for (_root, members) in classes.into_iter() {
+      +        for (_key, members) in classes.into_iter() {
+                   // Pick representative (tuple with fewest sinks)
+                   let best_idx = members
+                       .iter()
+      @@ -1045,49 +1039,3 @@
+               dwa
+           }
+       }
+      -
+      -fn can_merge(t1: &[Option<usize>], t2: &[Option<usize>]) -> bool {
+      -    for i in 0..t1.len() {
+      -        // If they are different, but not because one is None, they can't merge.
+      -        if t1[i] != t2[i] && t1[i].is_some() && t2[i].is_some() {
+      -            return false;
+      -        }
+      -    }
+      -    true
+      -}
+      -
+      -struct UnionFind {
+      -    parent: Vec<usize>,
+      -    rank: Vec<usize>,
+      -}
+      -
+      -impl UnionFind {
+      -    fn new(n: usize) -> Self {
+      -        UnionFind {
+      -            parent: (0..n).collect(),
+      -            rank: vec![0; n],
+      -        }
+      -    }
+      -
+      -    fn find(&mut self, x: usize) -> usize {
+      -        if self.parent[x] != x {
+      -            self.parent[x] = self.find(self.parent[x]);
+      -        }
+      -        self.parent[x]
+      -    }
+      -
+      -    fn union(&mut self, x: usize, y: usize) {
+      -        let rx = self.find(x);
+      -        let ry = self.find(y);
+      -        if rx == ry {
+      -            return;
+      -        }
+      -        if self.rank[rx] < self.rank[ry] {
+      -            self.parent[rx] = ry;
+      -        } else if self.rank[rx] > self.rank[ry] {
+      -            self.parent[ry] = rx;
+      -        } else {
+      -            self.parent[ry] = rx;
+      -            self.rank[rx] += 1;
+      -        }
+      -    }
+      -}
 
       ```
     metadata:
