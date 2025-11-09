@@ -13,7 +13,7 @@ fn test_determinize_simple_divergence() {
     let s2 = nwa.states.add_state();
     nwa.add_transition(s0, 'a' as i16, s1, Weight::all()).unwrap();
     nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
-    nwa.states[s2].final_weight = Some(Weight::from(0..=0));
+    nwa.states[s2].final_weight = Some(Weight::from_item(0));
 
     // NWA for "bc" with weight A2 (1..=1)
     let s3 = nwa.states.add_state();
@@ -21,7 +21,7 @@ fn test_determinize_simple_divergence() {
     let s5 = nwa.states.add_state();
     nwa.add_transition(s3, 'b' as i16, s4, Weight::all()).unwrap();
     nwa.add_transition(s4, 'c' as i16, s5, Weight::all()).unwrap();
-    nwa.states[s5].final_weight = Some(Weight::from(1..=1));
+    nwa.states[s5].final_weight = Some(Weight::from_item(1));
 
     // Union them with a new start state
     let start = nwa.states.add_state();
@@ -37,11 +37,11 @@ fn test_determinize_simple_divergence() {
     // Let's check the accepted words and their weights first.
     assert_eq!(
         dwa.eval_word_weight(&['a' as i16, 'c' as i16]),
-        Weight::from(0..=0)
+        Weight::from_item(0)
     );
     assert_eq!(
         dwa.eval_word_weight(&['b' as i16, 'c' as i16]),
-        Weight::from(1..=1)
+        Weight::from_item(1)
     );
     assert!(dwa.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
     assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
@@ -62,7 +62,7 @@ fn test_determinize_simple_divergence() {
 fn test_determinize_hypercube_catastrophe() {
     const N: usize = 4;
     let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
-    let atoms: Vec<Weight> = (0..N).map(|i| Weight::from(i..=i)).collect();
+    let atoms: Vec<Weight> = (0..N).map(|i| Weight::from_item(i)).collect();
 
     let mut nwa = NWA::new();
     nwa.states.0.clear();
