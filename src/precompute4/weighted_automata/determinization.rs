@@ -804,6 +804,7 @@ struct ProductDFA {
     trans: Vec<Vec<usize>>,
     trans_weights: Vec<Vec<Weight>>,
     tuples: Vec<Vec<Option<usize>>>,
+    members: Vec<Vec<Vec<Option<usize>>>>,
 }
 
 impl ProductDFA {
@@ -860,29 +861,29 @@ impl ProductDFA {
         }
 
 
-        // Step 4: For each class, pick representative
-        let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>)> = Vec::new();
-        // (members, representative)
+        // Step 4: For each class, pick representative and collect member tuples
+        let mut class_list: Vec<(Vec<Vec<Option<usize>>>, Vec<Option<usize>>)> = Vec::new();
+        // (member_tuples, representative_tuple)
 
-        for members in classes.into_iter() {
-            if members.is_empty() {
+        for member_indices in classes.into_iter() {
+            if member_indices.is_empty() {
                 continue;
             }
             // Pick representative (tuple with fewest sinks)
             let best_idx =
-                members.iter().min_by_key(|&&idx| all_tuples[idx].iter().filter(|s| s.is_none()).count()).unwrap();
+                member_indices.iter().min_by_key(|&&idx| all_tuples[idx].iter().filter(|s| s.is_none()).count()).unwrap();
             let repr = all_tuples[*best_idx].clone();
-
-            class_list.push((members, repr));
+            let member_tuples = member_indices.iter().map(|&idx| all_tuples[idx].clone()).collect();
+            class_list.push((member_tuples, repr));
         }
 
         // Step 5: Build mappings
         let n_states = class_list.len();
         let mut tuple_to_id: HashMap<Vec<Option<usize>>, usize> = HashMap::new();
 
-        for (id, (ref members, _repr)) in class_list.iter().enumerate() {
-            for &member_idx in members {
-                tuple_to_id.insert(all_tuples[member_idx].clone(), id);
+        for (id, (ref member_tuples, _repr)) in class_list.iter().enumerate() {
+            for tuple in member_tuples {
+                tuple_to_id.insert(tuple.clone(), id);
             }
         }
 
@@ -891,8 +892,8 @@ impl ProductDFA {
             crate::debug!(5, " State {}:", id);
             crate::debug!(5, "  Representative: {:?}", repr);
             crate::debug!(5, "  Members ({}):", members.len());
-            for &member_idx in members {
-                crate::debug!(5, "   {:?}", all_tuples[member_idx]);
+            for member_tuple in members {
+                crate::debug!(5, "   {:?}", member_tuple);
             }
         }
 
@@ -902,14 +903,15 @@ impl ProductDFA {
         let mut finals = vec![false; n_states];
         let mut trans = vec![vec![0; sigma.size()]; n_states];
         let mut trans_weights = vec![vec![Weight::zeros(); sigma.size()]; n_states];
-        let mut tuples = vec![vec![]; n_states]; // Vec<Vec<Option<usize>>>
+        let mut tuples = vec![vec![]; n_states]; // Representative tuples
+        let mut members_vec = vec![];
 
         for (id, (members, repr)) in class_list.into_iter().enumerate() {
             tuples[id] = repr.clone();
+            members_vec.push(members.clone());
 
             // Check if any member is final (has at least one accepting component)
-            finals[id] = members.iter().any(|&idx| {
-                let tuple = &all_tuples[idx];
+            finals[id] = members.iter().any(|tuple| {
                 tuple.iter().enumerate().any(|(i, s_opt)| {
                     if let Some(s) = s_opt { comps[i].finals[*s] } else { false }
                 })
@@ -945,8 +947,10 @@ impl ProductDFA {
             trans,
             trans_weights,
             tuples,
+            members: members_vec,
         }
     }
+
 
     fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, comps: &[DetDFA]) -> DWA {
         let mut dwa_states = DWAStates::default();
@@ -980,10 +984,14 @@ impl ProductDFA {
                 continue;
             }
             let mut w_final = Weight::zeros();
-            for (i, s_opt) in self.tuples[sid].iter().enumerate() {
-                if let Some(s_i) = s_opt {
-                    if comps[i].finals[*s_i] {
-                        w_final |= &atoms.atoms[i];
+            // The final weight is the union of final weights from ALL member tuples,
+            // not just the representative.
+            for tuple in &self.members[sid] {
+                for (i, s_opt) in tuple.iter().enumerate() {
+                    if let Some(s_i) = s_opt {
+                        if comps[i].finals[*s_i] {
+                            w_final |= &atoms.atoms[i];
+                        }
                     }
                 }
             }
