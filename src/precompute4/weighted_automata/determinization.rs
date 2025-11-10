@@ -1135,8 +1135,7 @@ fn merge_tuples_to_states(
     for t in &tuples {
         let mut placed = false;
         for gid in 0..states.len() {
-            if let Some(new_rep) = unify_tuples(&states[gid].representative_tuple, t) {
-                states[gid].representative_tuple = new_rep;
+            if unify_tuples(&states[gid].representative_tuple, t).is_some() {
                 states[gid].all_tuples.insert(t.clone());
                 tuple_to_group.insert(t.clone(), gid);
                 placed = true;
@@ -1286,7 +1285,7 @@ fn build_dwa_from_merged(
             if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
                 let _ = dwa.add_transition(sid, *lbl, to_id, w);
             } else {
-                panic!("Unmapped exception transition tuple for state {}", sid);
+                panic!("Unmapped exception transition tuple for state {} on label {}", sid, lbl);
             }
         }
     }
