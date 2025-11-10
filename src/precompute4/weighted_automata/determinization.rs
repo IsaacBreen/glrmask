@@ -512,14 +512,13 @@ impl PerAtomNFA {
             }
             ex_by_state[new_s] = local_ex.clone();
 
-            // default(s) for this atom: use per-atom exceptions = keys of local_ex
-            let ex_for_def: BTreeSet<i16> = local_ex.keys().copied().collect();
+            // default(s) for this atom
             for def in &states[old_s].default {
                 let to_old = def.target;
                 if to_old < n_total && live[to_old] && !(&atom_w & &def.weight).is_empty() {
                     let to_new = id_of[to_old];
                     if to_new != usize::MAX {
-                        def_by_state[new_s].push((to_new, ex_for_def.clone()));
+                        def_by_state[new_s].push((to_new, def.exceptions.clone()));
                     }
                 }
             }
@@ -642,14 +641,15 @@ impl PerAtomNFA {
                 match sigma.label_at(sym) {
                     Some(lbl) => {
                         // Label 'lbl': for each s in subset: take explicit transitions on lbl,
-                        // and any default transitions for which lbl is not an exception.
+                        // or if none, any default transitions for which lbl is not an exception.
                         for &s in &subset {
                             if let Some(ts) = self.ex_by_state[s].get(&lbl) {
                                 next_raw.extend_from_slice(ts);
-                            }
-                            for (target, exceptions) in &self.def_by_state[s] {
-                                if !exceptions.contains(&lbl) {
-                                    next_raw.push(*target);
+                            } else {
+                                for (target, exceptions) in &self.def_by_state[s] {
+                                    if !exceptions.contains(&lbl) {
+                                        next_raw.push(*target);
+                                    }
                                 }
                             }
                         }
