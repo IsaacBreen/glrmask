@@ -6,9 +6,8 @@ local_system:
     - src/precompute4/weighted_automata/common.rs
     - src/precompute4/weighted_automata/ops.rs
     - src/precompute4/weighted_automata/simplification.rs
-    - src/precompute4/weighted_automata/test_determinization.rs
-    - src/precompute4/weighted_automata/determinization.rs
-  conversation_file: conversation.yaml
+    - src/precompute4/full_dwa.rs
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/precompute4/weighted_automata/mod.rs: |
@@ -2504,658 +2503,399 @@ local_system:
               true
           }
       }
-    src/precompute4/weighted_automata/test_determinization.rs: |-
-      #![cfg(test)]
-
-      use super::*;
-
-      #[test]
-      fn test_determinize_simple_divergence() {
-          let mut nwa = NWA::new(); // new() creates a start state 0
-          nwa.states.0.clear(); // but we'll manage states manually for clarity
-
-          // NWA for "ac" with weight A1 (0)
-          let s0 = nwa.states.add_state();
-          let s1 = nwa.states.add_state();
-          let s2 = nwa.states.add_state();
-          nwa.add_transition(s0, 'a' as i16, s1, Weight::all()).unwrap();
-          nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
-          nwa.states[s2].final_weight = Some(Weight::from_item(0));
-
-          // NWA for "bc" with weight A2 (1)
-          let s3 = nwa.states.add_state();
-          let s4 = nwa.states.add_state();
-          let s5 = nwa.states.add_state();
-          nwa.add_transition(s3, 'b' as i16, s4, Weight::all()).unwrap();
-          nwa.add_transition(s4, 'c' as i16, s5, Weight::all()).unwrap();
-          nwa.states[s5].final_weight = Some(Weight::from_item(1));
-
-          // Union them with a new start state
-          let start = nwa.states.add_state();
-          nwa.add_epsilon(start, s0, Weight::all());
-          nwa.add_epsilon(start, s3, Weight::all());
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-          println!("{}", nwa);
-          println!("{}", dwa);
-
-          // Check accepted words and their weights.
-          assert_eq!(
-              dwa.eval_word_weight(&['a' as i16, 'c' as i16]),
-              Weight::from_item(0)
-          );
-          assert_eq!(
-              dwa.eval_word_weight(&['b' as i16, 'c' as i16]),
-              Weight::from_item(1)
-          );
-          assert!(dwa.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&[]).is_empty());
-
-          // An efficient DWA should merge states with similar future behavior,
-          // resulting in a small automaton.
-          // Allowing for a sink state, we assert a small number.
-          assert!(
-              dwa.states.len() <= 4,
-              "Expected a small number of states for simple divergence, got {}",
-              dwa.states.len()
-          );
-      }
-
-      #[test]
-      fn test_determinize_hypercube_catastrophe() {
-          const N: usize = 4;
-          let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
-          let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
-
-          let mut nwa = NWA::new();
-          nwa.states.0.clear();
-
-          let mut component_starts = vec![];
-
-          for i in 0..N {
-              // L_i = words without alphabet[i]
-              let s = nwa.states.add_state();
-              component_starts.push(s);
-              nwa.states[s].final_weight = Some(atoms[i].clone());
-
-              for j in 0..N {
-                  if i == j {
-                      continue;
-                  }
-                  nwa.add_transition(s, alphabet[j], s, Weight::all()).unwrap();
-              }
-          }
-
-          let start = nwa.states.add_state();
-          for &s_comp in &component_starts {
-              nwa.add_epsilon(start, s_comp, Weight::all());
-          }
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-
-          // An efficient DWA construction should avoid the 2^N state explosion by
-          // encoding the history of seen characters within the accumulated weight,
-          // not in the state space.
-          assert!(
-              dwa.states.len() <= 2,
-              "Expected a very small DWA (1-2 states) for hypercube, but got {} states. State explosion was not avoided.",
-              dwa.states.len()
-          );
-
-          // Test some words
-          // word "ac" (chars 0 and 2) -> should not contain 1 or 3 ('b' or 'd'). Belongs to L1 and L3.
-          // Weight should be A1 | A3.
-          let word_ac = vec![alphabet[0], alphabet[2]];
-          let expected_weight_ac = &atoms[1] | &atoms[3];
-          assert_eq!(dwa.eval_word_weight(&word_ac), expected_weight_ac);
-
-          // word "abcd" -> contains all symbols. Should be rejected by all components.
-          let word_all = alphabet.clone();
-          assert!(dwa.eval_word_weight(&word_all).is_empty());
-
-          // empty word -> belongs to all languages.
-          let empty_word = vec![];
-          let mut expected_weight_empty = Weight::zeros();
-          for atom in &atoms {
-              expected_weight_empty |= atom;
-          }
-          assert_eq!(dwa.eval_word_weight(&empty_word), expected_weight_empty);
-      }
-    src/precompute4/weighted_automata/determinization.rs: |
-      use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
-      use super::common::Weight;
-      use super::dwa::DWA;
-      use super::nwa::{NWAStates, NWA};
-      use crate::precompute4::weighted_automata::{NWADefaultTransition, NWAStateID};
-      use crate::profiler::PROGRESS_BAR_ENABLED;
-      use indicatif::{ProgressBar, ProgressStyle};
-
-      use std::collections::hash_map::Entry;
-      use std::collections::{BTreeMap, HashMap, VecDeque};
-      use std::hash::{Hash, Hasher};
+    src/precompute4/full_dwa.rs: |
+      use crate::r#macro::is_debug_level_enabled;
+      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
+      use crate::datastructures::trie::{Trie, Trie2Index};
+      use crate::glr::parser::{ExpectElse, GLRParser};
+      use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
+      use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
+      use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
+      use crate::precompute4::utils;
+      use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight};
+      use crate::constraint::LLMTokenBV;
+      use range_set_blaze::RangeSetBlaze;
+      use std::cell::RefCell;
+      use std::collections::{BTreeMap, BTreeSet};
       use std::time::Instant;
 
-      impl NWA {
-          pub fn determinize_to_dwa(&self) -> DWA {
-              let now = Instant::now();
+      pub type Precomputed4 = DWA;
+      use crate::tokenizer::TokenizerStateID;
 
-              crate::debug!(4, "NWA before simplify:\n{}", self);
-              let mut nwa = self.clone();
-              nwa.simplify();
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum FullDWABuildError {
+          ParserStateIdOutOfRange { state_id: ParserStateID },
+          AutomatonBuild(NWABuildError),
+      }
 
-              crate::debug!(4, "NWA::determinize_to_dwa stats after simplify:\n{}", nwa.stats());
-              crate::debug!(4, "NWA after simplify:\n{}", nwa);
+      impl From<NWABuildError> for FullDWABuildError {
+          fn from(e: NWABuildError) -> Self {
+              FullDWABuildError::AutomatonBuild(e)
+          }
+      }
 
-              let result = nwa.det_fixpoint();
+      fn build_template_nwa_from_characterization(
+          bb: &BelowBottomCharacterization,
+      ) -> Result<NWA, FullDWABuildError> {
+          let mut nwa = NWA::new();
+          let w_all = Weight::all();
 
-              crate::debug!(4, "NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
-
-              crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
-              result
+          // Create a node for each non-terminal, similar to the NWA construction.
+          let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
+          for &nt in &bb.all_nts {
+              let id = nwa.states.add_state();
+              nt_nodes.insert(nt, id);
           }
 
-          fn det_fixpoint(&self) -> DWA {
-              let fut = self.compute_future_weights();
-              let n = self.states.len();
-              if n == 0 {
-                  return DWA::new();
-              }
+          let start = nwa.body.start_state;
 
-              fn eps_closure_masked(
-                  sources: &[NWAStateID],
-                  states: &NWAStates,
-                  fut: &[Weight],
-              ) -> Vec<(NWAStateID, Weight)> {
-                  let mut out: HashMap<NWAStateID, Weight> = HashMap::new();
-                  let mut q: VecDeque<NWAStateID> = VecDeque::new();
-                  for &s in sources {
-                      if s >= states.len() {
-                          continue;
-                      }
-                      let f = fut[s].clone();
-                      if !f.is_empty() {
-                          out.insert(s, f);
-                          q.push_back(s);
-                      }
-                  }
-                  while let Some(u) = q.pop_front() {
-                      let base = out.get(&u).cloned().unwrap_or_else(Weight::zeros);
-                      if base.is_empty() {
-                          continue;
-                      }
-                      for &(v, ref w_eps) in &states[u].epsilons {
-                          if v >= states.len() {
-                              continue;
-                          }
-                          let mut prop = &base & w_eps;
-                          if prop.is_empty() {
-                              continue;
-                          }
-                          prop &= &fut[v];
-                          if prop.is_empty() {
-                              continue;
-                          }
-                          match out.entry(v) {
-                              Entry::Occupied(mut e) => {
-                                  let old = e.get_mut();
-                                  let nu = &*old | &prop;
-                                  if nu != *old {
-                                      *old = nu;
-                                      q.push_back(v);
-                                  }
-                              }
-                              Entry::Vacant(e) => {
-                                  e.insert(prop);
-                                  q.push_back(v);
-                              }
-                          }
-                      }
-                  }
-                  let mut v: Vec<(NWAStateID, Weight)> = out.into_iter().collect();
-                  v.sort_by_key(|(sid, _)| *sid);
-                  v
-              }
+          // --- Initial Actions from Start State ---
 
-              fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
-                  if w.is_all_fast() {
-                      return base.to_vec();
-                  }
-                  base.iter()
-                      .map(|(sid, wt)| (*sid, wt & w))
-                      .filter(|(_, x)| !x.is_empty())
-                      .collect()
-              }
+          for &(initial_state, shift_state) in &bb.initial_shifts {
+              let pos_initial = utils::encode_symbol_i16(initial_state)?;
+              let neg_initial = utils::encode_negative_i16(initial_state)?;
+              let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-              struct StepPool {
-                  raw: Vec<Vec<(NWAStateID, Weight)>>,
-                  map: HashMap<u64, Vec<usize>>,
-              }
+              let s0 = nwa.states.add_state();
+              let s1 = nwa.states.add_state();
+              let s2 = nwa.states.add_state();
+              let s3 = nwa.states.add_state();
 
-              impl StepPool {
-                  fn new() -> Self {
-                      Self { raw: Vec::new(), map: HashMap::new() }
-                  }
-                  fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
-                      pairs
-                          .iter()
-                          .fold(FP_ZERO, |fp, (sid, w)| mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2)))
-                  }
-                  fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
-                      pairs.retain(|(_, w)| !w.is_empty());
-                      let fp = Self::fingerprint(&pairs);
-                      if let Some(cands) = self.map.get(&fp) {
-                          for &id in cands {
-                              if self.raw[id] == pairs {
-                                  return id;
-                              }
-                          }
-                      }
-                      let id = self.raw.len();
-                      self.raw.push(pairs);
-                      self.map.entry(fp).or_default().push(id);
-                      id
+              // start --(eps)--> s0 --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
+              nwa.add_epsilon(start, s0, w_all.clone());
+              nwa.add_transition(s0, pos_initial, s1, w_all.clone())?;
+              nwa.add_transition(s1, neg_initial, s2, w_all.clone())?;
+              nwa.add_transition(s2, neg_shift, s3, w_all.clone())?;
+              nwa.states[s3].final_weight = Some(w_all.clone());
+          }
+
+          for &(initial_state, len, nt) in &bb.initial_reduces {
+              let pos_initial = utils::encode_symbol_i16(initial_state)?;
+              let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
+
+              // Create a chain of default transitions for the pops.
+              // start --(eps)--> s0 --(+initial)--> s1 --(default)*len--> target_nt_state
+              let s0 = nwa.states.add_state();
+              nwa.add_epsilon(start, s0, w_all.clone());
+              let mut from = s0;
+              let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
+              nwa.add_transition(from, pos_initial, next_state, w_all.clone())?;
+              from = next_state;
+
+              for i in 0..len {
+                  let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
+                  nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
+                  from = to;
+              }
+          }
+
+          // --- Actions from Non-Terminal States ---
+
+          for (nt, rc) in &bb.reduce_characterizations {
+              let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
+
+              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
+                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+                  let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
+
+                  // src --(eps)--> s0 --(+revealed)--> s1 --(default)*len--> dst
+                  let s0 = nwa.states.add_state();
+                  nwa.add_epsilon(src_nt_state, s0, w_all.clone());
+                  let mut from = s0;
+                  let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
+                  nwa.add_transition(from, pos_revealed, next_state, w_all.clone())?;
+                  from = next_state;
+
+                  for i in 0..len {
+                      let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
+                      nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
+                      from = to;
                   }
               }
 
-              #[derive(Clone)]
-              struct CompiledStep {
-                  by_sig: Vec<(usize, Weight)>,
-                  mask: Weight,
-              }
-              #[derive(Clone)]
-              struct MacroSig {
-                  final_w: Option<Weight>,
-                  def: Vec<usize>,
-                  ex: BTreeMap<i16, Vec<usize>>,
-              }
-              #[derive(Clone, Hash, Eq, PartialEq)]
-              struct MacroSigKey {
-                  final_fp: u64,
-                  def: Vec<usize>,
-                  ex: Vec<(i16, Vec<usize>)>,
-              }
+              for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+                  let neg_revealed = utils::encode_negative_i16(revealed_state)?;
+                  let neg_goto = utils::encode_negative_i16(goto_state)?;
+                  let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-              let pb_eps = if PROGRESS_BAR_ENABLED {
-                  Some(ProgressBar::new(n as u64).with_style(
-                      ProgressStyle::default_bar()
-                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
-                          .unwrap(),
-                  ))
-              } else {
-                  None
-              };
-              let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
-              for s in 0..n {
-                  eps_cache[s] = eps_closure_masked(std::slice::from_ref(&s), &self.states, &fut);
-                  if let Some(p) = &pb_eps {
-                      p.inc(1);
+                  let s0 = nwa.states.add_state();
+                  let s1 = nwa.states.add_state();
+                  let s2 = nwa.states.add_state();
+                  let s3 = nwa.states.add_state();
+                  let s4 = nwa.states.add_state();
+
+                  // src --(eps)--> s0 --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
+                  nwa.add_epsilon(src_nt_state, s0, w_all.clone());
+                  nwa.add_transition(s0, pos_revealed, s1, w_all.clone())?;
+                  nwa.add_transition(s1, neg_revealed, s2, w_all.clone())?;
+                  nwa.add_transition(s2, neg_goto, s3, w_all.clone())?;
+                  nwa.add_transition(s3, neg_shift, s4, w_all.clone())?;
+                  nwa.states[s4].final_weight = Some(w_all.clone());
+              }
+          }
+
+          Ok(nwa)
+      }
+
+      fn build_template_dwas(
+          parser: &GLRParser,
+      ) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+          let all = compute_all_characterizations(parser);
+          let mut out = BTreeMap::new();
+          for (term, bb) in all {
+              let nwa = build_template_nwa_from_characterization(&bb)?;
+              let mut dwa = nwa.determinize_to_dwa();
+              dwa.simplify();
+              crate::debug!(5, "Built template DWA for terminal {:?}:", term);
+              crate::debug!(5, "{}", dwa);
+              out.insert(term, dwa);
+          }
+          Ok(out)
+      }
+
+      fn build_ignore_terminal_dwa() -> DWA {
+          // Identity DWA: start is final, no transitions.
+          let mut dwa = DWA::new();
+          dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
+          dwa
+      }
+
+      /// For any state with a final weight, subtract that weight from all outgoing transitions.
+      /// This prunes paths that continue after a word has already been accepted with a given weight.
+      fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
+          let mut changed = false;
+          for i in 0..nwa.states.len() {
+              if let Some(final_weight) = nwa.states[i].final_weight.clone() {
+                  if final_weight.is_empty() {
+                      continue;
                   }
-              }
-              if let Some(p) = pb_eps {
-                  p.finish_with_message("ε-closures done");
-              }
 
-              let mut step_pool = StepPool::new();
-              let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
-              let mut state_to_sig_id: Vec<usize> = vec![0; n];
-              let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
-              let pb_sigs = if PROGRESS_BAR_ENABLED {
-                  Some(ProgressBar::new(n as u64).with_style(
-                      ProgressStyle::default_bar()
-                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Macro signatures)")
-                          .unwrap(),
-                  ))
-              } else {
-                  None
-              };
-              for s in 0..n {
-                  let final_acc = eps_cache[s].iter().fold(Weight::zeros(), |mut acc, (t, w)| {
-                      if let Some(fw) = &self.states[*t].final_weight {
-                          acc |= &(w & fw);
-                      }
-                      acc
-                  });
-                  let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
+                  let state = &mut nwa.states[i];
 
-                  // Compute default step; skip if out-of-bounds or effect is empty after weighting + ε-closure.
-                  let def_steps: Vec<usize> = self.states[s].default.iter().filter_map(|default| {
-                      let NWADefaultTransition { target: to, weight: wdef, .. } = default;
-                      if *to < n {
-                          let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
-                          if pairs_def.is_empty() { None } else { Some(step_pool.intern(pairs_def)) }
-                      } else { None }
-                  }).collect();
-
-                  // Compute exceptions; drop those that are empty or identical to the default step effect.
-                  let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-                  for (lbl, targets) in self.states[s].transitions.iter() {
-                      let mut step_exs: Vec<usize> = Vec::new();
-                      for (to, wlbl) in targets {
-                          if *to >= n {
-                              continue;
-                          }
-                          let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
-                          if pairs_ex.is_empty() {
-                              continue;
-                          }
-                          step_exs.push(step_pool.intern(pairs_ex));
-                      }
-
-                      if !step_exs.is_empty() {
-                          step_exs.sort_unstable();
-                          let mut sorted_def_steps = def_steps.clone();
-                          sorted_def_steps.sort_unstable();
-                          if step_exs == sorted_def_steps {
-                              continue;
-                          }
-                          ex.insert(*lbl, step_exs);
+                  // Epsilon transitions
+                  for (_, w) in &mut state.epsilons {
+                      let old_w = w.clone();
+                      *w -= &final_weight;
+                      if *w != old_w {
+                          changed = true;
                       }
                   }
 
-                  crate::debug!(5, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
+                  // Labeled transitions
+                  for targets in state.transitions.values_mut() {
+                      for (_, w) in targets {
+                          let old_w = w.clone();
+                          *w -= &final_weight;
+                          if *w != old_w {
+                              changed = true;
+                          }
+                      }
+                  }
 
-                  let mut sorted_def_steps = def_steps.clone();
-                  sorted_def_steps.sort_unstable();
-                  let key = MacroSigKey {
-                      final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
-                      def: sorted_def_steps,
-                      ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
+                  // Default transitions
+                  for def in &mut state.default {
+                      let old_w = def.weight.clone();
+                      def.weight -= &final_weight;
+                      if def.weight != old_w {
+                          changed = true;
+                      }
+                  }
+              }
+          }
+          changed
+      }
+
+      // Helper: collect final states of a DWA
+      fn collect_final_states(dwa: &DWA) -> BTreeSet<usize> {
+          let mut finals = BTreeSet::new();
+          for (i, st) in dwa.states.0.iter().enumerate() {
+              if st.final_weight.is_some() {
+                  finals.insert(i);
+              }
+          }
+          finals
+      }
+
+      // Helper: join_map for concatenation: map each left final to the right's start.
+      fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<usize>> {
+          let left_final_states = collect_final_states(left);
+          let right_start = right.body.start_state;
+          let mut join_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+          for lf in left_final_states {
+              join_map.insert(lf, BTreeSet::from([right_start]));
+          }
+          join_map
+      }
+
+      // Public API: precompute4 using NWA-first approach, determinize at the end.
+      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
+          let now_total = Instant::now();
+          let now = Instant::now();
+          crate::debug!(5, "Starting precompute4...");
+          // 1. Build template DWAs for all terminals.
+          let template_dwas = match build_template_dwas(parser) {
+              Ok(m) => m,
+              Err(e) => panic!("Failed to build template DWAs: {:?}", e),
+          };
+          let ignore_dwa = build_ignore_terminal_dwa();
+          crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
+          if is_debug_level_enabled(5) {
+              for (term, dwa) in template_dwas.iter().take(5) {
+                  crate::debug!(5, "Stats for template DWA for terminal {:?}:\n{}", term, dwa.stats());
+              }
+          }
+
+          // 2. Set up shared NWA state arena.
+          let states_arena = RefCell::new(NWAStates::default());
+
+          // 3. Reverse the precompute1 trie.
+          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
+
+          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+
+          let leaf_node = all_nodes.iter().find_map(|&idx| {
+              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+          }).expect("Precompute1 trie must have a single leaf node.");
+
+          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+          let reversed_trie_root = leaf_node;
+
+          // 4. Traverse the reversed trie with NWA bodies.
+          let initial_nwa_body = {
+              let mut states = states_arena.borrow_mut();
+              let start = states.add_state();
+              states[start].final_weight = Some(Weight::all());
+              NWABody { start_state: start }
+          };
+          let initial_tokens = LLMTokenBV::max_ones();
+          let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
+          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+          let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
+          for (k, v) in precomputed1.iter() {
+              original_trie1_roots_map.entry(v.clone()).or_default().push(*k);
+          }
+
+          let options = crate::datastructures::trie::PrettyPrintOptions::default()
+              .omit_nodes()
+              .omit_depth()
+              ;
+          crate::debug!(5, "Trie:\n{}", Trie::pretty_print_with_options(&trie1_god, &trie1_roots, &options));
+          crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+
+          let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
+
+          let now = Instant::now();
+          Trie::special_map_grouped(
+              &reversed_trie1_god,
+              &traversal_data,
+              initial_values,
+              // step function
+              |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
+                  let (current_nwa_body, current_tokens) = current_val;
+                  let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                      let terminal_id = edge_terminal_opt.unwrap();
+                      template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
+                  } else {
+                      &ignore_dwa
                   };
-                  let sig_id = *sig_intern.entry(key).or_insert_with(|| {
-                      let id = sigs.len();
-                      sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
-                      id
-                  });
-                  state_to_sig_id[s] = sig_id;
-                  if let Some(p) = &pb_sigs {
-                      p.inc(1);
-                  }
-              }
-              if let Some(p) = pb_sigs {
-                  p.finish_with_message("Macro signatures done");
-              }
 
-              crate::debug!(5, "All MacroSigs ({}):", sigs.len());
-              for (i, sig) in sigs.iter().enumerate() {
-                  crate::debug!(5, "  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
-              }
-              crate::debug!(5, "state_to_sig_id: {:?}", state_to_sig_id);
-
-              let pb_compile = if PROGRESS_BAR_ENABLED {
-                  Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
-                      ProgressStyle::default_bar()
-                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Compile steps)")
-                          .unwrap(),
-                  ))
-              } else {
-                  None
-              };
-              let mut compiled_steps: Vec<CompiledStep> = Vec::with_capacity(step_pool.raw.len());
-              for pairs in &step_pool.raw {
-                  let mut acc: HashMap<usize, Weight> = HashMap::new();
-                  for (t, w) in pairs.iter() {
-                      *acc.entry(state_to_sig_id[*t]).or_default() |= w;
-                  }
-                  let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
-                  by_sig.sort_by_key(|(sid, _)| *sid);
-                  let mask = by_sig.iter().fold(Weight::zeros(), |mut acc, (_, w)| {
-                      acc |= w;
-                      acc
-                  });
-                  compiled_steps.push(CompiledStep { by_sig, mask });
-                  if let Some(p) = &pb_compile {
-                      p.inc(1);
-                  }
-              }
-              if let Some(p) = pb_compile {
-                  p.finish_with_message("Compile steps done");
-              }
-
-              crate::debug!(5, "Step Pool ({}):", step_pool.raw.len());
-              for (i, pairs) in step_pool.raw.iter().enumerate() {
-                  crate::debug!(5, "  Step {}: {:?}", i, pairs);
-              }
-              crate::debug!(5, "Compiled Steps ({}):", compiled_steps.len());
-              for (i, step) in compiled_steps.iter().enumerate() {
-                  crate::debug!(5, "  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
-              }
-
-              #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-              struct MembersKey(Vec<usize>);
-
-              struct CompositionNode {
-                  final_weight: Option<Weight>,
-                  default_target_idx: Option<usize>,
-                  default_mask: Option<Weight>,
-                  exception_targets: BTreeMap<i16, usize>,
-                  exception_masks: BTreeMap<i16, Weight>,
-                  gates: HashMap<usize, Weight>,
-              }
-
-              fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
-                  for (sid, w) in compiled.iter() {
-                      let x = w & gate;
-                      if !x.is_empty() {
-                          *dst.entry(*sid).or_default() |= &x;
+                  let mut results: Vec<(PrecomputeNode1Index, (NWABody, LLMTokenBV))> = Vec::new();
+                  for (dest_idx, llm_token_bv) in dest_map.iter() {
+                      let next_tokens = current_tokens & llm_token_bv;
+                      if next_tokens.is_empty() {
+                          continue;
                       }
+
+                      let mut states = states_arena.borrow_mut();
+
+                      // Convert template DWA to NWA and copy it into the arena
+                      let template_nwa = NWA::from_dwa(template_dwa);
+                      crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
+                      let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
+                      crate::debug!(5, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
+                      let left_body = NWABody { start_state: template_start_in_arena };
+
+                      // Concatenate: left then current (right) via epsilon with weight = llm_token_bv
+                      crate::debug!(5, "Starting NWA::concatenate_components: left_start={} right_start={}...", left_body.start_state, current_nwa_body.start_state);
+                      let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                      let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
+                      crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
+
+                      results.push((*dest_idx, (composed_body, next_tokens)));
                   }
-              }
-
-              let mut nodes: Vec<CompositionNode> = Vec::new();
-              let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
-              let mut work: VecDeque<usize> = VecDeque::new();
-
-              let pb_discover = if PROGRESS_BAR_ENABLED {
-                  Some(
-                      ProgressBar::new(0).with_style(
-                          ProgressStyle::default_bar()
-                              .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Discovering states)")
-                              .unwrap(),
-                      ),
-                  )
-              } else {
-                  None
-              };
-
-              let mut init_map: HashMap<usize, Weight> = HashMap::new();
-              for (t, w) in eps_cache[self.body.start_state].iter() {
-                  *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
-              }
-              let mut init_keys: Vec<_> = init_map.keys().copied().collect();
-              init_keys.sort_unstable();
-              let init_key = MembersKey(init_keys);
-              let start_idx = 0;
-              key_to_idx.insert(init_key, start_idx);
-              nodes.push(CompositionNode {
-                  final_weight: None,
-                  default_target_idx: None,
-                  default_mask: None,
-                  exception_targets: BTreeMap::new(),
-                  exception_masks: BTreeMap::new(),
-                  gates: init_map,
-              });
-              let mut in_queue = vec![false; 1];
-              in_queue[start_idx] = true;
-              work.push_back(start_idx);
-
-              while let Some(idx) = work.pop_front() {
-                  in_queue[idx] = false;
-                  if let Some(p) = &pb_discover {
-                      p.inc(1);
-                  }
-                  let node_gates = nodes[idx].gates.clone();
-
-                  crate::debug!(5, "\nProcessing composition node {}: gates: {:?}", idx, node_gates);
-
-                  let mut def_groups: HashMap<usize, Weight> = HashMap::new();
-                  let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-                  let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-
-                  for (sig_id, gate) in &node_gates {
-                      for def_id in &sigs[*sig_id].def {
-                          *def_groups.entry(*def_id).or_default() |= gate;
-                      }
-                      for (lbl, ex_steps) in &sigs[*sig_id].ex {
-                          for ex_step in ex_steps {
-                              *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
-                          }
-                          if !sigs[*sig_id].def.is_empty() {
-                              for def_id in &sigs[*sig_id].def {
-                                  *def_exers_by_label.entry(*lbl).or_default().entry(*def_id).or_default() |= gate;
-                              }
+                  results
+              },
+              // merge function: union them via epsilon
+              |val1, val2| {
+                  let (body1, tokens1) = val1;
+                  let (body2, tokens2) = val2;
+                  let mut states = states_arena.borrow_mut();
+                  crate::debug!(5, "Starting NWA::union_components: body1_start={} body2_start={}...", body1.start_state, body2.start_state);
+                  *body1 = NWA::union_components(&mut states, body1, &body2);
+                  *tokens1 |= &tokens2;
+                  crate::debug!(5, "NWA::union_components finished. New start state: {}.", body1.start_state);
+              },
+              // process function: capture at original roots
+              |_node_data, node_idx, val| {
+                  let (nwa_body, tokens) = val;
+                  if !tokens.is_empty() {
+                      if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
+                          for tokenizer_state_id in tokenizer_state_ids {
+                              final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
                           }
                       }
+                      Some((nwa_body, tokens)) // continue traversal
+                  } else {
+                      None
                   }
+              },
+          );
+          crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
 
-                  crate::debug!(5, "  - def_groups: {:?}", def_groups);
-                  crate::debug!(5, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
-                  crate::debug!(5, "  - def_exers_by_label: {:?}", def_exers_by_label);
+          // Combine all final NWA bodies into a single NWA
+          let mut combined_nwa_states = states_arena.into_inner();
+          let combined_start_state = combined_nwa_states.add_state();
 
-                  let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
-                  let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
-                  for (def_step, g) in &def_groups {
-                      accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
-                  }
-                  if !def_target_map.is_empty() {
-                      target_maps.insert(None, def_target_map);
-                  }
-
-                  for (lbl, ex_groups) in &ex_groups_by_label {
-                      crate::debug!(5, "    - processing exception label {}", lbl);
-                      let mut map = HashMap::new();
-                      let def_exers = def_exers_by_label.get(lbl);
-                      for (def_step, total_g) in &def_groups {
-                          crate::debug!(5, "      - considering default step {} with total_g {}", def_step, total_g);
-                          let g_exers = def_exers.and_then(|de| de.get(def_step));
-                          crate::debug!(5, "        - g_exers for this def_step: {:?}", g_exers);
-                          let mut g_nonex = total_g.clone();
-                          if let Some(g_exers) = g_exers {
-                              g_nonex -= g_exers;
-                          }
-                          crate::debug!(5, "        - g_nonex: {}", g_nonex);
-                          if !g_nonex.is_empty() {
-                              crate::debug!(5, "        - accumulating for g_nonex");
-                              accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
-                          }
-                      }
-                      for (ex_step, g_ex) in ex_groups {
-                          crate::debug!(5, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
-                          accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
-                      }
-                      if !map.is_empty() {
-                          target_maps.insert(Some(*lbl), map);
-                      }
-                  }
-
-                  crate::debug!(5, "  - computed target_maps:");
-                  for (label, map) in &target_maps {
-                      let mut keys: Vec<_> = map.keys().copied().collect();
-                      keys.sort_unstable();
-                      let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-                      crate::debug!(5, "    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
-                  }
-
-                  let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
-                  for (label, map) in target_maps {
-                      let mut keys: Vec<_> = map.keys().copied().collect();
-                      keys.sort_unstable();
-                      let key = MembersKey(keys);
-                      let target_idx = *key_to_idx.entry(key).or_insert_with(|| {
-                          let new_idx = nodes.len();
-                          nodes.push(CompositionNode {
-                              final_weight: None,
-                              default_target_idx: None,
-                              default_mask: None,
-                              exception_targets: BTreeMap::new(),
-                              exception_masks: BTreeMap::new(),
-                              gates: HashMap::new(),
-                          });
-                          if new_idx >= in_queue.len() {
-                              in_queue.resize(new_idx + 1, false);
-                          }
-                          new_idx
-                      });
-
-                      let mut any_change = false;
-                      for (sig_id, weight) in &map {
-                          let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                          let new_w = &*entry | weight;
-                          if new_w != *entry {
-                              *entry = new_w;
-                              any_change = true;
-                          }
-                      }
-                      if any_change && !in_queue[target_idx] {
-                          in_queue[target_idx] = true;
-                          work.push_back(target_idx);
-                      }
-                      resolved_transitions.insert(label, (target_idx, map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a })));
-                  }
-
-                  let node = &mut nodes[idx];
-                  if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
-                      node.default_target_idx = Some(target_idx);
-                      node.default_mask = Some(mask);
-                  }
-                  for (label, (target_idx, mask)) in resolved_transitions {
-                      if let Some(lbl) = label {
-                          node.exception_targets.insert(lbl, target_idx);
-                          node.exception_masks.insert(lbl, mask);
-                      }
-                  }
-
-                  crate::debug!(5, "  - Resolved transitions for node {}:", idx);
-                  if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                      crate::debug!(5, "    - default -> {} (mask: {})", target, mask);
-                  }
-                  for (lbl, target) in &node.exception_targets {
-                      if let Some(mask) = node.exception_masks.get(lbl) {
-                          crate::debug!(5, "    - on {}: -> {} (mask: {})", lbl, target, mask);
-                      }
-                  }
-
-                  node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
-                      if let Some(fw) = &sigs[*sig_id].final_w {
-                          acc |= &(gate & fw);
-                      }
-                      acc
-                  }));
-
-                  if let Some(p) = &pb_discover {
-                      p.set_length(nodes.len() as u64);
-                  }
-              }
-              if let Some(p) = pb_discover {
-                  p.finish_with_message(format!("Discovered {} compositions", nodes.len()));
-              }
-
-              let mut dwa = DWA::new();
-              if nodes.is_empty() {
-                  return dwa;
-              }
-              dwa.states.0.resize(nodes.len(), Default::default());
-              dwa.body.start_state = start_idx;
-
-              for (i, node) in nodes.iter().enumerate() {
-                  dwa.states[i].final_weight = node.final_weight.clone();
-                  if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                      if !mask.is_empty() {
-                          dwa.set_default_transition(i, target_idx, mask.clone()).unwrap();
-                      }
-                  }
-                  for (lbl, &target_idx) in &node.exception_targets {
-                      if let Some(mask) = node.exception_masks.get(lbl) {
-                          if !mask.is_empty() {
-                              dwa.add_transition(i, *lbl, target_idx, mask.clone()).unwrap();
-                          }
-                      }
-                  }
-              }
-              dwa
+          for (tok_id, body) in final_bodies {
+              // Add a transition from the new combined start state to the start of the NWA for this tokenizer state.
+              // The label is the tokenizer state ID.
+              let label = tok_id.0 as i16;
+              combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all()).unwrap();
           }
+
+          let mut combined_nwa = NWA {
+              states: combined_nwa_states,
+              body: NWABody { start_state: combined_start_state },
+          };
+          combined_nwa.simplify();
+          crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
+          crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
+          crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
+
+          let now = Instant::now();
+          crate::debug!(4, "Starting resolve_negative_codes_in_nwa...");
+          resolve_negative_codes_in_nwa(&mut combined_nwa);
+          crate::debug!(4, "resolve_negative_codes_in_nwa took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+          crate::debug!(4, "Stats for combined NWA after negative resolution:\n{}", combined_nwa.stats());
+
+          let now = Instant::now();
+          crate::debug!(4, "Pruning continuations from final states...");
+          prune_continuations_from_final_states(&mut combined_nwa);
+          combined_nwa.simplify();
+          crate::debug!(4, "Pruning and simplifying took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+          crate::debug!(4, "Stats for combined NWA after pruning:\n{}", combined_nwa.stats());
+
+          let now = Instant::now();
+          // Determinize the single combined NWA
+          crate::debug!(4, "Determinizing final combined NWA...");
+          let mut final_dwa = combined_nwa.determinize_to_dwa();
+          final_dwa.simplify();
+          crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
+          crate::debug!(4, "Stats for final DWA:\n{}", final_dwa.stats());
+
+          crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
+          final_dwa
       }
   prev_file_contents:
     src/precompute4/weighted_automata/mod.rs: |
@@ -4393,7 +4133,10 @@ local_system:
                   None
               };
 
+              let now = Instant::now();
               let changed = pass(states, body);
+              let elapsed = now.elapsed();
+              crate::debug!(3, "DWA simplify pass '{}' took {:?} (changed: {})", pass_name, elapsed, changed);
 
               if let Some(before) = before_dwa {
                   if changed {
@@ -5052,7 +4795,11 @@ local_system:
               if let Some(p) = pb {
                   p.set_message(msg.to_string());
               }
-              if pass() {
+              let now = Instant::now();
+              let changed = pass();
+              let elapsed = now.elapsed();
+              crate::debug!(3, "NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
+              if changed {
                   *changed_any = true;
               }
           }
@@ -5651,705 +5398,399 @@ local_system:
               true
           }
       }
-    src/precompute4/weighted_automata/test_determinization.rs: |-
-      #![cfg(test)]
-
-      use super::*;
-
-      #[test]
-      fn test_determinize_simple_divergence() {
-          let mut nwa = NWA::new(); // new() creates a start state 0
-          nwa.states.0.clear(); // but we'll manage states manually for clarity
-
-          // NWA for "ac" with weight A1 (0)
-          let s0 = nwa.states.add_state();
-          let s1 = nwa.states.add_state();
-          let s2 = nwa.states.add_state();
-          nwa.add_transition(s0, 'a' as i16, s1, Weight::all()).unwrap();
-          nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
-          nwa.states[s2].final_weight = Some(Weight::from_item(0));
-
-          // NWA for "bc" with weight A2 (1)
-          let s3 = nwa.states.add_state();
-          let s4 = nwa.states.add_state();
-          let s5 = nwa.states.add_state();
-          nwa.add_transition(s3, 'b' as i16, s4, Weight::all()).unwrap();
-          nwa.add_transition(s4, 'c' as i16, s5, Weight::all()).unwrap();
-          nwa.states[s5].final_weight = Some(Weight::from_item(1));
-
-          // Union them with a new start state
-          let start = nwa.states.add_state();
-          nwa.add_epsilon(start, s0, Weight::all());
-          nwa.add_epsilon(start, s3, Weight::all());
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-          println!("{}", nwa);
-          println!("{}", dwa);
-
-          // Check accepted words and their weights.
-          assert_eq!(
-              dwa.eval_word_weight(&['a' as i16, 'c' as i16]),
-              Weight::from_item(0)
-          );
-          assert_eq!(
-              dwa.eval_word_weight(&['b' as i16, 'c' as i16]),
-              Weight::from_item(1)
-          );
-          assert!(dwa.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&[]).is_empty());
-
-          // An efficient DWA should merge states with similar future behavior,
-          // resulting in a small automaton.
-          // Allowing for a sink state, we assert a small number.
-          assert!(
-              dwa.states.len() <= 4,
-              "Expected a small number of states for simple divergence, got {}",
-              dwa.states.len()
-          );
-      }
-
-      #[test]
-      fn test_determinize_hypercube_catastrophe() {
-          const N: usize = 4;
-          let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
-          let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
-
-          let mut nwa = NWA::new();
-          nwa.states.0.clear();
-
-          let mut component_starts = vec![];
-
-          for i in 0..N {
-              // L_i = words without alphabet[i]
-              let s = nwa.states.add_state();
-              component_starts.push(s);
-              nwa.states[s].final_weight = Some(atoms[i].clone());
-
-              for j in 0..N {
-                  if i == j {
-                      continue;
-                  }
-                  nwa.add_transition(s, alphabet[j], s, Weight::all()).unwrap();
-              }
-          }
-
-          let start = nwa.states.add_state();
-          for &s_comp in &component_starts {
-              nwa.add_epsilon(start, s_comp, Weight::all());
-          }
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-
-          // An efficient DWA construction should avoid the 2^N state explosion by
-          // encoding the history of seen characters within the accumulated weight,
-          // not in the state space.
-          assert!(
-              dwa.states.len() <= 2,
-              "Expected a very small DWA (1-2 states) for hypercube, but got {} states. State explosion was not avoided.",
-              dwa.states.len()
-          );
-
-          // Test some words
-          // word "ac" (chars 0 and 2) -> should not contain 1 or 3 ('b' or 'd'). Belongs to L1 and L3.
-          // Weight should be A1 | A3.
-          let word_ac = vec![alphabet[0], alphabet[2]];
-          let expected_weight_ac = &atoms[1] | &atoms[3];
-          assert_eq!(dwa.eval_word_weight(&word_ac), expected_weight_ac);
-
-          // word "abcd" -> contains all symbols. Should be rejected by all components.
-          let word_all = alphabet.clone();
-          assert!(dwa.eval_word_weight(&word_all).is_empty());
-
-          // empty word -> belongs to all languages.
-          let empty_word = vec![];
-          let mut expected_weight_empty = Weight::zeros();
-          for atom in &atoms {
-              expected_weight_empty |= atom;
-          }
-          assert_eq!(dwa.eval_word_weight(&empty_word), expected_weight_empty);
-      }
-    src/precompute4/weighted_automata/determinization.rs: |
-      use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
-      use super::common::Weight;
-      use super::dwa::DWA;
-      use super::nwa::{NWAStates, NWA};
-      use crate::precompute4::weighted_automata::{NWADefaultTransition, NWAStateID};
-      use crate::profiler::PROGRESS_BAR_ENABLED;
-      use indicatif::{ProgressBar, ProgressStyle};
-
-      use std::collections::hash_map::Entry;
-      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-      use std::hash::{Hash, Hasher};
+    src/precompute4/full_dwa.rs: |
+      use crate::r#macro::is_debug_level_enabled;
+      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
+      use crate::datastructures::trie::{Trie, Trie2Index};
+      use crate::glr::parser::{ExpectElse, GLRParser};
+      use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
+      use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
+      use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
+      use crate::precompute4::utils;
+      use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight};
+      use crate::constraint::LLMTokenBV;
+      use range_set_blaze::RangeSetBlaze;
+      use std::cell::RefCell;
+      use std::collections::{BTreeMap, BTreeSet};
       use std::time::Instant;
 
-      impl NWA {
-          pub fn determinize_to_dwa(&self) -> DWA {
-              let now = Instant::now();
+      pub type Precomputed4 = DWA;
+      use crate::tokenizer::TokenizerStateID;
 
-              crate::debug!(4, "NWA before simplify:\n{}", self);
-              let mut nwa = self.clone();
-              nwa.simplify();
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum FullDWABuildError {
+          ParserStateIdOutOfRange { state_id: ParserStateID },
+          AutomatonBuild(NWABuildError),
+      }
 
-              crate::debug!(4, "NWA::determinize_to_dwa stats after simplify:\n{}", nwa.stats());
-              crate::debug!(4, "NWA after simplify:\n{}", nwa);
+      impl From<NWABuildError> for FullDWABuildError {
+          fn from(e: NWABuildError) -> Self {
+              FullDWABuildError::AutomatonBuild(e)
+          }
+      }
 
-              let result = nwa.det_fixpoint();
+      fn build_template_nwa_from_characterization(
+          bb: &BelowBottomCharacterization,
+      ) -> Result<NWA, FullDWABuildError> {
+          let mut nwa = NWA::new();
+          let w_all = Weight::all();
 
-              crate::debug!(4, "NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
-
-              crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
-              result
+          // Create a node for each non-terminal, similar to the NWA construction.
+          let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
+          for &nt in &bb.all_nts {
+              let id = nwa.states.add_state();
+              nt_nodes.insert(nt, id);
           }
 
-          fn det_fixpoint(&self) -> DWA {
-              let fut = self.compute_future_weights();
-              let n = self.states.len();
-              if n == 0 {
-                  return DWA::new();
+          let start = nwa.body.start_state;
+
+          // --- Initial Actions from Start State ---
+
+          for &(initial_state, shift_state) in &bb.initial_shifts {
+              let pos_initial = utils::encode_symbol_i16(initial_state)?;
+              let neg_initial = utils::encode_negative_i16(initial_state)?;
+              let neg_shift = utils::encode_negative_i16(shift_state)?;
+
+              let s0 = nwa.states.add_state();
+              let s1 = nwa.states.add_state();
+              let s2 = nwa.states.add_state();
+              let s3 = nwa.states.add_state();
+
+              // start --(eps)--> s0 --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
+              nwa.add_epsilon(start, s0, w_all.clone());
+              nwa.add_transition(s0, pos_initial, s1, w_all.clone())?;
+              nwa.add_transition(s1, neg_initial, s2, w_all.clone())?;
+              nwa.add_transition(s2, neg_shift, s3, w_all.clone())?;
+              nwa.states[s3].final_weight = Some(w_all.clone());
+          }
+
+          for &(initial_state, len, nt) in &bb.initial_reduces {
+              let pos_initial = utils::encode_symbol_i16(initial_state)?;
+              let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
+
+              // Create a chain of default transitions for the pops.
+              // start --(eps)--> s0 --(+initial)--> s1 --(default)*len--> target_nt_state
+              let s0 = nwa.states.add_state();
+              nwa.add_epsilon(start, s0, w_all.clone());
+              let mut from = s0;
+              let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
+              nwa.add_transition(from, pos_initial, next_state, w_all.clone())?;
+              from = next_state;
+
+              for i in 0..len {
+                  let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
+                  nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
+                  from = to;
+              }
+          }
+
+          // --- Actions from Non-Terminal States ---
+
+          for (nt, rc) in &bb.reduce_characterizations {
+              let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
+
+              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
+                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+                  let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
+
+                  // src --(eps)--> s0 --(+revealed)--> s1 --(default)*len--> dst
+                  let s0 = nwa.states.add_state();
+                  nwa.add_epsilon(src_nt_state, s0, w_all.clone());
+                  let mut from = s0;
+                  let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
+                  nwa.add_transition(from, pos_revealed, next_state, w_all.clone())?;
+                  from = next_state;
+
+                  for i in 0..len {
+                      let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
+                      nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
+                      from = to;
+                  }
               }
 
-              fn eps_closure_masked(
-                  sources: &[NWAStateID],
-                  states: &NWAStates,
-                  fut: &[Weight],
-              ) -> Vec<(NWAStateID, Weight)> {
-                  let mut out: HashMap<NWAStateID, Weight> = HashMap::new();
-                  let mut q: VecDeque<NWAStateID> = VecDeque::new();
-                  for &s in sources {
-                      if s >= states.len() {
-                          continue;
-                      }
-                      let f = fut[s].clone();
-                      if !f.is_empty() {
-                          out.insert(s, f);
-                          q.push_back(s);
+              for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+                  let neg_revealed = utils::encode_negative_i16(revealed_state)?;
+                  let neg_goto = utils::encode_negative_i16(goto_state)?;
+                  let neg_shift = utils::encode_negative_i16(shift_state)?;
+
+                  let s0 = nwa.states.add_state();
+                  let s1 = nwa.states.add_state();
+                  let s2 = nwa.states.add_state();
+                  let s3 = nwa.states.add_state();
+                  let s4 = nwa.states.add_state();
+
+                  // src --(eps)--> s0 --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
+                  nwa.add_epsilon(src_nt_state, s0, w_all.clone());
+                  nwa.add_transition(s0, pos_revealed, s1, w_all.clone())?;
+                  nwa.add_transition(s1, neg_revealed, s2, w_all.clone())?;
+                  nwa.add_transition(s2, neg_goto, s3, w_all.clone())?;
+                  nwa.add_transition(s3, neg_shift, s4, w_all.clone())?;
+                  nwa.states[s4].final_weight = Some(w_all.clone());
+              }
+          }
+
+          Ok(nwa)
+      }
+
+      fn build_template_dwas(
+          parser: &GLRParser,
+      ) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+          let all = compute_all_characterizations(parser);
+          let mut out = BTreeMap::new();
+          for (term, bb) in all {
+              let nwa = build_template_nwa_from_characterization(&bb)?;
+              let mut dwa = nwa.determinize_to_dwa();
+              dwa.simplify();
+              crate::debug!(5, "Built template DWA for terminal {:?}:", term);
+              crate::debug!(5, "{}", dwa);
+              out.insert(term, dwa);
+          }
+          Ok(out)
+      }
+
+      fn build_ignore_terminal_dwa() -> DWA {
+          // Identity DWA: start is final, no transitions.
+          let mut dwa = DWA::new();
+          dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
+          dwa
+      }
+
+      /// For any state with a final weight, subtract that weight from all outgoing transitions.
+      /// This prunes paths that continue after a word has already been accepted with a given weight.
+      fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
+          let mut changed = false;
+          for i in 0..nwa.states.len() {
+              if let Some(final_weight) = nwa.states[i].final_weight.clone() {
+                  if final_weight.is_empty() {
+                      continue;
+                  }
+
+                  let state = &mut nwa.states[i];
+
+                  // Epsilon transitions
+                  for (_, w) in &mut state.epsilons {
+                      let old_w = w.clone();
+                      *w -= &final_weight;
+                      if *w != old_w {
+                          changed = true;
                       }
                   }
-                  while let Some(u) = q.pop_front() {
-                      let base = out.get(&u).cloned().unwrap_or_else(Weight::zeros);
-                      if base.is_empty() {
-                          continue;
-                      }
-                      for &(v, ref w_eps) in &states[u].epsilons {
-                          if v >= states.len() {
-                              continue;
+
+                  // Labeled transitions
+                  for targets in state.transitions.values_mut() {
+                      for (_, w) in targets {
+                          let old_w = w.clone();
+                          *w -= &final_weight;
+                          if *w != old_w {
+                              changed = true;
                           }
-                          let mut prop = &base & w_eps;
-                          if prop.is_empty() {
-                              continue;
-                          }
-                          prop &= &fut[v];
-                          if prop.is_empty() {
-                              continue;
-                          }
-                          match out.entry(v) {
-                              Entry::Occupied(mut e) => {
-                                  let old = e.get_mut();
-                                  let nu = &*old | &prop;
-                                  if nu != *old {
-                                      *old = nu;
-                                      q.push_back(v);
-                                  }
-                              }
-                              Entry::Vacant(e) => {
-                                  e.insert(prop);
-                                  q.push_back(v);
-                              }
-                          }
-                      }
-                  }
-                  let mut v: Vec<(NWAStateID, Weight)> = out.into_iter().collect();
-                  v.sort_by_key(|(sid, _)| *sid);
-                  v
-              }
-
-              fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
-                  if w.is_all_fast() {
-                      return base.to_vec();
-                  }
-                  base.iter()
-                      .map(|(sid, wt)| (*sid, wt & w))
-                      .filter(|(_, x)| !x.is_empty())
-                      .collect()
-              }
-
-              struct StepPool {
-                  raw: Vec<Vec<(NWAStateID, Weight)>>,
-                  map: HashMap<u64, Vec<usize>>,
-              }
-
-              impl StepPool {
-                  fn new() -> Self {
-                      Self { raw: Vec::new(), map: HashMap::new() }
-                  }
-                  fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
-                      pairs
-                          .iter()
-                          .fold(FP_ZERO, |fp, (sid, w)| mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2)))
-                  }
-                  fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
-                      pairs.retain(|(_, w)| !w.is_empty());
-                      let fp = Self::fingerprint(&pairs);
-                      if let Some(cands) = self.map.get(&fp) {
-                          for &id in cands {
-                              if self.raw[id] == pairs {
-                                  return id;
-                              }
-                          }
-                      }
-                      let id = self.raw.len();
-                      self.raw.push(pairs);
-                      self.map.entry(fp).or_default().push(id);
-                      id
-                  }
-              }
-
-              #[derive(Clone)]
-              struct CompiledStep {
-                  by_sig: Vec<(usize, Weight)>,
-                  mask: Weight,
-              }
-              #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-              struct DefSig {
-                  step_id: usize,
-                  exceptions: BTreeSet<i16>,
-              }
-              #[derive(Clone)]
-              struct MacroSig {
-                  final_w: Option<Weight>,
-                  // Each default transition is represented by the compiled "step_id" along with its exception set.
-                  def: Vec<DefSig>,
-                  ex: BTreeMap<i16, Vec<usize>>,
-              }
-              #[derive(Clone, Hash, Eq, PartialEq)]
-              struct MacroSigKey {
-                  final_fp: u64,
-                  // Store both step id and the exact exceptions (as a sorted Vec) to keep signatures precise.
-                  def: Vec<(usize, Vec<i16>)>,
-                  ex: Vec<(i16, Vec<usize>)>,
-              }
-
-              let pb_eps = if PROGRESS_BAR_ENABLED {
-                  Some(ProgressBar::new(n as u64).with_style(
-                      ProgressStyle::default_bar()
-                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
-                          .unwrap(),
-                  ))
-              } else {
-                  None
-              };
-              let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
-              for s in 0..n {
-                  eps_cache[s] = eps_closure_masked(std::slice::from_ref(&s), &self.states, &fut);
-                  if let Some(p) = &pb_eps {
-                      p.inc(1);
-                  }
-              }
-              if let Some(p) = pb_eps {
-                  p.finish_with_message("ε-closures done");
-              }
-
-              let mut step_pool = StepPool::new();
-              let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
-              let mut state_to_sig_id: Vec<usize> = vec![0; n];
-              let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
-              let pb_sigs = if PROGRESS_BAR_ENABLED {
-                  Some(ProgressBar::new(n as u64).with_style(
-                      ProgressStyle::default_bar()
-                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Macro signatures)")
-                          .unwrap(),
-                  ))
-              } else {
-                  None
-              };
-              for s in 0..n {
-                  let final_acc = eps_cache[s].iter().fold(Weight::zeros(), |mut acc, (t, w)| {
-                      if let Some(fw) = &self.states[*t].final_weight {
-                          acc |= &(w & fw);
-                      }
-                      acc
-                  });
-                  let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
-
-                  // Compute default steps; preserve per-default exception sets.
-                  let mut def_steps: Vec<DefSig> = Vec::new();
-                  for default in &self.states[s].default {
-                      let NWADefaultTransition { target: to, weight: wdef, exceptions } = default;
-                      if *to >= n {
-                          continue;
-                      }
-                      let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
-                      if pairs_def.is_empty() {
-                          continue;
-                      }
-                      let step_id = step_pool.intern(pairs_def);
-                      def_steps.push(DefSig {
-                          step_id,
-                          exceptions: exceptions.clone(),
-                      });
-                  }
-
-                  // Compute exceptions; drop those that are empty or identical to the default step effect.
-                  let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-                  for (lbl, targets) in self.states[s].transitions.iter() {
-                      let mut step_exs: Vec<usize> = Vec::new();
-                      for (to, wlbl) in targets {
-                          if *to >= n {
-                              continue;
-                          }
-                          let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
-                          if pairs_ex.is_empty() {
-                              continue;
-                          }
-                          step_exs.push(step_pool.intern(pairs_ex));
-                      }
-
-                      if !step_exs.is_empty() {
-                          step_exs.sort_unstable();
-                          let mut sorted_def_step_ids: Vec<usize> =
-                              def_steps.iter().map(|d| d.step_id).collect();
-                          sorted_def_step_ids.sort_unstable();
-                          if step_exs == sorted_def_step_ids {
-                              continue;
-                          }
-                          ex.insert(*lbl, step_exs);
                       }
                   }
 
-                  crate::debug!(5, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
+                  // Default transitions
+                  for def in &mut state.default {
+                      let old_w = def.weight.clone();
+                      def.weight -= &final_weight;
+                      if def.weight != old_w {
+                          changed = true;
+                      }
+                  }
+              }
+          }
+          changed
+      }
 
-                  // Build a key that includes default exceptions, to avoid merging states that differ only by exception sets.
-                  let mut sorted_def_steps_key: Vec<(usize, Vec<i16>)> = def_steps
-                      .iter()
-                      .map(|d| {
-                          let mut v: Vec<i16> = d.exceptions.iter().copied().collect();
-                          v.sort_unstable();
-                          (d.step_id, v)
-                      })
-                      .collect();
-                  sorted_def_steps_key.sort_unstable();
-                  let key = MacroSigKey {
-                      final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
-                      def: sorted_def_steps_key,
-                      ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
+      // Helper: collect final states of a DWA
+      fn collect_final_states(dwa: &DWA) -> BTreeSet<usize> {
+          let mut finals = BTreeSet::new();
+          for (i, st) in dwa.states.0.iter().enumerate() {
+              if st.final_weight.is_some() {
+                  finals.insert(i);
+              }
+          }
+          finals
+      }
+
+      // Helper: join_map for concatenation: map each left final to the right's start.
+      fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<usize>> {
+          let left_final_states = collect_final_states(left);
+          let right_start = right.body.start_state;
+          let mut join_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+          for lf in left_final_states {
+              join_map.insert(lf, BTreeSet::from([right_start]));
+          }
+          join_map
+      }
+
+      // Public API: precompute4 using NWA-first approach, determinize at the end.
+      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
+          let now_total = Instant::now();
+          let now = Instant::now();
+          crate::debug!(5, "Starting precompute4...");
+          // 1. Build template DWAs for all terminals.
+          let template_dwas = match build_template_dwas(parser) {
+              Ok(m) => m,
+              Err(e) => panic!("Failed to build template DWAs: {:?}", e),
+          };
+          let ignore_dwa = build_ignore_terminal_dwa();
+          crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
+          if is_debug_level_enabled(5) {
+              for (term, dwa) in template_dwas.iter().take(5) {
+                  crate::debug!(5, "Stats for template DWA for terminal {:?}:\n{}", term, dwa.stats());
+              }
+          }
+
+          // 2. Set up shared NWA state arena.
+          let states_arena = RefCell::new(NWAStates::default());
+
+          // 3. Reverse the precompute1 trie.
+          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
+
+          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+
+          let leaf_node = all_nodes.iter().find_map(|&idx| {
+              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+          }).expect("Precompute1 trie must have a single leaf node.");
+
+          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+          let reversed_trie_root = leaf_node;
+
+          // 4. Traverse the reversed trie with NWA bodies.
+          let initial_nwa_body = {
+              let mut states = states_arena.borrow_mut();
+              let start = states.add_state();
+              states[start].final_weight = Some(Weight::all());
+              NWABody { start_state: start }
+          };
+          let initial_tokens = LLMTokenBV::max_ones();
+          let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
+          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+          let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
+          for (k, v) in precomputed1.iter() {
+              original_trie1_roots_map.entry(v.clone()).or_default().push(*k);
+          }
+
+          let options = crate::datastructures::trie::PrettyPrintOptions::default()
+              .omit_nodes()
+              .omit_depth()
+              ;
+          crate::debug!(5, "Trie:\n{}", Trie::pretty_print_with_options(&trie1_god, &trie1_roots, &options));
+          crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+
+          let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
+
+          let now = Instant::now();
+          Trie::special_map_grouped(
+              &reversed_trie1_god,
+              &traversal_data,
+              initial_values,
+              // step function
+              |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
+                  let (current_nwa_body, current_tokens) = current_val;
+                  let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                      let terminal_id = edge_terminal_opt.unwrap();
+                      template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
+                  } else {
+                      &ignore_dwa
                   };
-                  let sig_id = *sig_intern.entry(key).or_insert_with(|| {
-                      let id = sigs.len();
-                      sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
-                      id
-                  });
-                  state_to_sig_id[s] = sig_id;
-                  if let Some(p) = &pb_sigs {
-                      p.inc(1);
-                  }
-              }
-              if let Some(p) = pb_sigs {
-                  p.finish_with_message("Macro signatures done");
-              }
 
-              crate::debug!(5, "All MacroSigs ({}):", sigs.len());
-              for (i, sig) in sigs.iter().enumerate() {
-                  crate::debug!(5, "  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
-              }
-              crate::debug!(5, "state_to_sig_id: {:?}", state_to_sig_id);
-
-              let pb_compile = if PROGRESS_BAR_ENABLED {
-                  Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
-                      ProgressStyle::default_bar()
-                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Compile steps)")
-                          .unwrap(),
-                  ))
-              } else {
-                  None
-              };
-              let mut compiled_steps: Vec<CompiledStep> = Vec::with_capacity(step_pool.raw.len());
-              for pairs in &step_pool.raw {
-                  let mut acc: HashMap<usize, Weight> = HashMap::new();
-                  for (t, w) in pairs.iter() {
-                      *acc.entry(state_to_sig_id[*t]).or_default() |= w;
-                  }
-                  let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
-                  by_sig.sort_by_key(|(sid, _)| *sid);
-                  let mask = by_sig.iter().fold(Weight::zeros(), |mut acc, (_, w)| {
-                      acc |= w;
-                      acc
-                  });
-                  compiled_steps.push(CompiledStep { by_sig, mask });
-                  if let Some(p) = &pb_compile {
-                      p.inc(1);
-                  }
-              }
-              if let Some(p) = pb_compile {
-                  p.finish_with_message("Compile steps done");
-              }
-
-              crate::debug!(5, "Step Pool ({}):", step_pool.raw.len());
-              for (i, pairs) in step_pool.raw.iter().enumerate() {
-                  crate::debug!(5, "  Step {}: {:?}", i, pairs);
-              }
-              crate::debug!(5, "Compiled Steps ({}):", compiled_steps.len());
-              for (i, step) in compiled_steps.iter().enumerate() {
-                  crate::debug!(5, "  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
-              }
-
-              #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-              struct MembersKey(Vec<usize>);
-
-              struct CompositionNode {
-                  final_weight: Option<Weight>,
-                  default_target_idx: Option<usize>,
-                  default_mask: Option<Weight>,
-                  exception_targets: BTreeMap<i16, usize>,
-                  exception_masks: BTreeMap<i16, Weight>,
-                  gates: HashMap<usize, Weight>,
-              }
-
-              fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
-                  for (sid, w) in compiled.iter() {
-                      let x = w & gate;
-                      if !x.is_empty() {
-                          *dst.entry(*sid).or_default() |= &x;
+                  let mut results: Vec<(PrecomputeNode1Index, (NWABody, LLMTokenBV))> = Vec::new();
+                  for (dest_idx, llm_token_bv) in dest_map.iter() {
+                      let next_tokens = current_tokens & llm_token_bv;
+                      if next_tokens.is_empty() {
+                          continue;
                       }
+
+                      let mut states = states_arena.borrow_mut();
+
+                      // Convert template DWA to NWA and copy it into the arena
+                      let template_nwa = NWA::from_dwa(template_dwa);
+                      crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
+                      let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
+                      crate::debug!(5, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
+                      let left_body = NWABody { start_state: template_start_in_arena };
+
+                      // Concatenate: left then current (right) via epsilon with weight = llm_token_bv
+                      crate::debug!(5, "Starting NWA::concatenate_components: left_start={} right_start={}...", left_body.start_state, current_nwa_body.start_state);
+                      let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                      let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
+                      crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
+
+                      results.push((*dest_idx, (composed_body, next_tokens)));
                   }
-              }
-
-              let mut nodes: Vec<CompositionNode> = Vec::new();
-              let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
-              let mut work: VecDeque<usize> = VecDeque::new();
-
-              let pb_discover = if PROGRESS_BAR_ENABLED {
-                  Some(
-                      ProgressBar::new(0).with_style(
-                          ProgressStyle::default_bar()
-                              .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Discovering states)")
-                              .unwrap(),
-                      ),
-                  )
-              } else {
-                  None
-              };
-
-              let mut init_map: HashMap<usize, Weight> = HashMap::new();
-              for (t, w) in eps_cache[self.body.start_state].iter() {
-                  *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
-              }
-              let mut init_keys: Vec<_> = init_map.keys().copied().collect();
-              init_keys.sort_unstable();
-              let init_key = MembersKey(init_keys);
-              let start_idx = 0;
-              key_to_idx.insert(init_key, start_idx);
-              nodes.push(CompositionNode {
-                  final_weight: None,
-                  default_target_idx: None,
-                  default_mask: None,
-                  exception_targets: BTreeMap::new(),
-                  exception_masks: BTreeMap::new(),
-                  gates: init_map,
-              });
-              let mut in_queue = vec![false; 1];
-              in_queue[start_idx] = true;
-              work.push_back(start_idx);
-
-              while let Some(idx) = work.pop_front() {
-                  in_queue[idx] = false;
-                  if let Some(p) = &pb_discover {
-                      p.inc(1);
-                  }
-                  let node_gates = nodes[idx].gates.clone();
-
-                  crate::debug!(5, "\nProcessing composition node {}: gates: {:?}", idx, node_gates);
-
-                  let mut def_groups: HashMap<usize, Weight> = HashMap::new();
-                  let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-                  let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-                  let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-
-                  for (sig_id, gate) in &node_gates {
-                      for def in &sigs[*sig_id].def {
-                          *def_groups.entry(def.step_id).or_default() |= gate;
-                          // Record that this default has these labels as explicit exceptions; default must not apply on them.
-                          for &lbl in &def.exceptions {
-                              *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
+                  results
+              },
+              // merge function: union them via epsilon
+              |val1, val2| {
+                  let (body1, tokens1) = val1;
+                  let (body2, tokens2) = val2;
+                  let mut states = states_arena.borrow_mut();
+                  crate::debug!(5, "Starting NWA::union_components: body1_start={} body2_start={}...", body1.start_state, body2.start_state);
+                  *body1 = NWA::union_components(&mut states, body1, &body2);
+                  *tokens1 |= &tokens2;
+                  crate::debug!(5, "NWA::union_components finished. New start state: {}.", body1.start_state);
+              },
+              // process function: capture at original roots
+              |_node_data, node_idx, val| {
+                  let (nwa_body, tokens) = val;
+                  if !tokens.is_empty() {
+                      if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
+                          for tokenizer_state_id in tokenizer_state_ids {
+                              final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
                           }
                       }
-                      for (lbl, ex_steps) in &sigs[*sig_id].ex {
-                          for ex_step in ex_steps {
-                              *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
-                          }
-                          // Default should not apply on labels that have explicit labeled transitions (for this state).
-                          for def in &sigs[*sig_id].def {
-                              *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
-                          }
-                      }
+                      Some((nwa_body, tokens)) // continue traversal
+                  } else {
+                      None
                   }
+              },
+          );
+          crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
 
-                  crate::debug!(5, "  - def_groups: {:?}", def_groups);
-                  crate::debug!(5, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
-                  crate::debug!(5, "  - def_exers_by_label: {:?}", def_exers_by_label);
-                  crate::debug!(5, "  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
+          // Combine all final NWA bodies into a single NWA
+          let mut combined_nwa_states = states_arena.into_inner();
+          let combined_start_state = combined_nwa_states.add_state();
 
-                  let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
-                  let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
-                  for (def_step, g) in &def_groups {
-                      accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
-                  }
-                  if !def_target_map.is_empty() {
-                      target_maps.insert(None, def_target_map);
-                  }
-
-                  // Labels that need explicit exception edges are:
-                  //  - any label with explicit labeled transitions
-                  //  - any label that appears in a default's exception set
-                  let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
-                  labels_to_consider.extend(ex_groups_by_label.keys().copied());
-                  labels_to_consider.extend(def_exceptions_by_label.keys().copied());
-
-                  for lbl in labels_to_consider {
-                      crate::debug!(5, "    - processing exception label {}", lbl);
-                      let mut map = HashMap::new();
-                      let def_exers = def_exers_by_label.get(&lbl);
-                      let def_exc = def_exceptions_by_label.get(&lbl);
-
-                      for (def_step, total_g) in &def_groups {
-                          crate::debug!(5, "      - considering default step {} with total_g {}", def_step, total_g);
-                          // Subtract states that have explicit labeled transitions on this label
-                          let g_exers = def_exers.and_then(|de| de.get(def_step));
-                          // Subtract states whose default is explicitly not applicable on this label (exception set)
-                          let g_exc = def_exc.and_then(|dx| dx.get(def_step));
-
-                          crate::debug!(5, "        - g_exers for this def_step: {:?}", g_exers);
-                          crate::debug!(5, "        - g_exc for this def_step: {:?}", g_exc);
-                          let mut g_nonex = total_g.clone();
-                          if let Some(g) = g_exers { g_nonex -= g; }
-                          if let Some(g) = g_exc { g_nonex -= g; }
-                          crate::debug!(5, "        - g_nonex (after subtractors): {}", g_nonex);
-                          if !g_nonex.is_empty() {
-                              crate::debug!(5, "        - accumulating for g_nonex");
-                              accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
-                          }
-                      }
-                      if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
-                          for (ex_step, g_ex) in ex_groups {
-                              crate::debug!(5, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
-                              accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
-                          }
-                      }
-                      // Always insert an entry for this label (even if map is empty)
-                      // so that we can emit an exception edge that blocks the default.
-                      target_maps.insert(Some(lbl), map);
-                  }
-
-                  crate::debug!(5, "  - computed target_maps:");
-                  for (label, map) in &target_maps {
-                      let mut keys: Vec<_> = map.keys().copied().collect();
-                      keys.sort_unstable();
-                      let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-                      crate::debug!(5, "    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
-                  }
-
-                  let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
-                  for (label, map) in target_maps {
-                      let mut keys: Vec<_> = map.keys().copied().collect();
-                      keys.sort_unstable();
-                      let key = MembersKey(keys);
-                      let target_idx = *key_to_idx.entry(key).or_insert_with(|| {
-                          let new_idx = nodes.len();
-                          nodes.push(CompositionNode {
-                              final_weight: None,
-                              default_target_idx: None,
-                              default_mask: None,
-                              exception_targets: BTreeMap::new(),
-                              exception_masks: BTreeMap::new(),
-                              gates: HashMap::new(),
-                          });
-                          if new_idx >= in_queue.len() {
-                              in_queue.resize(new_idx + 1, false);
-                          }
-                          new_idx
-                      });
-
-                      let mut any_change = false;
-                      for (sig_id, weight) in &map {
-                          let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                          let new_w = &*entry | weight;
-                          if new_w != *entry {
-                              *entry = new_w;
-                              any_change = true;
-                          }
-                      }
-                      if any_change && !in_queue[target_idx] {
-                          in_queue[target_idx] = true;
-                          work.push_back(target_idx);
-                      }
-                      resolved_transitions.insert(label, (target_idx, map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a })));
-                  }
-
-                  let node = &mut nodes[idx];
-                  if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
-                      node.default_target_idx = Some(target_idx);
-                      node.default_mask = Some(mask);
-                  }
-                  for (label, (target_idx, mask)) in resolved_transitions {
-                      if let Some(lbl) = label {
-                          node.exception_targets.insert(lbl, target_idx);
-                          node.exception_masks.insert(lbl, mask);
-                      }
-                  }
-
-                  crate::debug!(5, "  - Resolved transitions for node {}:", idx);
-                  if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                      crate::debug!(5, "    - default -> {} (mask: {})", target, mask);
-                  }
-                  for (lbl, target) in &node.exception_targets {
-                      if let Some(mask) = node.exception_masks.get(lbl) {
-                          crate::debug!(5, "    - on {}: -> {} (mask: {})", lbl, target, mask);
-                      }
-                  }
-
-                  node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
-                      if let Some(fw) = &sigs[*sig_id].final_w {
-                          acc |= &(gate & fw);
-                      }
-                      acc
-                  }));
-
-                  if let Some(p) = &pb_discover {
-                      p.set_length(nodes.len() as u64);
-                  }
-              }
-              if let Some(p) = pb_discover {
-                  p.finish_with_message(format!("Discovered {} compositions", nodes.len()));
-              }
-
-              let mut dwa = DWA::new();
-              if nodes.is_empty() {
-                  return dwa;
-              }
-              dwa.states.0.resize(nodes.len(), Default::default());
-              dwa.body.start_state = start_idx;
-
-              for (i, node) in nodes.iter().enumerate() {
-                  dwa.states[i].final_weight = node.final_weight.clone();
-                  if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                      if !mask.is_empty() {
-                          dwa.set_default_transition(i, target_idx, mask.clone()).unwrap();
-                      }
-                  }
-                  for (lbl, &target_idx) in &node.exception_targets {
-                      // Always add exception transitions, even with empty masks, to properly block default on those labels.
-                      let mask = node
-                          .exception_masks
-                          .get(lbl)
-                          .cloned()
-                          .unwrap_or_else(Weight::zeros);
-                      dwa.add_transition(i, *lbl, target_idx, mask).unwrap();
-                  }
-              }
-              dwa
+          for (tok_id, body) in final_bodies {
+              // Add a transition from the new combined start state to the start of the NWA for this tokenizer state.
+              // The label is the tokenizer state ID.
+              let label = tok_id.0 as i16;
+              combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all()).unwrap();
           }
+
+          let mut combined_nwa = NWA {
+              states: combined_nwa_states,
+              body: NWABody { start_state: combined_start_state },
+          };
+          combined_nwa.simplify();
+          crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
+          crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
+          crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
+
+          let now = Instant::now();
+          crate::debug!(4, "Starting resolve_negative_codes_in_nwa...");
+          resolve_negative_codes_in_nwa(&mut combined_nwa);
+          crate::debug!(4, "resolve_negative_codes_in_nwa took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+          crate::debug!(4, "Stats for combined NWA after negative resolution:\n{}", combined_nwa.stats());
+
+          let now = Instant::now();
+          crate::debug!(4, "Pruning continuations from final states...");
+          prune_continuations_from_final_states(&mut combined_nwa);
+          combined_nwa.simplify();
+          crate::debug!(4, "Pruning and simplifying took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+          crate::debug!(4, "Stats for combined NWA after pruning:\n{}", combined_nwa.stats());
+
+          let now = Instant::now();
+          // Determinize the single combined NWA
+          crate::debug!(4, "Determinizing final combined NWA...");
+          let mut final_dwa = combined_nwa.determinize_to_dwa();
+          final_dwa.simplify();
+          crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
+          crate::debug!(4, "Stats for final DWA:\n{}", final_dwa.stats());
+
+          crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
+          final_dwa
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -8917,837 +8358,405 @@ messages:
     metadata:
       filename: src/precompute4/weighted_automata/simplification.rs
   - user: |-
-      ```rust "src/precompute4/weighted_automata/test_determinization.rs"
-      #![cfg(test)]
-
-      use super::*;
-
-      #[test]
-      fn test_determinize_simple_divergence() {
-          let mut nwa = NWA::new(); // new() creates a start state 0
-          nwa.states.0.clear(); // but we'll manage states manually for clarity
-
-          // NWA for "ac" with weight A1 (0)
-          let s0 = nwa.states.add_state();
-          let s1 = nwa.states.add_state();
-          let s2 = nwa.states.add_state();
-          nwa.add_transition(s0, 'a' as i16, s1, Weight::all()).unwrap();
-          nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
-          nwa.states[s2].final_weight = Some(Weight::from_item(0));
-
-          // NWA for "bc" with weight A2 (1)
-          let s3 = nwa.states.add_state();
-          let s4 = nwa.states.add_state();
-          let s5 = nwa.states.add_state();
-          nwa.add_transition(s3, 'b' as i16, s4, Weight::all()).unwrap();
-          nwa.add_transition(s4, 'c' as i16, s5, Weight::all()).unwrap();
-          nwa.states[s5].final_weight = Some(Weight::from_item(1));
-
-          // Union them with a new start state
-          let start = nwa.states.add_state();
-          nwa.add_epsilon(start, s0, Weight::all());
-          nwa.add_epsilon(start, s3, Weight::all());
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-          println!("{}", nwa);
-          println!("{}", dwa);
-
-          // Check accepted words and their weights.
-          assert_eq!(
-              dwa.eval_word_weight(&['a' as i16, 'c' as i16]),
-              Weight::from_item(0)
-          );
-          assert_eq!(
-              dwa.eval_word_weight(&['b' as i16, 'c' as i16]),
-              Weight::from_item(1)
-          );
-          assert!(dwa.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&[]).is_empty());
-
-          // An efficient DWA should merge states with similar future behavior,
-          // resulting in a small automaton.
-          // Allowing for a sink state, we assert a small number.
-          assert!(
-              dwa.states.len() <= 4,
-              "Expected a small number of states for simple divergence, got {}",
-              dwa.states.len()
-          );
-      }
-
-      #[test]
-      fn test_determinize_hypercube_catastrophe() {
-          const N: usize = 4;
-          let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
-          let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
-
-          let mut nwa = NWA::new();
-          nwa.states.0.clear();
-
-          let mut component_starts = vec![];
-
-          for i in 0..N {
-              // L_i = words without alphabet[i]
-              let s = nwa.states.add_state();
-              component_starts.push(s);
-              nwa.states[s].final_weight = Some(atoms[i].clone());
-
-              for j in 0..N {
-                  if i == j {
-                      continue;
-                  }
-                  nwa.add_transition(s, alphabet[j], s, Weight::all()).unwrap();
-              }
-          }
-
-          let start = nwa.states.add_state();
-          for &s_comp in &component_starts {
-              nwa.add_epsilon(start, s_comp, Weight::all());
-          }
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-
-          // An efficient DWA construction should avoid the 2^N state explosion by
-          // encoding the history of seen characters within the accumulated weight,
-          // not in the state space.
-          assert!(
-              dwa.states.len() <= 2,
-              "Expected a very small DWA (1-2 states) for hypercube, but got {} states. State explosion was not avoided.",
-              dwa.states.len()
-          );
-
-          // Test some words
-          // word "ac" (chars 0 and 2) -> should not contain 1 or 3 ('b' or 'd'). Belongs to L1 and L3.
-          // Weight should be A1 | A3.
-          let word_ac = vec![alphabet[0], alphabet[2]];
-          let expected_weight_ac = &atoms[1] | &atoms[3];
-          assert_eq!(dwa.eval_word_weight(&word_ac), expected_weight_ac);
-
-          // word "abcd" -> contains all symbols. Should be rejected by all components.
-          let word_all = alphabet.clone();
-          assert!(dwa.eval_word_weight(&word_all).is_empty());
-
-          // empty word -> belongs to all languages.
-          let empty_word = vec![];
-          let mut expected_weight_empty = Weight::zeros();
-          for atom in &atoms {
-              expected_weight_empty |= atom;
-          }
-          assert_eq!(dwa.eval_word_weight(&empty_word), expected_weight_empty);
-      }
-      ```
-    metadata:
-      filename: src/precompute4/weighted_automata/test_determinization.rs
-  - user: |-
-      ```rust "src/precompute4/weighted_automata/determinization.rs"
-      use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
-      use super::common::Weight;
-      use super::dwa::DWA;
-      use super::nwa::{NWAStates, NWA};
-      use crate::precompute4::weighted_automata::{NWADefaultTransition, NWAStateID};
-      use crate::profiler::PROGRESS_BAR_ENABLED;
-      use indicatif::{ProgressBar, ProgressStyle};
-
-      use std::collections::hash_map::Entry;
-      use std::collections::{BTreeMap, HashMap, VecDeque};
-      use std::hash::{Hash, Hasher};
+      ```rust "src/precompute4/full_dwa.rs"
+      use crate::r#macro::is_debug_level_enabled;
+      use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
+      use crate::datastructures::trie::{Trie, Trie2Index};
+      use crate::glr::parser::{ExpectElse, GLRParser};
+      use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
+      use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
+      use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
+      use crate::precompute4::utils;
+      use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight};
+      use crate::constraint::LLMTokenBV;
+      use range_set_blaze::RangeSetBlaze;
+      use std::cell::RefCell;
+      use std::collections::{BTreeMap, BTreeSet};
       use std::time::Instant;
 
-      impl NWA {
-          pub fn determinize_to_dwa(&self) -> DWA {
-              let now = Instant::now();
+      pub type Precomputed4 = DWA;
+      use crate::tokenizer::TokenizerStateID;
 
-              crate::debug!(4, "NWA before simplify:\n{}", self);
-              let mut nwa = self.clone();
-              nwa.simplify();
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum FullDWABuildError {
+          ParserStateIdOutOfRange { state_id: ParserStateID },
+          AutomatonBuild(NWABuildError),
+      }
 
-              crate::debug!(4, "NWA::determinize_to_dwa stats after simplify:\n{}", nwa.stats());
-              crate::debug!(4, "NWA after simplify:\n{}", nwa);
+      impl From<NWABuildError> for FullDWABuildError {
+          fn from(e: NWABuildError) -> Self {
+              FullDWABuildError::AutomatonBuild(e)
+          }
+      }
 
-              let result = nwa.det_fixpoint();
+      fn build_template_nwa_from_characterization(
+          bb: &BelowBottomCharacterization,
+      ) -> Result<NWA, FullDWABuildError> {
+          let mut nwa = NWA::new();
+          let w_all = Weight::all();
 
-              crate::debug!(4, "NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
-
-              crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
-              result
+          // Create a node for each non-terminal, similar to the NWA construction.
+          let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
+          for &nt in &bb.all_nts {
+              let id = nwa.states.add_state();
+              nt_nodes.insert(nt, id);
           }
 
-          fn det_fixpoint(&self) -> DWA {
-              let fut = self.compute_future_weights();
-              let n = self.states.len();
-              if n == 0 {
-                  return DWA::new();
-              }
+          let start = nwa.body.start_state;
 
-              fn eps_closure_masked(
-                  sources: &[NWAStateID],
-                  states: &NWAStates,
-                  fut: &[Weight],
-              ) -> Vec<(NWAStateID, Weight)> {
-                  let mut out: HashMap<NWAStateID, Weight> = HashMap::new();
-                  let mut q: VecDeque<NWAStateID> = VecDeque::new();
-                  for &s in sources {
-                      if s >= states.len() {
-                          continue;
-                      }
-                      let f = fut[s].clone();
-                      if !f.is_empty() {
-                          out.insert(s, f);
-                          q.push_back(s);
-                      }
-                  }
-                  while let Some(u) = q.pop_front() {
-                      let base = out.get(&u).cloned().unwrap_or_else(Weight::zeros);
-                      if base.is_empty() {
-                          continue;
-                      }
-                      for &(v, ref w_eps) in &states[u].epsilons {
-                          if v >= states.len() {
-                              continue;
-                          }
-                          let mut prop = &base & w_eps;
-                          if prop.is_empty() {
-                              continue;
-                          }
-                          prop &= &fut[v];
-                          if prop.is_empty() {
-                              continue;
-                          }
-                          match out.entry(v) {
-                              Entry::Occupied(mut e) => {
-                                  let old = e.get_mut();
-                                  let nu = &*old | &prop;
-                                  if nu != *old {
-                                      *old = nu;
-                                      q.push_back(v);
-                                  }
-                              }
-                              Entry::Vacant(e) => {
-                                  e.insert(prop);
-                                  q.push_back(v);
-                              }
-                          }
-                      }
-                  }
-                  let mut v: Vec<(NWAStateID, Weight)> = out.into_iter().collect();
-                  v.sort_by_key(|(sid, _)| *sid);
-                  v
-              }
+          // --- Initial Actions from Start State ---
 
-              fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
-                  if w.is_all_fast() {
-                      return base.to_vec();
-                  }
-                  base.iter()
-                      .map(|(sid, wt)| (*sid, wt & w))
-                      .filter(|(_, x)| !x.is_empty())
-                      .collect()
-              }
+          for &(initial_state, shift_state) in &bb.initial_shifts {
+              let pos_initial = utils::encode_symbol_i16(initial_state)?;
+              let neg_initial = utils::encode_negative_i16(initial_state)?;
+              let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-              struct StepPool {
-                  raw: Vec<Vec<(NWAStateID, Weight)>>,
-                  map: HashMap<u64, Vec<usize>>,
-              }
+              let s0 = nwa.states.add_state();
+              let s1 = nwa.states.add_state();
+              let s2 = nwa.states.add_state();
+              let s3 = nwa.states.add_state();
 
-              impl StepPool {
-                  fn new() -> Self {
-                      Self { raw: Vec::new(), map: HashMap::new() }
-                  }
-                  fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
-                      pairs
-                          .iter()
-                          .fold(FP_ZERO, |fp, (sid, w)| mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2)))
-                  }
-                  fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
-                      pairs.retain(|(_, w)| !w.is_empty());
-                      let fp = Self::fingerprint(&pairs);
-                      if let Some(cands) = self.map.get(&fp) {
-                          for &id in cands {
-                              if self.raw[id] == pairs {
-                                  return id;
-                              }
-                          }
-                      }
-                      let id = self.raw.len();
-                      self.raw.push(pairs);
-                      self.map.entry(fp).or_default().push(id);
-                      id
+              // start --(eps)--> s0 --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
+              nwa.add_epsilon(start, s0, w_all.clone());
+              nwa.add_transition(s0, pos_initial, s1, w_all.clone())?;
+              nwa.add_transition(s1, neg_initial, s2, w_all.clone())?;
+              nwa.add_transition(s2, neg_shift, s3, w_all.clone())?;
+              nwa.states[s3].final_weight = Some(w_all.clone());
+          }
+
+          for &(initial_state, len, nt) in &bb.initial_reduces {
+              let pos_initial = utils::encode_symbol_i16(initial_state)?;
+              let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
+
+              // Create a chain of default transitions for the pops.
+              // start --(eps)--> s0 --(+initial)--> s1 --(default)*len--> target_nt_state
+              let s0 = nwa.states.add_state();
+              nwa.add_epsilon(start, s0, w_all.clone());
+              let mut from = s0;
+              let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
+              nwa.add_transition(from, pos_initial, next_state, w_all.clone())?;
+              from = next_state;
+
+              for i in 0..len {
+                  let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
+                  nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
+                  from = to;
+              }
+          }
+
+          // --- Actions from Non-Terminal States ---
+
+          for (nt, rc) in &bb.reduce_characterizations {
+              let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
+
+              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
+                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+                  let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
+
+                  // src --(eps)--> s0 --(+revealed)--> s1 --(default)*len--> dst
+                  let s0 = nwa.states.add_state();
+                  nwa.add_epsilon(src_nt_state, s0, w_all.clone());
+                  let mut from = s0;
+                  let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
+                  nwa.add_transition(from, pos_revealed, next_state, w_all.clone())?;
+                  from = next_state;
+
+                  for i in 0..len {
+                      let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
+                      nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
+                      from = to;
                   }
               }
 
-              #[derive(Clone)]
-              struct CompiledStep {
-                  by_sig: Vec<(usize, Weight)>,
-                  mask: Weight,
-              }
-              #[derive(Clone)]
-              struct MacroSig {
-                  final_w: Option<Weight>,
-                  def: Vec<usize>,
-                  ex: BTreeMap<i16, Vec<usize>>,
-              }
-              #[derive(Clone, Hash, Eq, PartialEq)]
-              struct MacroSigKey {
-                  final_fp: u64,
-                  def: Vec<usize>,
-                  ex: Vec<(i16, Vec<usize>)>,
-              }
+              for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+                  let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+                  let neg_revealed = utils::encode_negative_i16(revealed_state)?;
+                  let neg_goto = utils::encode_negative_i16(goto_state)?;
+                  let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-              let pb_eps = if PROGRESS_BAR_ENABLED {
-                  Some(ProgressBar::new(n as u64).with_style(
-                      ProgressStyle::default_bar()
-                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
-                          .unwrap(),
-                  ))
-              } else {
-                  None
-              };
-              let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
-              for s in 0..n {
-                  eps_cache[s] = eps_closure_masked(std::slice::from_ref(&s), &self.states, &fut);
-                  if let Some(p) = &pb_eps {
-                      p.inc(1);
+                  let s0 = nwa.states.add_state();
+                  let s1 = nwa.states.add_state();
+                  let s2 = nwa.states.add_state();
+                  let s3 = nwa.states.add_state();
+                  let s4 = nwa.states.add_state();
+
+                  // src --(eps)--> s0 --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
+                  nwa.add_epsilon(src_nt_state, s0, w_all.clone());
+                  nwa.add_transition(s0, pos_revealed, s1, w_all.clone())?;
+                  nwa.add_transition(s1, neg_revealed, s2, w_all.clone())?;
+                  nwa.add_transition(s2, neg_goto, s3, w_all.clone())?;
+                  nwa.add_transition(s3, neg_shift, s4, w_all.clone())?;
+                  nwa.states[s4].final_weight = Some(w_all.clone());
+              }
+          }
+
+          Ok(nwa)
+      }
+
+      fn build_template_dwas(
+          parser: &GLRParser,
+      ) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+          let all = compute_all_characterizations(parser);
+          let mut out = BTreeMap::new();
+          for (term, bb) in all {
+              let nwa = build_template_nwa_from_characterization(&bb)?;
+              let mut dwa = nwa.determinize_to_dwa();
+              dwa.simplify();
+              crate::debug!(5, "Built template DWA for terminal {:?}:", term);
+              crate::debug!(5, "{}", dwa);
+              out.insert(term, dwa);
+          }
+          Ok(out)
+      }
+
+      fn build_ignore_terminal_dwa() -> DWA {
+          // Identity DWA: start is final, no transitions.
+          let mut dwa = DWA::new();
+          dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
+          dwa
+      }
+
+      /// For any state with a final weight, subtract that weight from all outgoing transitions.
+      /// This prunes paths that continue after a word has already been accepted with a given weight.
+      fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
+          let mut changed = false;
+          for i in 0..nwa.states.len() {
+              if let Some(final_weight) = nwa.states[i].final_weight.clone() {
+                  if final_weight.is_empty() {
+                      continue;
                   }
-              }
-              if let Some(p) = pb_eps {
-                  p.finish_with_message("ε-closures done");
-              }
 
-              let mut step_pool = StepPool::new();
-              let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
-              let mut state_to_sig_id: Vec<usize> = vec![0; n];
-              let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
-              let pb_sigs = if PROGRESS_BAR_ENABLED {
-                  Some(ProgressBar::new(n as u64).with_style(
-                      ProgressStyle::default_bar()
-                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Macro signatures)")
-                          .unwrap(),
-                  ))
-              } else {
-                  None
-              };
-              for s in 0..n {
-                  let final_acc = eps_cache[s].iter().fold(Weight::zeros(), |mut acc, (t, w)| {
-                      if let Some(fw) = &self.states[*t].final_weight {
-                          acc |= &(w & fw);
-                      }
-                      acc
-                  });
-                  let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
+                  let state = &mut nwa.states[i];
 
-                  // Compute default step; skip if out-of-bounds or effect is empty after weighting + ε-closure.
-                  let def_steps: Vec<usize> = self.states[s].default.iter().filter_map(|default| {
-                      let NWADefaultTransition { target: to, weight: wdef, .. } = default;
-                      if *to < n {
-                          let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
-                          if pairs_def.is_empty() { None } else { Some(step_pool.intern(pairs_def)) }
-                      } else { None }
-                  }).collect();
-
-                  // Compute exceptions; drop those that are empty or identical to the default step effect.
-                  let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-                  for (lbl, targets) in self.states[s].transitions.iter() {
-                      let mut step_exs: Vec<usize> = Vec::new();
-                      for (to, wlbl) in targets {
-                          if *to >= n {
-                              continue;
-                          }
-                          let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
-                          if pairs_ex.is_empty() {
-                              continue;
-                          }
-                          step_exs.push(step_pool.intern(pairs_ex));
-                      }
-
-                      if !step_exs.is_empty() {
-                          step_exs.sort_unstable();
-                          let mut sorted_def_steps = def_steps.clone();
-                          sorted_def_steps.sort_unstable();
-                          if step_exs == sorted_def_steps {
-                              continue;
-                          }
-                          ex.insert(*lbl, step_exs);
+                  // Epsilon transitions
+                  for (_, w) in &mut state.epsilons {
+                      let old_w = w.clone();
+                      *w -= &final_weight;
+                      if *w != old_w {
+                          changed = true;
                       }
                   }
 
-                  crate::debug!(5, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
+                  // Labeled transitions
+                  for targets in state.transitions.values_mut() {
+                      for (_, w) in targets {
+                          let old_w = w.clone();
+                          *w -= &final_weight;
+                          if *w != old_w {
+                              changed = true;
+                          }
+                      }
+                  }
 
-                  let mut sorted_def_steps = def_steps.clone();
-                  sorted_def_steps.sort_unstable();
-                  let key = MacroSigKey {
-                      final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
-                      def: sorted_def_steps,
-                      ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
+                  // Default transitions
+                  for def in &mut state.default {
+                      let old_w = def.weight.clone();
+                      def.weight -= &final_weight;
+                      if def.weight != old_w {
+                          changed = true;
+                      }
+                  }
+              }
+          }
+          changed
+      }
+
+      // Helper: collect final states of a DWA
+      fn collect_final_states(dwa: &DWA) -> BTreeSet<usize> {
+          let mut finals = BTreeSet::new();
+          for (i, st) in dwa.states.0.iter().enumerate() {
+              if st.final_weight.is_some() {
+                  finals.insert(i);
+              }
+          }
+          finals
+      }
+
+      // Helper: join_map for concatenation: map each left final to the right's start.
+      fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<usize>> {
+          let left_final_states = collect_final_states(left);
+          let right_start = right.body.start_state;
+          let mut join_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+          for lf in left_final_states {
+              join_map.insert(lf, BTreeSet::from([right_start]));
+          }
+          join_map
+      }
+
+      // Public API: precompute4 using NWA-first approach, determinize at the end.
+      pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
+          let now_total = Instant::now();
+          let now = Instant::now();
+          crate::debug!(5, "Starting precompute4...");
+          // 1. Build template DWAs for all terminals.
+          let template_dwas = match build_template_dwas(parser) {
+              Ok(m) => m,
+              Err(e) => panic!("Failed to build template DWAs: {:?}", e),
+          };
+          let ignore_dwa = build_ignore_terminal_dwa();
+          crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
+          if is_debug_level_enabled(5) {
+              for (term, dwa) in template_dwas.iter().take(5) {
+                  crate::debug!(5, "Stats for template DWA for terminal {:?}:\n{}", term, dwa.stats());
+              }
+          }
+
+          // 2. Set up shared NWA state arena.
+          let states_arena = RefCell::new(NWAStates::default());
+
+          // 3. Reverse the precompute1 trie.
+          let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
+
+          let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
+
+          let leaf_node = all_nodes.iter().find_map(|&idx| {
+              idx.read(trie1_god).and_then(|g| if g.value.end { Some(idx) } else { None })
+          }).expect("Precompute1 trie must have a single leaf node.");
+
+          let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
+          let reversed_trie_root = leaf_node;
+
+          // 4. Traverse the reversed trie with NWA bodies.
+          let initial_nwa_body = {
+              let mut states = states_arena.borrow_mut();
+              let start = states.add_state();
+              states[start].final_weight = Some(Weight::all());
+              NWABody { start_state: start }
+          };
+          let initial_tokens = LLMTokenBV::max_ones();
+          let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
+          let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+          let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
+          for (k, v) in precomputed1.iter() {
+              original_trie1_roots_map.entry(v.clone()).or_default().push(*k);
+          }
+
+          let options = crate::datastructures::trie::PrettyPrintOptions::default()
+              .omit_nodes()
+              .omit_depth()
+              ;
+          crate::debug!(5, "Trie:\n{}", Trie::pretty_print_with_options(&trie1_god, &trie1_roots, &options));
+          crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+
+          let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
+
+          let now = Instant::now();
+          Trie::special_map_grouped(
+              &reversed_trie1_god,
+              &traversal_data,
+              initial_values,
+              // step function
+              |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
+                  let (current_nwa_body, current_tokens) = current_val;
+                  let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                      let terminal_id = edge_terminal_opt.unwrap();
+                      template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
+                  } else {
+                      &ignore_dwa
                   };
-                  let sig_id = *sig_intern.entry(key).or_insert_with(|| {
-                      let id = sigs.len();
-                      sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
-                      id
-                  });
-                  state_to_sig_id[s] = sig_id;
-                  if let Some(p) = &pb_sigs {
-                      p.inc(1);
-                  }
-              }
-              if let Some(p) = pb_sigs {
-                  p.finish_with_message("Macro signatures done");
-              }
 
-              crate::debug!(5, "All MacroSigs ({}):", sigs.len());
-              for (i, sig) in sigs.iter().enumerate() {
-                  crate::debug!(5, "  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
-              }
-              crate::debug!(5, "state_to_sig_id: {:?}", state_to_sig_id);
-
-              let pb_compile = if PROGRESS_BAR_ENABLED {
-                  Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
-                      ProgressStyle::default_bar()
-                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Compile steps)")
-                          .unwrap(),
-                  ))
-              } else {
-                  None
-              };
-              let mut compiled_steps: Vec<CompiledStep> = Vec::with_capacity(step_pool.raw.len());
-              for pairs in &step_pool.raw {
-                  let mut acc: HashMap<usize, Weight> = HashMap::new();
-                  for (t, w) in pairs.iter() {
-                      *acc.entry(state_to_sig_id[*t]).or_default() |= w;
-                  }
-                  let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
-                  by_sig.sort_by_key(|(sid, _)| *sid);
-                  let mask = by_sig.iter().fold(Weight::zeros(), |mut acc, (_, w)| {
-                      acc |= w;
-                      acc
-                  });
-                  compiled_steps.push(CompiledStep { by_sig, mask });
-                  if let Some(p) = &pb_compile {
-                      p.inc(1);
-                  }
-              }
-              if let Some(p) = pb_compile {
-                  p.finish_with_message("Compile steps done");
-              }
-
-              crate::debug!(5, "Step Pool ({}):", step_pool.raw.len());
-              for (i, pairs) in step_pool.raw.iter().enumerate() {
-                  crate::debug!(5, "  Step {}: {:?}", i, pairs);
-              }
-              crate::debug!(5, "Compiled Steps ({}):", compiled_steps.len());
-              for (i, step) in compiled_steps.iter().enumerate() {
-                  crate::debug!(5, "  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
-              }
-
-              #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-              struct MembersKey(Vec<usize>);
-
-              struct CompositionNode {
-                  final_weight: Option<Weight>,
-                  default_target_idx: Option<usize>,
-                  default_mask: Option<Weight>,
-                  exception_targets: BTreeMap<i16, usize>,
-                  exception_masks: BTreeMap<i16, Weight>,
-                  gates: HashMap<usize, Weight>,
-              }
-
-              fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
-                  for (sid, w) in compiled.iter() {
-                      let x = w & gate;
-                      if !x.is_empty() {
-                          *dst.entry(*sid).or_default() |= &x;
+                  let mut results: Vec<(PrecomputeNode1Index, (NWABody, LLMTokenBV))> = Vec::new();
+                  for (dest_idx, llm_token_bv) in dest_map.iter() {
+                      let next_tokens = current_tokens & llm_token_bv;
+                      if next_tokens.is_empty() {
+                          continue;
                       }
+
+                      let mut states = states_arena.borrow_mut();
+
+                      // Convert template DWA to NWA and copy it into the arena
+                      let template_nwa = NWA::from_dwa(template_dwa);
+                      crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
+                      let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
+                      crate::debug!(5, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
+                      let left_body = NWABody { start_state: template_start_in_arena };
+
+                      // Concatenate: left then current (right) via epsilon with weight = llm_token_bv
+                      crate::debug!(5, "Starting NWA::concatenate_components: left_start={} right_start={}...", left_body.start_state, current_nwa_body.start_state);
+                      let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                      let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
+                      crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
+
+                      results.push((*dest_idx, (composed_body, next_tokens)));
                   }
-              }
-
-              let mut nodes: Vec<CompositionNode> = Vec::new();
-              let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
-              let mut work: VecDeque<usize> = VecDeque::new();
-
-              let pb_discover = if PROGRESS_BAR_ENABLED {
-                  Some(
-                      ProgressBar::new(0).with_style(
-                          ProgressStyle::default_bar()
-                              .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Discovering states)")
-                              .unwrap(),
-                      ),
-                  )
-              } else {
-                  None
-              };
-
-              let mut init_map: HashMap<usize, Weight> = HashMap::new();
-              for (t, w) in eps_cache[self.body.start_state].iter() {
-                  *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
-              }
-              let mut init_keys: Vec<_> = init_map.keys().copied().collect();
-              init_keys.sort_unstable();
-              let init_key = MembersKey(init_keys);
-              let start_idx = 0;
-              key_to_idx.insert(init_key, start_idx);
-              nodes.push(CompositionNode {
-                  final_weight: None,
-                  default_target_idx: None,
-                  default_mask: None,
-                  exception_targets: BTreeMap::new(),
-                  exception_masks: BTreeMap::new(),
-                  gates: init_map,
-              });
-              let mut in_queue = vec![false; 1];
-              in_queue[start_idx] = true;
-              work.push_back(start_idx);
-
-              while let Some(idx) = work.pop_front() {
-                  in_queue[idx] = false;
-                  if let Some(p) = &pb_discover {
-                      p.inc(1);
-                  }
-                  let node_gates = nodes[idx].gates.clone();
-
-                  crate::debug!(5, "\nProcessing composition node {}: gates: {:?}", idx, node_gates);
-
-                  let mut def_groups: HashMap<usize, Weight> = HashMap::new();
-                  let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-                  let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-
-                  for (sig_id, gate) in &node_gates {
-                      for def_id in &sigs[*sig_id].def {
-                          *def_groups.entry(*def_id).or_default() |= gate;
-                      }
-                      for (lbl, ex_steps) in &sigs[*sig_id].ex {
-                          for ex_step in ex_steps {
-                              *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
-                          }
-                          if !sigs[*sig_id].def.is_empty() {
-                              for def_id in &sigs[*sig_id].def {
-                                  *def_exers_by_label.entry(*lbl).or_default().entry(*def_id).or_default() |= gate;
-                              }
+                  results
+              },
+              // merge function: union them via epsilon
+              |val1, val2| {
+                  let (body1, tokens1) = val1;
+                  let (body2, tokens2) = val2;
+                  let mut states = states_arena.borrow_mut();
+                  crate::debug!(5, "Starting NWA::union_components: body1_start={} body2_start={}...", body1.start_state, body2.start_state);
+                  *body1 = NWA::union_components(&mut states, body1, &body2);
+                  *tokens1 |= &tokens2;
+                  crate::debug!(5, "NWA::union_components finished. New start state: {}.", body1.start_state);
+              },
+              // process function: capture at original roots
+              |_node_data, node_idx, val| {
+                  let (nwa_body, tokens) = val;
+                  if !tokens.is_empty() {
+                      if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
+                          for tokenizer_state_id in tokenizer_state_ids {
+                              final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
                           }
                       }
+                      Some((nwa_body, tokens)) // continue traversal
+                  } else {
+                      None
                   }
+              },
+          );
+          crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
 
-                  crate::debug!(5, "  - def_groups: {:?}", def_groups);
-                  crate::debug!(5, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
-                  crate::debug!(5, "  - def_exers_by_label: {:?}", def_exers_by_label);
+          // Combine all final NWA bodies into a single NWA
+          let mut combined_nwa_states = states_arena.into_inner();
+          let combined_start_state = combined_nwa_states.add_state();
 
-                  let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
-                  let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
-                  for (def_step, g) in &def_groups {
-                      accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
-                  }
-                  if !def_target_map.is_empty() {
-                      target_maps.insert(None, def_target_map);
-                  }
-
-                  for (lbl, ex_groups) in &ex_groups_by_label {
-                      crate::debug!(5, "    - processing exception label {}", lbl);
-                      let mut map = HashMap::new();
-                      let def_exers = def_exers_by_label.get(lbl);
-                      for (def_step, total_g) in &def_groups {
-                          crate::debug!(5, "      - considering default step {} with total_g {}", def_step, total_g);
-                          let g_exers = def_exers.and_then(|de| de.get(def_step));
-                          crate::debug!(5, "        - g_exers for this def_step: {:?}", g_exers);
-                          let mut g_nonex = total_g.clone();
-                          if let Some(g_exers) = g_exers {
-                              g_nonex -= g_exers;
-                          }
-                          crate::debug!(5, "        - g_nonex: {}", g_nonex);
-                          if !g_nonex.is_empty() {
-                              crate::debug!(5, "        - accumulating for g_nonex");
-                              accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
-                          }
-                      }
-                      for (ex_step, g_ex) in ex_groups {
-                          crate::debug!(5, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
-                          accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
-                      }
-                      if !map.is_empty() {
-                          target_maps.insert(Some(*lbl), map);
-                      }
-                  }
-
-                  crate::debug!(5, "  - computed target_maps:");
-                  for (label, map) in &target_maps {
-                      let mut keys: Vec<_> = map.keys().copied().collect();
-                      keys.sort_unstable();
-                      let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-                      crate::debug!(5, "    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
-                  }
-
-                  let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
-                  for (label, map) in target_maps {
-                      let mut keys: Vec<_> = map.keys().copied().collect();
-                      keys.sort_unstable();
-                      let key = MembersKey(keys);
-                      let target_idx = *key_to_idx.entry(key).or_insert_with(|| {
-                          let new_idx = nodes.len();
-                          nodes.push(CompositionNode {
-                              final_weight: None,
-                              default_target_idx: None,
-                              default_mask: None,
-                              exception_targets: BTreeMap::new(),
-                              exception_masks: BTreeMap::new(),
-                              gates: HashMap::new(),
-                          });
-                          if new_idx >= in_queue.len() {
-                              in_queue.resize(new_idx + 1, false);
-                          }
-                          new_idx
-                      });
-
-                      let mut any_change = false;
-                      for (sig_id, weight) in &map {
-                          let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                          let new_w = &*entry | weight;
-                          if new_w != *entry {
-                              *entry = new_w;
-                              any_change = true;
-                          }
-                      }
-                      if any_change && !in_queue[target_idx] {
-                          in_queue[target_idx] = true;
-                          work.push_back(target_idx);
-                      }
-                      resolved_transitions.insert(label, (target_idx, map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a })));
-                  }
-
-                  let node = &mut nodes[idx];
-                  if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
-                      node.default_target_idx = Some(target_idx);
-                      node.default_mask = Some(mask);
-                  }
-                  for (label, (target_idx, mask)) in resolved_transitions {
-                      if let Some(lbl) = label {
-                          node.exception_targets.insert(lbl, target_idx);
-                          node.exception_masks.insert(lbl, mask);
-                      }
-                  }
-
-                  crate::debug!(5, "  - Resolved transitions for node {}:", idx);
-                  if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                      crate::debug!(5, "    - default -> {} (mask: {})", target, mask);
-                  }
-                  for (lbl, target) in &node.exception_targets {
-                      if let Some(mask) = node.exception_masks.get(lbl) {
-                          crate::debug!(5, "    - on {}: -> {} (mask: {})", lbl, target, mask);
-                      }
-                  }
-
-                  node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
-                      if let Some(fw) = &sigs[*sig_id].final_w {
-                          acc |= &(gate & fw);
-                      }
-                      acc
-                  }));
-
-                  if let Some(p) = &pb_discover {
-                      p.set_length(nodes.len() as u64);
-                  }
-              }
-              if let Some(p) = pb_discover {
-                  p.finish_with_message(format!("Discovered {} compositions", nodes.len()));
-              }
-
-              let mut dwa = DWA::new();
-              if nodes.is_empty() {
-                  return dwa;
-              }
-              dwa.states.0.resize(nodes.len(), Default::default());
-              dwa.body.start_state = start_idx;
-
-              for (i, node) in nodes.iter().enumerate() {
-                  dwa.states[i].final_weight = node.final_weight.clone();
-                  if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                      if !mask.is_empty() {
-                          dwa.set_default_transition(i, target_idx, mask.clone()).unwrap();
-                      }
-                  }
-                  for (lbl, &target_idx) in &node.exception_targets {
-                      if let Some(mask) = node.exception_masks.get(lbl) {
-                          if !mask.is_empty() {
-                              dwa.add_transition(i, *lbl, target_idx, mask.clone()).unwrap();
-                          }
-                      }
-                  }
-              }
-              dwa
+          for (tok_id, body) in final_bodies {
+              // Add a transition from the new combined start state to the start of the NWA for this tokenizer state.
+              // The label is the tokenizer state ID.
+              let label = tok_id.0 as i16;
+              combined_nwa_states.add_transition(combined_start_state, label, body.start_state, Weight::all()).unwrap();
           }
+
+          let mut combined_nwa = NWA {
+              states: combined_nwa_states,
+              body: NWABody { start_state: combined_start_state },
+          };
+          combined_nwa.simplify();
+          crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
+          crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
+          crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
+
+          let now = Instant::now();
+          crate::debug!(4, "Starting resolve_negative_codes_in_nwa...");
+          resolve_negative_codes_in_nwa(&mut combined_nwa);
+          crate::debug!(4, "resolve_negative_codes_in_nwa took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+          crate::debug!(4, "Stats for combined NWA after negative resolution:\n{}", combined_nwa.stats());
+
+          let now = Instant::now();
+          crate::debug!(4, "Pruning continuations from final states...");
+          prune_continuations_from_final_states(&mut combined_nwa);
+          combined_nwa.simplify();
+          crate::debug!(4, "Pruning and simplifying took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+          crate::debug!(4, "Stats for combined NWA after pruning:\n{}", combined_nwa.stats());
+
+          let now = Instant::now();
+          // Determinize the single combined NWA
+          crate::debug!(4, "Determinizing final combined NWA...");
+          let mut final_dwa = combined_nwa.determinize_to_dwa();
+          final_dwa.simplify();
+          crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
+          crate::debug!(4, "Stats for final DWA:\n{}", final_dwa.stats());
+
+          crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
+          final_dwa
       }
 
       ```
     metadata:
-      filename: src/precompute4/weighted_automata/determinization.rs
-  - user: |+
-      Original DWA:
-      DWA (start: 0)
-        State 0:
-          97 -> 1 (trans_weight: ALL)
-        State 1:
-          * -> 2 (trans_weight: ALL)
-          98 -> 3 (trans_weight: ALL)
-        State 2:
-          99 -> 4 (trans_weight: ALL)
-        State 3:
-        State 4:
-          final_weight: [1]
-
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:18: NWA before simplify:
-      NWA (start: 0)
-        State 0:
-          97 -> 1 (weight: ALL)
-        State 1:
-          * -> 2 (weight: ALL, except for {98})
-          98 -> 3 (weight: ALL)
-        State 2:
-          99 -> 4 (weight: ALL)
-        State 3:
-        State 4:
-          final_weight: [1]
-
-      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:768: NWA::simplify (5 states -> 4 states) took: 16.990291ms
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:22: NWA::determinize_to_dwa stats after simplify:
-      NWA Stats:
-        - States: 4
-        - Final States: 1
-        - Epsilon Transitions: 0
-        - Labeled Transitions: 2
-        - Default Transitions: 1
-        - Avg Epsilon/State: 0.00
-        - Avg Labeled/State: 0.50
-
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:23: NWA after simplify:
-      NWA (start: 0)
-        State 0:
-          97 -> 1 (weight: ALL)
-        State 1:
-          * -> 2 (weight: ALL, except for {98})
-        State 2:
-          99 -> 3 (weight: ALL)
-        State 3:
-          final_weight: [1]
-
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:231: NWA state 0: final_w: None, def_steps: [], ex_steps: {97: [0]}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:231: NWA state 1: final_w: None, def_steps: [1], ex_steps: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:231: NWA state 2: final_w: None, def_steps: [], ex_steps: {99: [2]}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:231: NWA state 3: final_w: Some(1..=1), def_steps: [], ex_steps: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:254: All MacroSigs (4):
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:256:   Sig 0: final_w: None, def: [], ex: {97: [0]}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:256:   Sig 1: final_w: None, def: [1], ex: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:256:   Sig 2: final_w: None, def: [], ex: {99: [2]}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:256:   Sig 3: final_w: Some(1..=1), def: [], ex: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:258: state_to_sig_id: [0, 1, 2, 3]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:290: Step Pool (3):
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:292:   Step 0: [(1, 1..=1)]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:292:   Step 1: [(2, 1..=1)]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:292:   Step 2: [(3, 1..=1)]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:294: Compiled Steps (3):
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:296:   Compiled 0: by_sig: [(1, 1..=1)], mask: [1]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:296:   Compiled 1: by_sig: [(2, 1..=1)], mask: [1]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:296:   Compiled 2: by_sig: [(3, 1..=1)], mask: [1]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:364: 
-      Processing composition node 0: gates: {0: 1..=1}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:386:   - def_groups: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:387:   - ex_groups_by_label: {97: {0: 1..=1}}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:388:   - def_exers_by_label: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:400:     - processing exception label 97
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:418:       - considering exception step 0 with g_ex [1]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:426:   - computed target_maps:
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:431:     - label Some(97): target_sigs=[1], total_weight=[1]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:483:   - Resolved transitions for node 0:
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:489:     - on 97: -> 1 (mask: [1])
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:364: 
-      Processing composition node 1: gates: {1: 1..=1}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:386:   - def_groups: {1: 1..=1}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:387:   - ex_groups_by_label: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:388:   - def_exers_by_label: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:426:   - computed target_maps:
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:431:     - label None: target_sigs=[2], total_weight=[1]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:483:   - Resolved transitions for node 1:
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:485:     - default -> 2 (mask: [1])
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:364: 
-      Processing composition node 2: gates: {2: 1..=1}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:386:   - def_groups: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:387:   - ex_groups_by_label: {99: {2: 1..=1}}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:388:   - def_exers_by_label: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:400:     - processing exception label 99
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:418:       - considering exception step 2 with g_ex [1]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:426:   - computed target_maps:
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:431:     - label Some(99): target_sigs=[3], total_weight=[1]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:483:   - Resolved transitions for node 2:
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:489:     - on 99: -> 3 (mask: [1])
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:364: 
-      Processing composition node 3: gates: {3: 1..=1}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:386:   - def_groups: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:387:   - ex_groups_by_label: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:388:   - def_exers_by_label: {}
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:426:   - computed target_maps:
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:483:   - Resolved transitions for node 3:
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:27: NWA::determinize_to_dwa result DWA stats:
-      DWA Stats:
-        - States: 4
-        - Transitions: 3
-        - Final States: 4
-        - States with Default: 1
-        - Avg Exceptions/State: 0.50
-
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:29: NWA::determinize_to_dwa took: 26.217209ms
-      Determinized DWA:
-      DWA (start: 0)
-        State 0:
-          final_weight: []
-          97 -> 1 (trans_weight: [1])
-        State 1:
-          * -> 2 (trans_weight: [1])
-          final_weight: []
-        State 2:
-          final_weight: []
-          99 -> 3 (trans_weight: [1])
-        State 3:
-          final_weight: [1]
-
-
-
-      thread 'precompute4::test_weighted_automata::determinization_tests::test_determinize_default_vs_exception_bug' (15814537) panicked at src/precompute4/test_weighted_automata.rs:1984:9:
-      assertion `left == right` failed
-        left: 1..=1
-       right: 
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::test_weighted_automata::determinization_tests::test_determinize_default_vs_exception_bug
-                   at ./src/precompute4/test_weighted_automata.rs:1984:9
-         5: sep1::precompute4::test_weighted_automata::determinization_tests::test_determinize_default_vs_exception_bug::{{closure}}
-                   at ./src/precompute4/test_weighted_automata.rs:1944:51
-         6: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         7: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-    metadata:
-  - user: |-
-      Fix this. The issue is in determinization.rs.
-      Here's one issue:
-      ```rust
-      // Compute default step; skip if out-of-bounds or effect is empty after weighting + ε-closure.
-      let def_steps: Vec<usize> = self.states[s].default.iter().filter_map(|default| {
-          let NWADefaultTransition { target: to, weight: wdef, .. } = default;
-          if *to < n {
-              let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
-              if pairs_def.is_empty() { None } else { Some(step_pool.intern(pairs_def)) }
-          } else { None }
-      }).collect();
-      ```
-      We're not using the exceptions of the default transition. In fact, I think this code was written before default transitions had exceptions.
-      But quite possibly there are multiple problems.
-      Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your output.
-      Step through and work out what should have happened, what happened, what caused the error, and what will happen with your fixes.
+      filename: src/precompute4/full_dwa.rs
+  - user: Print how long each simplification pass takes.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9767,447 +8776,55 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here’s a precise plan and the patch to fix determinization so that default transitions respect their exception sets during NWA→DWA determinization. The core issue is that determinization currently ignores default exceptions; consequently, when an NWA default has an exception for a symbol (and simplification drops a corresponding explicit labeled edge), determinization incorrectly routes that symbol via the default in the DWA.
-
-      Step-by-step instructions
-
-      1) Update imports in determinization.rs
-      - Add BTreeSet to the imports.
-
-      2) Track default exceptions per default transition during signature construction
-      - Introduce a DefSig struct to carry step_id and the exact exception set for each NWADefaultTransition.
-      - Expand MacroSig to store a Vec<DefSig> instead of Vec<usize> for defaults.
-      - Include the default exceptions in MacroSigKey to ensure states with different exception sets don’t unify incorrectly.
-
-      3) Build default steps with exceptions
-      - When computing def_steps, create DefSig { step_id, exceptions } for each default, preserving the default’s exceptions set.
-
-      4) During composition (discovering composition states), correctly subtract default for labels with exceptions
-      - Build def_exceptions_by_label: for each label l and each default step, aggregate the gate weights from states whose default has l in its exceptions.
-      - Keep def_exers_by_label (as before) to disable defaults when a labeled transition exists for that label in that state.
-      - For each label L in the union of:
-        - labels with any explicit labeled transitions (ex_groups_by_label.keys())
-        - labels appearing in any default’s exceptions (def_exceptions_by_label.keys())
-        compute the target map for L by:
-        - starting from the total default group weight for each default step
-        - subtracting both the “has labeled transition on L” group and the “default has L in exceptions” group
-        - adding explicit labeled contributions
-      - Insert a label mapping even if the computed map is empty (to block the default for that label).
-
-      5) Always add exception edges in the DWA
-      - When emitting the final DWA:
-        - Keep the default edge emission as-is (skip when mask is empty).
-        - For exception edges, always add them even if the mask is empty, because a zero-weight exception is used to block the default on that label.
-
-      This ensures:
-      - Defaults do not apply to labels in their exception sets, even when there is no explicit labeled transition for those labels.
-      - States with differing default exception sets are not collapsed into the same macro-signature.
-      - The determinized DWA uses explicit zero-weight exception edges to disable defaults where needed.
-
-      Git diffs
-
-      ```diff
-      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
-      --- a/src/precompute4/weighted_automata/determinization.rs
-      +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -7,10 +7,11 @@
-       use crate::precompute4::weighted_automata::{NWADefaultTransition, NWAStateID};
-       use crate::profiler::PROGRESS_BAR_ENABLED;
-       use indicatif::{ProgressBar, ProgressStyle};
-       
-       use std::collections::hash_map::Entry;
-      -use std::collections::{BTreeMap, HashMap, VecDeque};
-      +use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-       use std::hash::{Hash, Hasher};
-       use std::time::Instant;
-       
-       impl NWA {
-           pub fn determinize_to_dwa(&self) -> DWA {
-      @@ -122,18 +123,26 @@
-                   }
-               }
-       
-               #[derive(Clone)]
-               struct CompiledStep {
-                   by_sig: Vec<(usize, Weight)>,
-                   mask: Weight,
-               }
-      -        #[derive(Clone)]
-      +        #[derive(Clone, Debug)]
-      +        struct DefSig {
-      +            step_id: usize,
-      +            exceptions: BTreeSet<i16>,
-      +        }
-      +        #[derive(Clone)]
-               struct MacroSig {
-                   final_w: Option<Weight>,
-      -            def: Vec<usize>,
-      +            // Each default transition is represented by the compiled "step_id" along with its exception set.
-      +            def: Vec<DefSig>,
-                   ex: BTreeMap<i16, Vec<usize>>,
-               }
-               #[derive(Clone, Hash, Eq, PartialEq)]
-               struct MacroSigKey {
-                   final_fp: u64,
-      -            def: Vec<usize>,
-      +            // Store both step id and the exact exceptions (as a sorted Vec) to keep signatures precise.
-      +            def: Vec<(usize, Vec<i16>)>,
-                   ex: Vec<(i16, Vec<usize>)>,
-               }
-       
-               let pb_eps = if PROGRESS_BAR_ENABLED {
-                   Some(ProgressBar::new(n as u64).with_style(
-                       ProgressStyle::default_bar()
-      @@ -177,17 +186,26 @@
-                   });
-                   let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
-       
-      -            // Compute default step; skip if out-of-bounds or effect is empty after weighting + ε-closure.
-      -            let def_steps: Vec<usize> = self.states[s].default.iter().filter_map(|default| {
-      -                let NWADefaultTransition { target: to, weight: wdef, .. } = default;
-      -                if *to < n {
-      -                    let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
-      -                    if pairs_def.is_empty() { None } else { Some(step_pool.intern(pairs_def)) }
-      -                } else { None }
-      -            }).collect();
-      +            // Compute default steps; preserve per-default exception sets.
-      +            let mut def_steps: Vec<DefSig> = Vec::new();
-      +            for default in &self.states[s].default {
-      +                let NWADefaultTransition { target: to, weight: wdef, exceptions } = default;
-      +                if *to >= n {
-      +                    continue;
-      +                }
-      +                let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
-      +                if pairs_def.is_empty() {
-      +                    continue;
-      +                }
-      +                let step_id = step_pool.intern(pairs_def);
-      +                def_steps.push(DefSig {
-      +                    step_id,
-      +                    exceptions: exceptions.clone(),
-      +                });
-      +            }
-       
-                   // Compute exceptions; drop those that are empty or identical to the default step effect.
-                   let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-                   for (lbl, targets) in self.states[s].transitions.iter() {
-                       let mut step_exs: Vec<usize> = Vec::new();
-      @@ -207,17 +225,23 @@
-                       }
-                   }
-       
-                   crate::debug!(5, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
-       
-      -            let mut sorted_def_steps = def_steps.clone();
-      -            sorted_def_steps.sort_unstable();
-      +            // Build a key that includes default exceptions, to avoid merging states that differ only by exception sets.
-      +            let mut sorted_def_steps_key: Vec<(usize, Vec<i16>)> = def_steps
-      +                .iter()
-      +                .map(|d| {
-      +                    let mut v: Vec<i16> = d.exceptions.iter().copied().collect();
-      +                    v.sort_unstable();
-      +                    (d.step_id, v)
-      +                })
-      +                .collect();
-      +            sorted_def_steps_key.sort_unstable();
-                   let key = MacroSigKey {
-                       final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
-      -                def: sorted_def_steps,
-      +                def: sorted_def_steps_key,
-                       ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
-                   };
-                   let sig_id = *sig_intern.entry(key).or_insert_with(|| {
-                       let id = sigs.len();
-      -                sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
-      +                sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
-                       id
-                   });
-                   state_to_sig_id[s] = sig_id;
-                   if let Some(p) = &pb_sigs {
-                       p.inc(1);
-      @@ -354,22 +378,27 @@
-       
-                   let mut def_groups: HashMap<usize, Weight> = HashMap::new();
-                   let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-                   let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-      +            let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-       
-                   for (sig_id, gate) in &node_gates {
-      -                for def_id in &sigs[*sig_id].def {
-      -                    *def_groups.entry(*def_id).or_default() |= gate;
-      +                for def in &sigs[*sig_id].def {
-      +                    *def_groups.entry(def.step_id).or_default() |= gate;
-      +                    // Record that this default has these labels as explicit exceptions; default must not apply on them.
-      +                    for &lbl in &def.exceptions {
-      +                        *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
-      +                    }
-                       }
-                       for (lbl, ex_steps) in &sigs[*sig_id].ex {
-                           for ex_step in ex_steps {
-                               *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
-                           }
-      -                    if !sigs[*sig_id].def.is_empty() {
-      -                        for def_id in &sigs[*sig_id].def {
-      -                            *def_exers_by_label.entry(*lbl).or_default().entry(*def_id).or_default() |= gate;
-      -                        }
-      +                    // Default should not apply on labels that have explicit labeled transitions (for this state).
-      +                    for def in &sigs[*sig_id].def {
-      +                        *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
-                           }
-                       }
-                   }
-       
-                   crate::debug!(5, "  - def_groups: {:?}", def_groups);
-                   crate::debug!(5, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
-      -            crate::debug!(5, "  - def_exers_by_label: {:?}", def_exers_by_label);
-      +            crate::debug!(5, "  - def_exers_by_label: {:?}", def_exers_by_label);
-      +            crate::debug!(5, "  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
-       
-                   let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
-                   let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
-                   for (def_step, g) in &def_groups {
-                       accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
-      @@ -378,28 +407,43 @@
-                       target_maps.insert(None, def_target_map);
-                   }
-       
-      -            for (lbl, ex_groups) in &ex_groups_by_label {
-      -                crate::debug!(5, "    - processing exception label {}", lbl);
-      +            // Labels that need explicit exception edges are:
-      +            //  - any label with explicit labeled transitions
-      +            //  - any label that appears in a default's exception set
-      +            let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
-      +            labels_to_consider.extend(ex_groups_by_label.keys().copied());
-      +            labels_to_consider.extend(def_exceptions_by_label.keys().copied());
-      +
-      +            for lbl in labels_to_consider {
-      +                crate::debug!(5, "    - processing exception label {}", lbl);
-                       let mut map = HashMap::new();
-      -                let def_exers = def_exers_by_label.get(lbl);
-      -                for (def_step, total_g) in &def_groups {
-      -                    crate::debug!(5, "      - considering default step {} with total_g {}", def_step, total_g);
-      -                    let g_exers = def_exers.and_then(|de| de.get(def_step));
-      -                    crate::debug!(5, "        - g_exers for this def_step: {:?}", g_exers);
-      -                    let mut g_nonex = total_g.clone();
-      -                    if let Some(g_exers) = g_exers {
-      -                        g_nonex -= g_exers;
-      -                    }
-      -                    crate::debug!(5, "        - g_nonex: {}", g_nonex);
-      -                    if !g_nonex.is_empty() {
-      -                        crate::debug!(5, "        - accumulating for g_nonex");
-      -                        accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
-      -                    }
-      +                let def_exers = def_exers_by_label.get(&lbl);
-      +                let def_exc = def_exceptions_by_label.get(&lbl);
-      +
-      +                for (def_step, total_g) in &def_groups {
-      +                    crate::debug!(5, "      - considering default step {} with total_g {}", def_step, total_g);
-      +                    // Subtract states that have explicit labeled transitions on this label
-      +                    let g_exers = def_exers.and_then(|de| de.get(def_step));
-      +                    // Subtract states whose default is explicitly not applicable on this label (exception set)
-      +                    let g_exc = def_exc.and_then(|dx| dx.get(def_step));
-      +
-      +                    crate::debug!(5, "        - g_exers for this def_step: {:?}", g_exers);
-      +                    crate::debug!(5, "        - g_exc for this def_step: {:?}", g_exc);
-      +                    let mut g_nonex = total_g.clone();
-      +                    if let Some(g) = g_exers { g_nonex -= g; }
-      +                    if let Some(g) = g_exc { g_nonex -= g; }
-      +                    crate::debug!(5, "        - g_nonex (after subtractors): {}", g_nonex);
-      +                    if !g_nonex.is_empty() {
-      +                        crate::debug!(5, "        - accumulating for g_nonex");
-      +                        accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
-      +                    }
-                       }
-      -                for (ex_step, g_ex) in ex_groups {
-      -                    crate::debug!(5, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
-      -                    accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
-      +                if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
-      +                    for (ex_step, g_ex) in ex_groups {
-      +                        crate::debug!(5, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
-      +                        accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
-      +                    }
-                       }
-      -                if !map.is_empty() {
-      -                    target_maps.insert(Some(*lbl), map);
-      -                }
-      +                // Always insert an entry for this label (even if map is empty)
-      +                // so that we can emit an exception edge that blocks the default.
-      +                target_maps.insert(Some(lbl), map);
-                   }
-       
-                   crate::debug!(5, "  - computed target_maps:");
-                   for (label, map) in &target_maps {
-                       let mut keys: Vec<_> = map.keys().copied().collect();
-      @@ -477,16 +521,16 @@
-       
-               for (i, node) in nodes.iter().enumerate() {
-                   dwa.states[i].final_weight = node.final_weight.clone();
-                   if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                       if !mask.is_empty() {
-                           dwa.set_default_transition(i, target_idx, mask.clone()).unwrap();
-                       }
-                   }
-                   for (lbl, &target_idx) in &node.exception_targets {
-      -                if let Some(mask) = node.exception_masks.get(lbl) {
-      -                    if !mask.is_empty() {
-      -                        dwa.add_transition(i, *lbl, target_idx, mask.clone()).unwrap();
-      -                    }
-      -                }
-      +                // Always add exception transitions, even with empty masks, to properly block default on those labels.
-      +                let mask = node
-      +                    .exception_masks
-      +                    .get(lbl)
-      +                    .cloned()
-      +                    .unwrap_or_else(Weight::zeros);
-      +                dwa.add_transition(i, *lbl, target_idx, mask).unwrap();
-                   }
-               }
-               dwa
-           }
-       }
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/weighted_automata/determinization.rs
-      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
-    metadata:
-  - user: 'Changes committed with message: "Fix: Correctly handle NWA default transition
-      exceptions during determinization"'
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
-      ```diff
-      --- original version of src/precompute4/weighted_automata/determinization.rs
-      +++ current version of src/precompute4/weighted_automata/determinization.rs
-      @@ -138,7 +138,7 @@
-                   by_sig: Vec<(usize, Weight)>,
-                   mask: Weight,
-               }
-      -        #[derive(Clone, Debug)]
-      +        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-               struct DefSig {
-                   step_id: usize,
-                   exceptions: BTreeSet<i16>,
-
-      ```
-    metadata:
-  - user: |+
-      error[E0277]: can't compare `usize` with `DefSig`
-         --> src/precompute4/weighted_automata/determinization.rs:240:33
-          |
-      240 |                     if step_exs == sorted_def_steps {
-          |                                 ^^ no implementation for `usize == DefSig`
-          |
-          = help: the trait `PartialEq<DefSig>` is not implemented for `usize`
-          = help: the following other types implement trait `PartialEq<Rhs>`:
-                    `usize` implements `PartialEq<Value>`
-                    `usize` implements `PartialEq`
-          = note: required for `Vec<usize>` to implement `PartialEq<Vec<DefSig>>`
-
-    metadata:
-  - assistant: |-
-      You've run into a compile error from my last patch—my apologies. The logic for checking if an exception transition is redundant was comparing two different types (`Vec<usize>` and `Vec<DefSig>`). The fix is to extract the step IDs from the default transitions before the comparison.
-
-      Here are the step-by-step instructions and the corresponding diff to resolve the issue.
+      Of course. Here are the step-by-step instructions to add timing information for each simplification pass, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open `src/precompute4/weighted_automata/determinization.rs`**.
+      I will modify the helper functions that execute simplification passes for both DWAs and NWAs to record and print how long each pass takes.
 
-      2.  **Navigate to the `det_fixpoint` function**. Inside the main loop over states (`for s in 0..n`), find the inner loop that processes labeled transitions (`for (lbl, targets) in self.states[s].transitions.iter()`).
+      #### File: `src/precompute4/weighted_automata/simplification.rs`
 
-      3.  **Correct the redundancy check**. The logic needs to compare the `step_exs` (a `Vec<usize>`) with the *step IDs* from `def_steps` (a `Vec<DefSig>`).
+      1.  **Instrument `DWA::run_pass_with_test` for timing:**
+          -   Locate the `run_pass_with_test` function inside the `impl DWA` block.
+          -   Around the line `let changed = pass(states, body);`, I will add code to record the start time, execute the pass, calculate the elapsed time, and print a debug message with the pass name, duration, and whether it modified the automaton.
 
-          Replace this block of code:
-          ```rust
-                          step_exs.sort_unstable();
-                          let mut sorted_def_steps = def_steps.clone();
-                          sorted_def_steps.sort_unstable();
-                          if step_exs == sorted_def_steps {
-                              continue;
-                          }
-          ```
+      2.  **Instrument `NWA::run_pass` for timing:**
+          -   Locate the `run_pass` function inside the `impl NWA` block.
+          -   I will replace the existing implementation with a new one that records the start time, executes the pass, calculates the elapsed time, and prints a debug message with the pass name and duration.
 
-          with this corrected version:
-          ```rust
-                          step_exs.sort_unstable();
-                          let mut sorted_def_step_ids: Vec<usize> = def_steps.iter().map(|d| d.step_id).collect();
-                          sorted_def_step_ids.sort_unstable();
-                          if step_exs == sorted_def_step_ids {
-                              continue;
-                          }
-          ```
-          This change extracts just the `step_id` fields, collects them into a new `Vec<usize>`, sorts it, and then performs the correct comparison.
+      These changes will give you visibility into the performance of each individual simplification step.
 
-      ### Git Diff
+      ### Git Diffs
 
-      Here is the patch to apply the fix.
+      Here are the git diffs to apply these changes:
 
       ```diff
-      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
-      --- a/src/precompute4/weighted_automata/determinization.rs
-      +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -235,10 +235,11 @@
+      --- a/src/precompute4/weighted_automata/simplification.rs
+      +++ b/src/precompute4/weighted_automata/simplification.rs
+      @@ -91,7 +91,11 @@
+                   None
+               };
        
-                       if !step_exs.is_empty() {
-                           step_exs.sort_unstable();
-      -                    let mut sorted_def_steps = def_steps.clone();
-      -                    sorted_def_steps.sort_unstable();
-      -                    if step_exs == sorted_def_steps {
-      +                    let mut sorted_def_step_ids: Vec<usize> =
-      +                        def_steps.iter().map(|d| d.step_id).collect();
-      +                    sorted_def_step_ids.sort_unstable();
-      +                    if step_exs == sorted_def_step_ids {
-                               continue;
-                           }
-                           ex.insert(*lbl, step_exs);
+      +        let now = Instant::now();
+               let changed = pass(states, body);
+      +        let elapsed = now.elapsed();
+      +        crate::debug!(3, "DWA simplify pass '{}' took {:?} (changed: {})", pass_name, elapsed, changed);
+       
+               if let Some(before) = before_dwa {
+                   if changed {
+      @@ -1006,8 +1010,12 @@
+               if let Some(p) = pb {
+                   p.set_message(msg.to_string());
+               }
+      -        if pass() {
+      +        let now = Instant::now();
+      +        let changed = pass();
+      +        let elapsed = now.elapsed();
+      +        crate::debug!(3, "NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
+      +        if changed {
+                   *changed_any = true;
+               }
+           }
 
       ```
     metadata:
@@ -10216,11 +8833,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/weighted_automata/determinization.rs
-      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+      Identified target file: src/precompute4/weighted_automata/simplification.rs
+      Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly handle NWA default transition
-      exceptions during determinization"'
+  - user: 'Changes committed with message: "Add timing for DWA and NWA simplification
+      passes"'
     metadata:
 ...

@@ -68,7 +68,10 @@ impl DWA {
             None
         };
 
+        let now = Instant::now();
         let changed = pass(states, body);
+        let elapsed = now.elapsed();
+        crate::debug!(3, "DWA simplify pass '{}' took {:?} (changed: {})", pass_name, elapsed, changed);
 
         if let Some(before) = before_dwa {
             if changed {
@@ -727,7 +730,11 @@ impl NWA {
         if let Some(p) = pb {
             p.set_message(msg.to_string());
         }
-        if pass() {
+        let now = Instant::now();
+        let changed = pass();
+        let elapsed = now.elapsed();
+        crate::debug!(3, "NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
+        if changed {
             *changed_any = true;
         }
     }
