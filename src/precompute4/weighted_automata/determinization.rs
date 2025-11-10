@@ -119,11 +119,51 @@ impl NWA {
                 now_merge.elapsed()
             )
         });
-        let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
-        println!("\n--- MergedProduct ---");
-        println!("{:#?}", merged);
-        println!("\n--- tuple_to_group (sorted by tuple) ---");
-        println!("{:#?}", sorted_map);
+        {
+            // Helper to format tuples like [0, _, 2] instead of [Some(0), None, Some(2)]
+            let format_tuple = |tuple: &ProductDFAStateTuple| -> String {
+                let parts: Vec<String> = tuple
+                    .iter()
+                    .map(|opt| match opt {
+                        Some(v) => v.to_string(),
+                        None => "_".to_string(),
+                    })
+                    .collect();
+                format!("[{}]", parts.join(", "))
+            };
+
+            println!("\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
+            for (gid, state) in merged.states.iter().enumerate() {
+                println!("  State {}:", gid);
+                println!("    - Representative: {}", format_tuple(&state.representative_tuple));
+                if let Some(w) = &state.final_weight {
+                    println!("    - Final Weight: {}", w);
+                }
+                println!("    - Transitions:");
+                let dest_tuple_def = &state.trans_default;
+                if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_def) {
+                    println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
+                } else {
+                    println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
+                }
+
+                for (lbl, dest_tuple_ex) in &state.trans_exceptions {
+                    let char_repr = super::common::format_i16_char(*lbl);
+                    if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_ex) {
+                        println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
+                    } else {
+                        println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
+                    }
+                }
+                println!("    - Contains {} tuples.", state.all_tuples.len());
+            }
+
+            println!("\n--- tuple_to_group ({} entries) ---", tuple_to_group.len());
+            let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
+            for (tuple, gid) in sorted_map {
+                println!("  {} -> State {}", format_tuple(tuple), gid);
+            }
+        }
 
         // 6) Convert merged product to a DWA
         let now_convert = Instant::now();

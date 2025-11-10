@@ -7,7 +7,7 @@ local_system:
     - src/precompute4/weighted_automata/ops.rs
     - src/precompute4/weighted_automata/test_determinization.rs
     - src/precompute4/weighted_automata/determinization.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/precompute4/weighted_automata/mod.rs: |
@@ -3938,11 +3938,51 @@ local_system:
                       now_merge.elapsed()
                   )
               });
-              let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
-              println!("\n--- MergedProduct ---");
-              println!("{:#?}", merged);
-              println!("\n--- tuple_to_group (sorted by tuple) ---");
-              println!("{:#?}", sorted_map);
+              {
+                  // Helper to format tuples like [0, _, 2] instead of [Some(0), None, Some(2)]
+                  let format_tuple = |tuple: &ProductDFAStateTuple| -> String {
+                      let parts: Vec<String> = tuple
+                          .iter()
+                          .map(|opt| match opt {
+                              Some(v) => v.to_string(),
+                              None => "_".to_string(),
+                          })
+                          .collect();
+                      format!("[{}]", parts.join(", "))
+                  };
+
+                  println!("\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
+                  for (gid, state) in merged.states.iter().enumerate() {
+                      println!("  State {}:", gid);
+                      println!("    - Representative: {}", format_tuple(&state.representative_tuple));
+                      if let Some(w) = &state.final_weight {
+                          println!("    - Final Weight: {}", w);
+                      }
+                      println!("    - Transitions:");
+                      let dest_tuple_def = &state.trans_default;
+                      if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_def) {
+                          println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
+                      } else {
+                          println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
+                      }
+
+                      for (lbl, dest_tuple_ex) in &state.trans_exceptions {
+                          let char_repr = super::common::format_i16_char(*lbl);
+                          if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_ex) {
+                              println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
+                          } else {
+                              println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
+                          }
+                      }
+                      println!("    - Contains {} tuples.", state.all_tuples.len());
+                  }
+
+                  println!("\n--- tuple_to_group ({} entries) ---", tuple_to_group.len());
+                  let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
+                  for (tuple, gid) in sorted_map {
+                      println!("  {} -> State {}", format_tuple(tuple), gid);
+                  }
+              }
 
               // 6) Convert merged product to a DWA
               let now_convert = Instant::now();
@@ -7733,5 +7773,190 @@ messages:
     metadata:
   - user: 'Changes committed with message: "debug: Print MergedProduct and tuple_to_group
       after merging in NWA determinization"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Not pretty enough.
+    metadata:
+  - assistant: |-
+      Of course. I can certainly make that output more readable. Here are the step-by-step instructions for a more detailed and structured debug output, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `src/precompute4/weighted_automata/determinization.rs`**.
+
+      2.  **Navigate to the `determinize_to_dwa` function**.
+
+      3.  **Locate the debug printing code** that was added in the previous step. It starts with `let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();` and ends with `println!("{:#?}", sorted_map);`.
+
+      4.  **Replace that entire block** with the following code. This new code introduces a helper function to format state tuples compactly and then iterates through the merged states and the tuple-to-group map to print them in a more structured, human-readable format.
+
+          ```rust
+                  {
+                      // Helper to format tuples like [0, _, 2] instead of [Some(0), None, Some(2)]
+                      let format_tuple = |tuple: &ProductDFAStateTuple| -> String {
+                          let parts: Vec<String> = tuple
+                              .iter()
+                              .map(|opt| match opt {
+                                  Some(v) => v.to_string(),
+                                  None => "_".to_string(),
+                              })
+                              .collect();
+                          format!("[{}]", parts.join(", "))
+                      };
+          
+                      println!("\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
+                      for (gid, state) in merged.states.iter().enumerate() {
+                          println!("  State {}:", gid);
+                          println!("    - Representative: {}", format_tuple(&state.representative_tuple));
+                          if let Some(w) = &state.final_weight {
+                              println!("    - Final Weight: {}", w);
+                          }
+                          println!("    - Transitions:");
+                          let dest_tuple_def = &state.trans_default;
+                          if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_def) {
+                              println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
+                          } else {
+                              println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
+                          }
+          
+                          for (lbl, dest_tuple_ex) in &state.trans_exceptions {
+                              let char_repr = super::common::format_i16_char(*lbl);
+                              if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_ex) {
+                                  println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
+                              } else {
+                                  println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
+                              }
+                          }
+                          println!("    - Contains {} tuples.", state.all_tuples.len());
+                      }
+          
+                      println!("\n--- tuple_to_group ({} entries) ---", tuple_to_group.len());
+                      let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
+                      for (tuple, gid) in sorted_map {
+                          println!("  {} -> State {}", format_tuple(tuple), gid);
+                      }
+                  }
+          ```
+
+      ### Git Diff
+
+      Here is the git diff for the change.
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -102,11 +102,49 @@
+                       now_merge.elapsed()
+                   )
+               });
+      -        let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
+      -        println!("\n--- MergedProduct ---");
+      -        println!("{:#?}", merged);
+      -        println!("\n--- tuple_to_group (sorted by tuple) ---");
+      -        println!("{:#?}", sorted_map);
+      +        {
+      +            // Helper to format tuples like [0, _, 2] instead of [Some(0), None, Some(2)]
+      +            let format_tuple = |tuple: &ProductDFAStateTuple| -> String {
+      +                let parts: Vec<String> = tuple
+      +                    .iter()
+      +                    .map(|opt| match opt {
+      +                        Some(v) => v.to_string(),
+      +                        None => "_".to_string(),
+      +                    })
+      +                    .collect();
+      +                format!("[{}]", parts.join(", "))
+      +            };
+      +
+      +            println!("\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
+      +            for (gid, state) in merged.states.iter().enumerate() {
+      +                println!("  State {}:", gid);
+      +                println!("    - Representative: {}", format_tuple(&state.representative_tuple));
+      +                if let Some(w) = &state.final_weight {
+      +                    println!("    - Final Weight: {}", w);
+      +                }
+      +                println!("    - Transitions:");
+      +                let dest_tuple_def = &state.trans_default;
+      +                if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_def) {
+      +                    println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
+      +                } else {
+      +                    println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
+      +                }
+      +
+      +                for (lbl, dest_tuple_ex) in &state.trans_exceptions {
+      +                    let char_repr = super::common::format_i16_char(*lbl);
+      +                    if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_ex) {
+      +                        println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
+      +                    } else {
+      +                        println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
+      +                    }
+      +                }
+      +                println!("    - Contains {} tuples.", state.all_tuples.len());
+      +            }
+      +
+      +            println!("\n--- tuple_to_group ({} entries) ---", tuple_to_group.len());
+      +            let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
+      +            for (tuple, gid) in sorted_map {
+      +                println!("  {} -> State {}", format_tuple(tuple), gid);
+      +            }
+      +        }
+       
+               // 6) Convert merged product to a DWA
+               let now_convert = Instant::now();
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "debug: Enhance NWA determinization logging
+      with structured MergedProduct and tuple mapping"'
     metadata:
 ...
