@@ -810,8 +810,6 @@ struct ProductDFAState {
     representative_tuple: ProductDFAStateTuple,
     /// All member tuples that belong to this class.
     all_tuples: BTreeSet<ProductDFAStateTuple>,
-    /// The active weight for this state (union of atoms over any non-sink component in any member tuple).
-    active_weight: Weight,
 }
 
 #[derive(Clone, Debug)]
@@ -906,17 +904,6 @@ impl ProductDFA {
             }
             let final_opt = if final_w.is_empty() { None } else { Some(final_w) };
 
-            // Compute active weight: union of atoms for all non-sink positions across all members
-            let mut active_w = Weight::zeros();
-            for &member_idx in &members {
-                let tuple = &all_tuples[member_idx];
-                for (comp_idx, state) in tuple.iter().enumerate() {
-                    if state.is_some() {
-                        active_w |= &atoms.atoms[comp_idx];
-                    }
-                }
-            }
-
             // Build labeled transitions from representative (unmapped tuples)
             let mut trans: BTreeMap<i16, ProductDFAStateTuple> = BTreeMap::new();
             for (li, lbl) in sigma.labels.iter().enumerate() {
@@ -937,7 +924,6 @@ impl ProductDFA {
                 trans,
                 representative_tuple: repr,
                 all_tuples: all_tuples_set,
-                active_weight: active_w,
             });
         }
 
@@ -998,6 +984,17 @@ impl ProductDFA {
             }
         }
 
+        // Helper to compute weight from a product tuple: union atoms for non-None positions
+        let compute_weight_from_tuple = |tpl: &ProductDFAStateTuple| -> Weight {
+            let mut w = Weight::zeros();
+            for (i, s_opt) in tpl.iter().enumerate() {
+                if s_opt.is_some() {
+                    w |= &atoms.atoms[i];
+                }
+            }
+            w
+        };
+
         let k = comps.len();
 
         // Final weights
@@ -1016,7 +1013,6 @@ impl ProductDFA {
             }
 
             let st = &self.states[sid];
-            let edge_weight = &st.active_weight;
 
             // Build default (OTHER) from the representative tuple
             let other_next_tuple: ProductDFAStateTuple = (0..k)
@@ -1024,7 +1020,8 @@ impl ProductDFA {
                 .collect();
             if let Some(rep_next) = tuple_to_rep.get(&other_next_tuple) {
                 if let Some(&dst_id) = rep_tuple_to_id.get(rep_next) {
-                    let _ = dwa.set_default_transition(sid, dst_id, edge_weight.clone());
+                    let edge_weight = compute_weight_from_tuple(&other_next_tuple);
+                    let _ = dwa.set_default_transition(sid, dst_id, edge_weight);
                 }
             }
 
@@ -1032,7 +1029,8 @@ impl ProductDFA {
             for (lbl, next_tuple) in &st.trans {
                 if let Some(rep_next) = tuple_to_rep.get(next_tuple) {
                     if let Some(&dst_id) = rep_tuple_to_id.get(rep_next) {
-                        let _ = dwa.add_transition(sid, *lbl, dst_id, edge_weight.clone());
+                        let edge_weight = compute_weight_from_tuple(next_tuple);
+                        let _ = dwa.add_transition(sid, *lbl, dst_id, edge_weight);
                     }
                 }
             }
