@@ -1225,9 +1225,32 @@ fn merge_tuples_to_states(
         }
 
         if !placed {
-            // This should not happen. Any tuple reachable from a representative should be mergeable
-            // with one of the groups formed from the original set of reachable tuples.
-            panic!("Could not place emergent tuple {:?}; this indicates a flaw in the merging logic.", t);
+            // Create a new group for this emergent tuple.
+            let gid = states.len();
+            let new_state = ProductDFAState {
+                representative_tuple: t.clone(),
+                all_tuples: {
+                    let mut s = BTreeSet::new();
+                    s.insert(t.clone());
+                    s
+                },
+                ..Default::default()
+            };
+            states.push(new_state);
+            tuple_to_group.insert(t.clone(), gid);
+
+            // Add its successors to the worklist.
+            let rep = &states[gid].representative_tuple;
+            let next_def = successor_tuple(rep, sigma.other_index, comps, comp_sinks);
+            if !tuple_to_group.contains_key(&next_def) {
+                worklist.push_back(next_def);
+            }
+            for i in 0..sigma.labels.len() {
+                let next_ex = successor_tuple(rep, i, comps, comp_sinks);
+                if !tuple_to_group.contains_key(&next_ex) {
+                    worklist.push_back(next_ex);
+                }
+            }
         }
     }
 
