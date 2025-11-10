@@ -119,7 +119,11 @@ impl NWA {
                 now_merge.elapsed()
             )
         });
-        todo!();
+        let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
+        println!("\n--- MergedProduct ---");
+        println!("{:#?}", merged);
+        println!("\n--- tuple_to_group (sorted by tuple) ---");
+        println!("{:#?}", sorted_map);
 
         // 6) Convert merged product to a DWA
         let now_convert = Instant::now();
