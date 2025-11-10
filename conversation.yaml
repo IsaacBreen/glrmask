@@ -3,1354 +3,9 @@ local_system:
     - src/precompute4/weighted_automata/test_determinization.rs
     - src/precompute4/weighted_automata/determinization.rs
     - src/precompute4/weighted_automata/tuple_merger.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
-    src/precompute4/weighted_automata/test_determinization.rs: |-
-      #![cfg(test)]
-
-      use super::*;
-
-      #[test]
-      fn test_determinize_simple_divergence() {
-          let mut nwa = NWA::new(); // new() creates a start state 0
-          nwa.states.0.clear(); // but we'll manage states manually for clarity
-
-          // NWA for "ac" with weight A1 (0)
-          let s0 = nwa.states.add_state();
-          let s1 = nwa.states.add_state();
-          let s2 = nwa.states.add_state();
-          nwa.add_transition(s0, 'a' as i16, s1, Weight::all()).unwrap();
-          nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
-          nwa.states[s2].final_weight = Some(Weight::from_item(0));
-
-          // NWA for "bc" with weight A2 (1)
-          let s3 = nwa.states.add_state();
-          let s4 = nwa.states.add_state();
-          let s5 = nwa.states.add_state();
-          nwa.add_transition(s3, 'b' as i16, s4, Weight::all()).unwrap();
-          nwa.add_transition(s4, 'c' as i16, s5, Weight::all()).unwrap();
-          nwa.states[s5].final_weight = Some(Weight::from_item(1));
-
-          // Union them with a new start state
-          let start = nwa.states.add_state();
-          nwa.add_epsilon(start, s0, Weight::all());
-          nwa.add_epsilon(start, s3, Weight::all());
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-          println!("{}", nwa);
-          println!("{}", dwa);
-
-          // Check accepted words and their weights.
-          assert_eq!(
-              dwa.eval_word_weight(&['a' as i16, 'c' as i16]),
-              Weight::from_item(0)
-          );
-          assert_eq!(
-              dwa.eval_word_weight(&['b' as i16, 'c' as i16]),
-              Weight::from_item(1)
-          );
-          assert!(dwa.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&[]).is_empty());
-
-          // An efficient DWA should merge states with similar future behavior,
-          // resulting in a small automaton.
-          // Allowing for a sink state, we assert a small number.
-          assert!(
-              dwa.states.len() <= 4,
-              "Expected a small number of states for simple divergence, got {}",
-              dwa.states.len()
-          );
-      }
-
-      #[test]
-      fn test_determinize_hypercube_catastrophe() {
-          const N: usize = 4;
-          let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
-          let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
-
-          let mut nwa = NWA::new();
-          nwa.states.0.clear();
-
-          let mut component_starts = vec![];
-
-          for i in 0..N {
-              // L_i = words without alphabet[i]
-              let s = nwa.states.add_state();
-              component_starts.push(s);
-              nwa.states[s].final_weight = Some(atoms[i].clone());
-
-              for j in 0..N {
-                  if i == j {
-                      continue;
-                  }
-                  nwa.add_transition(s, alphabet[j], s, Weight::all()).unwrap();
-              }
-          }
-
-          let start = nwa.states.add_state();
-          for &s_comp in &component_starts {
-              nwa.add_epsilon(start, s_comp, Weight::all());
-          }
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-
-          // An efficient DWA construction should avoid the 2^N state explosion by
-          // encoding the history of seen characters within the accumulated weight,
-          // not in the state space.
-          assert!(
-              dwa.states.len() <= 2,
-              "Expected a very small DWA (1-2 states) for hypercube, but got {} states. State explosion was not avoided.",
-              dwa.states.len()
-          );
-
-          // Test some words
-          // word "ac" (chars 0 and 2) -> should not contain 1 or 3 ('b' or 'd'). Belongs to L1 and L3.
-          // Weight should be A1 | A3.
-          let word_ac = vec![alphabet[0], alphabet[2]];
-          let expected_weight_ac = &atoms[1] | &atoms[3];
-          assert_eq!(dwa.eval_word_weight(&word_ac), expected_weight_ac);
-
-          // word "abcd" -> contains all symbols. Should be rejected by all components.
-          let word_all = alphabet.clone();
-          assert!(dwa.eval_word_weight(&word_all).is_empty());
-
-          // empty word -> belongs to all languages.
-          let empty_word = vec![];
-          let mut expected_weight_empty = Weight::zeros();
-          for atom in &atoms {
-              expected_weight_empty |= atom;
-          }
-          assert_eq!(dwa.eval_word_weight(&empty_word), expected_weight_empty);
-      }
-    src/precompute4/weighted_automata/determinization.rs: |
-      #![allow(dead_code)]
-      #![allow(clippy::needless_borrow)]
-
-      use super::tuple_merger;
-      use super::bitset::SimpleBitset as Weight;
-      use super::dwa::{DWAState, DWAStates, DWA, DWABody};
-      use super::nwa::{NWA, NWAStates};
-      use crate::profiler::PROGRESS_BAR_ENABLED;
-      use indicatif::{ProgressBar, ProgressStyle};
-
-
-      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-      use std::ops::RangeInclusive;
-      use std::time::Instant;
-      use crate::precompute4::weighted_automata::format_i16_char;
-
-      /// This determinization implements a tuple-based merging construction:
-      /// 1) Partition weight space into atoms.
-      /// 2) For each atom, determinize the corresponding unweighted NFA to a DFA.
-      /// 3) Enumerate the set of reachable product tuples T = Vec<Option<usize>> of component DFA states,
-      ///    where None represents the component's sink state.
-      /// 4) Merge tuples greedily into product states by unifying on non-sink positions:
-      ///    two tuples are mergeable iff for each index either both are Some with equal values or at least one is None.
-      ///    The representative tuple of a merged state is the pointwise "most-specific" unify.
-      /// 5) For each merged state, compute:
-      ///    - final weight = union of atom-weights for indices whose representative component is accepting.
-      ///    - transitions from representative tuple on the global alphabet (labels + OTHER).
-      ///      Store per-label destination tuple, and for OTHER store a default destination tuple.
-      /// 6) Convert merged product directly to a DWA:
-      ///    - For a transition with destination tuple U, the edge weight is the union of atom-weights for i with U[i] != None.
-      ///    - Final weight as computed in (5).
-      impl NWA {
-          pub fn determinize_to_dwa(&self) -> DWA {
-              self.determinize_to_dwa_internal(false)
-          }
-
-          pub fn determinize_to_dwa_with_final_state_simplification(&self) -> DWA {
-              self.determinize_to_dwa_internal(true)
-          }
-
-          fn determinize_to_dwa_internal(&self, simplify_final_states: bool) -> DWA {
-              let now_total = Instant::now();
-
-              // Work on a copy to avoid side effects.
-              let mut nwa = self.clone();
-              crate::debug!(3, "Starting determinization for NWA with {} states", nwa.states.len());
-
-              // Compute future-acceptance masks (used to filter alphabet).
-              let fut = nwa.compute_future_weights();
-
-              // 1) Weight atoms
-              let now_atoms = Instant::now();
-              let atoms = WeightPartition::from_nwa(&nwa);
-              crate::debug!(
-                  4,
-                  "Built weight partition with {} atoms in {:?}",
-                  atoms.intervals.len(),
-                  now_atoms.elapsed()
-              );
-
-              // 2) Alphabet (labels + OTHER), filtered by future weights
-              let now_sigma = Instant::now();
-              let sigma = Alphabet::from_nwa_with_future(&nwa, &fut);
-              crate::debug!(4, "Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed());
-
-              // 3) Per-atom DFAs
-              let pb_atoms = if PROGRESS_BAR_ENABLED {
-                  Some(
-                      ProgressBar::new(atoms.intervals.len() as u64).with_style(
-                          ProgressStyle::default_bar()
-                              .template(
-                                  "{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (per-atom DFAs)",
-                              )
-                              .unwrap(),
-                      ),
-                  )
-              } else {
-                  None
-              };
-
-              let mut comp_dfas: Vec<DetDFA> = Vec::with_capacity(atoms.intervals.len());
-              let mut comp_sinks: Vec<Option<usize>> = Vec::with_capacity(atoms.intervals.len());
-              for (i, atom) in atoms.intervals.iter().enumerate() {
-                  let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
-                  let mut dfa = nfa.determinize(&sigma, simplify_final_states);
-                  dfa.minimize(&sigma);
-                  crate::debug!(4, "Atom {}: interval={:?}, DFA states={}", i, atom, dfa.n_states);
-                  let sink = dfa.find_sink_index(&sigma);
-                  comp_sinks.push(sink);
-                  comp_dfas.push(dfa);
-                  if let Some(p) = &pb_atoms {
-                      p.inc(1);
-                  }
-              }
-              if let Some(p) = pb_atoms {
-                  p.finish_with_message("Per-atom DFAs built & minimized");
-              }
-
-              if 5 <= crate::r#macro::get_macro_debug_level() {
-                  println!("\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
-                  for (i, dfa) in comp_dfas.iter().enumerate() {
-                      println!("  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
-                      println!("    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
-                      for s in 0..dfa.n_states {
-                          let final_marker = if dfa.finals[s] { " (final)" } else { "" };
-                          let mut trans_parts = vec![];
-                          for (sym_idx, &label) in sigma.labels.iter().enumerate() {
-                              let target = dfa.trans[s][sym_idx];
-                              trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
-                          }
-                          let other_target = dfa.trans[s][sigma.other_index];
-                          trans_parts.push(format!("*->{}", other_target));
-                          println!("    - State {}{}: {}", s, final_marker, trans_parts.join(", "));
-                      }
-                  }
-              }
-
-              // Edge case: No atoms => no weight can be produced
-              if atoms.intervals.is_empty() {
-                  return DWA::new();
-              }
-
-              // 4) Enumerate reachable product tuples (Vec<Option<usize>>)
-              let now_enum = Instant::now();
-              let k = comp_dfas.len();
-              let mut start_tuple = Vec::with_capacity(k);
-              for i in 0..k {
-                  let s = comp_dfas[i].start;
-                  if let Some(sink) = comp_sinks[i] {
-                      if s == sink {
-                          start_tuple.push(None);
-                      } else {
-                          start_tuple.push(Some(s));
-                      }
-                  } else {
-                      start_tuple.push(Some(s));
-                  }
-              }
-              crate::debug!(
-                  4,
-                  "Computed start tuple in {:?}",
-                  now_enum.elapsed()
-              );
-
-              // 5) Merge tuples greedily and attach transitions/finals from representative tuples
-              let now_merge = Instant::now();
-              let merger_components: Vec<tuple_merger::Component> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
-                  let mut sparse_trans = Vec::with_capacity(dfa.n_states);
-                  for s in 0..dfa.n_states {
-                      let mut exceptions = BTreeMap::new();
-                      if let Some(sink_idx) = sink {
-                          for (sym, &target) in dfa.trans[s].iter().enumerate() {
-                              if target != *sink_idx {
-                                  exceptions.insert(sym, target);
-                              }
-                          }
-                      } else {
-                          // No sink, so all transitions are explicit.
-                          for (sym, &target) in dfa.trans[s].iter().enumerate() {
-                              exceptions.insert(sym, target);
-                          }
-                      }
-                      sparse_trans.push(exceptions);
-                  }
-                  tuple_merger::Component { transitions: sparse_trans }
-              }).collect();
-
-              let merged_automaton = tuple_merger::merge_and_build_automaton(
-                  start_tuple,
-                  &merger_components,
-                  sigma.size(),
-              );
-              crate::debug!(
-                  4,
-                  "Merged into {} product states in {:?}",
-                  merged_automaton.states.len(),
-                  now_merge.elapsed()
-              );
-
-              // 6) Convert merged product to a DWA
-              let now_convert = Instant::now();
-              let dwa = build_dwa_from_merged_automaton(&merged_automaton, &comp_dfas, &atoms.atoms, &sigma);
-              crate::debug!(
-                  4,
-                  "Merged-product -> DWA conversion completed in {:?}",
-                  now_convert.elapsed()
-              );
-
-              crate::debug!(3, "NWA::determinize_to_dwa total time: {:?}", now_total.elapsed());
-
-              dwa
-          }
-      }
-
-      /* ------------------------------
-         Utilities and support structs
-         ------------------------------ */
-
-      /// Alphabet = all labels that appear as exceptions, plus a special OTHER symbol.
-      /// OTHER means "use default transitions"
-      #[derive(Clone, Debug)]
-      struct Alphabet {
-          labels: Vec<i16>, // sorted unique exception labels
-          other_index: usize,
-      }
-      impl Alphabet {
-          fn from_nwa(nwa: &NWA) -> Self {
-              let mut set = BTreeSet::new();
-              for st in &nwa.states.0 {
-                  for (&lbl, _) in &st.transitions {
-                      set.insert(lbl);
-                  }
-                  for def in &st.default {
-                      for &lbl in &def.exceptions {
-                          set.insert(lbl);
-                      }
-                  }
-              }
-              let labels: Vec<i16> = set.into_iter().collect();
-              let other_index = labels.len(); // last slot is OTHER
-              Alphabet { labels, other_index }
-          }
-
-          /// Build an alphabet filtered by future-acceptance masks:
-          /// only keep labels that can actually contribute to acceptance along some path.
-          /// A label is kept if there exists some edge s --lbl/w--> t with (w ∧ F[t]) ≠ ∅,
-          /// or a default s --wdef--> t with (wdef ∧ F[t]) ≠ ∅, in which case we keep the defaults'
-          /// exception labels too (they must be separated from OTHER).
-          fn from_nwa_with_future(nwa: &NWA, fut: &Vec<Weight>) -> Self {
-              let mut set = BTreeSet::new();
-              for (_s, st) in nwa.states.0.iter().enumerate() {
-                  // labeled transitions
-                  for (&lbl, targets) in &st.transitions {
-                      let mut relevant = false;
-                      for (t, w) in targets {
-                          if !(&fut[*t] & w).is_empty() {
-                              relevant = true;
-                              break;
-                          }
-                      }
-                      if relevant {
-                          set.insert(lbl);
-                      }
-                  }
-                  // defaults: if relevant, keep their exception labels
-                  for def in &st.default {
-                      if !(&fut[def.target] & &def.weight).is_empty() {
-                          for &lbl in &def.exceptions {
-                              set.insert(lbl);
-                          }
-                      }
-                  }
-              }
-              let labels: Vec<i16> = set.into_iter().collect();
-              let other_index = labels.len();
-              Alphabet { labels, other_index }
-          }
-          #[inline]
-          fn size(&self) -> usize {
-              self.labels.len() + 1
-          }
-          #[inline]
-          fn index_of_label(&self, l: i16) -> Option<usize> {
-              self.labels.binary_search(&l).ok()
-          }
-          #[inline]
-          fn is_other(&self, sym: usize) -> bool {
-              sym == self.other_index
-          }
-          #[inline]
-          fn label_at(&self, sym: usize) -> Option<i16> {
-              if sym < self.labels.len() {
-                  Some(self.labels[sym])
-              } else {
-                  None
-              }
-          }
-      }
-
-      /// WeightPartition: disjoint contiguous atoms that cover the union of all weights.
-      /// Each atom is a RangeInclusive<usize>.
-      #[derive(Clone, Debug)]
-      struct WeightPartition {
-          intervals: Vec<RangeInclusive<usize>>,
-          atoms: Vec<Weight>, // cached Weight for each interval
-      }
-      impl WeightPartition {
-          fn from_nwa(nwa: &NWA) -> Self {
-              let mut starts: BTreeSet<usize> = BTreeSet::new();
-              let mut ends_plus: BTreeSet<usize> = BTreeSet::new();
-              let mut has_tail_to_max = false;
-
-              let mut feed_weight = |w: &Weight| {
-                  let mut it = w.rsb.ranges();
-                  while let Some(r) = it.next() {
-                      let s = *r.start();
-                      let e = *r.end();
-                      starts.insert(s);
-                      if e == usize::MAX {
-                          has_tail_to_max = true;
-                      } else {
-                          ends_plus.insert(e.saturating_add(1));
-                      }
-                  }
-              };
-
-              for st in &nwa.states.0 {
-                  // final weight
-                  if let Some(w) = &st.final_weight {
-                      if !w.is_empty() {
-                          feed_weight(w);
-                      }
-                  }
-                  // epsilons
-                  for (_, w) in &st.epsilons {
-                      if !w.is_empty() {
-                          feed_weight(w);
-                      }
-                  }
-                  // defaults
-                  for def in &st.default {
-                      if !def.weight.is_empty() {
-                          feed_weight(&def.weight);
-                      }
-                  }
-                  // exceptions
-                  for (_, targets) in &st.transitions {
-                      for (_, w) in targets {
-                          if !w.is_empty() {
-                              feed_weight(w);
-                          }
-                      }
-                  }
-              }
-
-              // If there are no weights at all, the partition is empty.
-              if starts.is_empty() && ends_plus.is_empty() && !has_tail_to_max {
-                  return WeightPartition { intervals: vec![], atoms: vec![] };
-              }
-
-              // Combine and sort all "breakpoints" (start and end+1).
-              let mut breaks: Vec<usize> = starts.union(&ends_plus).copied().collect();
-              breaks.sort_unstable();
-              breaks.dedup();
-              if breaks.is_empty() {
-                  // Only possible if there was at least one ALL weight: single atom [0..=usize::MAX]
-                  let singleton = 0usize..=usize::MAX;
-                  let atom_w: Weight = std::iter::once(singleton.clone()).collect();
-                  return WeightPartition { intervals: vec![singleton], atoms: vec![atom_w] };
-              }
-
-              // Build atoms between consecutive breakpoints; if tail-to-max exists, include final segment.
-              let mut intervals: Vec<RangeInclusive<usize>> = Vec::new();
-              for i in 0..breaks.len().saturating_sub(1) {
-                  let a = breaks[i];
-                  let b_excl = breaks[i + 1];
-                  if a < b_excl {
-                      let b = b_excl - 1;
-                      intervals.push(a..=b);
-                  }
-              }
-              if has_tail_to_max {
-                  if let Some(&last) = breaks.last() {
-                      if last <= usize::MAX {
-                          intervals.push(last..=usize::MAX);
-                      }
-                  }
-              }
-
-              // Cache atom Weights
-              let atoms: Vec<Weight> = intervals
-                  .iter()
-                  .map(|r| {
-                      let r2: RangeInclusive<usize> = (*r.start())..=(*r.end());
-                      std::iter::once(r2).collect()
-                  })
-                  .collect();
-
-              WeightPartition { intervals, atoms }
-          }
-      }
-
-      /* ------------------------------
-         Per-atom NFA and DFA
-         ------------------------------ */
-
-      /// An NFA specialized for a single atom:
-      /// - Keep only edges/defaults/epsilons/finals whose weight intersects the atom.
-      /// - Alphabet is Sigma' (labels + OTHER); on label 'l': exceptions for l (if any) and defaults where l not in exceptions.
-      /// - On OTHER: use defaults.
-      #[derive(Clone, Debug)]
-      struct PerAtomNFA {
-          n: usize,
-          start: usize,
-          finals: Vec<bool>,
-          ex_by_state: Vec<BTreeMap<i16, Vec<usize>>>,
-          def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>>, // list of (target, exceptions)
-          eps_by_state: Vec<Vec<usize>>,
-      }
-      impl PerAtomNFA {
-          fn from_nwa(states: &NWAStates, start: usize, _sigma: &Alphabet, atom: &RangeInclusive<usize>, fut: &[Weight]) -> Self {
-              let n_total = states.len();
-              let atom_w: Weight = std::iter::once((*atom.start())..=(*atom.end())).collect();
-
-              // Live states for this atom: those with F[s] ∧ atom ≠ ∅
-              let mut live = vec![false; n_total];
-              for s in 0..n_total {
-                  if !(&fut[s] & &atom_w).is_empty() {
-                      live[s] = true;
-                  }
-              }
-
-              // If start is not live, return a trivial 1-state NFA (non-final, no edges).
-              if start >= n_total || !live[start] {
-                  return PerAtomNFA {
-                      n: 1,
-                      start: 0,
-                      finals: vec![false],
-                      ex_by_state: vec![BTreeMap::new()],
-                      def_by_state: vec![Vec::new()],
-                      eps_by_state: vec![Vec::new()],
-                  };
-              }
-
-              // BFS to collect only states reachable from start via edges that intersect atom and lead to live targets.
-              let mut visited = vec![false; n_total];
-              let mut order: Vec<usize> = Vec::new();
-              let mut q = VecDeque::new();
-              visited[start] = true;
-              q.push_back(start);
-              order.push(start);
-
-              while let Some(u) = q.pop_front() {
-                  // Epsilons
-                  for (v, w) in &states[u].epsilons {
-                      if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
-                          visited[*v] = true;
-                          q.push_back(*v);
-                          order.push(*v);
-                      }
-                  }
-                  // Labeled
-                  for (_lbl, targets) in &states[u].transitions {
-                      for (v, w) in targets {
-                          if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
-                              visited[*v] = true;
-                              q.push_back(*v);
-                              order.push(*v);
-                          }
-                      }
-                  }
-                  // Defaults
-                  for def in &states[u].default {
-                      let v = def.target;
-                      if v < n_total && live[v] && !(&atom_w & &def.weight).is_empty() && !visited[v] {
-                          visited[v] = true;
-                          q.push_back(v);
-                          order.push(v);
-                      }
-                  }
-              }
-
-              // Compact IDs
-              let m = order.len();
-              let mut id_of = vec![usize::MAX; n_total];
-              for (i, &old) in order.iter().enumerate() {
-                  id_of[old] = i;
-              }
-
-              let mut finals = vec![false; m];
-              let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); m];
-              let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); m];
-              let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); m];
-
-              for (new_s, &old_s) in order.iter().enumerate() {
-                  // final
-                  if let Some(w) = &states[old_s].final_weight {
-                      if !(&atom_w & w).is_empty() {
-                          finals[new_s] = true;
-                      }
-                  }
-                  // exceptions for this atom
-                  let mut local_ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
-                  for (&lbl, targets) in &states[old_s].transitions {
-                      let mut kept: Vec<usize> = Vec::new();
-                      for (to_old, w) in targets {
-                          if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
-                              let to_new = id_of[*to_old];
-                              if to_new != usize::MAX {
-                                  kept.push(to_new);
-                              }
-                          }
-                      }
-                      if !kept.is_empty() {
-                          kept.sort_unstable();
-                          kept.dedup();
-                          local_ex.insert(lbl, kept);
-                      }
-                  }
-                  ex_by_state[new_s] = local_ex.clone();
-
-                  // default(s) for this atom
-                  for def in &states[old_s].default {
-                      let to_old = def.target;
-                      if to_old < n_total && live[to_old] && !(&atom_w & &def.weight).is_empty() {
-                          let to_new = id_of[to_old];
-                          if to_new != usize::MAX {
-                              def_by_state[new_s].push((to_new, def.exceptions.clone()));
-                          }
-                      }
-                  }
-
-                  // epsilons
-                  for (to_old, w) in &states[old_s].epsilons {
-                      if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
-                          let to_new = id_of[*to_old];
-                          if to_new != usize::MAX {
-                              eps_by_state[new_s].push(to_new);
-                          }
-                      }
-                  }
-              }
-
-              let new_start = id_of[start];
-              debug_assert!(new_start != usize::MAX, "start must be visited when live[start] is true");
-              Self { n: m, start: new_start, finals, ex_by_state, def_by_state, eps_by_state }
-          }
-
-          /// Epsilon closure precomputation for each single state.
-          fn eps_closure_per_state(&self) -> Vec<Vec<usize>> {
-              let mut out = vec![Vec::<usize>::new(); self.n];
-              for s in 0..self.n {
-                  let mut visited = vec![false; self.n];
-                  let mut stack = vec![s];
-                  visited[s] = true;
-                  let mut closure = Vec::new();
-                  while let Some(u) = stack.pop() {
-                      closure.push(u);
-                      for &v in &self.eps_by_state[u] {
-                          if v < self.n && !visited[v] {
-                              visited[v] = true;
-                              stack.push(v);
-                          }
-                      }
-                  }
-                  closure.sort_unstable();
-                  out[s] = closure;
-              }
-              out
-          }
-
-          /// Given a set of states, compute epsilon closure (using per-state closures).
-          fn eps_closure_set(&self, base: &[usize], per: &Vec<Vec<usize>>) -> Vec<usize> {
-              let mut mark = vec![false; self.n];
-              let mut result = Vec::new();
-              for &s in base {
-                  if s >= self.n {
-                      continue;
-                  }
-                  for &u in &per[s] {
-                      if !mark[u] {
-                          mark[u] = true;
-                          result.push(u);
-                      }
-                  }
-              }
-              result.sort_unstable();
-              result
-          }
-
-          /// Determinize this NFA to a complete DFA with alphabet Sigma' (labels + OTHER).
-          fn determinize(&self, sigma: &Alphabet, simplify_final_states: bool) -> DetDFA {
-              let per = self.eps_closure_per_state();
-
-              // Start set: closure({start})
-              let start_set = self.eps_closure_set(&[self.start], &per);
-
-              // Subset-to-id interning
-              let mut map: HashMap<Vec<usize>, usize> = HashMap::new();
-              let mut states: Vec<Vec<usize>> = Vec::new();
-              let mut finals: Vec<bool> = Vec::new();
-              let mut trans: Vec<Vec<Option<usize>>> = Vec::new(); // Option for next state; sink if None later
-
-              let pb_subset = if PROGRESS_BAR_ENABLED {
-                  let p = ProgressBar::new_spinner();
-                  p.set_style(
-                      ProgressStyle::default_spinner()
-                          .template("{spinner:.green} [Determinize/Subset: {elapsed_precise}] States found: {pos}")
-                          .unwrap(),
-                  );
-                  Some(p)
-              } else {
-                  None
-              };
-
-              let mut push_state = |subset: Vec<usize>,
-                                    states: &mut Vec<Vec<usize>>,
-                                    finals: &mut Vec<bool>,
-                                    trans: &mut Vec<Vec<Option<usize>>>,
-                                    map: &mut HashMap<Vec<usize>, usize>| {
-                  if let Some(&id) = map.get(&subset) {
-                      return id;
-                  }
-                  let id = states.len();
-                  let is_final = subset.iter().any(|&s| self.finals[s]);
-                  states.push(subset);
-                  finals.push(is_final);
-                  trans.push(vec![None; sigma.size()]);
-                  map.insert(states[id].clone(), id);
-                  id
-              };
-
-              let start_id = push_state(start_set, &mut states, &mut finals, &mut trans, &mut map);
-              if let Some(p) = &pb_subset {
-                  p.set_position(states.len() as u64);
-              }
-
-              let mut q = VecDeque::new();
-              q.push_back(start_id);
-
-              while let Some(u) = q.pop_front() {
-                  let subset = states[u].clone();
-
-                  // For each symbol in Sigma', compute the next subset (then epsilon closure)
-                  for sym in 0..sigma.size() {
-                      let mut next_raw: Vec<usize> = Vec::new();
-
-                      match sigma.label_at(sym) {
-                          Some(lbl) => {
-                              // Label 'lbl': for each s in subset: take explicit transitions on lbl,
-                              // or if none, any default transitions for which lbl is not an exception.
-                              for &s in &subset {
-                                  if let Some(ts) = self.ex_by_state[s].get(&lbl) {
-                                      next_raw.extend_from_slice(ts);
-                                  } else {
-                                      for (target, exceptions) in &self.def_by_state[s] {
-                                          if !exceptions.contains(&lbl) {
-                                              next_raw.push(*target);
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                          None => {
-                              // OTHER: take all default transitions
-                              for &s in &subset {
-                                  for (target, _) in &self.def_by_state[s] {
-                                      next_raw.push(*target);
-                                  }
-                              }
-                          }
-                      }
-
-                      if next_raw.is_empty() {
-                          // Will lead to sink; leave as None for now
-                          continue;
-                      }
-
-                      next_raw.sort_unstable();
-                      next_raw.dedup();
-
-                      let next = self.eps_closure_set(&next_raw, &per);
-                      if next.is_empty() {
-                          continue;
-                      }
-
-                      let v = if let Some(&id) = map.get(&next) {
-                          id
-                      } else {
-                          let id = states.len();
-                          let is_final = next.iter().any(|&s| self.finals[s]);
-                          states.push(next.clone());
-                          finals.push(is_final);
-                          trans.push(vec![None; sigma.size()]);
-                          map.insert(next, id);
-                          if let Some(p) = &pb_subset {
-                              p.set_position(states.len() as u64);
-                          }
-                          q.push_back(id);
-                          id
-                      };
-
-                      trans[u][sym] = Some(v);
-                  }
-              }
-
-              if let Some(p) = pb_subset {
-                  p.finish_with_message(format!("Subset construction done, {} states", states.len()));
-              }
-
-              if simplify_final_states {
-                  // From final states, all transitions go to a sink.
-                  for s in 0..states.len() {
-                      if finals[s] {
-                          trans[s] = vec![None; sigma.size()];
-                      }
-                  }
-              }
-       
-              // Build sink state if any transition is None
-              let needs_sink = trans.iter().any(|row| row.iter().any(|x| x.is_none()));
-              let mut sink_index: Option<usize> = None;
-
-              if needs_sink {
-                  sink_index = Some(trans.len());
-                  trans.push(vec![None; sigma.size()]);
-                  finals.push(false);
-                  states.push(Vec::new()); // empty subset for sink
-              }
-
-              // Fill None transitions with sink (or self-loop if no sink needed)
-              let mut out_trans: Vec<Vec<usize>> = Vec::with_capacity(trans.len());
-              for (i, row) in trans.iter().enumerate() {
-                  let mut new_row = Vec::with_capacity(row.len());
-                  for (_sym, dst) in row.iter().enumerate() {
-                      match dst {
-                          Some(v) => new_row.push(*v),
-                          None => {
-                              if let Some(sink) = sink_index {
-                                  new_row.push(sink);
-                              } else {
-                                  new_row.push(i); // complete with self (won't happen unless needs_sink=false)
-                              }
-                          }
-                      }
-                  }
-                  out_trans.push(new_row);
-              }
-
-              DetDFA {
-                  n_states: out_trans.len(),
-                  start: start_id,
-                  finals,
-                  trans: out_trans,
-              }
-          }
-      }
-
-      /// Deterministic complete DFA (over Sigma').
-      #[derive(Clone, Debug)]
-      struct DetDFA {
-          n_states: usize,
-          start: usize,
-          finals: Vec<bool>,
-          trans: Vec<Vec<usize>>, // [state][symbol] -> next state
-      }
-      impl DetDFA {
-          fn minimize(&mut self, sigma: &Alphabet) {
-              crate::debug!(4, "Minimizing DFA with {} states", self.n_states);
-              // Remove states unreachable from start first
-              let reachable = {
-                  let mut visited = vec![false; self.n_states];
-                  let mut q = VecDeque::new();
-                  visited[self.start] = true;
-                  q.push_back(self.start);
-                  while let Some(u) = q.pop_front() {
-                      for &v in &self.trans[u] {
-                          if !visited[v] {
-                              visited[v] = true;
-                              q.push_back(v);
-                          }
-                      }
-                  }
-                  visited
-              };
-
-              // Map reachable states to compact ids
-              let mut map = vec![usize::MAX; self.n_states];
-              let mut new_states = 0usize;
-              for i in 0..self.n_states {
-                  if reachable[i] {
-                      map[i] = new_states;
-                      new_states += 1;
-                  }
-              }
-
-              if new_states == 0 {
-                  // No reachable states? Create a single dead state.
-                  self.n_states = 1;
-                  self.start = 0;
-                  self.finals = vec![false];
-                  self.trans = vec![vec![0; sigma.size()]];
-                  return;
-              }
-
-              let mut finals = vec![false; new_states];
-              let mut trans = vec![vec![0usize; sigma.size()]; new_states];
-
-              for i in 0..self.n_states {
-                  if !reachable[i] {
-                      continue;
-                  }
-                  let ni = map[i];
-                  finals[ni] = self.finals[i];
-                  for a in 0..sigma.size() {
-                      let v = self.trans[i][a];
-                      trans[ni][a] = map[v];
-                  }
-              }
-
-              self.n_states = new_states;
-              self.start = map[self.start];
-              self.finals = finals;
-              self.trans = trans;
-
-              // Hopcroft minimization on complete DFA
-              if self.n_states <= 1 {
-                  return;
-              }
-
-              let n = self.n_states;
-              let a = sigma.size();
-
-              // Initial partition: accepting vs non-accepting
-              let mut part_id = vec![0usize; n];
-              let mut blocks: Vec<Vec<usize>> = Vec::new();
-              let (accepting_block, non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| self.finals[s]);
-
-              if accepting_block.is_empty() || non_accepting_block.is_empty() {
-                  // All accepting or all non-accepting -> nothing to split
-                  return;
-              }
-              blocks.push(accepting_block);
-              blocks.push(non_accepting_block);
-              for (pid, block) in blocks.iter().enumerate() { for &s in block { part_id[s] = pid; } }
-
-              // Build inverse transitions for each symbol
-              let mut inv: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); n]; a];
-              for s in 0..n { for sym in 0..a { let v = self.trans[s][sym]; inv[sym][v].push(s); } }
-
-              // Worklist of (block id, symbol).
-              let mut worklist: BTreeSet<(usize, usize)> = BTreeSet::new();
-              let smaller_initial_set = if blocks[0].len() <= blocks[1].len() { 0 } else { 1 };
-              for sym in 0..a {
-                  worklist.insert((smaller_initial_set, sym));
-              }
-
-              let pb_hopcroft = if PROGRESS_BAR_ENABLED {
-                  let p = ProgressBar::new_spinner();
-                  p.set_style(
-                      ProgressStyle::default_spinner()
-                          .template(
-                              "{spinner:.green} [Determinize/Minimize: {elapsed_precise}] Pass {pos}, worklist size: {msg}",
-                          )
-                          .unwrap(),
-                  );
-                  Some(p)
-              } else {
-                  None
-              };
-              let mut passes = 0u64;
-
-              while let Some(&(b, sym)) = worklist.iter().next() {
-                  worklist.remove(&(b, sym));
-
-                  if let Some(p) = &pb_hopcroft {
-                      passes += 1;
-                      p.set_position(passes);
-                      p.set_message(format!("{}", worklist.len()));
-                  }
-
-                  // Compute preimage of block b under symbol sym
-                  let mut pre: Vec<usize> = Vec::new();
-                  for &v in &blocks[b] { pre.extend_from_slice(&inv[sym][v]); }
-                  if pre.is_empty() {
-                      continue;
-                  }
-                  pre.sort_unstable();
-                  pre.dedup();
-
-                  // For each block, split by intersection with pre
-                  let mut affected: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
-                  for &s in &pre { let pid = part_id[s]; affected.entry(pid).or_default().0.push(s); }
-                  for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
-                      // Fill not_in_pre
-                      for &s in &blocks[*pid] { if !in_pre.binary_search(&s).is_ok() { not_in_pre.push(s); } }
-                  }
-
-                  let mut to_replace: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
-
-                  for (pid, (in_pre, not_in_pre)) in affected.into_iter() {
-                      if in_pre.is_empty() || not_in_pre.is_empty() {
-                          continue;
-                      }
-                      to_replace.push((pid, in_pre, not_in_pre));
-                  }
-
-                  if to_replace.is_empty() {
-                      continue;
-                  }
-
-                  // Apply replacements (block splits)
-                  for (pid, mut in_pre, mut not_in_pre) in to_replace {
-                      in_pre.sort_unstable();
-                      not_in_pre.sort_unstable();
-
-                      let pid2 = blocks.len();
-                      blocks.push(not_in_pre);
-                      blocks[pid] = in_pre;
-
-                      // Update part_id map for all states in the newly created blocks
-                      for &s in &blocks[pid] { part_id[s] = pid; }
-                      for &s in &blocks[pid2] { part_id[s] = pid2; }
-
-                      // Update worklist according to Hopcroft's algorithm
-                      for sym2 in 0..a {
-                          if worklist.remove(&(pid, sym2)) {
-                              // The original block was on the worklist. Replace it with both new blocks.
-                              worklist.insert((pid, sym2));
-                              worklist.insert((pid2, sym2));
-                          } else {
-                              // The original block was not on the worklist. Add the smaller of the two new blocks.
-                              let (smaller_pid, _) = if blocks[pid].len() <= blocks[pid2].len() { (pid, pid2) } else { (pid2, pid) };
-                              worklist.insert((smaller_pid, sym2));
-                          }
-                      }
-                  }
-              }
-
-              if let Some(p) = pb_hopcroft {
-                  p.finish_with_message(format!("Hopcroft done, {} partitions", blocks.len()));
-              }
-
-              // Build the quotient automaton
-              let num_parts = blocks.len();
-              let mut repr: Vec<usize> = vec![0; num_parts];
-              for (pid, block) in blocks.iter().enumerate() { repr[pid] = block[0]; }
-
-              let start_part = part_id[self.start];
-              let mut finals2 = vec![false; num_parts];
-              for pid in 0..num_parts {
-                  finals2[pid] = self.finals[repr[pid]];
-              }
-
-              let mut trans2 = vec![vec![0usize; a]; num_parts];
-              for pid in 0..num_parts {
-                  let s = repr[pid];
-                  for sym in 0..a {
-                      let v = self.trans[s][sym];
-                      trans2[pid][sym] = part_id[v];
-                  }
-              }
-
-              self.n_states = num_parts;
-              self.start = start_part;
-              self.finals = finals2;
-              self.trans = trans2;
-          }
-
-          /// Find an index of a sink state (if any), defined as a non-accepting state whose transitions on all symbols loop to itself.
-          fn find_sink_index(&self, sigma: &Alphabet) -> Option<usize> {
-              'outer: for s in 0..self.n_states {
-                  if self.finals[s] {
-                      continue;
-                  }
-                  for sym in 0..sigma.size() {
-                      if self.trans[s][sym] != s {
-                          continue 'outer;
-                      }
-                  }
-                  return Some(s);
-              }
-              None
-          }
-      }
-
-      /* ------------------------------
-         Tuple enumeration and merging
-         ------------------------------ */
-
-      /* ------------------------------
-         Build DWA from merged product
-         ------------------------------ */
-
-      fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &tuple_merger::ProductTuple) -> Weight {
-          let mut w = Weight::zeros();
-          for (i, pos) in tuple.iter().enumerate() {
-              if pos.is_some() {
-                  w |= &atom_weights[i];
-              }
-          }
-          w
-      }
-
-      fn build_dwa_from_merged_automaton(
-          merged_automaton: &tuple_merger::MergedAutomaton,
-          comps: &[DetDFA],
-          atom_weights: &Vec<Weight>,
-          sigma: &Alphabet,
-      ) -> DWA {
-          let mut dwa_states = DWAStates::default();
-          for _ in 0..merged_automaton.states.len() {
-              dwa_states.add_state();
-          }
-          let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: merged_automaton.start_state_id } };
-
-          // We need a way to compute successor tuples to determine edge weights.
-          // Re-create the component structures for the tuple_merger.
-          let merger_components: Vec<tuple_merger::Component> = comps.iter().map(|dfa| {
-              let sink = dfa.find_sink_index(sigma);
-              let mut sparse_trans = Vec::with_capacity(dfa.n_states);
-              for s in 0..dfa.n_states {
-                  let mut exceptions = BTreeMap::new();
-                  if let Some(sink_idx) = sink {
-                      for (sym, &target) in dfa.trans[s].iter().enumerate() {
-                          if target != sink_idx {
-                              exceptions.insert(sym, target);
-                          }
-                      }
-                  } else {
-                      for (sym, &target) in dfa.trans[s].iter().enumerate() {
-                          exceptions.insert(sym, target);
-                      }
-                  }
-                  sparse_trans.push(exceptions);
-              }
-              tuple_merger::Component { transitions: sparse_trans }
-          }).collect();
-
-          for state in &merged_automaton.states {
-              let sid = state.id;
-              let rep = &state.representative_tuple;
-
-              // Final weight
-              let mut w_final = Weight::zeros();
-              for (i, pos) in rep.iter().enumerate() {
-                  if let Some(s) = pos {
-                      if comps[i].finals[*s] {
-                          w_final |= &atom_weights[i];
-                      }
-                  }
-              }
-              if !w_final.is_empty() {
-                  let _ = dwa.set_final_weight(sid, w_final);
-              }
-
-              // Default (OTHER)
-              let def_to_id = state.transitions[sigma.other_index];
-              let def_succ_tuple = tuple_merger::successor_tuple(rep, sigma.other_index, &merger_components);
-              let def_w = edge_weight_from_tuple(atom_weights, &def_succ_tuple);
-              let _ = dwa.set_default_transition(sid, def_to_id, def_w);
-
-              // Exceptions
-              for (li, &lbl) in sigma.labels.iter().enumerate() {
-                  let to_id = state.transitions[li];
-                  let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
-                  let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
-                  let _ = dwa.add_transition(sid, lbl, to_id, w);
-              }
-          }
-
-          dwa
-      }
-
-      /* ------------------------------
-         End of merged determinization
-         ------------------------------ */
-    src/precompute4/weighted_automata/tuple_merger.rs: |
-      #![allow(dead_code)]
-
-      use std::collections::{BTreeMap, HashMap, VecDeque};
-
-      #[derive(Clone, Debug)]
-      pub struct Component {
-          pub transitions: Vec<BTreeMap<usize, usize>>,
-      }
-
-      #[derive(Clone, Debug)]
-      pub struct MergedState {
-          pub id: usize,
-          pub representative_tuple: ProductTuple,
-          pub transitions: Vec<usize>,
-      }
-
-      #[derive(Clone, Debug)]
-      pub struct MergedAutomaton {
-          pub states: Vec<MergedState>,
-          pub start_state_id: usize,
-      }
-
-      pub type ProductTuple = Vec<Option<usize>>;
-
-      fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
-          if a.len() != b.len() {
-              return None;
-          }
-          let mut out = Vec::with_capacity(a.len());
-          for i in 0..a.len() {
-              match (a[i], b[i]) {
-                  (Some(x), Some(y)) => {
-                      if x == y {
-                          out.push(Some(x));
-                      } else {
-                          return None;
-                      }
-                  }
-                  (Some(x), None) => out.push(Some(x)),
-                  (None, Some(y)) => out.push(Some(y)),
-                  (None, None) => out.push(None),
-              }
-          }
-          Some(out)
-      }
-
-      pub fn successor_tuple(tuple: &ProductTuple, symbol: usize, components: &[Component]) -> ProductTuple {
-          let k = components.len();
-          let mut out = Vec::with_capacity(k);
-          for i in 0..k {
-              match tuple[i] {
-                  Some(s) => {
-                      if let Some(&v) = components[i].transitions[s].get(&symbol) {
-                          out.push(Some(v));
-                      } else {
-                          out.push(None);
-                      }
-                  }
-                  None => {
-                      out.push(None);
-                  }
-              }
-          }
-          out
-      }
-
-      pub fn merge_and_build_automaton(
-          start_tuple: ProductTuple,
-          components: &[Component],
-          alphabet_size: usize,
-      ) -> MergedAutomaton {
-          let mut states: Vec<ProductTuple> = Vec::new();
-          let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
-          let mut worklist: VecDeque<usize> = VecDeque::new();
-
-          let start_id = 0;
-          states.push(start_tuple.clone());
-          point_map.insert(start_tuple, start_id);
-          worklist.push_back(start_id);
-
-          while let Some(state_id) = worklist.pop_front() {
-              let representative = states[state_id].clone();
-
-              for symbol in 0..alphabet_size {
-
-                  let successor = successor_tuple(&representative, symbol, components);
-
-                  if point_map.contains_key(&successor) {
-                      continue;
-                  }
-
-                  let mut assigned_id = None;
-                  for id in 0..states.len() {
-                      if let Some(new_rep) = unify_tuples(&states[id], &successor) {
-                          if new_rep != states[id] {
-                              states[id] = new_rep;
-                              if !worklist.contains(&id) {
-                                  worklist.push_back(id);
-                              }
-                          }
-                          assigned_id = Some(id);
-                          break;
-                      }
-                  }
-
-                  let home_id = assigned_id.unwrap_or_else(|| {
-                      let new_id = states.len();
-                      states.push(successor.clone());
-                      worklist.push_back(new_id);
-                      new_id
-                  });
-
-                  point_map.insert(successor, home_id);
-              }
-          }
-
-          let mut final_states = Vec::with_capacity(states.len());
-          for (id, rep) in states.iter().enumerate() {
-              let transitions = (0..alphabet_size)
-                  .map(|symbol| {
-                      let succ = successor_tuple(rep, symbol, components);
-                      *point_map.get(&succ).expect("Successor point must have an assigned state")
-                  })
-                  .collect();
-
-              final_states.push(MergedState { id, representative_tuple: rep.clone(), transitions });
-          }
-
-          MergedAutomaton { states: final_states, start_state_id: 0 }
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use super::*;
-
-          #[test]
-          fn test_unify_tuples() {
-              assert_eq!(unify_tuples(&vec![Some(1), None], &vec![None, Some(2)]), Some(vec![Some(1), Some(2)]));
-              assert_eq!(unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]), Some(vec![Some(1), Some(2)]));
-              assert_eq!(unify_tuples(&vec![Some(1), None], &vec![Some(1), Some(3)]), Some(vec![Some(1), Some(3)]));
-              assert_eq!(unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)]), None);
-              assert_eq!(unify_tuples(&vec![None, None], &vec![Some(1), Some(2)]), Some(vec![Some(1), Some(2)]));
-          }
-
-          #[test]
-          fn test_simple_merge() {
-              let comp0 = Component { transitions: vec![BTreeMap::from([(0, 0)])] };
-              let comp1 = Component { transitions: vec![BTreeMap::from([(1, 0)])] };
-              let components = vec![comp0, comp1];
-              let alphabet_size = 2;
-
-              let start_tuple = vec![Some(0), Some(0)];
-
-              let automaton = merge_and_build_automaton(start_tuple, &components, alphabet_size);
-
-              assert_eq!(automaton.states.len(), 1);
-
-              let s0_id = automaton.start_state_id;
-              assert_eq!(automaton.states[s0_id].representative_tuple, vec![Some(0), Some(0)]);
-
-              assert_eq!(automaton.states[s0_id].transitions[0], s0_id);
-
-              assert_eq!(automaton.states[s0_id].transitions[1], s0_id);
-          }
-      }
-  prev_file_contents:
     src/precompute4/weighted_automata/test_determinization.rs: |-
       #![cfg(test)]
 
@@ -2679,50 +1334,8 @@ local_system:
               assert_eq!(*point_map.get(&succ1).unwrap(), 0);
           }
       }
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-  default_end_line:
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - gp
-  code_completion_model:
-    - gf
-  commit_message_model:
-    - gemini/gemini-flash-lite-latest
-  diff_correction_model:
-    - gf
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
-
-
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```rust "src/precompute4/weighted_automata/test_determinization.rs"
+  prev_file_contents:
+    src/precompute4/weighted_automata/test_determinization.rs: |-
       #![cfg(test)]
 
       use super::*;
@@ -2842,11 +1455,7 @@ messages:
           }
           assert_eq!(dwa.eval_word_weight(&empty_word), expected_weight_empty);
       }
-      ```
-    metadata:
-      filename: src/precompute4/weighted_automata/test_determinization.rs
-  - user: |-
-      ```rust "src/precompute4/weighted_automata/determinization.rs"
+    src/precompute4/weighted_automata/determinization.rs: |
       #![allow(dead_code)]
       #![allow(clippy::needless_borrow)]
 
@@ -2993,7 +1602,7 @@ messages:
 
               // 5) Merge tuples greedily and attach transitions/finals from representative tuples
               let now_merge = Instant::now();
-              let merger_components: Vec<tuple_merger::Component> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
+              let merger_components: Vec<Vec<BTreeMap<usize, usize>>> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
                   let mut sparse_trans = Vec::with_capacity(dfa.n_states);
                   for s in 0..dfa.n_states {
                       let mut exceptions = BTreeMap::new();
@@ -3011,10 +1620,10 @@ messages:
                       }
                       sparse_trans.push(exceptions);
                   }
-                  tuple_merger::Component { transitions: sparse_trans }
+                  sparse_trans
               }).collect();
 
-              let merged_automaton = tuple_merger::merge_and_build_automaton(
+              let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
                   start_tuple,
                   &merger_components,
                   sigma.size(),
@@ -3022,13 +1631,14 @@ messages:
               crate::debug!(
                   4,
                   "Merged into {} product states in {:?}",
-                  merged_automaton.states.len(),
+                  merged_reps.len(),
                   now_merge.elapsed()
               );
 
               // 6) Convert merged product to a DWA
               let now_convert = Instant::now();
-              let dwa = build_dwa_from_merged_automaton(&merged_automaton, &comp_dfas, &atoms.atoms, &sigma);
+              let dwa =
+                  build_dwa_from_merged_automaton(&merged_reps, &point_map, &comp_dfas, &atoms.atoms, &sigma);
               crate::debug!(
                   4,
                   "Merged-product -> DWA conversion completed in {:?}",
@@ -3832,20 +2442,21 @@ messages:
       }
 
       fn build_dwa_from_merged_automaton(
-          merged_automaton: &tuple_merger::MergedAutomaton,
+          merged_reps: &[tuple_merger::ProductTuple],
+          point_map: &HashMap<tuple_merger::ProductTuple, usize>,
           comps: &[DetDFA],
           atom_weights: &Vec<Weight>,
           sigma: &Alphabet,
       ) -> DWA {
           let mut dwa_states = DWAStates::default();
-          for _ in 0..merged_automaton.states.len() {
+          for _ in 0..merged_reps.len() {
               dwa_states.add_state();
           }
-          let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: merged_automaton.start_state_id } };
+          let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: 0 } };
 
           // We need a way to compute successor tuples to determine edge weights.
           // Re-create the component structures for the tuple_merger.
-          let merger_components: Vec<tuple_merger::Component> = comps.iter().map(|dfa| {
+          let merger_components: Vec<Vec<BTreeMap<usize, usize>>> = comps.iter().map(|dfa| {
               let sink = dfa.find_sink_index(sigma);
               let mut sparse_trans = Vec::with_capacity(dfa.n_states);
               for s in 0..dfa.n_states {
@@ -3863,13 +2474,10 @@ messages:
                   }
                   sparse_trans.push(exceptions);
               }
-              tuple_merger::Component { transitions: sparse_trans }
+              sparse_trans
           }).collect();
 
-          for state in &merged_automaton.states {
-              let sid = state.id;
-              let rep = &state.representative_tuple;
-
+          for (sid, rep) in merged_reps.iter().enumerate() {
               // Final weight
               let mut w_final = Weight::zeros();
               for (i, pos) in rep.iter().enumerate() {
@@ -3884,15 +2492,17 @@ messages:
               }
 
               // Default (OTHER)
-              let def_to_id = state.transitions[sigma.other_index];
               let def_succ_tuple = tuple_merger::successor_tuple(rep, sigma.other_index, &merger_components);
+              let def_to_id =
+                  *point_map.get(&def_succ_tuple).expect("Default successor tuple must be mapped");
               let def_w = edge_weight_from_tuple(atom_weights, &def_succ_tuple);
               let _ = dwa.set_default_transition(sid, def_to_id, def_w);
 
               // Exceptions
               for (li, &lbl) in sigma.labels.iter().enumerate() {
-                  let to_id = state.transitions[li];
                   let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
+                  let to_id =
+                      *point_map.get(&succ_tuple).expect("Successor tuple must be mapped");
                   let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
                   let _ = dwa.add_transition(sid, lbl, to_id, w);
               }
@@ -3904,33 +2514,10 @@ messages:
       /* ------------------------------
          End of merged determinization
          ------------------------------ */
-
-      ```
-    metadata:
-      filename: src/precompute4/weighted_automata/determinization.rs
-  - user: |-
-      ```rust "src/precompute4/weighted_automata/tuple_merger.rs"
+    src/precompute4/weighted_automata/tuple_merger.rs: |
       #![allow(dead_code)]
 
-      use std::collections::{BTreeMap, HashMap, VecDeque};
-
-      #[derive(Clone, Debug)]
-      pub struct Component {
-          pub transitions: Vec<BTreeMap<usize, usize>>,
-      }
-
-      #[derive(Clone, Debug)]
-      pub struct MergedState {
-          pub id: usize,
-          pub representative_tuple: ProductTuple,
-          pub transitions: Vec<usize>,
-      }
-
-      #[derive(Clone, Debug)]
-      pub struct MergedAutomaton {
-          pub states: Vec<MergedState>,
-          pub start_state_id: usize,
-      }
+      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
       pub type ProductTuple = Vec<Option<usize>>;
 
@@ -3956,13 +2543,17 @@ messages:
           Some(out)
       }
 
-      pub fn successor_tuple(tuple: &ProductTuple, symbol: usize, components: &[Component]) -> ProductTuple {
+      pub fn successor_tuple(
+          tuple: &ProductTuple,
+          symbol: usize,
+          components: &[Vec<BTreeMap<usize, usize>>],
+      ) -> ProductTuple {
           let k = components.len();
           let mut out = Vec::with_capacity(k);
           for i in 0..k {
               match tuple[i] {
                   Some(s) => {
-                      if let Some(&v) = components[i].transitions[s].get(&symbol) {
+                      if let Some(&v) = components[i][s].get(&symbol) {
                           out.push(Some(v));
                       } else {
                           out.push(None);
@@ -3978,9 +2569,9 @@ messages:
 
       pub fn merge_and_build_automaton(
           start_tuple: ProductTuple,
-          components: &[Component],
+          components: &[Vec<BTreeMap<usize, usize>>],
           alphabet_size: usize,
-      ) -> MergedAutomaton {
+      ) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>) {
           let mut states: Vec<ProductTuple> = Vec::new();
           let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
           let mut worklist: VecDeque<usize> = VecDeque::new();
@@ -3994,6 +2585,1385 @@ messages:
               let representative = states[state_id].clone();
 
               for symbol in 0..alphabet_size {
+                  let successor = successor_tuple(&representative, symbol, components);
+
+                  if point_map.contains_key(&successor) {
+                      continue;
+                  }
+
+                  let mut assigned_id = None;
+                  for id in 0..states.len() {
+                      if let Some(new_rep) = unify_tuples(&states[id], &successor) {
+                          if new_rep != states[id] {
+                              states[id] = new_rep;
+                              if !worklist.contains(&id) {
+                                  worklist.push_back(id);
+                              }
+                          }
+                          assigned_id = Some(id);
+                          break;
+                      }
+                  }
+
+                  let home_id = assigned_id.unwrap_or_else(|| {
+                      let new_id = states.len();
+                      states.push(successor.clone());
+                      worklist.push_back(new_id);
+                      new_id
+                  });
+
+                  point_map.insert(successor, home_id);
+              }
+          }
+
+          (states, point_map)
+      }
+
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+
+          #[test]
+          fn test_unify_tuples() {
+              assert_eq!(unify_tuples(&vec![Some(1), None], &vec![None, Some(2)]), Some(vec![Some(1), Some(2)]));
+              assert_eq!(unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]), Some(vec![Some(1), Some(2)]));
+              assert_eq!(unify_tuples(&vec![Some(1), None], &vec![Some(1), Some(3)]), Some(vec![Some(1), Some(3)]));
+              assert_eq!(unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)]), None);
+              assert_eq!(unify_tuples(&vec![None, None], &vec![Some(1), Some(2)]), Some(vec![Some(1), Some(2)]));
+          }
+
+          #[test]
+          fn test_simple_merge() {
+              let comp0 = vec![BTreeMap::from([(0, 0)])];
+              let comp1 = vec![BTreeMap::from([(1, 0)])];
+              let components = vec![comp0, comp1];
+              let alphabet_size = 3; // Symbols 0, 1, and OTHER=2
+
+              let start_tuple = vec![Some(0), Some(0)];
+
+              let (states, point_map) = merge_and_build_automaton(start_tuple, &components, alphabet_size);
+
+              assert_eq!(states.len(), 1);
+              assert_eq!(states[0], vec![Some(0), Some(0)]);
+
+              let succ0 = successor_tuple(&states[0], 0, &components);
+              let succ1 = successor_tuple(&states[0], 1, &components);
+              assert_eq!(*point_map.get(&succ0).unwrap(), 0);
+              assert_eq!(*point_map.get(&succ1).unwrap(), 0);
+          }
+      }
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+  default_end_line:
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - gp
+  code_completion_model:
+    - gf
+  commit_message_model:
+    - gemini/gemini-flash-lite-latest
+  diff_correction_model:
+    - gf
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
+    metadata:
+      kind: core-guidance
+      role: developer
+      ephemeral: false
+  - user: |-
+      ```rust "src/precompute4/weighted_automata/test_determinization.rs"
+      #![cfg(test)]
+
+      use super::*;
+
+      #[test]
+      fn test_determinize_simple_divergence() {
+          let mut nwa = NWA::new(); // new() creates a start state 0
+          nwa.states.0.clear(); // but we'll manage states manually for clarity
+
+          // NWA for "ac" with weight A1 (0)
+          let s0 = nwa.states.add_state();
+          let s1 = nwa.states.add_state();
+          let s2 = nwa.states.add_state();
+          nwa.add_transition(s0, 'a' as i16, s1, Weight::all()).unwrap();
+          nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
+          nwa.states[s2].final_weight = Some(Weight::from_item(0));
+
+          // NWA for "bc" with weight A2 (1)
+          let s3 = nwa.states.add_state();
+          let s4 = nwa.states.add_state();
+          let s5 = nwa.states.add_state();
+          nwa.add_transition(s3, 'b' as i16, s4, Weight::all()).unwrap();
+          nwa.add_transition(s4, 'c' as i16, s5, Weight::all()).unwrap();
+          nwa.states[s5].final_weight = Some(Weight::from_item(1));
+
+          // Union them with a new start state
+          let start = nwa.states.add_state();
+          nwa.add_epsilon(start, s0, Weight::all());
+          nwa.add_epsilon(start, s3, Weight::all());
+          nwa.body.start_state = start;
+
+          let dwa = nwa.determinize_to_dwa();
+          println!("{}", nwa);
+          println!("{}", dwa);
+
+          // Check accepted words and their weights.
+          assert_eq!(
+              dwa.eval_word_weight(&['a' as i16, 'c' as i16]),
+              Weight::from_item(0)
+          );
+          assert_eq!(
+              dwa.eval_word_weight(&['b' as i16, 'c' as i16]),
+              Weight::from_item(1)
+          );
+          assert!(dwa.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
+          assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
+          assert!(dwa.eval_word_weight(&[]).is_empty());
+
+          // An efficient DWA should merge states with similar future behavior,
+          // resulting in a small automaton.
+          // Allowing for a sink state, we assert a small number.
+          assert!(
+              dwa.states.len() <= 4,
+              "Expected a small number of states for simple divergence, got {}",
+              dwa.states.len()
+          );
+      }
+
+      #[test]
+      fn test_determinize_hypercube_catastrophe() {
+          const N: usize = 4;
+          let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
+          let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
+
+          let mut nwa = NWA::new();
+          nwa.states.0.clear();
+
+          let mut component_starts = vec![];
+
+          for i in 0..N {
+              // L_i = words without alphabet[i]
+              let s = nwa.states.add_state();
+              component_starts.push(s);
+              nwa.states[s].final_weight = Some(atoms[i].clone());
+
+              for j in 0..N {
+                  if i == j {
+                      continue;
+                  }
+                  nwa.add_transition(s, alphabet[j], s, Weight::all()).unwrap();
+              }
+          }
+
+          let start = nwa.states.add_state();
+          for &s_comp in &component_starts {
+              nwa.add_epsilon(start, s_comp, Weight::all());
+          }
+          nwa.body.start_state = start;
+
+          let dwa = nwa.determinize_to_dwa();
+
+          // An efficient DWA construction should avoid the 2^N state explosion by
+          // encoding the history of seen characters within the accumulated weight,
+          // not in the state space.
+          assert!(
+              dwa.states.len() <= 2,
+              "Expected a very small DWA (1-2 states) for hypercube, but got {} states. State explosion was not avoided.",
+              dwa.states.len()
+          );
+
+          // Test some words
+          // word "ac" (chars 0 and 2) -> should not contain 1 or 3 ('b' or 'd'). Belongs to L1 and L3.
+          // Weight should be A1 | A3.
+          let word_ac = vec![alphabet[0], alphabet[2]];
+          let expected_weight_ac = &atoms[1] | &atoms[3];
+          assert_eq!(dwa.eval_word_weight(&word_ac), expected_weight_ac);
+
+          // word "abcd" -> contains all symbols. Should be rejected by all components.
+          let word_all = alphabet.clone();
+          assert!(dwa.eval_word_weight(&word_all).is_empty());
+
+          // empty word -> belongs to all languages.
+          let empty_word = vec![];
+          let mut expected_weight_empty = Weight::zeros();
+          for atom in &atoms {
+              expected_weight_empty |= atom;
+          }
+          assert_eq!(dwa.eval_word_weight(&empty_word), expected_weight_empty);
+      }
+      ```
+    metadata:
+      filename: src/precompute4/weighted_automata/test_determinization.rs
+  - user: |-
+      ```rust "src/precompute4/weighted_automata/determinization.rs"
+      #![allow(dead_code)]
+      #![allow(clippy::needless_borrow)]
+
+      use super::tuple_merger;
+      use super::bitset::SimpleBitset as Weight;
+      use super::dwa::{DWAState, DWAStates, DWA, DWABody};
+      use super::nwa::{NWA, NWAStates};
+      use crate::profiler::PROGRESS_BAR_ENABLED;
+      use indicatif::{ProgressBar, ProgressStyle};
+
+
+      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+      use std::ops::RangeInclusive;
+      use std::time::Instant;
+      use crate::precompute4::weighted_automata::format_i16_char;
+
+      /// This determinization implements a tuple-based merging construction:
+      /// 1) Partition weight space into atoms.
+      /// 2) For each atom, determinize the corresponding unweighted NFA to a DFA.
+      /// 3) Enumerate the set of reachable product tuples T = Vec<Option<usize>> of component DFA states,
+      ///    where None represents the component's sink state.
+      /// 4) Merge tuples greedily into product states by unifying on non-sink positions:
+      ///    two tuples are mergeable iff for each index either both are Some with equal values or at least one is None.
+      ///    The representative tuple of a merged state is the pointwise "most-specific" unify.
+      /// 5) For each merged state, compute:
+      ///    - final weight = union of atom-weights for indices whose representative component is accepting.
+      ///    - transitions from representative tuple on the global alphabet (labels + OTHER).
+      ///      Store per-label destination tuple, and for OTHER store a default destination tuple.
+      /// 6) Convert merged product directly to a DWA:
+      ///    - For a transition with destination tuple U, the edge weight is the union of atom-weights for i with U[i] != None.
+      ///    - Final weight as computed in (5).
+      impl NWA {
+          pub fn determinize_to_dwa(&self) -> DWA {
+              self.determinize_to_dwa_internal(false)
+          }
+
+          pub fn determinize_to_dwa_with_final_state_simplification(&self) -> DWA {
+              self.determinize_to_dwa_internal(true)
+          }
+
+          fn determinize_to_dwa_internal(&self, simplify_final_states: bool) -> DWA {
+              let now_total = Instant::now();
+
+              // Work on a copy to avoid side effects.
+              let mut nwa = self.clone();
+              crate::debug!(3, "Starting determinization for NWA with {} states", nwa.states.len());
+
+              // Compute future-acceptance masks (used to filter alphabet).
+              let fut = nwa.compute_future_weights();
+
+              // 1) Weight atoms
+              let now_atoms = Instant::now();
+              let atoms = WeightPartition::from_nwa(&nwa);
+              crate::debug!(
+                  4,
+                  "Built weight partition with {} atoms in {:?}",
+                  atoms.intervals.len(),
+                  now_atoms.elapsed()
+              );
+
+              // 2) Alphabet (labels + OTHER), filtered by future weights
+              let now_sigma = Instant::now();
+              let sigma = Alphabet::from_nwa_with_future(&nwa, &fut);
+              crate::debug!(4, "Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed());
+
+              // 3) Per-atom DFAs
+              let pb_atoms = if PROGRESS_BAR_ENABLED {
+                  Some(
+                      ProgressBar::new(atoms.intervals.len() as u64).with_style(
+                          ProgressStyle::default_bar()
+                              .template(
+                                  "{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (per-atom DFAs)",
+                              )
+                              .unwrap(),
+                      ),
+                  )
+              } else {
+                  None
+              };
+
+              let mut comp_dfas: Vec<DetDFA> = Vec::with_capacity(atoms.intervals.len());
+              let mut comp_sinks: Vec<Option<usize>> = Vec::with_capacity(atoms.intervals.len());
+              for (i, atom) in atoms.intervals.iter().enumerate() {
+                  let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
+                  let mut dfa = nfa.determinize(&sigma, simplify_final_states);
+                  dfa.minimize(&sigma);
+                  crate::debug!(4, "Atom {}: interval={:?}, DFA states={}", i, atom, dfa.n_states);
+                  let sink = dfa.find_sink_index(&sigma);
+                  comp_sinks.push(sink);
+                  comp_dfas.push(dfa);
+                  if let Some(p) = &pb_atoms {
+                      p.inc(1);
+                  }
+              }
+              if let Some(p) = pb_atoms {
+                  p.finish_with_message("Per-atom DFAs built & minimized");
+              }
+
+              if 5 <= crate::r#macro::get_macro_debug_level() {
+                  println!("\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
+                  for (i, dfa) in comp_dfas.iter().enumerate() {
+                      println!("  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
+                      println!("    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
+                      for s in 0..dfa.n_states {
+                          let final_marker = if dfa.finals[s] { " (final)" } else { "" };
+                          let mut trans_parts = vec![];
+                          for (sym_idx, &label) in sigma.labels.iter().enumerate() {
+                              let target = dfa.trans[s][sym_idx];
+                              trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+                          }
+                          let other_target = dfa.trans[s][sigma.other_index];
+                          trans_parts.push(format!("*->{}", other_target));
+                          println!("    - State {}{}: {}", s, final_marker, trans_parts.join(", "));
+                      }
+                  }
+              }
+
+              // Edge case: No atoms => no weight can be produced
+              if atoms.intervals.is_empty() {
+                  return DWA::new();
+              }
+
+              // 4) Enumerate reachable product tuples (Vec<Option<usize>>)
+              let now_enum = Instant::now();
+              let k = comp_dfas.len();
+              let mut start_tuple = Vec::with_capacity(k);
+              for i in 0..k {
+                  let s = comp_dfas[i].start;
+                  if let Some(sink) = comp_sinks[i] {
+                      if s == sink {
+                          start_tuple.push(None);
+                      } else {
+                          start_tuple.push(Some(s));
+                      }
+                  } else {
+                      start_tuple.push(Some(s));
+                  }
+              }
+              crate::debug!(
+                  4,
+                  "Computed start tuple in {:?}",
+                  now_enum.elapsed()
+              );
+
+              // 5) Merge tuples greedily and attach transitions/finals from representative tuples
+              let now_merge = Instant::now();
+              let merger_components: Vec<Vec<BTreeMap<usize, usize>>> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
+                  let mut sparse_trans = Vec::with_capacity(dfa.n_states);
+                  for s in 0..dfa.n_states {
+                      let mut exceptions = BTreeMap::new();
+                      if let Some(sink_idx) = sink {
+                          for (sym, &target) in dfa.trans[s].iter().enumerate() {
+                              if target != *sink_idx {
+                                  exceptions.insert(sym, target);
+                              }
+                          }
+                      } else {
+                          // No sink, so all transitions are explicit.
+                          for (sym, &target) in dfa.trans[s].iter().enumerate() {
+                              exceptions.insert(sym, target);
+                          }
+                      }
+                      sparse_trans.push(exceptions);
+                  }
+                  sparse_trans
+              }).collect();
+
+              let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
+                  start_tuple,
+                  &merger_components,
+                  sigma.other_index,
+              );
+              crate::debug!(
+                  4,
+                  "Merged into {} product states in {:?}",
+                  merged_reps.len(),
+                  now_merge.elapsed()
+              );
+
+              // 6) Convert merged product to a DWA
+              let now_convert = Instant::now();
+              let dwa =
+                  build_dwa_from_merged_automaton(&merged_reps, &point_map, &comp_dfas, &atoms.atoms, &sigma);
+              crate::debug!(
+                  4,
+                  "Merged-product -> DWA conversion completed in {:?}",
+                  now_convert.elapsed()
+              );
+
+              crate::debug!(3, "NWA::determinize_to_dwa total time: {:?}", now_total.elapsed());
+
+              dwa
+          }
+      }
+
+      /* ------------------------------
+         Utilities and support structs
+         ------------------------------ */
+
+      /// Alphabet = all labels that appear as exceptions, plus a special OTHER symbol.
+      /// OTHER means "use default transitions"
+      #[derive(Clone, Debug)]
+      struct Alphabet {
+          labels: Vec<i16>, // sorted unique exception labels
+          other_index: usize,
+      }
+      impl Alphabet {
+          fn from_nwa(nwa: &NWA) -> Self {
+              let mut set = BTreeSet::new();
+              for st in &nwa.states.0 {
+                  for (&lbl, _) in &st.transitions {
+                      set.insert(lbl);
+                  }
+                  for def in &st.default {
+                      for &lbl in &def.exceptions {
+                          set.insert(lbl);
+                      }
+                  }
+              }
+              let labels: Vec<i16> = set.into_iter().collect();
+              let other_index = labels.len(); // last slot is OTHER
+              Alphabet { labels, other_index }
+          }
+
+          /// Build an alphabet filtered by future-acceptance masks:
+          /// only keep labels that can actually contribute to acceptance along some path.
+          /// A label is kept if there exists some edge s --lbl/w--> t with (w ∧ F[t]) ≠ ∅,
+          /// or a default s --wdef--> t with (wdef ∧ F[t]) ≠ ∅, in which case we keep the defaults'
+          /// exception labels too (they must be separated from OTHER).
+          fn from_nwa_with_future(nwa: &NWA, fut: &Vec<Weight>) -> Self {
+              let mut set = BTreeSet::new();
+              for (_s, st) in nwa.states.0.iter().enumerate() {
+                  // labeled transitions
+                  for (&lbl, targets) in &st.transitions {
+                      let mut relevant = false;
+                      for (t, w) in targets {
+                          if !(&fut[*t] & w).is_empty() {
+                              relevant = true;
+                              break;
+                          }
+                      }
+                      if relevant {
+                          set.insert(lbl);
+                      }
+                  }
+                  // defaults: if relevant, keep their exception labels
+                  for def in &st.default {
+                      if !(&fut[def.target] & &def.weight).is_empty() {
+                          for &lbl in &def.exceptions {
+                              set.insert(lbl);
+                          }
+                      }
+                  }
+              }
+              let labels: Vec<i16> = set.into_iter().collect();
+              let other_index = labels.len();
+              Alphabet { labels, other_index }
+          }
+          #[inline]
+          fn size(&self) -> usize {
+              self.labels.len() + 1
+          }
+          #[inline]
+          fn index_of_label(&self, l: i16) -> Option<usize> {
+              self.labels.binary_search(&l).ok()
+          }
+          #[inline]
+          fn is_other(&self, sym: usize) -> bool {
+              sym == self.other_index
+          }
+          #[inline]
+          fn label_at(&self, sym: usize) -> Option<i16> {
+              if sym < self.labels.len() {
+                  Some(self.labels[sym])
+              } else {
+                  None
+              }
+          }
+      }
+
+      /// WeightPartition: disjoint contiguous atoms that cover the union of all weights.
+      /// Each atom is a RangeInclusive<usize>.
+      #[derive(Clone, Debug)]
+      struct WeightPartition {
+          intervals: Vec<RangeInclusive<usize>>,
+          atoms: Vec<Weight>, // cached Weight for each interval
+      }
+      impl WeightPartition {
+          fn from_nwa(nwa: &NWA) -> Self {
+              let mut starts: BTreeSet<usize> = BTreeSet::new();
+              let mut ends_plus: BTreeSet<usize> = BTreeSet::new();
+              let mut has_tail_to_max = false;
+
+              let mut feed_weight = |w: &Weight| {
+                  let mut it = w.rsb.ranges();
+                  while let Some(r) = it.next() {
+                      let s = *r.start();
+                      let e = *r.end();
+                      starts.insert(s);
+                      if e == usize::MAX {
+                          has_tail_to_max = true;
+                      } else {
+                          ends_plus.insert(e.saturating_add(1));
+                      }
+                  }
+              };
+
+              for st in &nwa.states.0 {
+                  // final weight
+                  if let Some(w) = &st.final_weight {
+                      if !w.is_empty() {
+                          feed_weight(w);
+                      }
+                  }
+                  // epsilons
+                  for (_, w) in &st.epsilons {
+                      if !w.is_empty() {
+                          feed_weight(w);
+                      }
+                  }
+                  // defaults
+                  for def in &st.default {
+                      if !def.weight.is_empty() {
+                          feed_weight(&def.weight);
+                      }
+                  }
+                  // exceptions
+                  for (_, targets) in &st.transitions {
+                      for (_, w) in targets {
+                          if !w.is_empty() {
+                              feed_weight(w);
+                          }
+                      }
+                  }
+              }
+
+              // If there are no weights at all, the partition is empty.
+              if starts.is_empty() && ends_plus.is_empty() && !has_tail_to_max {
+                  return WeightPartition { intervals: vec![], atoms: vec![] };
+              }
+
+              // Combine and sort all "breakpoints" (start and end+1).
+              let mut breaks: Vec<usize> = starts.union(&ends_plus).copied().collect();
+              breaks.sort_unstable();
+              breaks.dedup();
+              if breaks.is_empty() {
+                  // Only possible if there was at least one ALL weight: single atom [0..=usize::MAX]
+                  let singleton = 0usize..=usize::MAX;
+                  let atom_w: Weight = std::iter::once(singleton.clone()).collect();
+                  return WeightPartition { intervals: vec![singleton], atoms: vec![atom_w] };
+              }
+
+              // Build atoms between consecutive breakpoints; if tail-to-max exists, include final segment.
+              let mut intervals: Vec<RangeInclusive<usize>> = Vec::new();
+              for i in 0..breaks.len().saturating_sub(1) {
+                  let a = breaks[i];
+                  let b_excl = breaks[i + 1];
+                  if a < b_excl {
+                      let b = b_excl - 1;
+                      intervals.push(a..=b);
+                  }
+              }
+              if has_tail_to_max {
+                  if let Some(&last) = breaks.last() {
+                      if last <= usize::MAX {
+                          intervals.push(last..=usize::MAX);
+                      }
+                  }
+              }
+
+              // Cache atom Weights
+              let atoms: Vec<Weight> = intervals
+                  .iter()
+                  .map(|r| {
+                      let r2: RangeInclusive<usize> = (*r.start())..=(*r.end());
+                      std::iter::once(r2).collect()
+                  })
+                  .collect();
+
+              WeightPartition { intervals, atoms }
+          }
+      }
+
+      /* ------------------------------
+         Per-atom NFA and DFA
+         ------------------------------ */
+
+      /// An NFA specialized for a single atom:
+      /// - Keep only edges/defaults/epsilons/finals whose weight intersects the atom.
+      /// - Alphabet is Sigma' (labels + OTHER); on label 'l': exceptions for l (if any) and defaults where l not in exceptions.
+      /// - On OTHER: use defaults.
+      #[derive(Clone, Debug)]
+      struct PerAtomNFA {
+          n: usize,
+          start: usize,
+          finals: Vec<bool>,
+          ex_by_state: Vec<BTreeMap<i16, Vec<usize>>>,
+          def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>>, // list of (target, exceptions)
+          eps_by_state: Vec<Vec<usize>>,
+      }
+      impl PerAtomNFA {
+          fn from_nwa(states: &NWAStates, start: usize, _sigma: &Alphabet, atom: &RangeInclusive<usize>, fut: &[Weight]) -> Self {
+              let n_total = states.len();
+              let atom_w: Weight = std::iter::once((*atom.start())..=(*atom.end())).collect();
+
+              // Live states for this atom: those with F[s] ∧ atom ≠ ∅
+              let mut live = vec![false; n_total];
+              for s in 0..n_total {
+                  if !(&fut[s] & &atom_w).is_empty() {
+                      live[s] = true;
+                  }
+              }
+
+              // If start is not live, return a trivial 1-state NFA (non-final, no edges).
+              if start >= n_total || !live[start] {
+                  return PerAtomNFA {
+                      n: 1,
+                      start: 0,
+                      finals: vec![false],
+                      ex_by_state: vec![BTreeMap::new()],
+                      def_by_state: vec![Vec::new()],
+                      eps_by_state: vec![Vec::new()],
+                  };
+              }
+
+              // BFS to collect only states reachable from start via edges that intersect atom and lead to live targets.
+              let mut visited = vec![false; n_total];
+              let mut order: Vec<usize> = Vec::new();
+              let mut q = VecDeque::new();
+              visited[start] = true;
+              q.push_back(start);
+              order.push(start);
+
+              while let Some(u) = q.pop_front() {
+                  // Epsilons
+                  for (v, w) in &states[u].epsilons {
+                      if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
+                          visited[*v] = true;
+                          q.push_back(*v);
+                          order.push(*v);
+                      }
+                  }
+                  // Labeled
+                  for (_lbl, targets) in &states[u].transitions {
+                      for (v, w) in targets {
+                          if *v < n_total && live[*v] && !(&atom_w & w).is_empty() && !visited[*v] {
+                              visited[*v] = true;
+                              q.push_back(*v);
+                              order.push(*v);
+                          }
+                      }
+                  }
+                  // Defaults
+                  for def in &states[u].default {
+                      let v = def.target;
+                      if v < n_total && live[v] && !(&atom_w & &def.weight).is_empty() && !visited[v] {
+                          visited[v] = true;
+                          q.push_back(v);
+                          order.push(v);
+                      }
+                  }
+              }
+
+              // Compact IDs
+              let m = order.len();
+              let mut id_of = vec![usize::MAX; n_total];
+              for (i, &old) in order.iter().enumerate() {
+                  id_of[old] = i;
+              }
+
+              let mut finals = vec![false; m];
+              let mut ex_by_state: Vec<BTreeMap<i16, Vec<usize>>> = vec![BTreeMap::new(); m];
+              let mut def_by_state: Vec<Vec<(usize, BTreeSet<i16>)>> = vec![Vec::new(); m];
+              let mut eps_by_state: Vec<Vec<usize>> = vec![Vec::new(); m];
+
+              for (new_s, &old_s) in order.iter().enumerate() {
+                  // final
+                  if let Some(w) = &states[old_s].final_weight {
+                      if !(&atom_w & w).is_empty() {
+                          finals[new_s] = true;
+                      }
+                  }
+                  // exceptions for this atom
+                  let mut local_ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+                  for (&lbl, targets) in &states[old_s].transitions {
+                      let mut kept: Vec<usize> = Vec::new();
+                      for (to_old, w) in targets {
+                          if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
+                              let to_new = id_of[*to_old];
+                              if to_new != usize::MAX {
+                                  kept.push(to_new);
+                              }
+                          }
+                      }
+                      if !kept.is_empty() {
+                          kept.sort_unstable();
+                          kept.dedup();
+                          local_ex.insert(lbl, kept);
+                      }
+                  }
+                  ex_by_state[new_s] = local_ex.clone();
+
+                  // default(s) for this atom
+                  for def in &states[old_s].default {
+                      let to_old = def.target;
+                      if to_old < n_total && live[to_old] && !(&atom_w & &def.weight).is_empty() {
+                          let to_new = id_of[to_old];
+                          if to_new != usize::MAX {
+                              def_by_state[new_s].push((to_new, def.exceptions.clone()));
+                          }
+                      }
+                  }
+
+                  // epsilons
+                  for (to_old, w) in &states[old_s].epsilons {
+                      if *to_old < n_total && live[*to_old] && !(&atom_w & w).is_empty() {
+                          let to_new = id_of[*to_old];
+                          if to_new != usize::MAX {
+                              eps_by_state[new_s].push(to_new);
+                          }
+                      }
+                  }
+              }
+
+              let new_start = id_of[start];
+              debug_assert!(new_start != usize::MAX, "start must be visited when live[start] is true");
+              Self { n: m, start: new_start, finals, ex_by_state, def_by_state, eps_by_state }
+          }
+
+          /// Epsilon closure precomputation for each single state.
+          fn eps_closure_per_state(&self) -> Vec<Vec<usize>> {
+              let mut out = vec![Vec::<usize>::new(); self.n];
+              for s in 0..self.n {
+                  let mut visited = vec![false; self.n];
+                  let mut stack = vec![s];
+                  visited[s] = true;
+                  let mut closure = Vec::new();
+                  while let Some(u) = stack.pop() {
+                      closure.push(u);
+                      for &v in &self.eps_by_state[u] {
+                          if v < self.n && !visited[v] {
+                              visited[v] = true;
+                              stack.push(v);
+                          }
+                      }
+                  }
+                  closure.sort_unstable();
+                  out[s] = closure;
+              }
+              out
+          }
+
+          /// Given a set of states, compute epsilon closure (using per-state closures).
+          fn eps_closure_set(&self, base: &[usize], per: &Vec<Vec<usize>>) -> Vec<usize> {
+              let mut mark = vec![false; self.n];
+              let mut result = Vec::new();
+              for &s in base {
+                  if s >= self.n {
+                      continue;
+                  }
+                  for &u in &per[s] {
+                      if !mark[u] {
+                          mark[u] = true;
+                          result.push(u);
+                      }
+                  }
+              }
+              result.sort_unstable();
+              result
+          }
+
+          /// Determinize this NFA to a complete DFA with alphabet Sigma' (labels + OTHER).
+          fn determinize(&self, sigma: &Alphabet, simplify_final_states: bool) -> DetDFA {
+              let per = self.eps_closure_per_state();
+
+              // Start set: closure({start})
+              let start_set = self.eps_closure_set(&[self.start], &per);
+
+              // Subset-to-id interning
+              let mut map: HashMap<Vec<usize>, usize> = HashMap::new();
+              let mut states: Vec<Vec<usize>> = Vec::new();
+              let mut finals: Vec<bool> = Vec::new();
+              let mut trans: Vec<Vec<Option<usize>>> = Vec::new(); // Option for next state; sink if None later
+
+              let pb_subset = if PROGRESS_BAR_ENABLED {
+                  let p = ProgressBar::new_spinner();
+                  p.set_style(
+                      ProgressStyle::default_spinner()
+                          .template("{spinner:.green} [Determinize/Subset: {elapsed_precise}] States found: {pos}")
+                          .unwrap(),
+                  );
+                  Some(p)
+              } else {
+                  None
+              };
+
+              let mut push_state = |subset: Vec<usize>,
+                                    states: &mut Vec<Vec<usize>>,
+                                    finals: &mut Vec<bool>,
+                                    trans: &mut Vec<Vec<Option<usize>>>,
+                                    map: &mut HashMap<Vec<usize>, usize>| {
+                  if let Some(&id) = map.get(&subset) {
+                      return id;
+                  }
+                  let id = states.len();
+                  let is_final = subset.iter().any(|&s| self.finals[s]);
+                  states.push(subset);
+                  finals.push(is_final);
+                  trans.push(vec![None; sigma.size()]);
+                  map.insert(states[id].clone(), id);
+                  id
+              };
+
+              let start_id = push_state(start_set, &mut states, &mut finals, &mut trans, &mut map);
+              if let Some(p) = &pb_subset {
+                  p.set_position(states.len() as u64);
+              }
+
+              let mut q = VecDeque::new();
+              q.push_back(start_id);
+
+              while let Some(u) = q.pop_front() {
+                  let subset = states[u].clone();
+
+                  // For each symbol in Sigma', compute the next subset (then epsilon closure)
+                  for sym in 0..sigma.size() {
+                      let mut next_raw: Vec<usize> = Vec::new();
+
+                      match sigma.label_at(sym) {
+                          Some(lbl) => {
+                              // Label 'lbl': for each s in subset: take explicit transitions on lbl,
+                              // or if none, any default transitions for which lbl is not an exception.
+                              for &s in &subset {
+                                  if let Some(ts) = self.ex_by_state[s].get(&lbl) {
+                                      next_raw.extend_from_slice(ts);
+                                  } else {
+                                      for (target, exceptions) in &self.def_by_state[s] {
+                                          if !exceptions.contains(&lbl) {
+                                              next_raw.push(*target);
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                          None => {
+                              // OTHER: take all default transitions
+                              for &s in &subset {
+                                  for (target, _) in &self.def_by_state[s] {
+                                      next_raw.push(*target);
+                                  }
+                              }
+                          }
+                      }
+
+                      if next_raw.is_empty() {
+                          // Will lead to sink; leave as None for now
+                          continue;
+                      }
+
+                      next_raw.sort_unstable();
+                      next_raw.dedup();
+
+                      let next = self.eps_closure_set(&next_raw, &per);
+                      if next.is_empty() {
+                          continue;
+                      }
+
+                      let v = if let Some(&id) = map.get(&next) {
+                          id
+                      } else {
+                          let id = states.len();
+                          let is_final = next.iter().any(|&s| self.finals[s]);
+                          states.push(next.clone());
+                          finals.push(is_final);
+                          trans.push(vec![None; sigma.size()]);
+                          map.insert(next, id);
+                          if let Some(p) = &pb_subset {
+                              p.set_position(states.len() as u64);
+                          }
+                          q.push_back(id);
+                          id
+                      };
+
+                      trans[u][sym] = Some(v);
+                  }
+              }
+
+              if let Some(p) = pb_subset {
+                  p.finish_with_message(format!("Subset construction done, {} states", states.len()));
+              }
+
+              if simplify_final_states {
+                  // From final states, all transitions go to a sink.
+                  for s in 0..states.len() {
+                      if finals[s] {
+                          trans[s] = vec![None; sigma.size()];
+                      }
+                  }
+              }
+       
+              // Build sink state if any transition is None
+              let needs_sink = trans.iter().any(|row| row.iter().any(|x| x.is_none()));
+              let mut sink_index: Option<usize> = None;
+
+              if needs_sink {
+                  sink_index = Some(trans.len());
+                  trans.push(vec![None; sigma.size()]);
+                  finals.push(false);
+                  states.push(Vec::new()); // empty subset for sink
+              }
+
+              // Fill None transitions with sink (or self-loop if no sink needed)
+              let mut out_trans: Vec<Vec<usize>> = Vec::with_capacity(trans.len());
+              for (i, row) in trans.iter().enumerate() {
+                  let mut new_row = Vec::with_capacity(row.len());
+                  for (_sym, dst) in row.iter().enumerate() {
+                      match dst {
+                          Some(v) => new_row.push(*v),
+                          None => {
+                              if let Some(sink) = sink_index {
+                                  new_row.push(sink);
+                              } else {
+                                  new_row.push(i); // complete with self (won't happen unless needs_sink=false)
+                              }
+                          }
+                      }
+                  }
+                  out_trans.push(new_row);
+              }
+
+              DetDFA {
+                  n_states: out_trans.len(),
+                  start: start_id,
+                  finals,
+                  trans: out_trans,
+              }
+          }
+      }
+
+      /// Deterministic complete DFA (over Sigma').
+      #[derive(Clone, Debug)]
+      struct DetDFA {
+          n_states: usize,
+          start: usize,
+          finals: Vec<bool>,
+          trans: Vec<Vec<usize>>, // [state][symbol] -> next state
+      }
+      impl DetDFA {
+          fn minimize(&mut self, sigma: &Alphabet) {
+              crate::debug!(4, "Minimizing DFA with {} states", self.n_states);
+              // Remove states unreachable from start first
+              let reachable = {
+                  let mut visited = vec![false; self.n_states];
+                  let mut q = VecDeque::new();
+                  visited[self.start] = true;
+                  q.push_back(self.start);
+                  while let Some(u) = q.pop_front() {
+                      for &v in &self.trans[u] {
+                          if !visited[v] {
+                              visited[v] = true;
+                              q.push_back(v);
+                          }
+                      }
+                  }
+                  visited
+              };
+
+              // Map reachable states to compact ids
+              let mut map = vec![usize::MAX; self.n_states];
+              let mut new_states = 0usize;
+              for i in 0..self.n_states {
+                  if reachable[i] {
+                      map[i] = new_states;
+                      new_states += 1;
+                  }
+              }
+
+              if new_states == 0 {
+                  // No reachable states? Create a single dead state.
+                  self.n_states = 1;
+                  self.start = 0;
+                  self.finals = vec![false];
+                  self.trans = vec![vec![0; sigma.size()]];
+                  return;
+              }
+
+              let mut finals = vec![false; new_states];
+              let mut trans = vec![vec![0usize; sigma.size()]; new_states];
+
+              for i in 0..self.n_states {
+                  if !reachable[i] {
+                      continue;
+                  }
+                  let ni = map[i];
+                  finals[ni] = self.finals[i];
+                  for a in 0..sigma.size() {
+                      let v = self.trans[i][a];
+                      trans[ni][a] = map[v];
+                  }
+              }
+
+              self.n_states = new_states;
+              self.start = map[self.start];
+              self.finals = finals;
+              self.trans = trans;
+
+              // Hopcroft minimization on complete DFA
+              if self.n_states <= 1 {
+                  return;
+              }
+
+              let n = self.n_states;
+              let a = sigma.size();
+
+              // Initial partition: accepting vs non-accepting
+              let mut part_id = vec![0usize; n];
+              let mut blocks: Vec<Vec<usize>> = Vec::new();
+              let (accepting_block, non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| self.finals[s]);
+
+              if accepting_block.is_empty() || non_accepting_block.is_empty() {
+                  // All accepting or all non-accepting -> nothing to split
+                  return;
+              }
+              blocks.push(accepting_block);
+              blocks.push(non_accepting_block);
+              for (pid, block) in blocks.iter().enumerate() { for &s in block { part_id[s] = pid; } }
+
+              // Build inverse transitions for each symbol
+              let mut inv: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); n]; a];
+              for s in 0..n { for sym in 0..a { let v = self.trans[s][sym]; inv[sym][v].push(s); } }
+
+              // Worklist of (block id, symbol).
+              let mut worklist: BTreeSet<(usize, usize)> = BTreeSet::new();
+              let smaller_initial_set = if blocks[0].len() <= blocks[1].len() { 0 } else { 1 };
+              for sym in 0..a {
+                  worklist.insert((smaller_initial_set, sym));
+              }
+
+              let pb_hopcroft = if PROGRESS_BAR_ENABLED {
+                  let p = ProgressBar::new_spinner();
+                  p.set_style(
+                      ProgressStyle::default_spinner()
+                          .template(
+                              "{spinner:.green} [Determinize/Minimize: {elapsed_precise}] Pass {pos}, worklist size: {msg}",
+                          )
+                          .unwrap(),
+                  );
+                  Some(p)
+              } else {
+                  None
+              };
+              let mut passes = 0u64;
+
+              while let Some(&(b, sym)) = worklist.iter().next() {
+                  worklist.remove(&(b, sym));
+
+                  if let Some(p) = &pb_hopcroft {
+                      passes += 1;
+                      p.set_position(passes);
+                      p.set_message(format!("{}", worklist.len()));
+                  }
+
+                  // Compute preimage of block b under symbol sym
+                  let mut pre: Vec<usize> = Vec::new();
+                  for &v in &blocks[b] { pre.extend_from_slice(&inv[sym][v]); }
+                  if pre.is_empty() {
+                      continue;
+                  }
+                  pre.sort_unstable();
+                  pre.dedup();
+
+                  // For each block, split by intersection with pre
+                  let mut affected: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
+                  for &s in &pre { let pid = part_id[s]; affected.entry(pid).or_default().0.push(s); }
+                  for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
+                      // Fill not_in_pre
+                      for &s in &blocks[*pid] { if !in_pre.binary_search(&s).is_ok() { not_in_pre.push(s); } }
+                  }
+
+                  let mut to_replace: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
+
+                  for (pid, (in_pre, not_in_pre)) in affected.into_iter() {
+                      if in_pre.is_empty() || not_in_pre.is_empty() {
+                          continue;
+                      }
+                      to_replace.push((pid, in_pre, not_in_pre));
+                  }
+
+                  if to_replace.is_empty() {
+                      continue;
+                  }
+
+                  // Apply replacements (block splits)
+                  for (pid, mut in_pre, mut not_in_pre) in to_replace {
+                      in_pre.sort_unstable();
+                      not_in_pre.sort_unstable();
+
+                      let pid2 = blocks.len();
+                      blocks.push(not_in_pre);
+                      blocks[pid] = in_pre;
+
+                      // Update part_id map for all states in the newly created blocks
+                      for &s in &blocks[pid] { part_id[s] = pid; }
+                      for &s in &blocks[pid2] { part_id[s] = pid2; }
+
+                      // Update worklist according to Hopcroft's algorithm
+                      for sym2 in 0..a {
+                          if worklist.remove(&(pid, sym2)) {
+                              // The original block was on the worklist. Replace it with both new blocks.
+                              worklist.insert((pid, sym2));
+                              worklist.insert((pid2, sym2));
+                          } else {
+                              // The original block was not on the worklist. Add the smaller of the two new blocks.
+                              let (smaller_pid, _) = if blocks[pid].len() <= blocks[pid2].len() { (pid, pid2) } else { (pid2, pid) };
+                              worklist.insert((smaller_pid, sym2));
+                          }
+                      }
+                  }
+              }
+
+              if let Some(p) = pb_hopcroft {
+                  p.finish_with_message(format!("Hopcroft done, {} partitions", blocks.len()));
+              }
+
+              // Build the quotient automaton
+              let num_parts = blocks.len();
+              let mut repr: Vec<usize> = vec![0; num_parts];
+              for (pid, block) in blocks.iter().enumerate() { repr[pid] = block[0]; }
+
+              let start_part = part_id[self.start];
+              let mut finals2 = vec![false; num_parts];
+              for pid in 0..num_parts {
+                  finals2[pid] = self.finals[repr[pid]];
+              }
+
+              let mut trans2 = vec![vec![0usize; a]; num_parts];
+              for pid in 0..num_parts {
+                  let s = repr[pid];
+                  for sym in 0..a {
+                      let v = self.trans[s][sym];
+                      trans2[pid][sym] = part_id[v];
+                  }
+              }
+
+              self.n_states = num_parts;
+              self.start = start_part;
+              self.finals = finals2;
+              self.trans = trans2;
+          }
+
+          /// Find an index of a sink state (if any), defined as a non-accepting state whose transitions on all symbols loop to itself.
+          fn find_sink_index(&self, sigma: &Alphabet) -> Option<usize> {
+              'outer: for s in 0..self.n_states {
+                  if self.finals[s] {
+                      continue;
+                  }
+                  for sym in 0..sigma.size() {
+                      if self.trans[s][sym] != s {
+                          continue 'outer;
+                      }
+                  }
+                  return Some(s);
+              }
+              None
+          }
+      }
+
+      /* ------------------------------
+         Tuple enumeration and merging
+         ------------------------------ */
+
+      /* ------------------------------
+         Build DWA from merged product
+         ------------------------------ */
+
+      fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &tuple_merger::ProductTuple) -> Weight {
+          let mut w = Weight::zeros();
+          for (i, pos) in tuple.iter().enumerate() {
+              if pos.is_some() {
+                  w |= &atom_weights[i];
+              }
+          }
+          w
+      }
+
+      fn build_dwa_from_merged_automaton(
+          merged_reps: &[tuple_merger::ProductTuple],
+          point_map: &HashMap<tuple_merger::ProductTuple, usize>,
+          comps: &[DetDFA],
+          atom_weights: &Vec<Weight>,
+          sigma: &Alphabet,
+      ) -> DWA {
+          let mut dwa_states = DWAStates::default();
+          for _ in 0..merged_reps.len() {
+              dwa_states.add_state();
+          }
+          let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: 0 } };
+
+          // We need a way to compute successor tuples to determine edge weights.
+          // Re-create the component structures for the tuple_merger.
+          let merger_components: Vec<Vec<BTreeMap<usize, usize>>> = comps.iter().map(|dfa| {
+              let sink = dfa.find_sink_index(sigma);
+              let mut sparse_trans = Vec::with_capacity(dfa.n_states);
+              for s in 0..dfa.n_states {
+                  let mut exceptions = BTreeMap::new();
+                  if let Some(sink_idx) = sink {
+                      for (sym, &target) in dfa.trans[s].iter().enumerate() {
+                          if target != sink_idx {
+                              exceptions.insert(sym, target);
+                          }
+                      }
+                  } else {
+                      for (sym, &target) in dfa.trans[s].iter().enumerate() {
+                          exceptions.insert(sym, target);
+                      }
+                  }
+                  sparse_trans.push(exceptions);
+              }
+              sparse_trans
+          }).collect();
+
+          for (sid, rep) in merged_reps.iter().enumerate() {
+              // Final weight
+              let mut w_final = Weight::zeros();
+              for (i, pos) in rep.iter().enumerate() {
+                  if let Some(s) = pos {
+                      if comps[i].finals[*s] {
+                          w_final |= &atom_weights[i];
+                      }
+                  }
+              }
+              if !w_final.is_empty() {
+                  let _ = dwa.set_final_weight(sid, w_final);
+              }
+
+              // Default (OTHER)
+              let def_succ_tuple = tuple_merger::successor_tuple(rep, sigma.other_index, &merger_components);
+              let def_to_id =
+                  *point_map.get(&def_succ_tuple).expect("Default successor tuple must be mapped");
+              let def_w = edge_weight_from_tuple(atom_weights, &def_succ_tuple);
+              let _ = dwa.set_default_transition(sid, def_to_id, def_w);
+
+              // Exceptions
+              for (li, &lbl) in sigma.labels.iter().enumerate() {
+                  let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
+                  let to_id =
+                      *point_map.get(&succ_tuple).expect("Successor tuple must be mapped");
+                  let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
+                  let _ = dwa.add_transition(sid, lbl, to_id, w);
+              }
+          }
+
+          dwa
+      }
+
+      /* ------------------------------
+         End of merged determinization
+         ------------------------------ */
+
+      ```
+    metadata:
+      filename: src/precompute4/weighted_automata/determinization.rs
+  - user: |-
+      ```rust "src/precompute4/weighted_automata/tuple_merger.rs"
+      #![allow(dead_code)]
+
+      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+
+      pub type ProductTuple = Vec<Option<usize>>;
+
+      fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
+          if a.len() != b.len() {
+              return None;
+          }
+          let mut out = Vec::with_capacity(a.len());
+          for i in 0..a.len() {
+              match (a[i], b[i]) {
+                  (Some(x), Some(y)) => {
+                      if x == y {
+                          out.push(Some(x));
+                      } else {
+                          return None;
+                      }
+                  }
+                  (Some(x), None) => out.push(Some(x)),
+                  (None, Some(y)) => out.push(Some(y)),
+                  (None, None) => out.push(None),
+              }
+          }
+          Some(out)
+      }
+
+      pub fn successor_tuple(
+          tuple: &ProductTuple,
+          symbol: usize,
+          components: &[Vec<BTreeMap<usize, usize>>],
+      ) -> ProductTuple {
+          let k = components.len();
+          let mut out = Vec::with_capacity(k);
+          for i in 0..k {
+              match tuple[i] {
+                  Some(s) => {
+                      if let Some(&v) = components[i][s].get(&symbol) {
+                          out.push(Some(v));
+                      } else {
+                          out.push(None);
+                      }
+                  }
+                  None => {
+                      out.push(None);
+                  }
+              }
+          }
+          out
+      }
+
+      pub fn merge_and_build_automaton(
+          start_tuple: ProductTuple,
+          components: &[Vec<BTreeMap<usize, usize>>],
+          other_index: usize,
+      ) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>) {
+          let mut states: Vec<ProductTuple> = Vec::new();
+          let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
+          let mut worklist: VecDeque<usize> = VecDeque::new();
+
+          let start_id = 0;
+          states.push(start_tuple.clone());
+          point_map.insert(start_tuple, start_id);
+          worklist.push_back(start_id);
+
+          while let Some(state_id) = worklist.pop_front() {
+              let representative = states[state_id].clone();
+
+              let mut alphabet = BTreeSet::new();
+              for (i, comp_state_opt) in representative.iter().enumerate() {
+                  if let Some(comp_state) = comp_state_opt {
+                      for &symbol in components[i][*comp_state].keys() {
+                          alphabet.insert(symbol);
+                      }
+                  }
+              }
+              alphabet.insert(other_index);
+
+              for symbol in alphabet {
 
                   let successor = successor_tuple(&representative, symbol, components);
 
@@ -4026,19 +3996,7 @@ messages:
               }
           }
 
-          let mut final_states = Vec::with_capacity(states.len());
-          for (id, rep) in states.iter().enumerate() {
-              let transitions = (0..alphabet_size)
-                  .map(|symbol| {
-                      let succ = successor_tuple(rep, symbol, components);
-                      *point_map.get(&succ).expect("Successor point must have an assigned state")
-                  })
-                  .collect();
-
-              final_states.push(MergedState { id, representative_tuple: rep.clone(), transitions });
-          }
-
-          MergedAutomaton { states: final_states, start_state_id: 0 }
+          (states, point_map)
       }
 
       #[cfg(test)]
@@ -4056,23 +4014,22 @@ messages:
 
           #[test]
           fn test_simple_merge() {
-              let comp0 = Component { transitions: vec![BTreeMap::from([(0, 0)])] };
-              let comp1 = Component { transitions: vec![BTreeMap::from([(1, 0)])] };
+              let comp0 = vec![BTreeMap::from([(0, 0)])];
+              let comp1 = vec![BTreeMap::from([(1, 0)])];
               let components = vec![comp0, comp1];
-              let alphabet_size = 2;
+              let other_index = 2;
 
               let start_tuple = vec![Some(0), Some(0)];
 
-              let automaton = merge_and_build_automaton(start_tuple, &components, alphabet_size);
+              let (states, point_map) = merge_and_build_automaton(start_tuple, &components, other_index);
 
-              assert_eq!(automaton.states.len(), 1);
+              assert_eq!(states.len(), 1);
+              assert_eq!(states[0], vec![Some(0), Some(0)]);
 
-              let s0_id = automaton.start_state_id;
-              assert_eq!(automaton.states[s0_id].representative_tuple, vec![Some(0), Some(0)]);
-
-              assert_eq!(automaton.states[s0_id].transitions[0], s0_id);
-
-              assert_eq!(automaton.states[s0_id].transitions[1], s0_id);
+              let succ0 = successor_tuple(&states[0], 0, &components);
+              let succ1 = successor_tuple(&states[0], 1, &components);
+              assert_eq!(*point_map.get(&succ0).unwrap(), 0);
+              assert_eq!(*point_map.get(&succ1).unwrap(), 0);
           }
       }
 
@@ -4080,21 +4037,7 @@ messages:
     metadata:
       filename: src/precompute4/weighted_automata/tuple_merger.rs
   - user: |-
-      Make all these changes:
-
-      Modify `MergedState` so that `transitions` has type `BTreeMap<usize, usize>`.
-
-      Modify src/precompute4/weighted_automata/tuple_merger.rs to simplify the types involved.
-      Remove `MergedAutomaton`. Just make the initial state state 0 by default. So just return from `merge_and_build_automaton` a states vec.
-      Remove `MergedState`. Its ID should be evident from its position in the states vec. Do keep `representative_tuple`. So make it so `MergedState` is a 2-tuple.
-      Remove `Components`. Instead of wrapping in `Components`, just deal with `Vec<BTreeMap<usize, usize>>` directly.
-
-      Modify `merge_and_build_automaton` so it doesn't require `alphabet_size`.
-      How do we make `for symbol in 0..alphabet_size {` work then?
-      Well, right before it, after `let representative = states[state_id].clone();`, loop through the components for each element in the tuple and gather the relevant parts of the alphabet.
-
-      Ensure it's functionally equivalent.
-
+      But there has to be a more elegant solution than burdening `src/precompute4/weighted_automata/tuple_merger.rs` with this knowledge of other_index. We want to keep src/precompute4/weighted_automata/tuple_merger.rs as simple as possible. How else could we make it work? It should be functionally equivalent...
       Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your output.
     metadata:
   - user: |-
@@ -4115,453 +4058,107 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to apply the requested changes, followed by the git diffs for each file.
+      Of course. You've identified a subtle but important design issue. Coupling the generic `tuple_merger` logic to a special symbol like `other_index` is not ideal. A more elegant and robust solution involves making the tuple merger agnostic to the semantics of the alphabet symbols it processes.
 
-      ### Step-by-step Instructions
+      Here is my hypothesis, proof, and the step-by-step implementation of the solution.
 
-      #### 1. Refactor `src/precompute4/weighted_automata/tuple_merger.rs`
+      ### Hypothesis and Mathematical Justification
 
-      This file will be significantly simplified. The `Component`, `MergedState`, and `MergedAutomaton` structs will be removed. The main function `merge_and_build_automaton` will be updated to only discover the merged states and their representative tuples, without calculating the full transition table. It will return the representatives and a map from raw successor tuples to their corresponding merged state ID.
+      **Hypothesis:** The responsibility of defining the alphabet of transitions to explore should belong to the caller (`determinization.rs`), not the `tuple_merger`. The `tuple_merger` should be a generic engine that, given a state, explores transitions for all symbols in a provided alphabet to find all reachable successor states.
 
-      1.  **Remove Structs**: Delete the struct definitions for `Component`, `MergedState`, and `MergedAutomaton`.
-      2.  **Update `successor_tuple`**:
-          *   Change the type of the `components` parameter from `&[Component]` to `&[Vec<BTreeMap<usize, usize>>]`.
-          *   Update the access inside the function from `components[i].transitions[s]` to `components[i][s]`.
-      3.  **Update `merge_and_build_automaton`**:
-          *   Change the signature to accept `components: &[Vec<BTreeMap<usize, usize>>]` and remove the `alphabet_size` parameter.
-          *   Change the return type to `(Vec<ProductTuple>, HashMap<ProductTuple, usize>)`.
-          *   In the main `while` loop, dynamically build a set of relevant alphabet symbols for the current state to guide the exploration, instead of iterating from `0` to `alphabet_size`.
-          *   Remove the final loop that builds `final_states` with transitions.
-          *   Return the `states` vector (containing the representative tuples) and the `point_map`.
-      4.  **Update Tests**:
-          *   In `test_simple_merge`, remove the usage of the `Component` struct.
-          *   Update the call to `merge_and_build_automaton` and adjust the assertions to match its new return type. The test will now verify the returned representatives and the structure of the automaton.
+      **Mathematical Model:**
+      The process of creating a deterministic automaton from a product of component DFAs involves exploring the reachable state space of the product automaton.
+      - A state in the product automaton is a tuple `S = (s_1, s_2, ..., s_k)`, where `s_i` is a state in the `i`-th component DFA (or a special sink state, represented by `None`).
+      - The alphabet `Σ'` is the set of all symbols on which transitions are defined (in our case, `sigma.labels` plus the `OTHER` symbol).
+      - The transition function of the product automaton is `δ(S, a) = (δ_1(s_1, a), δ_2(s_2, a), ..., δ_k(s_k, a))` for any symbol `a ∈ Σ'`.
 
-      #### 2. Update `src/precompute4/weighted_automata/determinization.rs`
+      **Proof of Correctness for the Proposed Change:**
+      The goal of the `merge_and_build_automaton` function is to find all states reachable from the `start_tuple`. A state `S'` is reachable if there is a sequence of symbols `a_1, a_2, ..., a_n` such that `S' = δ(...δ(start_tuple, a_1)..., a_n)`.
 
-      This file needs to be adapted to the new, simpler interface of `tuple_merger.rs`.
+      The current implementation attempts to optimize this exploration by only considering symbols that have an explicit non-sink transition from the current state, plus the special `other_index`. This is a heuristic. If a symbol `a` causes *all* components of a state `S` to transition to their respective sinks, the current logic would not explore the transition on `a` (unless `a` is `other_index`). This could potentially miss the "all-sink" tuple if it's only reachable via such a symbol.
 
-      1.  **Update `merger_components` Creation**: When creating `merger_components`, it should now be of type `Vec<Vec<BTreeMap<usize, usize>>>`. Remove the `tuple_merger::Component` wrapper.
-      2.  **Update Call to `merge_and_build_automaton`**:
-          *   Modify the call to remove the `sigma.size()` argument.
-          *   Store the returned tuple of `(reps, map)` in new variables, for example, `merged_reps` and `point_map`.
-          *   Update the debug message to print the length of `merged_reps`.
-      3.  **Update `build_dwa_from_merged_automaton`**:
-          *   Change the first parameter from `merged_automaton: &tuple_merger::MergedAutomaton` to `merged_reps: &[tuple_merger::ProductTuple]` and add a new parameter `point_map: &HashMap<tuple_merger::ProductTuple, usize>`.
-          *   The DWA's start state is now hardcoded to `0`.
-          *   The re-creation of `merger_components` inside this function needs to be updated to the new type without the `Component` wrapper.
-          *   The main loop should now iterate over `merged_reps.iter().enumerate()`.
-          *   Inside the loop, remove all references to `state.transitions`. Instead, for each symbol in `sigma` (both default and exceptions), calculate the successor tuple using `tuple_merger::successor_tuple`, look up its ID in the `point_map`, and use that to build the DWA transitions.
+      The proposed solution is to iterate over the *entire* alphabet `Σ'` for every state being processed. This guarantees that all possible one-step transitions from all reachable states are explored. By induction, this guarantees that the entire reachable state space is discovered.
 
-      ### Git Diffs
+      This change is not only more elegant and decouples the modules, but it is also more robust and formally correct, as it performs a standard breadth-first search on the product automaton's state graph without making assumptions about the transition structure.
 
-      Here are the git diffs to apply these changes.
+      ### Step-by-Step Instructions
 
-      ```diff
-      --- a/src/precompute4/weighted_automata/determinization.rs
-      +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -151,7 +151,7 @@
-       
-               // 5) Merge tuples greedily and attach transitions/finals from representative tuples
-               let now_merge = Instant::now();
-      -        let merger_components: Vec<tuple_merger::Component> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
-      +        let merger_components: Vec<Vec<BTreeMap<usize, usize>>> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
-                   let mut sparse_trans = Vec::with_capacity(dfa.n_states);
-                   for s in 0..dfa.n_states {
-                       let mut exceptions = BTreeMap::new();
-      @@ -168,26 +168,25 @@
-                       }
-                       sparse_trans.push(exceptions);
-                   }
-      -            tuple_merger::Component { transitions: sparse_trans }
-      +            sparse_trans
-               }).collect();
-       
-      -        let merged_automaton = tuple_merger::merge_and_build_automaton(
-      +        let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
-                   start_tuple,
-                   &merger_components,
-      -            sigma.size(),
-               );
-               crate::debug!(
-                   4,
-                   "Merged into {} product states in {:?}",
-      -            merged_automaton.states.len(),
-      +            merged_reps.len(),
-                   now_merge.elapsed()
-               );
-       
-               // 6) Convert merged product to a DWA
-               let now_convert = Instant::now();
-      -        let dwa = build_dwa_from_merged_automaton(&merged_automaton, &comp_dfas, &atoms.atoms, &sigma);
-      +        let dwa =
-      +            build_dwa_from_merged_automaton(&merged_reps, &point_map, &comp_dfas, &atoms.atoms, &sigma);
-               crate::debug!(
-                   4,
-                   "Merged-product -> DWA conversion completed in {:?}",
-      @@ -909,21 +908,22 @@
-       }
-       
-       fn build_dwa_from_merged_automaton(
-      -    merged_automaton: &tuple_merger::MergedAutomaton,
-      +    merged_reps: &[tuple_merger::ProductTuple],
-      +    point_map: &HashMap<tuple_merger::ProductTuple, usize>,
-           comps: &[DetDFA],
-           atom_weights: &Vec<Weight>,
-           sigma: &Alphabet,
-       ) -> DWA {
-           let mut dwa_states = DWAStates::default();
-      -    for _ in 0..merged_automaton.states.len() {
-      +    for _ in 0..merged_reps.len() {
-               dwa_states.add_state();
-           }
-      -    let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: merged_automaton.start_state_id } };
-      +    let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: 0 } };
-       
-           // We need a way to compute successor tuples to determine edge weights.
-           // Re-create the component structures for the tuple_merger.
-      -    let merger_components: Vec<tuple_merger::Component> = comps.iter().map(|dfa| {
-      +    let merger_components: Vec<Vec<BTreeMap<usize, usize>>> = comps.iter().map(|dfa| {
-               let sink = dfa.find_sink_index(sigma);
-               let mut sparse_trans = Vec::with_capacity(dfa.n_states);
-               for s in 0..dfa.n_states {
-      @@ -940,13 +940,11 @@
-                   }
-                   sparse_trans.push(exceptions);
-               }
-      -        tuple_merger::Component { transitions: sparse_trans }
-      +        sparse_trans
-           }).collect();
-       
-      -    for state in &merged_automaton.states {
-      -        let sid = state.id;
-      -        let rep = &state.representative_tuple;
-      -
-      +    for (sid, rep) in merged_reps.iter().enumerate() {
-               // Final weight
-               let mut w_final = Weight::zeros();
-               for (i, pos) in rep.iter().enumerate() {
-      @@ -961,15 +959,17 @@
-               }
-       
-               // Default (OTHER)
-      -        let def_to_id = state.transitions[sigma.other_index];
-               let def_succ_tuple = tuple_merger::successor_tuple(rep, sigma.other_index, &merger_components);
-      +        let def_to_id =
-      +            *point_map.get(&def_succ_tuple).expect("Default successor tuple must be mapped");
-               let def_w = edge_weight_from_tuple(atom_weights, &def_succ_tuple);
-               let _ = dwa.set_default_transition(sid, def_to_id, def_w);
-       
-               // Exceptions
-               for (li, &lbl) in sigma.labels.iter().enumerate() {
-      -            let to_id = state.transitions[li];
-                   let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
-      +            let to_id =
-      +                *point_map.get(&succ_tuple).expect("Successor tuple must be mapped");
-                   let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
-                   let _ = dwa.add_transition(sid, lbl, to_id, w);
-               }
+      Here are the precise edits to implement this refactoring:
 
-      ``````diff
-      --- a/src/precompute4/weighted_automata/tuple_merger.rs
-      +++ b/src/precompute4/weighted_automata/tuple_merger.rs
-      @@ -1,26 +1,6 @@
-       #![allow(dead_code)]
-       
-      -use std::collections::{BTreeMap, HashMap, VecDeque};
-      -
-      -#[derive(Clone, Debug)]
-      -pub struct Component {
-      -    pub transitions: Vec<BTreeMap<usize, usize>>,
-      -}
-      -
-      -#[derive(Clone, Debug)]
-      -pub struct MergedState {
-      -    pub id: usize,
-      -    pub representative_tuple: ProductTuple,
-      -    pub transitions: Vec<usize>,
-      -}
-      -
-      -#[derive(Clone, Debug)]
-      -pub struct MergedAutomaton {
-      -    pub states: Vec<MergedState>,
-      -    pub start_state_id: usize,
-      -}
-      +use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-       
-       pub type ProductTuple = Vec<Option<usize>>;
-       
-      @@ -46,12 +26,16 @@
-           Some(out)
-       }
-       
-      -pub fn successor_tuple(tuple: &ProductTuple, symbol: usize, components: &[Component]) -> ProductTuple {
-      +pub fn successor_tuple(
-      +    tuple: &ProductTuple,
-      +    symbol: usize,
-      +    components: &[Vec<BTreeMap<usize, usize>>],
-      +) -> ProductTuple {
-           let k = components.len();
-           let mut out = Vec::with_capacity(k);
-           for i in 0..k {
-               match tuple[i] {
-                   Some(s) => {
-      -                if let Some(&v) = components[i].transitions[s].get(&symbol) {
-      +                if let Some(&v) = components[i][s].get(&symbol) {
-                           out.push(Some(v));
-                       } else {
-                           out.push(None);
-      @@ -66,9 +50,8 @@
-       
-       pub fn merge_and_build_automaton(
-           start_tuple: ProductTuple,
-      -    components: &[Component],
-      -    alphabet_size: usize,
-      -) -> MergedAutomaton {
-      +    components: &[Vec<BTreeMap<usize, usize>>],
-      +) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>) {
-           let mut states: Vec<ProductTuple> = Vec::new();
-           let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
-           let mut worklist: VecDeque<usize> = VecDeque::new();
-      @@ -81,7 +64,17 @@
-           while let Some(state_id) = worklist.pop_front() {
-               let representative = states[state_id].clone();
-       
-      -        for symbol in 0..alphabet_size {
-      +        let mut alphabet = BTreeSet::new();
-      +        for (i, comp_state_opt) in representative.iter().enumerate() {
-      +            if let Some(comp_state) = comp_state_opt {
-      +                for &symbol in components[i][*comp_state].keys() {
-      +                    alphabet.insert(symbol);
-      +                }
-      +            }
-      +        }
-      +
-      +        for symbol in alphabet {
-       
-                   let successor = successor_tuple(&representative, symbol, components);
-       
-      @@ -113,20 +106,7 @@
-               }
-           }
-       
-      -    let mut final_states = Vec::with_capacity(states.len());
-      -    for (id, rep) in states.iter().enumerate() {
-      -        let transitions = (0..alphabet_size)
-      -            .map(|symbol| {
-      -                let succ = successor_tuple(rep, symbol, components);
-      -                *point_map.get(&succ).expect("Successor point must have an assigned state")
-      -            })
-      -            .collect();
-      -
-      -        final_states.push(MergedState { id, representative_tuple: rep.clone(), transitions });
-      -    }
-      -
-      -    MergedAutomaton { states: final_states, start_state_id: 0 }
-      +    (states, point_map)
-       }
-       
-       #[cfg(test)]
-      @@ -143,23 +123,20 @@
-       
-           #[test]
-           fn test_simple_merge() {
-      -        let comp0 = Component { transitions: vec![BTreeMap::from([(0, 0)])] };
-      -        let comp1 = Component { transitions: vec![BTreeMap::from([(1, 0)])] };
-      +        let comp0 = vec![BTreeMap::from([(0, 0)])];
-      +        let comp1 = vec![BTreeMap::from([(1, 0)])];
-               let components = vec![comp0, comp1];
-      -        let alphabet_size = 2;
-       
-               let start_tuple = vec![Some(0), Some(0)];
-       
-      -        let automaton = merge_and_build_automaton(start_tuple, &components, alphabet_size);
-      +        let (states, point_map) = merge_and_build_automaton(start_tuple, &components);
-       
-      -        assert_eq!(automaton.states.len(), 1);
-      +        assert_eq!(states.len(), 1);
-      +        assert_eq!(states[0], vec![Some(0), Some(0)]);
-       
-      -        let s0_id = automaton.start_state_id;
-      -        assert_eq!(automaton.states[s0_id].representative_tuple, vec![Some(0), Some(0)]);
-      -
-      -        assert_eq!(automaton.states[s0_id].transitions[0], s0_id);
-      -
-      -        assert_eq!(automaton.states[s0_id].transitions[1], s0_id);
-      +        let succ0 = successor_tuple(&states[0], 0, &components);
-      +        let succ1 = successor_tuple(&states[0], 1, &components);
-      +        assert_eq!(*point_map.get(&succ0).unwrap(), 0);
-      +        assert_eq!(*point_map.get(&succ1).unwrap(), 0);
-           }
-       }
+      1.  **In `src/precompute4/weighted_automata/tuple_merger.rs`:**
+          *   Modify the signature of `merge_and_build_automaton` to accept the total alphabet size instead of the specific `other_index`.
+              -   Change `other_index: usize` to `alphabet_size: usize`.
+          *   In the body of the function, replace the logic that builds a `BTreeSet` of symbols with a simple loop from `0` to `alphabet_size`.
+          *   Update the test `test_simple_merge` to reflect this new signature, passing `3` as the alphabet size (for symbols `0`, `1`, and `OTHER`).
 
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/weighted_automata/determinization.rs
-      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/precompute4/weighted_automata/tuple_merger.rs
-      Applying patch to 'src/precompute4/weighted_automata/tuple_merger.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/tuple_merger.rs.
-    metadata:
-  - user: 'Changes committed with message: "Refactor tuple merger to simplify types
-      and dynamically determine alphabet for successor calculation"'
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/tuple_merger.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |+
-      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:46: Starting determinization for NWA with 7 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Built weight partition with 3 atoms in 818µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:64: Built alphabet with 3 labels in 583.208µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:749: Minimizing DFA with 4 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:87: Atom 0: interval=0..=0, DFA states=4
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:749: Minimizing DFA with 4 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:87: Atom 1: interval=1..=1, DFA states=4
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:749: Minimizing DFA with 2 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:87: Atom 2: interval=2..=18446744073709551615, DFA states=2
-
-      --- Atomic DFAs (3 total) ---
-        DFA 0 (for atom 0..=0):
-          - States: 4, Start: 2, Sink: Some(3)
-          - State 0 (final): 97->3, 98->3, 99->3, *->3
-          - State 1: 97->3, 98->3, 99->0, *->3
-          - State 2: 97->1, 98->3, 99->3, *->3
-          - State 3: 97->3, 98->3, 99->3, *->3
-        DFA 1 (for atom 1..=1):
-          - States: 4, Start: 2, Sink: Some(3)
-          - State 0 (final): 97->3, 98->3, 99->3, *->3
-          - State 1: 97->3, 98->3, 99->0, *->3
-          - State 2: 97->3, 98->1, 99->3, *->3
-          - State 3: 97->3, 98->3, 99->3, *->3
-        DFA 2 (for atom 2..=18446744073709551615):
-          - States: 2, Start: 0, Sink: Some(1)
-          - State 0: 97->1, 98->1, 99->1, *->1
-          - State 1: 97->1, 98->1, 99->1, *->1
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:139: Computed start tuple in 21.542µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:172: Merged into 3 product states in 441.542µs
-
-
-      thread 'precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence' (14928653) panicked at src/precompute4/weighted_automata/determinization.rs:1038:45:
-      Default successor tuple must be mapped
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::panic_display
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:259:5
-         3: core::option::expect_failed
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/option.rs:2139:5
-         4: core::option::Option<T>::expect
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:964:21
-         5: sep1::precompute4::weighted_automata::determinization::build_dwa_from_merged_automaton
-                   at ./src/precompute4/weighted_automata/determinization.rs:1038:45
-         6: sep1::precompute4::weighted_automata::determinization::<impl sep1::precompute4::weighted_automata::nwa::NWA>::determinize_to_dwa_internal
-                   at ./src/precompute4/weighted_automata/determinization.rs:182:13
-         7: sep1::precompute4::weighted_automata::determinization::<impl sep1::precompute4::weighted_automata::nwa::NWA>::determinize_to_dwa
-                   at ./src/precompute4/weighted_automata/determinization.rs:34:14
-         8: sep1::precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence
-                   at ./src/precompute4/weighted_automata/test_determinization.rs:32:19
-         9: sep1::precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence::{{closure}}
-                   at ./src/precompute4/weighted_automata/test_determinization.rs:6:40
-        10: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-        11: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-    metadata:
-  - assistant: |-
-      Hello! I see you're encountering a panic. The error message `Default successor tuple must be mapped` indicates that when building the final DWA, we're trying to find the destination state for a default ("OTHER") transition, but that destination was never discovered during the state-space exploration.
-
-      This is happening because our simplified `tuple_merger` now dynamically discovers the alphabet from explicit transitions but doesn't know about the special `OTHER` symbol that `determinization.rs` uses.
-
-      Here is the fix. We'll thread the `other_index` through to the tuple merger so it can explore default transitions as well, ensuring all reachable states are found.
-
-      ### Step-by-step Instructions
-
-      #### 1. Update `src/precompute4/weighted_automata/tuple_merger.rs`
-
-      1.  **Modify `merge_and_build_automaton`'s signature** to accept the `other_index`.
-      2.  **Ensure `other_index` is explored**: Add the `other_index` to the set of symbols to check for transitions from each merged state.
-      3.  **Update the test case**: Pass a value for `other_index` in `test_simple_merge`.
-
-      #### 2. Update `src/precompute4/weighted_automata/determinization.rs`
-
-      1.  **Pass `sigma.other_index`**: In `determinize_to_dwa_internal`, update the call to `tuple_merger::merge_and_build_automaton` to pass `sigma.other_index`.
+      2.  **In `src/precompute4/weighted_automata/determinization.rs`:**
+          *   Find the call to `tuple_merger::merge_and_build_automaton`.
+          *   Update the call to pass the full alphabet size, `sigma.size()`, instead of just `sigma.other_index`.
 
       ### Git Diffs
 
-      Here are the diffs to apply the changes:
+      Here are the git diffs corresponding to the instructions above.
 
       ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
       --- a/src/precompute4/weighted_automata/determinization.rs
       +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -163,6 +163,7 @@
+      @@ -171,7 +171,7 @@
                let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
                    start_tuple,
                    &merger_components,
-      +            sigma.other_index,
+      -            sigma.other_index,
+      +            sigma.size(),
                );
                crate::debug!(
                    4,
 
-      ``````diff
+      ```
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/tuple_merger.rs b/src/precompute4/weighted_automata/tuple_merger.rs
       --- a/src/precompute4/weighted_automata/tuple_merger.rs
       +++ b/src/precompute4/weighted_automata/tuple_merger.rs
-      @@ -68,8 +68,9 @@
-       
+      @@ -52,7 +52,7 @@
        pub fn merge_and_build_automaton(
            start_tuple: ProductTuple,
            components: &[Vec<BTreeMap<usize, usize>>],
-      -) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>) {
-      +    other_index: usize,
-      +) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>) {
+      -    other_index: usize,
+      +    alphabet_size: usize,
+       ) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>) {
            let mut states: Vec<ProductTuple> = Vec::new();
            let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
-           let mut worklist: VecDeque<usize> = VecDeque::new();
-      @@ -92,6 +93,7 @@
-                       }
-                   }
-               }
-      +        alphabet.insert(other_index);
+      @@ -66,20 +66,9 @@
+           while let Some(state_id) = worklist.pop_front() {
+               let representative = states[state_id].clone();
        
-               for symbol in alphabet {
+      -        let mut alphabet = BTreeSet::new();
+      -        for (i, comp_state_opt) in representative.iter().enumerate() {
+      -            if let Some(comp_state) = comp_state_opt {
+      -                for &symbol in components[i][*comp_state].keys() {
+      -                    alphabet.insert(symbol);
+      -                }
+      -            }
+      -        }
+      -        alphabet.insert(other_index);
+      -
+      -        for symbol in alphabet {
+      -
+      +        for symbol in 0..alphabet_size {
+                   let successor = successor_tuple(&representative, symbol, components);
        
-      @@ -134,10 +136,11 @@
-           fn test_simple_merge() {
+                   if point_map.contains_key(&successor) {
+      @@ -131,11 +120,11 @@
                let comp0 = vec![BTreeMap::from([(0, 0)])];
                let comp1 = vec![BTreeMap::from([(1, 0)])];
                let components = vec![comp0, comp1];
-      +        let other_index = 2;
+      -        let other_index = 2;
+      +        let alphabet_size = 3; // Symbols 0, 1, and OTHER=2
        
                let start_tuple = vec![Some(0), Some(0)];
        
-      -        let (states, point_map) = merge_and_build_automaton(start_tuple, &components);
-      +        let (states, point_map) = merge_and_build_automaton(start_tuple, &components, other_index);
+      -        let (states, point_map) = merge_and_build_automaton(start_tuple, &components, other_index);
+      +        let (states, point_map) = merge_and_build_automaton(start_tuple, &components, alphabet_size);
        
                assert_eq!(states.len(), 1);
                assert_eq!(states[0], vec![Some(0), Some(0)]);
@@ -4582,7 +4179,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/tuple_merger.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/tuple_merger.rs.
     metadata:
-  - user: "Changes committed with message: \"Refactor tuple merger to include 'OTHER'
-      symbol in state discovery and simplify returned types\""
+  - user: 'Changes committed with message: "Refactor tuple merger to iterate over
+      full alphabet size, removing dependency on special other_index"'
     metadata:
 ...
