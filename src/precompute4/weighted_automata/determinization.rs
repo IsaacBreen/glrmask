@@ -796,14 +796,22 @@ impl DetDFA {
     }
 }
 
+type ProductDFAStateTuple = Vec<Option<usize>>;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ProductDFAState {
+    final_weight: Option<Weight>,
+    trans: BTreeMap<i16, ProductDFAStateTuple>,
+    default_trans_tuple: ProductDFAStateTuple,
+    representative_tuple: ProductDFAStateTuple,
+    all_tuples: BTreeSet<ProductDFAStateTuple>,
+}
+
 #[derive(Clone, Debug)]
 struct ProductDFA {
-    n_states: usize,
+    states: Vec<ProductDFAState>,
     start: usize,
-    finals: Vec<bool>,
-    trans: Vec<Vec<usize>>,
-    tuples: Vec<Vec<Option<usize>>>,
-    active_weights: Vec<Weight>,
+    n_states: usize,
 }
 
 impl ProductDFA {
@@ -823,16 +831,16 @@ impl ProductDFA {
         };
 
         // Step 1: Collect all reachable tuples
-        let start_tuple: Vec<Option<usize>> = comps.iter().map(|c| Some(c.start)).collect();
-        let mut visited: HashSet<Vec<Option<usize>>> = HashSet::new();
-        let mut queue: VecDeque<Vec<Option<usize>>> = VecDeque::new();
+        let start_tuple: ProductDFAStateTuple = comps.iter().map(|c| Some(c.start)).collect();
+        let mut visited: HashSet<ProductDFAStateTuple> = HashSet::new();
+        let mut queue: VecDeque<ProductDFAStateTuple> = VecDeque::new();
 
         visited.insert(start_tuple.clone());
         queue.push_back(start_tuple.clone());
 
         while let Some(current) = queue.pop_front() {
             for sym in 0..sigma.size() {
-                let next_tuple: Vec<Option<usize>> = (0..k)
+                let next_tuple: ProductDFAStateTuple = (0..k)
                     .map(|i| current[i].and_then(|s| comps[i].trans[s][sym]))
                     .collect();
                 if visited.insert(next_tuple.clone()) {
@@ -844,14 +852,14 @@ impl ProductDFA {
             }
         }
 
-        let all_tuples: Vec<Vec<Option<usize>>> = visited.into_iter().collect();
+        let all_tuples: Vec<ProductDFAStateTuple> = visited.into_iter().collect();
         let n = all_tuples.len();
 
         if let Some(p) = &pb_product {
             p.set_message(format!("Collected {} tuples, now merging...", n));
         }
 
-        // Step 2: Group tuples by their canonical key
+        // Step 2: Group tuples into equivalence classes.
         let group_ids = Self::group_product_states(&all_tuples);
         let num_groups = group_ids.iter().max().map_or(0, |&max| max + 1);
         let mut classes: Vec<Vec<usize>> = vec![vec![]; num_groups];
@@ -859,121 +867,81 @@ impl ProductDFA {
             classes[*group_id].push(tuple_idx);
         }
 
-
-        // Step 4: For each class, pick representative and compute active weight
-        let mut class_list: Vec<(Vec<usize>, Vec<Option<usize>>, Weight)> = Vec::new();
-        // (members, representative, active_weight)
-
-        crate::debug!(5, "ProductDFA: Atoms: {}", atoms.intervals.len());
-        for (i, a) in atoms.atoms.iter().enumerate() {
-            crate::debug!(5, " Atom {}: {:?}", i, a);
-        }
-
-        for members in classes.into_iter() {
-            if members.is_empty() {
+        // Step 3: Create ProductDFAState for each class.
+        let mut product_states = Vec::new();
+        for members_indices in classes.into_iter() {
+            if members_indices.is_empty() {
                 continue;
             }
-            // Pick representative (tuple with fewest sinks)
-            let best_idx = members
-                .iter()
-                .min_by_key(|&&idx| {
-                    all_tuples[idx]
-                        .iter()
-                        .filter(|s| s.is_none())
-                        .count()
-                })
-                .unwrap();
-            let repr = all_tuples[*best_idx].clone();
 
-            // Compute active weight: union of atoms for all non-sink positions across all members
-            let mut active = Weight::zeros();
-            for &member_idx in &members {
-                let tuple = &all_tuples[member_idx];
-                for (comp_idx, state) in tuple.iter().enumerate() {
-                    if state.is_some() {
-                        active |= &atoms.atoms[comp_idx];
-                    }
+            let current_all_tuples: BTreeSet<ProductDFAStateTuple> =
+                members_indices.iter().map(|&idx| all_tuples[idx].clone()).collect();
+
+            let best_idx = members_indices
+                .iter()
+                .min_by_key(|&&idx| all_tuples[idx].iter().filter(|s| s.is_none()).count())
+                .unwrap();
+            let representative_tuple = all_tuples[*best_idx].clone();
+
+            // Final weight calculation
+            let mut final_weight_calc = Weight::zeros();
+            let mut is_final = false;
+            for (i, atom) in atoms.atoms.iter().enumerate() {
+                if current_all_tuples.iter().any(|t| t[i].map_or(false, |s| comps[i].finals[s])) {
+                    final_weight_calc |= atom;
+                    is_final = true;
                 }
             }
+            let final_weight = if is_final { Some(final_weight_calc) } else { None };
 
-            class_list.push((members, repr, active));
-        }
-
-        // Step 5: Build mappings
-        let n_states = class_list.len();
-        let mut tuple_to_id: HashMap<Vec<Option<usize>>, usize> = HashMap::new();
-
-        for (id, (ref members, _repr, _active)) in class_list.iter().enumerate() {
-            for &member_idx in members {
-                tuple_to_id.insert(all_tuples[member_idx].clone(), id);
-            }
-        }
-
-        crate::debug!(5, "ProductDFA: Merged {} tuples into {} states", n, n_states);
-        for (id, (ref members, ref repr, active)) in class_list.iter().enumerate() {
-            crate::debug!(5, " State {}:", id);
-            crate::debug!(5, "  Representative: {:?}", repr);
-            crate::debug!(5, "  Members ({}):", members.len());
-            for &member_idx in members {
-                crate::debug!(5, "   {:?}", all_tuples[member_idx]);
-            }
-            crate::debug!(5, "  Active weight: {:?}", active);
-        }
-
-        let start_id = tuple_to_id[&start_tuple];
-
-        // Step 6: Build Product DFA structures
-        let mut finals = vec![false; n_states];
-        let mut trans = vec![vec![0; sigma.size()]; n_states];
-        let mut tuples = vec![vec![]; n_states]; // Vec<Vec<Option<usize>>>
-        let mut active_weights = vec![Weight::zeros(); n_states];
-
-        for (id, (members, repr, active_weight)) in class_list.into_iter().enumerate() {
-            tuples[id] = repr.clone();
-            active_weights[id] = active_weight;
-
-            // Check if any member is final (has at least one accepting component)
-            finals[id] = members.iter().any(|&idx| {
-                let tuple = &all_tuples[idx];
-                tuple.iter().enumerate().any(|(i, s_opt)| {
-                    if let Some(s) = s_opt { comps[i].finals[*s] } else { false }
-                })
-            });
-
-            // Build transitions from representative
-            for sym in 0..sigma.size() {
-                let next_tuple: Vec<Option<usize>> = (0..k)
-                    .map(|i| repr[i].and_then(|s| comps[i].trans[s][sym]))
+            // Transitions from representative
+            let mut trans = BTreeMap::new();
+            for (sym, &lbl) in sigma.labels.iter().enumerate() {
+                let next_tuple: ProductDFAStateTuple = (0..k)
+                    .map(|i| representative_tuple[i].and_then(|s| comps[i].trans[s][sym]))
                     .collect();
-                let next_id = tuple_to_id[&next_tuple];
-                trans[id][sym] = next_id;
+                trans.insert(lbl, next_tuple);
             }
+            let default_trans_tuple: ProductDFAStateTuple = (0..k)
+                .map(|i| representative_tuple[i].and_then(|s| comps[i].trans[s][sigma.other_index]))
+                .collect();
+
+            let p_state = ProductDFAState {
+                final_weight,
+                trans,
+                default_trans_tuple,
+                representative_tuple,
+                all_tuples: current_all_tuples,
+            };
+            product_states.push(p_state);
         }
 
+        // Sort states by representative tuple to have a canonical order.
+        product_states.sort_by(|a, b| a.representative_tuple.cmp(&b.representative_tuple));
+
+        let start_id = product_states
+            .binary_search_by(|s| s.representative_tuple.cmp(&start_tuple))
+            .expect("Start tuple must have a corresponding state");
+
+        let n_states = product_states.len();
         if let Some(p) = pb_product {
-            p.finish_with_message(format!("Product DFA built with {} states (merged from {} tuples)", n_states, n));
+            p.finish_with_message(format!(
+                "Product DFA built with {} states (merged from {} tuples)",
+                n_states, n
+            ));
         }
 
-        ProductDFA {
-            n_states,
-            start: start_id,
-            finals,
-            trans,
-            tuples,
-            active_weights,
-        }
+        ProductDFA { states: product_states, start: start_id, n_states }
     }
 
-    fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, comps: &[DetDFA]) -> DWA {
+    fn to_dwa(&self, sigma: &Alphabet, atoms: &WeightPartition, _comps: &[DetDFA]) -> DWA {
         let mut dwa_states = DWAStates::default();
         for _ in 0..self.n_states {
             dwa_states.add_state();
         }
         let mut dwa = DWA {
             states: dwa_states,
-            body: DWABody {
-                start_state: self.start,
-            },
+            body: DWABody { start_state: self.start },
         };
 
         let pb_convert = if PROGRESS_BAR_ENABLED {
@@ -990,43 +958,70 @@ impl ProductDFA {
             None
         };
 
-        // Final weights
-        for sid in 0..self.n_states {
-            if !self.finals[sid] {
-                continue;
-            }
-            let mut w_final = Weight::zeros();
-            for (i, s_opt) in self.tuples[sid].iter().enumerate() {
-                if let Some(s_i) = s_opt {
-                    if comps[i].finals[*s_i] {
-                        w_final |= &atoms.atoms[i];
-                    }
-                }
-            }
-            if !w_final.is_empty() {
-                let _ = dwa.set_final_weight(sid, w_final);
+        // 1. Create map from any tuple to its representative tuple.
+        let mut tuple_to_repr: HashMap<ProductDFAStateTuple, ProductDFAStateTuple> = HashMap::new();
+        for p_state in &self.states {
+            for t in &p_state.all_tuples {
+                tuple_to_repr.insert(t.clone(), p_state.representative_tuple.clone());
             }
         }
 
-        // Transitions
-        for sid in 0..self.n_states {
+        // 2. Create map from representative tuple to its DWA state ID.
+        let mut repr_to_id: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
+        for (id, p_state) in self.states.iter().enumerate() {
+            repr_to_id.insert(p_state.representative_tuple.clone(), id);
+        }
+
+        // 3. Populate DWA states
+        for (sid, p_state) in self.states.iter().enumerate() {
             if let Some(p) = &pb_convert {
                 p.inc(1);
             }
 
-            let edge_weight = &self.active_weights[sid];
-
-            // Default (OTHER)
-            let dst_def = self.trans[sid][sigma.other_index];
-            if sid < dwa.states.len() && dst_def < dwa.states.len() {
-                let _ = dwa.set_default_transition(sid, dst_def, edge_weight.clone());
+            // Final weights
+            if let Some(fw) = &p_state.final_weight {
+                if !fw.is_empty() {
+                    let _ = dwa.set_final_weight(sid, fw.clone());
+                }
             }
 
-            // Exceptions for each explicit label
-            for (li, &lbl) in sigma.labels.iter().enumerate() {
-                let dst = self.trans[sid][li];
-                if sid < dwa.states.len() && dst < dwa.states.len() {
-                    let _ = dwa.add_transition(sid, lbl, dst, edge_weight.clone());
+            // Default transition
+            let dest_tuple_def = &p_state.default_trans_tuple;
+            let repr_def = tuple_to_repr
+                .get(dest_tuple_def)
+                .expect("Destination tuple must have a representative");
+            let dest_id_def = *repr_to_id
+                .get(repr_def)
+                .expect("Representative tuple must have a state ID");
+
+            let mut weight_def = Weight::zeros();
+            for (i, s_opt) in dest_tuple_def.iter().enumerate() {
+                if s_opt.is_some() {
+                    weight_def |= &atoms.atoms[i];
+                }
+            }
+            if sid < dwa.states.len() && dest_id_def < dwa.states.len() {
+                let _ = dwa.set_default_transition(sid, dest_id_def, weight_def);
+            }
+
+            // Exception transitions
+            for (&lbl, dest_tuple) in &p_state.trans {
+                let repr = tuple_to_repr
+                    .get(dest_tuple)
+                    .expect("Destination tuple must have a representative");
+                let dest_id = *repr_to_id
+                    .get(repr)
+                    .expect("Representative tuple must have a state ID");
+
+                let mut weight = Weight::zeros();
+                for (i, s_opt) in dest_tuple.iter().enumerate() {
+                    if s_opt.is_some() {
+                        weight |= &atoms.atoms[i];
+                    }
+                }
+
+                if sid < dwa.states.len() && dest_id < dwa.states.len() {
+                    let _ = dwa.add_transition(sid, lbl, dest_id, weight);
                 }
             }
         }
