@@ -4024,7 +4024,7 @@ local_system:
                       }
                       sparse_trans.push(exceptions);
                   }
-                  tuple_merger::Component { sink_state: *sink, transitions: sparse_trans }
+                  tuple_merger::Component { transitions: sparse_trans }
               }).collect();
 
               let merged_automaton = tuple_merger::merge_and_build_automaton(
@@ -4867,7 +4867,7 @@ local_system:
                   }
                   sparse_trans.push(exceptions);
               }
-              tuple_merger::Component { sink_state: sink, transitions: sparse_trans }
+              tuple_merger::Component { transitions: sparse_trans }
           }).collect();
 
           for state in &merged_automaton.states {
@@ -4955,8 +4955,6 @@ local_system:
       /// Represents one of the component automata in the product.
       #[derive(Clone, Debug)]
       pub struct Component {
-          /// A designated sink state, if one exists.
-          pub sink_state: Option<usize>,
           /// Sparse transition table: `transitions[state]` is a map from `symbol` to `next_state`.
           /// Any symbol not in the map is assumed to transition to the sink state.
           pub transitions: Vec<BTreeMap<usize, usize>>,
@@ -5017,13 +5015,8 @@ local_system:
                   Some(s) => {
                       // Look up in sparse map. If not found, it's a transition to the sink.
                       if let Some(&v) = components[i].transitions[s].get(&symbol) {
-                          if components[i].sink_state == Some(v) {
-                              out.push(None);
-                          } else {
-                              out.push(Some(v));
-                          }
+                          out.push(Some(v));
                       } else {
-                          // Not in map -> transition to sink
                           out.push(None);
                       }
                   }
@@ -5135,14 +5128,12 @@ local_system:
           fn test_simple_merge() {
               // Component 0: 2 states (0=start, 1=sink). 0 -> 0 on 'a', 0 -> 1 on 'b'.
               let comp0 = Component {
-                  sink_state: Some(1),
                   // s0: a(0)->s0. b(1) is not present, so it goes to sink (1).
                   // s1: all transitions go to sink (1), so map is empty.
                   transitions: vec![BTreeMap::from([(0, 0)]), BTreeMap::new()],
               };
               // Component 1: 2 states (0=start, 1=sink). 0 -> 1 on 'a', 0 -> 0 on 'b'.
               let comp1 = Component {
-                  sink_state: Some(1),
                   // s0: b(1)->s0. a(0) is not present, so it goes to sink (1).
                   // s1: all transitions go to sink (1), so map is empty.
                   transitions: vec![BTreeMap::from([(1, 0)]), BTreeMap::new()],
@@ -8312,5 +8303,167 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor: Make tuple_merger component
       transitions sparse and clean up internal state"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/tuple_merger.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: What about the sink states? Don't we just use None for sink states? What
+      does it mean to have a dedicated sink state here?
+    metadata:
+  - assistant: |-
+      You've hit on a key point of abstraction, and you are absolutely right. The `tuple_merger` module shouldn't need to know the specific ID of a component's sink state. The use of `None` in the `ProductTuple` is the abstract representation of a sink, and that's all the merger algorithm should care about.
+
+      The contract with the component can be simplified: the component provides a sparse map of its non-sink transitions. Any transition not present in the map is implicitly a transition to the abstract sink state, which the merger represents as `None`.
+
+      This makes the `sink_state` field in `Component` redundant. Let's remove it to make the module cleaner and more self-contained.
+
+      ### Step-by-step Instructions
+
+      1.  **File: `src/precompute4/weighted_automata/tuple_merger.rs`**
+          *   In the `Component` struct, remove the `sink_state: Option<usize>` field.
+          *   In the `successor_tuple` function, simplify the logic. When a transition to a state `v` is found in the map, the next state is simply `Some(v)`. If it's not found, the next state is `None`. The check against a `sink_state` is no longer needed.
+          *   In the `test_simple_merge` test, remove the `sink_state` field from the `comp0` and `comp1` initializations.
+
+      2.  **File: `src/precompute4/weighted_automata/determinization.rs`**
+          *   In the `determinize_to_dwa` function, when creating `merger_components`, remove the `sink_state` field from the `tuple_merger::Component` initialization. The logic for building the sparse transition map already correctly omits transitions to the sink, so it remains unchanged.
+          *   Do the same in the `build_dwa_from_merged_automaton` function for its local `merger_components` variable.
+
+      ### Git Diffs
+
+      Here are the git diffs to apply these changes.
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -137,7 +137,7 @@
+                       }
+                       sparse_trans.push(exceptions);
+                   }
+      -            tuple_merger::Component { sink_state: *sink, transitions: sparse_trans }
+      +            tuple_merger::Component { transitions: sparse_trans }
+               }).collect();
+       
+               let merged_automaton = tuple_merger::merge_and_build_automaton(
+      @@ -1028,7 +1028,7 @@
+                   }
+                   sparse_trans.push(exceptions);
+               }
+      -        tuple_merger::Component { sink_state: sink, transitions: sparse_trans }
+      +        tuple_merger::Component { transitions: sparse_trans }
+           }).collect();
+       
+           for state in &merged_automaton.states {
+
+      ```
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/tuple_merger.rs
+      +++ b/src/precompute4/weighted_automata/tuple_merger.rs
+      @@ -25,8 +25,6 @@
+       /// Represents one of the component automata in the product.
+       #[derive(Clone, Debug)]
+       pub struct Component {
+      -    /// A designated sink state, if one exists.
+      -    pub sink_state: Option<usize>,
+           /// Sparse transition table: `transitions[state]` is a map from `symbol` to `next_state`.
+           /// Any symbol not in the map is assumed to transition to the sink state.
+           pub transitions: Vec<BTreeMap<usize, usize>>,
+      @@ -74,14 +72,9 @@
+               match tuple[i] {
+                   Some(s) => {
+                       // Look up in sparse map. If not found, it's a transition to the sink.
+      -                if let Some(&v) = components[i].transitions[s].get(&symbol) {
+      -                    if components[i].sink_state == Some(v) {
+      -                        out.push(None);
+      -                    } else {
+      -                        out.push(Some(v));
+      -                    }
+      -                } else {
+      -                    // Not in map -> transition to sink
+      +                if let Some(&v) = components[i].transitions[s].get(&symbol) {
+      +                    out.push(Some(v));
+      +                } else {
+                           out.push(None);
+                       }
+                   }
+      @@ -171,16 +164,12 @@
+           fn test_simple_merge() {
+               // Component 0: 2 states (0=start, 1=sink). 0 -> 0 on 'a', 0 -> 1 on 'b'.
+               let comp0 = Component {
+      -            sink_state: Some(1),
+                   // s0: a(0)->s0. b(1) is not present, so it goes to sink (1).
+                   // s1: all transitions go to sink (1), so map is empty.
+                   transitions: vec![BTreeMap::from([(0, 0)]), BTreeMap::new()],
+               };
+               // Component 1: 2 states (0=start, 1=sink). 0 -> 1 on 'a', 0 -> 0 on 'b'.
+               let comp1 = Component {
+      -            sink_state: Some(1),
+                   // s0: b(1)->s0. a(0) is not present, so it goes to sink (1).
+                   // s1: all transitions go to sink (1), so map is empty.
+                   transitions: vec![BTreeMap::from([(1, 0)]), BTreeMap::new()],
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/precompute4/weighted_automata/tuple_merger.rs
+      Applying patch to 'src/precompute4/weighted_automata/tuple_merger.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/tuple_merger.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor: Remove explicit sink state from
+      tuple_merger::Component for better abstraction"'
     metadata:
 ...

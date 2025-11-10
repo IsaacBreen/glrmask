@@ -44,8 +44,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 /// Represents one of the component automata in the product.
 #[derive(Clone, Debug)]
 pub struct Component {
-    /// A designated sink state, if one exists.
-    pub sink_state: Option<usize>,
     /// Sparse transition table: `transitions[state]` is a map from `symbol` to `next_state`.
     /// Any symbol not in the map is assumed to transition to the sink state.
     pub transitions: Vec<BTreeMap<usize, usize>>,
@@ -106,13 +104,8 @@ pub fn successor_tuple(
             Some(s) => {
                 // Look up in sparse map. If not found, it's a transition to the sink.
                 if let Some(&v) = components[i].transitions[s].get(&symbol) {
-                    if components[i].sink_state == Some(v) {
-                        out.push(None);
-                    } else {
-                        out.push(Some(v));
-                    }
+                    out.push(Some(v));
                 } else {
-                    // Not in map -> transition to sink
                     out.push(None);
                 }
             }
@@ -224,14 +217,12 @@ mod tests {
     fn test_simple_merge() {
         // Component 0: 2 states (0=start, 1=sink). 0 -> 0 on 'a', 0 -> 1 on 'b'.
         let comp0 = Component {
-            sink_state: Some(1),
             // s0: a(0)->s0. b(1) is not present, so it goes to sink (1).
             // s1: all transitions go to sink (1), so map is empty.
             transitions: vec![BTreeMap::from([(0, 0)]), BTreeMap::new()],
         };
         // Component 1: 2 states (0=start, 1=sink). 0 -> 1 on 'a', 0 -> 0 on 'b'.
         let comp1 = Component {
-            sink_state: Some(1),
             // s0: b(1)->s0. a(0) is not present, so it goes to sink (1).
             // s1: all transitions go to sink (1), so map is empty.
             transitions: vec![BTreeMap::from([(1, 0)]), BTreeMap::new()],

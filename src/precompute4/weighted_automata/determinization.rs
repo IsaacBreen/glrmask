@@ -154,7 +154,7 @@ impl NWA {
                 }
                 sparse_trans.push(exceptions);
             }
-            tuple_merger::Component { sink_state: *sink, transitions: sparse_trans }
+            tuple_merger::Component { transitions: sparse_trans }
         }).collect();
 
         let merged_automaton = tuple_merger::merge_and_build_automaton(
@@ -997,7 +997,7 @@ fn build_dwa_from_merged_automaton(
             }
             sparse_trans.push(exceptions);
         }
-        tuple_merger::Component { sink_state: sink, transitions: sparse_trans }
+        tuple_merger::Component { transitions: sparse_trans }
     }).collect();
 
     for state in &merged_automaton.states {
