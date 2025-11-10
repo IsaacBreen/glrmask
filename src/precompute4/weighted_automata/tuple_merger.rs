@@ -1,6 +1,4 @@
-//! Masked-Product Point Synthesis (self-contained spec and baseline)
-//!
-//! This file defines a small, abstract puzzle (no domain-specific context):
+//! Masked-Product Point Synthesis (self-contained spec and optimized greedy)
 //!
 //! Problem (informal):
 //! - There are K components. Each component has a finite set of local states S_i plus a
@@ -32,59 +30,46 @@
 //!
 //! Synthesis task (formal):
 //! - Input:
-//!   - K ≥ 1 components, each with a finite local-graph structure captured as a sparse
-//!     adjacency (only non-masked transitions are stored). For each component i and each
-//!     local state s, we have a sparse map s -> { a ↦ s' }. For symbols not in the map,
-//!     the successor is masked (⊥).
-//!   - An alphabet size M.
-//!   - A start point p0 ∈ (S_0 ∪ {⊥}) × ... × (S_{K-1} ∪ {⊥}).
+//!   - K ≥ 1 components, sparse encoding (symbols missing ⇒ masked).
+//!   - Alphabet size M.
+//!   - Start point p0.
+//! - Output:
+//!   - Representatives R and a map φ defined on at least Start ∪ Succ-closure(R) such that:
+//!     (C1) ∀x ∈ Dom, x ≤ φ(x).
+//!     (C2) ∀r ∈ R, ∀a ∈ Σ, succ(r, a) ∈ Dom.
+//!     (C3) p0 ∈ Dom.
 //!
-//! - Goal:
-//!   Produce a finite set R ⊆ (S_0 ∪ {⊥}) × ... × (S_{K-1} ∪ {⊥}) of "representatives"
-//!   and a map φ defined on at least:
-//!     Dom ⊇ { p0 } ∪ { succ(r, a) | r ∈ R, a ∈ Σ } ∪ { succ(succ(r, a), b) | ... } ...,
-//!   i.e., on every product successor encountered when starting from any representative,
-//!   such that:
-//!     (C1) Well-formedness: ∀x ∈ Dom, x ≤ φ(x).
-//!          (Every tuple we "name" is mapped to a representative that is at least as
-//!          specific as the tuple.)
-//!     (C2) Closure/Stability: ∀r ∈ R, ∀a ∈ Σ, succ(r, a) ∈ Dom.
-//!          (All outgoing successors of every representative have a home.)
-//!     (C3) Start: p0 ∈ Dom.
+//! Quality objective (primary):
+//!   Minimize |R|, subject to (C1–C3).
 //!
-//! If these hold, we obtain a total transition function on R:
-//!   δ: R × Σ → R,   δ(r, a) = φ(succ(r, a)).
-//! This is well-defined by (C2) and assigns every representative a successor representative
-//! under each symbol. Different valid (R, φ) choices are possible; smaller |R| is better.
+//! This implementation provides an optimized greedy synthesizer designed from the following
+//! hypotheses and proofs:
+//!   - H1 (quality heuristic): When mapping a new successor x to an existing representative r_j,
+//!     choosing the candidate that minimizes the number of None→Some flips (specificity increase)
+//!     tends to keep r_j general and increases the chance that r_j covers future successors,
+//!     reducing |R| in practice.
+//!   - H2 (tie-break): When multiple r_j induce the same minimal specificity increase, prefer the
+//!     r_j with the smallest current specificity (fewest Some). This further preserves generality.
 //!
-//! Quality objective (to optimize in future work):
-//!   Minimize |R| subject to (C1–C3).
+//! Correctness arguments (sketch):
+//!   - (C1) If x is assigned to r_j with zero increase, then x ≤ r_j. If a specialization is
+//!     required, r_j is updated to unify(r_j, x); by definition, x ≤ unify(r_j, x). Thus x ≤ φ(x).
+//!   - (C2) Representatives are processed via a worklist. Whenever r_j is specialized, we re-enqueue
+//!     it; the loop continues until all succ(r, a) have entries in φ, guaranteeing closure.
+//!   - (C3) Initialization inserts p0 into image, hence p0 ∈ Dom.
+//!   - Termination: The product space is finite. Each specialization increases specificity and cannot
+//!     be undone; finite total increases exist. When no more specializations or creations are needed,
+//!     the worklist empties and the algorithm stops.
 //!
-//! Baseline algorithm (provided here):
-//!   synthesize_greedy implements a simple, deterministic construction:
-//!   - Maintain a growing vector of representatives R = [r_0, r_1, ...] and a map φ from
-//!     product points to indices in R.
-//!   - Initialize with r_0 := p0 and φ(p0) = 0.
-//!   - Perform a worklist exploration of representatives. Whenever a new product successor
-//!     x arises, either assign it to an existing representative r_j that can unify with x
-//!     (updating r_j := unify(r_j, x) if this increases specificity), or create a fresh
-//!     representative r_new := x.
-//!   This satisfies (C1–C3), but is not guaranteed to be minimal.
-//!
-//! Verification:
-//!   The struct Solution offers verify(&Instance) -> Result<(), String> to mechanically
-//!   check (C1–C3). Any alternative algorithm can output (reps, image) and be verified the
-//!   same way.
-//!
-//! Public API kept for backward compatibility:
+//! Public API (unchanged):
 //!   - type ProductTuple
 //!   - fn successor_tuple(...)
 //!   - fn merge_and_build_automaton(...) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>)
-//!     which simply wraps the greedy synthesizer.
+//!     (wraps the optimized greedy synthesizer).
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
 
 /// Symbol index in 0..alphabet_size.
 pub type Symbol = usize;
@@ -115,7 +100,7 @@ fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
                 if x == y {
                     out.push(Some(x));
                 } else {
-                    return None;
+                    return None; // Conflict
                 }
             }
             (Some(x), None) => out.push(Some(x)),
@@ -126,20 +111,27 @@ fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
     Some(out)
 }
 
-/// Checks if tuple `a` is less specific than or equal to tuple `b` (a ≤ b).
-fn is_less_or_equal(a: &ProductTuple, b: &ProductTuple) -> bool {
-    debug_assert_eq!(a.len(), b.len(), "Tuples must have same arity for comparison");
-    for i in 0..a.len() {
-        match (a[i], b[i]) {
+/// Checks if tuple `x` is less specific than or equal to tuple `y` (x ≤ y).
+/// Intuitively, `y` is at least as "specific" as `x`: whenever `x` specifies a concrete local
+/// state, `y` agrees. Otherwise `x` leaves the coordinate unspecified (⊥).
+fn is_less_or_equal(x: &ProductTuple, y: &ProductTuple) -> bool {
+    debug_assert_eq!(x.len(), y.len(), "Tuples must have same arity for comparison");
+    for i in 0..x.len() {
+        match (x[i], y[i]) {
             (Some(xs), Some(ys)) => {
                 if xs != ys {
-                    return false; // Conflict: a specifies something different from b
+                    return false; // Conflict: x specifies something different from y
                 }
             }
             (Some(_), None) => {
-                return false; // a specifies a value, but b is masked (a is more specific than b)
+                return false; // x specifies a value, but y is masked (x is more specific than y)
             }
-            _ => {} // a is masked or both agree; condition holds for this coordinate
+            (None, Some(_)) => {
+                // x is masked while y is specified: ok (y is ≥ x)
+            }
+            (None, None) => {
+                // both masked: ok
+            }
         }
     }
     true
@@ -250,10 +242,7 @@ impl Solution {
             }
             // Check x ≤ reps[id]
             if !is_less_or_equal(x, &self.reps[id]) {
-                return Err(
-                    "image well-formedness violated: x is not less than or equal to its representative"
-                        .into(),
-                );
+                return Err("image well-formedness violated: x is more specific than its rep".into());
             }
         }
 
@@ -274,101 +263,83 @@ impl Solution {
     }
 }
 
-/// An optimized greedy synthesizer that aims to minimize |R|.
+/// Optimized greedy synthesizer that prioritizes minimizing |R| while remaining fast.
 ///
-/// This algorithm improves upon a simple greedy approach by making more principled local choices.
-/// When processing a representative, it computes all its successors and processes them in
-/// descending order of specificity (most constrained first).
-///
-/// For each successor `x`, it finds the best existing representative `r_j` to merge with.
-/// The "best" candidate is one that minimizes a lexicographical cost:
-///   `cost(j) = (specificity_increase, current_specificity_of_r_j)`
-///
-/// This heuristic prioritizes merges that add the least new information and, as a tie-breaker,
-/// modifies the most general representatives first, preserving flexibility. A new representative
-/// is created only as a last resort.
+/// Strategy per successor x:
+///   - Evaluate all existing representatives r_j that are compatible with x (unification succeeds).
+///   - Choose the one that minimizes (specificity_increase, current_specificity), where:
+///       specificity_increase = (#Some in unify(r_j, x)) - (#Some in r_j)
+///       current_specificity  = #Some in r_j
+///     This preserves generality and tends to reduce future representative creations.
+///   - If no compatible representative exists, create a new one.
+///   - Re-enqueue a representative if it was specialized (so all its succ are reprocessed).
 pub fn synthesize_greedy(inst: &Instance) -> Solution {
-    let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
+    let _ = inst.validate_shape(); // Callers can validate first; we proceed regardless.
 
     let mut reps: Vec<ProductTuple> = Vec::new();
     let mut image: HashMap<ProductTuple, usize> = HashMap::new();
     let mut work_queue: VecDeque<usize> = VecDeque::new();
-    let mut work_set: HashSet<usize> = HashSet::new(); // To efficiently check if an item is in work_queue
+    let mut work_set: HashSet<usize> = HashSet::new(); // Track items currently queued
 
-    // Initialize
+    // Initialize with start
     reps.push(inst.start.clone());
     image.insert(inst.start.clone(), 0);
     work_queue.push_back(0);
     work_set.insert(0);
 
-    // Explore representatives
+    // Explore until fixpoint
     while let Some(rid) = work_queue.pop_front() {
         work_set.remove(&rid);
-        let rep = reps[rid].clone(); // Clone to avoid mutable borrow issues
 
-        // 1. Generate all unique, unprocessed successors for the current representative.
-        let mut successors_to_process = Vec::new();
+        let rep_snapshot = reps[rid].clone(); // Avoid mutable aliasing while scanning
         for a in 0..inst.alphabet_size {
-            let x = successor_tuple(&rep, a, &inst.components);
-            if !image.contains_key(&x) {
-                let specificity = x.iter().filter(|opt| opt.is_some()).count();
-                successors_to_process.push((x, specificity));
-            }
-        }
-        // Deduplicate successors that might be identical for different symbols
-        successors_to_process.sort_by(|a, b| a.0.cmp(&b.0));
-        successors_to_process.dedup_by(|a, b| a.0 == b.0);
-
-        // 2. Sort successors by specificity, descending. Process most constrained points first.
-        successors_to_process.sort_by_key(|&(_, spec)| std::cmp::Reverse(spec));
-
-        // 3. Process each successor
-        for (x, _) in successors_to_process {
-            // This check is technically redundant due to the initial filter, but safe
+            let x = successor_tuple(&rep_snapshot, a, &inst.components);
             if image.contains_key(&x) {
-                continue;
+                continue; // Already mapped
             }
 
-            let mut best_candidate: Option<(usize, (usize, usize))> = None; // (rep_id, (spec_increase, current_spec))
+            // Find best existing representative to absorb x
+            // Store (rep_id, unified_tuple, (spec_increase, current_spec))
+            let mut best: Option<(usize, ProductTuple, (usize, usize))> = None;
 
-            // Find the best existing representative to merge with
             for j in 0..reps.len() {
                 if let Some(unified) = unify_tuples(&reps[j], &x) {
-                    let current_spec = reps[j].iter().filter(|opt| opt.is_some()).count();
-                    let unified_spec = unified.iter().filter(|opt| opt.is_some()).count();
-                    let spec_increase = unified_spec - current_spec;
+                    let current_spec = reps[j].iter().filter(|v| v.is_some()).count();
+                    let unified_spec = unified.iter().filter(|v| v.is_some()).count();
+                    let inc = unified_spec - current_spec;
 
-                    let current_cost = (spec_increase, current_spec);
-
-                    if let Some((_best_j, best_cost)) = best_candidate {
-                        if current_cost < best_cost {
-                            best_candidate = Some((j, current_cost));
+                    let cost = (inc, current_spec);
+                    match best {
+                        Some((_, _, best_cost)) => {
+                            if cost < best_cost {
+                                best = Some((j, unified, cost));
+                            }
                         }
-                    } else {
-                        best_candidate = Some((j, current_cost));
+                        None => {
+                            best = Some((j, unified, cost));
+                        }
                     }
                 }
             }
 
-            if let Some((j, _cost)) = best_candidate {
-                // Found a best-fit representative to merge with.
-                let unified_tuple = unify_tuples(&reps[j], &x).unwrap();
-
-                if unified_tuple != reps[j] {
+            if let Some((j, unified_tuple, (inc, _cur_spec))) = best {
+                // Absorb x into representative j
+                if inc > 0 || unified_tuple != reps[j] {
+                    // Specialization occurred; update and re-enqueue j if not already queued
                     reps[j] = unified_tuple;
-                    if !work_set.contains(&j) {
+                    if work_set.insert(j) {
                         work_queue.push_back(j);
-                        work_set.insert(j);
                     }
                 }
                 image.insert(x, j);
             } else {
-                // No compatible representative found. Create a new one.
+                // No compatible representative: create new one
                 let new_id = reps.len();
                 reps.push(x.clone());
                 image.insert(x, new_id);
-                work_queue.push_back(new_id);
-                work_set.insert(new_id);
+                if work_set.insert(new_id) {
+                    work_queue.push_back(new_id);
+                }
             }
         }
     }
@@ -376,7 +347,7 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
     Solution { reps, image }
 }
 
-/// Backwards-compatible wrapper: constructs a solution by the greedy method and
+/// Backwards-compatible wrapper: constructs a solution by the optimized greedy method and
 /// returns its representatives and point-map.
 ///
 /// - start_tuple: the start point p0
@@ -431,16 +402,15 @@ mod tests {
 
     #[test]
     fn test_is_less_or_equal() {
-        // x <= y
+        // x ≤ y
         assert!(is_less_or_equal(&vec![None, None], &vec![Some(1), Some(2)]));
         assert!(is_less_or_equal(&vec![Some(1), None], &vec![Some(1), Some(2)]));
         assert!(is_less_or_equal(&vec![None, Some(2)], &vec![Some(1), Some(2)]));
         assert!(is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]));
-
-        // x not <= y
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), None])); // x is more specific
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)])); // conflict
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![None, Some(2)])); // x is more specific
+        // x ≰ y
+        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), None]));
+        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)]));
+        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![None, Some(2)]));
     }
 
     #[test]
@@ -464,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_simple_merge_greedy_wrapper() {
-        // Same as original simple test: components only react to distinct symbols (0 vs 1).
+        // Components react to distinct symbols (0 vs 1).
         let comp0 = vec![BTreeMap::from([(0usize, 0usize)])];
         let comp1 = vec![BTreeMap::from([(1usize, 0usize)])];
         let components = vec![comp0, comp1];
@@ -474,15 +444,16 @@ mod tests {
         let (states, point_map) =
             merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
-        // The improved algorithm should find a single representative, because all
-        // successors can be merged with the start representative with 0 specificity increase.
+        // The optimized algorithm should find a single representative here.
         assert_eq!(states.len(), 1);
         assert_eq!(states[0], vec![Some(0), Some(0)]);
 
         let succ0 = successor_tuple(&states[0], 0, &components);
         let succ1 = successor_tuple(&states[0], 1, &components);
+        let succ2 = successor_tuple(&states[0], 2, &components);
         assert_eq!(*point_map.get(&succ0).unwrap(), 0);
         assert_eq!(*point_map.get(&succ1).unwrap(), 0);
+        assert_eq!(*point_map.get(&succ2).unwrap(), 0);
     }
 
     #[test]
@@ -508,27 +479,10 @@ mod tests {
         let sol = synthesize_greedy(&inst);
         sol.verify(&inst).expect("greedy solution must satisfy constraints");
 
-        // Manual trace of the improved algorithm:
-        // Start: p0 = (0,0)
-        // R = [(0,0)], image = {(0,0):0}, work = [0]
-        //
-        // Pop 0, rep = (0,0)
-        // Successors: succ(a=0)=(1,None), succ(a=1)=(None,1). Both have spec 1. Order is stable.
-        // Process x = (1, None):
-        //   - No existing rep is compatible. Create new.
-        //   - R = [(0,0), (1,None)], image{(1,None):1}, work.push(1)
-        // Process x = (None, 1):
-        //   - Check compatibility with existing reps:
-        //     - r0=(0,0): Incompatible.
-        //     - r1=(1,None): Compatible. unify -> (1,1).
-        //       - cost: spec_inc=1, current_spec=1. best_candidate = (j=1, cost=(1,1)).
-        //   - Merge with r1. reps[1] becomes (1,1). Add 1 back to worklist.
-        //   - R = [(0,0), (1,1)], image{(None,1):1}, work has [1].
-        //
-        // Pop 1, rep = (1,1)
-        // Successors: succ(a=0)=(1,None), succ(a=1)=(None,1). Both already in image. Loop finishes.
-        //
-        // Worklist empty. Final R = [(0,0), (1,1)]. Size 2. This is minimal.
+        // Trace for this scenario (intuitive):
+        // Start: (0,0)
+        // succ(0): (1,⊥)  -> cannot be absorbed by (0,0), create new r1
+        // succ(1): (⊥,1)  -> unifies with r1 to (1,1), reducing |R| to 2
         assert_eq!(sol.reps.len(), 2);
         assert_eq!(sol.reps[0], vec![Some(0), Some(0)]);
         assert_eq!(sol.reps[1], vec![Some(1), Some(1)]);
