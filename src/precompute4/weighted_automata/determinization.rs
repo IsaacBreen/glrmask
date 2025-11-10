@@ -1068,6 +1068,23 @@ fn merge_tuples_to_states(
         worklist.push_back(0);
     }
 
+    let pb_merge = if PROGRESS_BAR_ENABLED {
+        let p = ProgressBar::new_spinner();
+        p.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [Determinize: {elapsed_precise}] States: {pos}, Worklist: {msg}")
+                .unwrap(),
+        );
+        Some(p)
+    } else {
+        None
+    };
+
+    if let Some(p) = &pb_merge {
+        p.set_position(states.len() as u64);
+        p.set_message(format!("{}", worklist.len()));
+    }
+
     while let Some(gid) = worklist.pop_front() {
         let rep = states[gid].representative_tuple.clone();
 
@@ -1106,6 +1123,11 @@ fn merge_tuples_to_states(
                 states.push(new_state);
                 tuple_to_group.insert(succ_tuple, new_gid);
                 worklist.push_back(new_gid);
+
+                if let Some(p) = &pb_merge {
+                    p.set_position(states.len() as u64);
+                    p.set_message(format!("{}", worklist.len()));
+                }
             }
         }
     }
@@ -1114,7 +1136,7 @@ fn merge_tuples_to_states(
         let p = ProgressBar::new_spinner();
         p.set_style(
             ProgressStyle::default_spinner()
-                .template("{spinner:.green} [Determinize: {elapsed_precise}] Merging tuples...")
+                .template("{spinner:.green} [Determinize: {elapsed_precise}] States: {pos}, Worklist: {msg}")
                 .unwrap(),
         );
         Some(p)
