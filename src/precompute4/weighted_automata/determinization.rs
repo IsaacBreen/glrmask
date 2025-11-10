@@ -200,8 +200,7 @@ impl NWA {
                 } else { None }
             }).collect();
 
-            // Compute exceptions. Even if a label's effect is empty or identical to the default,
-            // its mere presence must block the default on that label.
+            // Compute exceptions; drop those that are empty or identical to the default step effect.
             let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
             for (lbl, targets) in self.states[s].transitions.iter() {
                 let mut step_exs: Vec<usize> = Vec::new();
@@ -215,15 +214,15 @@ impl NWA {
                     }
                     step_exs.push(step_pool.intern(pairs_ex));
                 }
-                // Keep the label even if the step set is empty: presence alone blocks default.
-                step_exs.sort_unstable();
-                step_exs.dedup();
-                ex.insert(*lbl, step_exs);
-            }
-            // Also block default for labels listed as exceptions on any default transition.
-            for def in &self.states[s].default {
-                for &lbl in def.exceptions.iter() {
-                    ex.entry(lbl).or_default();
+
+                if !step_exs.is_empty() {
+                    step_exs.sort_unstable();
+                    let mut sorted_def_steps = def_steps.clone();
+                    sorted_def_steps.sort_unstable();
+                    if step_exs == sorted_def_steps {
+                        continue;
+                    }
+                    ex.insert(*lbl, step_exs);
                 }
             }
 
