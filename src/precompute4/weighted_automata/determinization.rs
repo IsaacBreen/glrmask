@@ -1135,7 +1135,8 @@ fn merge_tuples_to_states(
     for t in &tuples {
         let mut placed = false;
         for gid in 0..states.len() {
-            if unify_tuples(&states[gid].representative_tuple, t).is_some() {
+            if let Some(new_rep) = unify_tuples(&states[gid].representative_tuple, t) {
+                states[gid].representative_tuple = new_rep;
                 states[gid].all_tuples.insert(t.clone());
                 tuple_to_group.insert(t.clone(), gid);
                 placed = true;
