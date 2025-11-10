@@ -1278,7 +1278,7 @@ fn build_dwa_from_merged(
         if let Some(to_id) = find_group_for_tuple(&merged.states, def_t) {
             let _ = dwa.set_default_transition(sid, to_id, def_w);
         } else {
-            panic!("Unmapped default transition tuple for state {}", sid);
+            assert!(def_t.iter().all(|x| x.is_none()), "Default transition tuple must be all None if unmapped. Found unmapped tuple {:?} for state {}", def_t, sid);
         }
 
         // Exceptions
@@ -1287,7 +1287,7 @@ fn build_dwa_from_merged(
             if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
                 let _ = dwa.add_transition(sid, *lbl, to_id, w);
             } else {
-                panic!("Unmapped exception transition tuple for state {} on label {}", sid, format_i16_char(*lbl));
+                assert!(dst_t.iter().all(|x| x.is_none()), "Exception transition tuple must be all None if unmapped. Found unmapped tuple {:?} for state {} on label {}", dst_t, sid, format_i16_char(*lbl));
             }
         }
     }
