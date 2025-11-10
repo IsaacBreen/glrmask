@@ -810,8 +810,6 @@ struct ProductDFAState {
     representative_tuple: ProductDFAStateTuple,
     /// All member tuples that belong to this class.
     all_tuples: BTreeSet<ProductDFAStateTuple>,
-    /// The active weight for this state (union of atoms over any tuple/component that is active).
-    active_weight: Weight,
 }
 
 #[derive(Clone, Debug)]
@@ -906,17 +904,6 @@ impl ProductDFA {
             }
             let final_opt = if final_w.is_empty() { None } else { Some(final_w) };
 
-            // Compute active weight for the class
-            let mut active_w = Weight::zeros();
-            for &member_idx in &members {
-                let t = &all_tuples[member_idx];
-                for (comp_idx, s_opt) in t.iter().enumerate() {
-                    if s_opt.is_some() {
-                        active_w |= &atoms.atoms[comp_idx];
-                    }
-                }
-            }
-
             // Build labeled transitions from representative (unmapped tuples)
             let mut trans: BTreeMap<i16, ProductDFAStateTuple> = BTreeMap::new();
             for (li, lbl) in sigma.labels.iter().enumerate() {
@@ -937,7 +924,6 @@ impl ProductDFA {
                 trans,
                 representative_tuple: repr,
                 all_tuples: all_tuples_set,
-                active_weight: active_w,
             });
         }
 
@@ -998,6 +984,17 @@ impl ProductDFA {
             }
         }
 
+        // Helper to compute weight from a product tuple: union atoms for non-None positions
+        let compute_weight_from_tuple = |tpl: &ProductDFAStateTuple| -> Weight {
+            let mut w = Weight::zeros();
+            for (i, s_opt) in tpl.iter().enumerate() {
+                if s_opt.is_some() {
+                    w |= &atoms.atoms[i];
+                }
+            }
+            w
+        };
+
         let k = comps.len();
 
         // Final weights
@@ -1016,7 +1013,6 @@ impl ProductDFA {
             }
 
             let st = &self.states[sid];
-            let edge_weight = &st.active_weight;
 
             // Build default (OTHER) from the representative tuple
             let other_next_tuple: ProductDFAStateTuple = (0..k)
@@ -1024,7 +1020,8 @@ impl ProductDFA {
                 .collect();
             if let Some(rep_next) = tuple_to_rep.get(&other_next_tuple) {
                 if let Some(&dst_id) = rep_tuple_to_id.get(rep_next) {
-                    let _ = dwa.set_default_transition(sid, dst_id, edge_weight.clone());
+                    let edge_weight = compute_weight_from_tuple(&other_next_tuple);
+                    let _ = dwa.set_default_transition(sid, dst_id, edge_weight);
                 }
             }
 
@@ -1032,7 +1029,8 @@ impl ProductDFA {
             for (lbl, next_tuple) in &st.trans {
                 if let Some(rep_next) = tuple_to_rep.get(next_tuple) {
                     if let Some(&dst_id) = rep_tuple_to_id.get(rep_next) {
-                        let _ = dwa.add_transition(sid, *lbl, dst_id, edge_weight.clone());
+                        let edge_weight = compute_weight_from_tuple(next_tuple);
+                        let _ = dwa.add_transition(sid, *lbl, dst_id, edge_weight);
                     }
                 }
             }
@@ -1047,9 +1045,13 @@ impl ProductDFA {
     /// Groups product state tuples into equivalence classes.
     /// Returns a vector where `result[i]` is the group ID for `all_tuples[i]`.
     fn group_product_states(all_tuples: &[ProductDFAStateTuple]) -> Vec<usize> {
+        // This is a greedy, order-dependent implementation for clique partitioning.
+        // Two tuples can be in the same group if for any component, their states are
+        // either the same, or one of them is a sink (None).
         let n = all_tuples.len();
         let mut group_ids = vec![usize::MAX; n];
-        let mut core_to_gid: HashMap<BTreeMap<usize, usize>, usize> = HashMap::new();
+        // Each group is represented by its canonical "core", which is the superposition of the cores of its members.
+        let mut group_cores: Vec<BTreeMap<usize, usize>> = Vec::new();
         let mut next_group_id = 0;
 
         for (i, tuple) in all_tuples.iter().enumerate() {
@@ -1059,9 +1061,25 @@ impl ProductDFA {
                 .filter_map(|(comp_idx, s_opt)| s_opt.map(|s| (comp_idx, s)))
                 .collect();
 
-            let gid = *core_to_gid.entry(core).or_insert_with(|| {
+            let mut assigned_gid = None;
+            // Find the first existing group that this tuple is compatible with.
+            for (gid, g_core) in group_cores.iter_mut().enumerate() {
+                let compatible = core.iter().all(|(k, v)| g_core.get(k).map_or(true, |v2| v == v2))
+                    && g_core.iter().all(|(k, v)| core.get(k).map_or(true, |v2| v == v2));
+
+                if compatible {
+                    // Add to this group and update the group's canonical core.
+                    g_core.extend(core.clone());
+                    assigned_gid = Some(gid);
+                    break;
+                }
+            }
+
+            let gid = assigned_gid.unwrap_or_else(|| {
+                // No compatible group found, create a new one.
                 let new_gid = next_group_id;
                 next_group_id += 1;
+                group_cores.push(core);
                 new_gid
             });
             group_ids[i] = gid;
