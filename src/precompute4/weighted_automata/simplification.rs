@@ -755,9 +755,6 @@ impl NWA {
             if let Some(p) = &pb { p.inc(1); }
             changed = false;
             Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
-            Self::run_pass(&pb, "prune continuations", &mut changed, || {
-                self.prune_continuations_from_final_states()
-            });
             Self::run_pass(&pb, "unify final states", &mut changed, || self.unify_final_states());
             Self::run_pass(&pb, "dedup epsilons", &mut changed, || self.dedup_epsilon_edges());
             Self::run_pass(&pb, "bypass ε-chains", &mut changed, || self.bypass_trivial_epsilon_chains());
@@ -1019,54 +1016,6 @@ impl NWA {
 }
 
 impl NWA {
-    /// For any state that is final, we can prune its outgoing transitions. The logic is that
-    /// if a weight is accepted at this state (for a given prefix), we don't need to consider
-    /// any longer paths for that same weight. We subtract the final_weight from all outgoing
-    /// edge weights. The `normalize_edges_inplace` pass, which is called in the main simplify
-    /// loop, will then remove any transitions whose weights become empty.
-    fn prune_continuations_from_final_states(&mut self) -> bool {
-        let mut changed = false;
-        for state in &mut self.states.0 {
-            if let Some(final_weight) = &state.final_weight {
-                if final_weight.is_empty() {
-                    continue;
-                }
-
-                // Subtract final_weight from all outgoing transitions.
-
-                // Epsilon transitions
-                for (_, w) in &mut state.epsilons {
-                    let old_w = w.clone();
-                    *w -= final_weight;
-                    if *w != old_w {
-                        changed = true;
-                    }
-                }
-
-                // Labeled transitions
-                for (_, targets) in &mut state.transitions {
-                    for (_, w) in targets {
-                        let old_w = w.clone();
-                        *w -= final_weight;
-                        if *w != old_w {
-                            changed = true;
-                        }
-                    }
-                }
-
-                // Default transitions
-                for def in &mut state.default {
-                    let old_w = def.weight.clone();
-                    def.weight -= final_weight;
-                    if def.weight != old_w {
-                        changed = true;
-                    }
-                }
-            }
-        }
-        changed
-    }
-
     /// Normalize in-place:
     /// - Remove empty-weight edges (ε, labeled, and default)
     /// - Drop labeled transitions that are identical to the default (same target and weight)
