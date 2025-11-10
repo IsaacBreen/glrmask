@@ -1198,6 +1198,24 @@ fn compute_signature_key(
     SigKey { final_hash, def_w_hash, def_dst_root, ex }
 }
 
+fn get_or_create_group(
+    t: ProductDFAStateTuple,
+    tuple_to_gid: &mut HashMap<ProductDFAStateTuple, usize>,
+    groups: &mut Vec<GroupData>,
+    preds: &mut Vec<BTreeSet<usize>>,
+    uf: &mut UnionFind,
+    sigma: &Alphabet,
+) -> usize {
+    if let Some(&gid) = tuple_to_gid.get(&t) {
+        return uf.find(gid);
+    }
+    let gid = uf.make_set();
+    tuple_to_gid.insert(t.clone(), gid);
+    groups.push(GroupData::new(t, sigma.labels.len()));
+    preds.push(BTreeSet::new());
+    gid
+}
+
 /// Optimal merging: compute minimal quotient of reachable tuples under (F, per-symbol W, successors).
 fn minimize_tuples_to_states(
     start_tuple: ProductDFAStateTuple,
@@ -1217,24 +1235,12 @@ fn minimize_tuples_to_states(
     // Signature -> canonical group mapping (use hash keys + equality recheck)
     let mut sig_to_gid: HashMap<SigKey, usize> = HashMap::new();
 
-    // Helper: get or create group for tuple
-    let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
-        if let Some(&gid) = tuple_to_gid.get(&t) {
-            return uf.find(gid);
-        }
-        let gid = uf.make_set();
-        tuple_to_gid.insert(t.clone(), gid);
-        groups.push(GroupData::new(t, sigma.labels.len()));
-        preds.push(BTreeSet::new());
-        gid
-    };
-
     // Worklists
     let mut expand_q: VecDeque<usize> = VecDeque::new();
     let mut recheck_q: VecDeque<usize> = VecDeque::new();
 
     // Seed
-    let start_gid = get_or_create(start_tuple.clone());
+    let start_gid = get_or_create_group(start_tuple.clone(), &mut tuple_to_gid, &mut groups, &mut preds, &mut uf, sigma);
     expand_q.push_back(start_gid);
 
     // Expand groups with transitions and base signature data
@@ -1259,7 +1265,7 @@ fn minimize_tuples_to_states(
         // Default (OTHER)
         let succ_def = successor_tuple(&tuple, sigma.other_index, comps, comp_sinks);
         let def_w = edge_weight_from_tuple(atom_weights, &succ_def);
-        let def_gid = get_or_create(succ_def);
+        let def_gid = get_or_create_group(succ_def, &mut tuple_to_gid, &mut groups, &mut preds, &mut uf, sigma);
         groups[gid].def_w = def_w;
         groups[gid].def_dst = def_gid;
         preds[def_gid].insert(gid);
@@ -1268,7 +1274,7 @@ fn minimize_tuples_to_states(
         for (li, _lbl) in sigma.labels.iter().enumerate() {
             let succ = successor_tuple(&tuple, li, comps, comp_sinks);
             let w = edge_weight_from_tuple(atom_weights, &succ);
-            let to = get_or_create(succ);
+            let to = get_or_create_group(succ, &mut tuple_to_gid, &mut groups, &mut preds, &mut uf, sigma);
             groups[gid].ex_w[li] = w;
             groups[gid].ex_dst[li] = to;
             preds[to].insert(gid);

@@ -7,7 +7,7 @@ local_system:
     - src/precompute4/weighted_automata/ops.rs
     - src/precompute4/weighted_automata/test_determinization.rs
     - src/precompute4/weighted_automata/determinization.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/precompute4/weighted_automata/mod.rs: |
@@ -4902,7 +4902,8 @@ local_system:
                   }
                   return Some(s);
               }
-          None
+              None
+          }
       }
 
       /// Lightweight 64-bit fingerprint for Weight (SimpleBitset) by hashing its ranges.
@@ -5145,6 +5146,24 @@ local_system:
           SigKey { final_hash, def_w_hash, def_dst_root, ex }
       }
 
+      fn get_or_create_group(
+          t: ProductDFAStateTuple,
+          tuple_to_gid: &mut HashMap<ProductDFAStateTuple, usize>,
+          groups: &mut Vec<GroupData>,
+          preds: &mut Vec<BTreeSet<usize>>,
+          uf: &mut UnionFind,
+          sigma: &Alphabet,
+      ) -> usize {
+          if let Some(&gid) = tuple_to_gid.get(&t) {
+              return uf.find(gid);
+          }
+          let gid = uf.make_set();
+          tuple_to_gid.insert(t.clone(), gid);
+          groups.push(GroupData::new(t, sigma.labels.len()));
+          preds.push(BTreeSet::new());
+          gid
+      }
+
       /// Optimal merging: compute minimal quotient of reachable tuples under (F, per-symbol W, successors).
       fn minimize_tuples_to_states(
           start_tuple: ProductDFAStateTuple,
@@ -5164,24 +5183,12 @@ local_system:
           // Signature -> canonical group mapping (use hash keys + equality recheck)
           let mut sig_to_gid: HashMap<SigKey, usize> = HashMap::new();
 
-          // Helper: get or create group for tuple
-          let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
-              if let Some(&gid) = tuple_to_gid.get(&t) {
-                  return uf.find(gid);
-              }
-              let gid = uf.make_set();
-              tuple_to_gid.insert(t.clone(), gid);
-              groups.push(GroupData::new(t, sigma.labels.len()));
-              preds.push(BTreeSet::new());
-              gid
-          };
-
           // Worklists
           let mut expand_q: VecDeque<usize> = VecDeque::new();
           let mut recheck_q: VecDeque<usize> = VecDeque::new();
 
           // Seed
-          let start_gid = get_or_create(start_tuple.clone());
+          let start_gid = get_or_create_group(start_tuple.clone(), &mut tuple_to_gid, &mut groups, &mut preds, &mut uf, sigma);
           expand_q.push_back(start_gid);
 
           // Expand groups with transitions and base signature data
@@ -5206,7 +5213,7 @@ local_system:
               // Default (OTHER)
               let succ_def = successor_tuple(&tuple, sigma.other_index, comps, comp_sinks);
               let def_w = edge_weight_from_tuple(atom_weights, &succ_def);
-              let def_gid = get_or_create(succ_def);
+              let def_gid = get_or_create_group(succ_def, &mut tuple_to_gid, &mut groups, &mut preds, &mut uf, sigma);
               groups[gid].def_w = def_w;
               groups[gid].def_dst = def_gid;
               preds[def_gid].insert(gid);
@@ -5215,7 +5222,7 @@ local_system:
               for (li, _lbl) in sigma.labels.iter().enumerate() {
                   let succ = successor_tuple(&tuple, li, comps, comp_sinks);
                   let w = edge_weight_from_tuple(atom_weights, &succ);
-                  let to = get_or_create(succ);
+                  let to = get_or_create_group(succ, &mut tuple_to_gid, &mut groups, &mut preds, &mut uf, sigma);
                   groups[gid].ex_w[li] = w;
                   groups[gid].ex_dst[li] = to;
                   preds[to].insert(gid);
@@ -5457,7 +5464,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -9075,6 +9082,553 @@ messages:
           End of merged determinization
           ------------------------------ */
        
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Determinization: Implement optimal state
+      minimization via signature-based union-find for product automaton."'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+      --- original version of src/precompute4/weighted_automata/determinization.rs
+      +++ current version of src/precompute4/weighted_automata/determinization.rs
+      @@ -954,7 +954,8 @@
+                   }
+                   return Some(s);
+               }
+      -    None
+      +        None
+      +    }
+       }
+       
+       /// Lightweight 64-bit fingerprint for Weight (SimpleBitset) by hashing its ranges.
+
+      ```
+    metadata:
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --message-format=json-diagnostic-rendered-ansi --no-run --package sep1 --lib precompute4::test_weighted_automata --profile test
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0499]: cannot borrow `uf` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1242:19
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      1222 |         if let Some(&gid) = tuple_to_gid.get(&t) {
+      1223 |             return uf.find(gid);
+           |                    -- first borrow occurs due to use of `uf` in closure
+      ...
+      1242 |         let gid = uf.find(gid0);
+           |                   ^^ second mutable borrow occurs here
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+
+      error[E0502]: cannot borrow `groups` as immutable because it is also borrowed as mutable
+          --> src/precompute4/weighted_automata/determinization.rs:1243:12
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- mutable borrow occurs here
+      ...
+      1227 |         groups.push(GroupData::new(t, sigma.labels.len()));
+           |         ------ first borrow occurs due to use of `groups` in closure
+      ...
+      1243 |         if groups[gid].expanded {
+           |            ^^^^^^ immutable borrow occurs here
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- mutable borrow later used here
+
+      error[E0502]: cannot borrow `groups` as immutable because it is also borrowed as mutable
+          --> src/precompute4/weighted_automata/determinization.rs:1247:21
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- mutable borrow occurs here
+      ...
+      1227 |         groups.push(GroupData::new(t, sigma.labels.len()));
+           |         ------ first borrow occurs due to use of `groups` in closure
+      ...
+      1247 |         let tuple = groups[gid].tuple.clone();
+           |                     ^^^^^^ immutable borrow occurs here
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- mutable borrow later used here
+
+      error[E0499]: cannot borrow `groups` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1257:9
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      ...
+      1227 |         groups.push(GroupData::new(t, sigma.labels.len()));
+           |         ------ first borrow occurs due to use of `groups` in closure
+      ...
+      1257 |         groups[gid].final_weight = if w_final.is_empty() { None } else { Some(w_final) };
+           |         ^^^^^^ second mutable borrow occurs here
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+
+      error[E0499]: cannot borrow `groups` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1263:9
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      ...
+      1227 |         groups.push(GroupData::new(t, sigma.labels.len()));
+           |         ------ first borrow occurs due to use of `groups` in closure
+      ...
+      1263 |         groups[gid].def_w = def_w;
+           |         ^^^^^^ second mutable borrow occurs here
+      ...
+      1271 |             let to = get_or_create(succ);
+           |                      ------------- first borrow later used here
+
+      error[E0499]: cannot borrow `groups` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1264:9
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      ...
+      1227 |         groups.push(GroupData::new(t, sigma.labels.len()));
+           |         ------ first borrow occurs due to use of `groups` in closure
+      ...
+      1264 |         groups[gid].def_dst = def_gid;
+           |         ^^^^^^ second mutable borrow occurs here
+      ...
+      1271 |             let to = get_or_create(succ);
+           |                      ------------- first borrow later used here
+
+      error[E0499]: cannot borrow `preds` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1265:9
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      ...
+      1228 |         preds.push(BTreeSet::new());
+           |         ----- first borrow occurs due to use of `preds` in closure
+      ...
+      1265 |         preds[def_gid].insert(gid);
+           |         ^^^^^ second mutable borrow occurs here
+      ...
+      1271 |             let to = get_or_create(succ);
+           |                      ------------- first borrow later used here
+
+      error[E0499]: cannot borrow `groups` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1272:13
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      ...
+      1227 |         groups.push(GroupData::new(t, sigma.labels.len()));
+           |         ------ first borrow occurs due to use of `groups` in closure
+      ...
+      1271 |             let to = get_or_create(succ);
+           |                      ------------- first borrow later used here
+      1272 |             groups[gid].ex_w[li] = w;
+           |             ^^^^^^ second mutable borrow occurs here
+
+      error[E0499]: cannot borrow `groups` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1273:13
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      ...
+      1227 |         groups.push(GroupData::new(t, sigma.labels.len()));
+           |         ------ first borrow occurs due to use of `groups` in closure
+      ...
+      1271 |             let to = get_or_create(succ);
+           |                      ------------- first borrow later used here
+      1272 |             groups[gid].ex_w[li] = w;
+      1273 |             groups[gid].ex_dst[li] = to;
+           |             ^^^^^^ second mutable borrow occurs here
+
+      error[E0499]: cannot borrow `preds` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1274:13
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      ...
+      1228 |         preds.push(BTreeSet::new());
+           |         ----- first borrow occurs due to use of `preds` in closure
+      ...
+      1271 |             let to = get_or_create(succ);
+           |                      ------------- first borrow later used here
+      ...
+      1274 |             preds[to].insert(gid);
+           |             ^^^^^ second mutable borrow occurs here
+
+      error[E0499]: cannot borrow `groups` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1277:9
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      ...
+      1227 |         groups.push(GroupData::new(t, sigma.labels.len()));
+           |         ------ first borrow occurs due to use of `groups` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+      ...
+      1277 |         groups[gid].expanded = true;
+           |         ^^^^^^ second mutable borrow occurs here
+
+      error[E0502]: cannot borrow `groups` as immutable because it is also borrowed as mutable
+          --> src/precompute4/weighted_automata/determinization.rs:1280:46
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- mutable borrow occurs here
+      ...
+      1227 |         groups.push(GroupData::new(t, sigma.labels.len()));
+           |         ------ first borrow occurs due to use of `groups` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- mutable borrow later used here
+      ...
+      1280 |         let key = compute_signature_key(gid, &groups, sigma, &mut uf);
+           |                                              ^^^^^^^ immutable borrow occurs here
+
+      error[E0499]: cannot borrow `uf` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1280:62
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      1222 |         if let Some(&gid) = tuple_to_gid.get(&t) {
+      1223 |             return uf.find(gid);
+           |                    -- first borrow occurs due to use of `uf` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+      ...
+      1280 |         let key = compute_signature_key(gid, &groups, sigma, &mut uf);
+           |                                                              ^^^^^^^ second mutable borrow occurs here
+
+      error[E0499]: cannot borrow `uf` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1282:30
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      1222 |         if let Some(&gid) = tuple_to_gid.get(&t) {
+      1223 |             return uf.find(gid);
+           |                    -- first borrow occurs due to use of `uf` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+      ...
+      1282 |             let other_root = uf.find(other);
+           |                              ^^ second mutable borrow occurs here
+
+      error[E0499]: cannot borrow `uf` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1283:28
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      1222 |         if let Some(&gid) = tuple_to_gid.get(&t) {
+      1223 |             return uf.find(gid);
+           |                    -- first borrow occurs due to use of `uf` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+      ...
+      1283 |             let gid_root = uf.find(gid);
+           |                            ^^ second mutable borrow occurs here
+
+      error[E0502]: cannot borrow `groups` as immutable because it is also borrowed as mutable
+          --> src/precompute4/weighted_automata/determinization.rs:1284:81
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- mutable borrow occurs here
+      ...
+      1227 |         groups.push(GroupData::new(t, sigma.labels.len()));
+           |         ------ first borrow occurs due to use of `groups` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- mutable borrow later used here
+      ...
+      1284 |             if gid_root != other_root && signatures_equal(gid_root, other_root, &groups, sigma, &mut uf) {
+           |                                                                                 ^^^^^^^ immutable borrow occurs here
+
+      error[E0499]: cannot borrow `uf` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1284:97
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      1222 |         if let Some(&gid) = tuple_to_gid.get(&t) {
+      1223 |             return uf.find(gid);
+           |                    -- first borrow occurs due to use of `uf` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+      ...
+      1284 |             if gid_root != other_root && signatures_equal(gid_root, other_root, &groups, sigma, &mut uf) {
+           |                                                                                                 ^^^^^^^ second mutable borrow occurs here
+
+      error[E0499]: cannot borrow `uf` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1285:25
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      1222 |         if let Some(&gid) = tuple_to_gid.get(&t) {
+      1223 |             return uf.find(gid);
+           |                    -- first borrow occurs due to use of `uf` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+      ...
+      1285 |                 let r = uf.union(gid_root, other_root);
+           |                         ^^ second mutable borrow occurs here
+
+      error[E0502]: cannot borrow `preds` as immutable because it is also borrowed as mutable
+          --> src/precompute4/weighted_automata/determinization.rs:1290:26
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- mutable borrow occurs here
+      ...
+      1228 |         preds.push(BTreeSet::new());
+           |         ----- first borrow occurs due to use of `preds` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- mutable borrow later used here
+      ...
+      1290 |                 for p in preds[a].iter() {
+           |                          ^^^^^ immutable borrow occurs here
+
+      error[E0499]: cannot borrow `preds` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1294:21
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      ...
+      1228 |         preds.push(BTreeSet::new());
+           |         ----- first borrow occurs due to use of `preds` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+      ...
+      1294 |                     preds[r].insert(p);
+           |                     ^^^^^ second mutable borrow occurs here
+
+      error[E0499]: cannot borrow `preds` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1296:17
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      ...
+      1228 |         preds.push(BTreeSet::new());
+           |         ----- first borrow occurs due to use of `preds` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+      ...
+      1296 |                 preds[a].clear();
+           |                 ^^^^^ second mutable borrow occurs here
+
+      error[E0502]: cannot borrow `preds` as immutable because it is also borrowed as mutable
+          --> src/precompute4/weighted_automata/determinization.rs:1297:27
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- mutable borrow occurs here
+      ...
+      1228 |         preds.push(BTreeSet::new());
+           |         ----- first borrow occurs due to use of `preds` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- mutable borrow later used here
+      ...
+      1297 |                 for &p in preds[r].iter() {
+           |                           ^^^^^ immutable borrow occurs here
+
+      error[E0499]: cannot borrow `uf` as mutable more than once at a time
+          --> src/precompute4/weighted_automata/determinization.rs:1306:36
+           |
+      1221 |     let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+           |                             ---------------------------------- first mutable borrow occurs here
+      1222 |         if let Some(&gid) = tuple_to_gid.get(&t) {
+      1223 |             return uf.find(gid);
+           |                    -- first borrow occurs due to use of `uf` in closure
+      ...
+      1262 |         let def_gid = get_or_create(succ_def);
+           |                       ------------- first borrow later used here
+      ...
+      1306 |             sig_to_gid.insert(key, uf.find(gid));
+           |                                    ^^ second mutable borrow occurs here
+
+      Some errors have detailed explanations: E0499, E0502.
+      For more information about an error, try `rustc --explain E0499`.
+      error: could not compile `sep1` (lib test) due to 23 previous errors
+      Process finished with exit code 101
+    metadata:
+  - assistant: |-
+      Of course. The compiler errors you're seeing are all related to Rust's borrow checker. The closure `get_or_create` captures several variables mutably, and this borrow lasts for the closure's entire lifetime. When the main loop then tries to access these same variables, it results in conflicting borrows.
+
+      The solution is to refactor the code to eliminate this closure and its long-lived borrows. I'll replace it with a standalone helper function that takes the state it needs as explicit arguments. This scopes the mutable borrows to just the function call, resolving the conflict.
+
+      Here are the step-by-step instructions to fix the code:
+
+      ### Step 1: Create a Standalone Helper Function
+
+      In `src/precompute4/weighted_automata/determinization.rs`, we will create a new function `get_or_create_group` to encapsulate the logic of the old closure.
+
+      1.  **Open the file**: `src/precompute4/weighted_automata/determinization.rs`.
+      2.  **Insert the new function**: Add the following function definition immediately before the `minimize_tuples_to_states` function.
+
+          ```rust
+          fn get_or_create_group(
+              t: ProductDFAStateTuple,
+              tuple_to_gid: &mut HashMap<ProductDFAStateTuple, usize>,
+              groups: &mut Vec<GroupData>,
+              preds: &mut Vec<BTreeSet<usize>>,
+              uf: &mut UnionFind,
+              sigma: &Alphabet,
+          ) -> usize {
+              if let Some(&gid) = tuple_to_gid.get(&t) {
+                  return uf.find(gid);
+              }
+              let gid = uf.make_set();
+              tuple_to_gid.insert(t.clone(), gid);
+              groups.push(GroupData::new(t, sigma.labels.len()));
+              preds.push(BTreeSet::new());
+              gid
+          }
+          ```
+
+      ### Step 2: Remove the Closure and Update Calls
+
+      Now, let's remove the old closure from `minimize_tuples_to_states` and replace its usage with calls to our new helper function.
+
+      1.  **Navigate to `minimize_tuples_to_states`**: Inside `src/precompute4/weighted_automata/determinization.rs`.
+      2.  **Delete the closure**: Find and delete the entire `let mut get_or_create = ...;` block.
+      3.  **Update the calls**: Replace the three places where `get_or_create` was called with `get_or_create_group`, passing the necessary state as arguments.
+          *   The first call is for `start_gid`.
+          *   The second is for `def_gid`.
+          *   The third is for `to` inside the exceptions loop.
+
+      ---
+
+      ### Git Diff
+
+      Here is the git diff that applies these changes:
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -1202,6 +1202,26 @@
+           SigKey { final_hash, def_w_hash, def_dst_root, ex }
+       }
+       
+      +fn get_or_create_group(
+      +    t: ProductDFAStateTuple,
+      +    tuple_to_gid: &mut HashMap<ProductDFAStateTuple, usize>,
+      +    groups: &mut Vec<GroupData>,
+      +    preds: &mut Vec<BTreeSet<usize>>,
+      +    uf: &mut UnionFind,
+      +    sigma: &Alphabet,
+      +) -> usize {
+      +    if let Some(&gid) = tuple_to_gid.get(&t) {
+      +        return uf.find(gid);
+      +    }
+      +    let gid = uf.make_set();
+      +    tuple_to_gid.insert(t.clone(), gid);
+      +    groups.push(GroupData::new(t, sigma.labels.len()));
+      +    preds.push(BTreeSet::new());
+      +    gid
+      +}
+      +
+       /// Optimal merging: compute minimal quotient of reachable tuples under (F, per-symbol W, successors).
+       fn minimize_tuples_to_states(
+           start_tuple: ProductDFAStateTuple,
+      @@ -1218,26 +1238,12 @@
+           // Union-find for merging equivalent groups
+           let mut uf = UnionFind::default();
+           // Signature -> canonical group mapping (use hash keys + equality recheck)
+           let mut sig_to_gid: HashMap<SigKey, usize> = HashMap::new();
+       
+      -    // Helper: get or create group for tuple
+      -    let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+      -        if let Some(&gid) = tuple_to_gid.get(&t) {
+      -            return uf.find(gid);
+      -        }
+      -        let gid = uf.make_set();
+      -        tuple_to_gid.insert(t.clone(), gid);
+      -        groups.push(GroupData::new(t, sigma.labels.len()));
+      -        preds.push(BTreeSet::new());
+      -        gid
+      -    };
+      -
+           // Worklists
+           let mut expand_q: VecDeque<usize> = VecDeque::new();
+           let mut recheck_q: VecDeque<usize> = VecDeque::new();
+       
+           // Seed
+      -    let start_gid = get_or_create(start_tuple.clone());
+      +    let start_gid = get_or_create_group(start_tuple.clone(), &mut tuple_to_gid, &mut groups, &mut preds, &mut uf, sigma);
+           expand_q.push_back(start_gid);
+       
+           // Expand groups with transitions and base signature data
+      @@ -1262,7 +1268,7 @@
+               // Default (OTHER)
+               let succ_def = successor_tuple(&tuple, sigma.other_index, comps, comp_sinks);
+               let def_w = edge_weight_from_tuple(atom_weights, &succ_def);
+      -        let def_gid = get_or_create(succ_def);
+      +        let def_gid = get_or_create_group(succ_def, &mut tuple_to_gid, &mut groups, &mut preds, &mut uf, sigma);
+               groups[gid].def_w = def_w;
+               groups[gid].def_dst = def_gid;
+               preds[def_gid].insert(gid);
+      @@ -1271,7 +1277,7 @@
+               for (li, _lbl) in sigma.labels.iter().enumerate() {
+                   let succ = successor_tuple(&tuple, li, comps, comp_sinks);
+                   let w = edge_weight_from_tuple(atom_weights, &succ);
+      -            let to = get_or_create(succ);
+      +            let to = get_or_create_group(succ, &mut tuple_to_gid, &mut groups, &mut preds, &mut uf, sigma);
+                   groups[gid].ex_w[li] = w;
+                   groups[gid].ex_dst[li] = to;
+                   preds[to].insert(gid);
+
       ```
     metadata:
   - user: |
