@@ -165,10 +165,11 @@ impl NWA {
             sparse_trans
         }).collect();
 
+        let merger_alphabet: Vec<usize> = (0..sigma.size()).collect();
         let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
             start_tuple,
             &merger_components,
-            sigma.other_index,
+            &merger_alphabet,
         );
         crate::debug!(
             4,
