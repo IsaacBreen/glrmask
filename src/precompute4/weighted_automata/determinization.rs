@@ -7,7 +7,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
@@ -139,13 +139,19 @@ impl NWA {
         #[derive(Clone)]
         struct MacroSig {
             final_w: Option<Weight>,
-            def: Vec<usize>,
+            // For each default transition: (compiled step id, its exception set)
+            def_steps: Vec<usize>,
+            def_excepts: Vec<BTreeSet<i16>>,
+            // Explicit labeled transitions
             ex: BTreeMap<i16, Vec<usize>>,
         }
         #[derive(Clone, Hash, Eq, PartialEq)]
         struct MacroSigKey {
             final_fp: u64,
-            def: Vec<usize>,
+            // Include exceptions in the macro signature key for correctness
+            // Represent each default as (step_id, sorted exceptions)
+            def: Vec<(usize, Vec<i16>)>,
+            // Labeled transitions keyed by label -> list of step ids
             ex: Vec<(i16, Vec<usize>)>,
         }
 
@@ -191,27 +197,29 @@ impl NWA {
             });
             let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
 
-            // Compute default step; skip if out-of-bounds or effect is empty after weighting + ε-closure.
-            let def_steps: Vec<usize> = self.states[s].default.iter().filter_map(|default| {
-                let NWADefaultTransition { target: to, weight: wdef, .. } = default;
+            // Compute default steps (with their exception sets). Skip steps whose effect is empty.
+            let mut def_steps: Vec<usize> = Vec::new();
+            let mut def_excepts: Vec<BTreeSet<i16>> = Vec::new();
+            for default in &self.states[s].default {
+                let NWADefaultTransition { target: to, weight: wdef, exceptions } = default;
                 if *to < n {
                     let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
-                    if pairs_def.is_empty() { None } else { Some(step_pool.intern(pairs_def)) }
-                } else { None }
-            }).collect();
+                    if !pairs_def.is_empty() {
+                        let sid = step_pool.intern(pairs_def);
+                        def_steps.push(sid);
+                        def_excepts.push(exceptions.clone());
+                    }
+                }
+            }
 
             // Compute exceptions; drop those that are empty or identical to the default step effect.
             let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
             for (lbl, targets) in self.states[s].transitions.iter() {
                 let mut step_exs: Vec<usize> = Vec::new();
                 for (to, wlbl) in targets {
-                    if *to >= n {
-                        continue;
-                    }
+                    if *to >= n { continue; }
                     let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
-                    if pairs_ex.is_empty() {
-                        continue;
-                    }
+                    if pairs_ex.is_empty() { continue; }
                     step_exs.push(step_pool.intern(pairs_ex));
                 }
 
@@ -228,16 +236,20 @@ impl NWA {
 
             crate::debug!(5, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
 
-            let mut sorted_def_steps = def_steps.clone();
-            sorted_def_steps.sort_unstable();
+            // Build macro signature key including exceptions
+            let mut def_key: Vec<(usize, Vec<i16>)> = def_steps.iter()
+                .zip(def_excepts.iter())
+                .map(|(sid, exc)| (*sid, exc.iter().copied().collect()))
+                .collect();
+            def_key.sort_unstable();
             let key = MacroSigKey {
                 final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
-                def: sorted_def_steps,
+                def: def_key,
                 ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
             };
             let sig_id = *sig_intern.entry(key).or_insert_with(|| {
                 let id = sigs.len();
-                sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
+                sigs.push(MacroSig { final_w: final_acc, def_steps, def_excepts, ex });
                 id
             });
             state_to_sig_id[s] = sig_id;
@@ -348,27 +360,28 @@ impl NWA {
 
             let mut def_groups: HashMap<usize, Weight> = HashMap::new();
             let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-            let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+            // Labels for which a default step should be blocked due to exceptions
+            let mut def_block_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
 
             for (sig_id, gate) in &node_gates {
-                for def_id in &sigs[*sig_id].def {
+                for def_id in &sigs[*sig_id].def_steps {
                     *def_groups.entry(*def_id).or_default() |= gate;
                 }
                 for (lbl, ex_steps) in &sigs[*sig_id].ex {
                     for ex_step in ex_steps {
                         *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
                     }
-                    if !sigs[*sig_id].def.is_empty() {
-                        for def_id in &sigs[*sig_id].def {
-                            *def_exers_by_label.entry(*lbl).or_default().entry(*def_id).or_default() |= gate;
-                        }
+                }
+                // Block default steps on labels listed in their exception sets
+                for (def_id, excs) in sigs[*sig_id].def_steps.iter().zip(sigs[*sig_id].def_excepts.iter()) {
+                    for lbl in excs {
+                        *def_block_by_label.entry(*lbl).or_default().entry(*def_id).or_default() |= gate;
                     }
                 }
             }
 
             crate::debug!(5, "  - def_groups: {:?}", def_groups);
             crate::debug!(5, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
-            crate::debug!(5, "  - def_exers_by_label: {:?}", def_exers_by_label);
 
             let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
             let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
@@ -379,24 +392,40 @@ impl NWA {
                 target_maps.insert(None, def_target_map);
             }
 
-            for (lbl, ex_groups) in &ex_groups_by_label {
+            // Build label-specific maps over union of explicit ex labels and default exception labels
+            let mut all_labels: BTreeSet<i16> = BTreeSet::new();
+            all_labels.extend(ex_groups_by_label.keys().copied());
+            all_labels.extend(def_block_by_label.keys().copied());
+            let mut blocked_labels: Vec<i16> = Vec::new();
+
+            for lbl in all_labels {
                 let mut map = HashMap::new();
-                let def_exers = def_exers_by_label.get(lbl);
+                let def_blocks = def_block_by_label.get(&lbl);
+                // Default contributions, minus those blocked by default exceptions on this label
                 for (def_step, total_g) in &def_groups {
-                    let g_exers = def_exers.and_then(|de| de.get(def_step));
+                    let g_block = def_blocks.and_then(|de| de.get(def_step));
                     let mut g_nonex = total_g.clone();
-                    if let Some(g_exers) = g_exers {
-                        g_nonex -= g_exers;
+                    if let Some(gb) = g_block {
+                        g_nonex -= gb;
                     }
                     if !g_nonex.is_empty() {
                         accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
                     }
                 }
-                for (ex_step, g_ex) in ex_groups {
-                    accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+                // Explicit labeled edges on this label
+                if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
+                    for (ex_step, g_ex) in ex_groups {
+                        accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+                    }
                 }
                 if !map.is_empty() {
-                    target_maps.insert(Some(*lbl), map);
+                    target_maps.insert(Some(lbl), map);
+                } else {
+                    // If default exists but yields no effect for this label due to exceptions,
+                    // we must block the default by adding a zero-weight exception later.
+                    if !def_groups.is_empty() && def_blocks.is_some() {
+                        blocked_labels.push(lbl);
+                    }
                 }
             }
 
@@ -449,6 +478,14 @@ impl NWA {
             if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
                 node.default_target_idx = Some(target_idx);
                 node.default_mask = Some(mask);
+            }
+            // Add zero-weight exceptions to block default on labels excluded by all default steps
+            // (only meaningful if a default exists)
+            if node.default_target_idx.is_some() {
+                for lbl in blocked_labels {
+                    node.exception_targets.insert(lbl, node.default_target_idx.unwrap());
+                    node.exception_masks.insert(lbl, Weight::zeros());
+                }
             }
             for (label, (target_idx, mask)) in resolved_transitions {
                 if let Some(lbl) = label {
