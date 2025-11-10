@@ -15,10 +15,12 @@ impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
 
+        crate::debug!(4, "NWA before simplify:\n{}", self);
         let mut nwa = self.clone();
         nwa.simplify();
 
         crate::debug!(4, "NWA::determinize_to_dwa stats after simplify:\n{}", nwa.stats());
+        crate::debug!(4, "NWA after simplify:\n{}", nwa);
 
         let result = nwa.det_fixpoint();
 
@@ -249,6 +251,12 @@ impl NWA {
             p.finish_with_message("Macro signatures done");
         }
 
+        crate::debug!(5, "All MacroSigs ({}):", sigs.len());
+        for (i, sig) in sigs.iter().enumerate() {
+            crate::debug!(5, "  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
+        }
+        crate::debug!(5, "state_to_sig_id: {:?}", state_to_sig_id);
+
         let pb_compile = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
                 ProgressStyle::default_bar()
@@ -277,6 +285,15 @@ impl NWA {
         }
         if let Some(p) = pb_compile {
             p.finish_with_message("Compile steps done");
+        }
+
+        crate::debug!(5, "Step Pool ({}):", step_pool.raw.len());
+        for (i, pairs) in step_pool.raw.iter().enumerate() {
+            crate::debug!(5, "  Step {}: {:?}", i, pairs);
+        }
+        crate::debug!(5, "Compiled Steps ({}):", compiled_steps.len());
+        for (i, step) in compiled_steps.iter().enumerate() {
+            crate::debug!(5, "  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
         }
 
         #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -380,19 +397,25 @@ impl NWA {
             }
 
             for (lbl, ex_groups) in &ex_groups_by_label {
+                crate::debug!(5, "    - processing exception label {}", lbl);
                 let mut map = HashMap::new();
                 let def_exers = def_exers_by_label.get(lbl);
                 for (def_step, total_g) in &def_groups {
+                    crate::debug!(5, "      - considering default step {} with total_g {}", def_step, total_g);
                     let g_exers = def_exers.and_then(|de| de.get(def_step));
+                    crate::debug!(5, "        - g_exers for this def_step: {:?}", g_exers);
                     let mut g_nonex = total_g.clone();
                     if let Some(g_exers) = g_exers {
                         g_nonex -= g_exers;
                     }
+                    crate::debug!(5, "        - g_nonex: {}", g_nonex);
                     if !g_nonex.is_empty() {
+                        crate::debug!(5, "        - accumulating for g_nonex");
                         accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
                     }
                 }
                 for (ex_step, g_ex) in ex_groups {
+                    crate::debug!(5, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
                     accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
                 }
                 if !map.is_empty() {
