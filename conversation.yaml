@@ -1409,6 +1409,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
       use std::ops::RangeInclusive;
       use std::time::Instant;
+      use crate::precompute4::weighted_automata::format_i16_char;
 
       /// This determinization implements a tuple-based merging construction:
       /// 1) Partition weight space into atoms.
@@ -2684,7 +2685,7 @@ local_system:
                   if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
                       let _ = dwa.add_transition(sid, *lbl, to_id, w);
                   } else {
-                      panic!("Unmapped exception transition tuple for state {}", sid);
+                      panic!("Unmapped exception transition tuple for state {} on label {}", sid, format_i16_char(*lbl));
                   }
               }
           }
@@ -4094,6 +4095,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
       use std::ops::RangeInclusive;
       use std::time::Instant;
+      use crate::precompute4::weighted_automata::format_i16_char;
 
       /// This determinization implements a tuple-based merging construction:
       /// 1) Partition weight space into atoms.
@@ -5218,7 +5220,8 @@ local_system:
           for t in &tuples {
               let mut placed = false;
               for gid in 0..states.len() {
-                  if unify_tuples(&states[gid].representative_tuple, t).is_some() {
+                  if let Some(new_rep) = unify_tuples(&states[gid].representative_tuple, t) {
+                      states[gid].representative_tuple = new_rep;
                       states[gid].all_tuples.insert(t.clone());
                       tuple_to_group.insert(t.clone(), gid);
                       placed = true;
@@ -5248,6 +5251,42 @@ local_system:
           }
           if let Some(p) = pb_merge {
               p.finish_with_message(format!("Merged into {} states", states.len()));
+          }
+
+          // Iteratively add states for unmapped successors of representatives until a fixed point is reached.
+          // This ensures that the set of representatives is closed under the successor function,
+          // preventing panics from unmapped destination tuples later.
+          loop {
+              let reps: Vec<_> = states.iter().map(|s| s.representative_tuple.clone()).collect();
+              let mut unmapped_successors = BTreeSet::new();
+
+              for rep in &reps {
+                  for sym in 0..sigma.size() {
+                      let dst = successor_tuple(rep, sym, comps, comp_sinks);
+                      if find_group_for_tuple(&states, &dst).is_none() {
+                          unmapped_successors.insert(dst);
+                      }
+                  }
+              }
+
+              if unmapped_successors.is_empty() {
+                  break; // Fixpoint reached
+              }
+
+              // Add new states for the unmapped successors.
+              for t in unmapped_successors {
+                  // It's possible that a new state added in this batch can host another tuple.
+                  // Re-check before adding a new state to avoid redundant groups.
+                  if find_group_for_tuple(&states, &t).is_some() {
+                      continue;
+                  }
+                  let st = ProductDFAState {
+                      representative_tuple: t.clone(),
+                      all_tuples: BTreeSet::new(), // This state is synthetic, not from original enumeration
+                      ..Default::default()
+                  };
+                  states.push(st);
+              }
           }
 
           // Find start group
@@ -5359,7 +5398,7 @@ local_system:
               if let Some(to_id) = find_group_for_tuple(&merged.states, def_t) {
                   let _ = dwa.set_default_transition(sid, to_id, def_w);
               } else {
-                  panic!("Unmapped default transition tuple for state {}", sid);
+                  assert!(def_t.iter().all(|x| x.is_none()), "Default transition tuple must be all None if unmapped. Found unmapped tuple {:?} for state {}", def_t, sid);
               }
 
               // Exceptions
@@ -5368,7 +5407,7 @@ local_system:
                   if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
                       let _ = dwa.add_transition(sid, *lbl, to_id, w);
                   } else {
-                      panic!("Unmapped exception transition tuple for state {} on label {}", sid, lbl);
+                      assert!(dst_t.iter().all(|x| x.is_none()), "Exception transition tuple must be all None if unmapped. Found unmapped tuple {:?} for state {} on label {}", dst_t, sid, format_i16_char(*lbl));
                   }
               }
           }
@@ -6853,6 +6892,7 @@ messages:
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
       use std::ops::RangeInclusive;
       use std::time::Instant;
+      use crate::precompute4::weighted_automata::format_i16_char;
 
       /// This determinization implements a tuple-based merging construction:
       /// 1) Partition weight space into atoms.
@@ -8128,7 +8168,7 @@ messages:
                   if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
                       let _ = dwa.add_transition(sid, *lbl, to_id, w);
                   } else {
-                      panic!("Unmapped exception transition tuple for state {}", sid);
+                      panic!("Unmapped exception transition tuple for state {} on label {}", sid, format_i16_char(*lbl));
                   }
               }
           }
@@ -8144,17 +8184,17 @@ messages:
     metadata:
       filename: src/precompute4/weighted_automata/determinization.rs
   - user: |+
-      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:52: DWA::simplify_components (21 states -> 21 states) took: 18.49975ms
-      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:52: DWA::simplify_components (23 states -> 23 states) took: 1.268042ms
-      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:36: Starting determinization for NWA with 45 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:44: Built weight partition with 3 atoms in 968.833µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Built alphabet with 14 labels in 891.917µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:740: Minimizing DFA with 24 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 0: interval=0..=0, DFA states=24
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:740: Minimizing DFA with 22 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 1: interval=1..=1, DFA states=22
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:740: Minimizing DFA with 2 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 2: interval=2..=18446744073709551615, DFA states=2
+      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:52: DWA::simplify_components (21 states -> 21 states) took: 3.343333ms
+      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:52: DWA::simplify_components (23 states -> 23 states) took: 1.28225ms
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:38: Starting determinization for NWA with 45 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:46: Built weight partition with 3 atoms in 31.792µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:56: Built alphabet with 14 labels in 68.25µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:742: Minimizing DFA with 24 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:79: Atom 0: interval=0..=0, DFA states=24
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:742: Minimizing DFA with 22 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:79: Atom 1: interval=1..=1, DFA states=22
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:742: Minimizing DFA with 2 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:79: Atom 2: interval=2..=18446744073709551615, DFA states=2
 
       --- Atomic DFAs (3 total) ---
         DFA 0 (for atom 0..=0):
@@ -8211,8 +8251,8 @@ messages:
           - States: 2, Start: 0, Sink: Some(1)
           - State 0: neg(0)->1, neg(3)->1, neg(5)->1, neg(7)->1, neg(9)->1, neg(10)->1, 0->1, 3->1, 5->1, 6->1, 7->1, 8->1, 9->1, 10->1, *->1
           - State 1: neg(0)->1, neg(3)->1, neg(5)->1, neg(7)->1, neg(9)->1, neg(10)->1, 0->1, 3->1, 5->1, 6->1, 7->1, 8->1, 9->1, 10->1, *->1
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:116: Enumerated 43 product tuples in 586.875µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:134: Merged into 25 product states in 843.834µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:118: Enumerated 43 product tuples in 475.125µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:136: Merged into 25 product states in 352.084µs
 
       --- MergedProduct (25 states, start=0) ---
         State 0:
@@ -8694,735 +8734,23 @@ messages:
           - Contains 1 tuples.
 
 
-      thread 'precompute4::test_weighted_automata::test_union_complex_from_attachment_simpified' (14482823) panicked at src/precompute4/weighted_automata/determinization.rs:1289:17:
-      Unmapped exception transition tuple for state 1
+      thread 'precompute4::test_weighted_automata::test_union_complex_from_attachment_simpified' (14506243) panicked at src/precompute4/weighted_automata/determinization.rs:1291:17:
+      Unmapped exception transition tuple for state 1 on label neg(0)
       stack backtrace:
          0: __rustc::rust_begin_unwind
                    at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
          1: core::panicking::panic_fmt
                    at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
          2: sep1::precompute4::weighted_automata::determinization::build_dwa_from_merged
-                   at ./src/precompute4/weighted_automata/determinization.rs:1289:17
+                   at ./src/precompute4/weighted_automata/determinization.rs:1291:17
          3: sep1::precompute4::weighted_automata::determinization::<impl sep1::precompute4::weighted_automata::nwa::NWA>::determinize_to_dwa
-                   at ./src/precompute4/weighted_automata/determinization.rs:182:19
+                   at ./src/precompute4/weighted_automata/determinization.rs:184:19
          4: sep1::precompute4::weighted_automata::ops::<impl sep1::precompute4::weighted_automata::dwa::DWA>::union
                    at ./src/precompute4/weighted_automata/ops.rs:83:40
          5: sep1::precompute4::test_weighted_automata::test_union_complex_from_attachment_simpified
                    at ./src/precompute4/test_weighted_automata.rs:937:18
          6: sep1::precompute4::test_weighted_automata::test_union_complex_from_attachment_simpified::{{closure}}
                    at ./src/precompute4/test_weighted_automata.rs:799:50
-         7: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         8: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-
-
-      ---
-
-
-
-      Original DWA:
-      DWA (start: 0)
-        State 0:
-          0 -> 1 (trans_weight: [1])
-          1 -> 2 (trans_weight: [0])
-          2 -> 3 (trans_weight: [1..=2])
-          3 -> 4 (trans_weight: [1..=2])
-          4 -> 5 (trans_weight: [1..=2])
-          5 -> 6 (trans_weight: [0])
-          7 -> 7 (trans_weight: [1..=2])
-          8 -> 8 (trans_weight: [0])
-          9 -> 9 (trans_weight: [1..=2])
-        State 1:
-          neg(0) -> 10 (trans_weight: [1])
-        State 2:
-          neg(1) -> 11 (trans_weight: [0])
-        State 3:
-          * -> 12 (trans_weight: [1])
-          neg(2) -> 13 (trans_weight: [2])
-        State 4:
-          neg(3) -> 13 (trans_weight: [2])
-          5 -> 14 (trans_weight: [1])
-        State 5:
-          1 -> 15 (trans_weight: [1..=2])
-          5 -> 16 (trans_weight: [1..=2])
-          8 -> 17 (trans_weight: [1..=2])
-        State 6:
-          neg(5) -> 11 (trans_weight: [0])
-        State 7:
-          1 -> 15 (trans_weight: [1..=2])
-          5 -> 16 (trans_weight: [1..=2])
-        State 8:
-          neg(8) -> 11 (trans_weight: [0])
-        State 9:
-          * -> 17 (trans_weight: [1..=2])
-        State 10:
-          neg(1) -> 18 (trans_weight: [1])
-        State 11:
-          neg(4) -> 19 (trans_weight: [0])
-        State 12:
-          * -> 20 (trans_weight: [1])
-        State 13:
-          neg(8) -> 21 (trans_weight: [2])
-        State 14:
-          neg(5) -> 1 (trans_weight: [1])
-        State 15:
-          * -> 20 (trans_weight: [1])
-          neg(1) -> 22 (trans_weight: [2])
-        State 16:
-          neg(5) -> 23 (trans_weight: [1..=2])
-        State 17:
-          * -> 7 (trans_weight: [1..=2])
-        State 18:
-          final_weight: [1]
-        State 19:
-          final_weight: [0]
-        State 20:
-          5 -> 14 (trans_weight: [1])
-        State 21:
-          final_weight: [2]
-        State 22:
-          neg(2) -> 13 (trans_weight: [2])
-        State 23:
-          neg(0) -> 10 (trans_weight: [1])
-          neg(3) -> 13 (trans_weight: [2])
-
-      Converted NWA:
-      NWA (start: 0)
-        State 0:
-          0 -> 1 (weight: [1])
-          1 -> 2 (weight: [0])
-          2 -> 3 (weight: [1..=2])
-          3 -> 4 (weight: [1..=2])
-          4 -> 5 (weight: [1..=2])
-          5 -> 6 (weight: [0])
-          7 -> 7 (weight: [1..=2])
-          8 -> 8 (weight: [0])
-          9 -> 9 (weight: [1..=2])
-        State 1:
-          neg(0) -> 10 (weight: [1])
-        State 2:
-          neg(1) -> 11 (weight: [0])
-        State 3:
-          * -> 12 (weight: [1], except for {-32766})
-          neg(2) -> 13 (weight: [2])
-        State 4:
-          neg(3) -> 13 (weight: [2])
-          5 -> 14 (weight: [1])
-        State 5:
-          1 -> 15 (weight: [1..=2])
-          5 -> 16 (weight: [1..=2])
-          8 -> 17 (weight: [1..=2])
-        State 6:
-          neg(5) -> 11 (weight: [0])
-        State 7:
-          1 -> 15 (weight: [1..=2])
-          5 -> 16 (weight: [1..=2])
-        State 8:
-          neg(8) -> 11 (weight: [0])
-        State 9:
-          * -> 17 (weight: [1..=2])
-        State 10:
-          neg(1) -> 18 (weight: [1])
-        State 11:
-          neg(4) -> 19 (weight: [0])
-        State 12:
-          * -> 20 (weight: [1])
-        State 13:
-          neg(8) -> 21 (weight: [2])
-        State 14:
-          neg(5) -> 1 (weight: [1])
-        State 15:
-          * -> 20 (weight: [1], except for {-32767})
-          neg(1) -> 22 (weight: [2])
-        State 16:
-          neg(5) -> 23 (weight: [1..=2])
-        State 17:
-          * -> 7 (weight: [1..=2])
-        State 18:
-          final_weight: [1]
-        State 19:
-          final_weight: [0]
-        State 20:
-          5 -> 14 (weight: [1])
-        State 21:
-          final_weight: [2]
-        State 22:
-          neg(2) -> 13 (weight: [2])
-        State 23:
-          neg(0) -> 10 (weight: [1])
-          neg(3) -> 13 (weight: [2])
-
-      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:36: Starting determinization for NWA with 24 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:44: Built weight partition with 3 atoms in 31.5µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Built alphabet with 16 labels in 70.625µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:740: Minimizing DFA with 7 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 0: interval=0..=0, DFA states=7
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:740: Minimizing DFA with 17 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 1: interval=1..=1, DFA states=14
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:740: Minimizing DFA with 14 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 2: interval=2..=2, DFA states=12
-
-      --- Atomic DFAs (3 total) ---
-        DFA 0 (for atom 0..=0):
-          - States: 7, Start: 5, Sink: Some(6)
-          - State 0 (final): neg(0)->6, neg(1)->6, neg(2)->6, neg(3)->6, neg(4)->6, neg(5)->6, neg(8)->6, 0->6, 1->6, 2->6, 3->6, 4->6, 5->6, 7->6, 8->6, 9->6, *->6
-          - State 1: neg(0)->6, neg(1)->6, neg(2)->6, neg(3)->6, neg(4)->0, neg(5)->6, neg(8)->6, 0->6, 1->6, 2->6, 3->6, 4->6, 5->6, 7->6, 8->6, 9->6, *->6
-          - State 2: neg(0)->6, neg(1)->1, neg(2)->6, neg(3)->6, neg(4)->6, neg(5)->6, neg(8)->6, 0->6, 1->6, 2->6, 3->6, 4->6, 5->6, 7->6, 8->6, 9->6, *->6
-          - State 3: neg(0)->6, neg(1)->6, neg(2)->6, neg(3)->6, neg(4)->6, neg(5)->1, neg(8)->6, 0->6, 1->6, 2->6, 3->6, 4->6, 5->6, 7->6, 8->6, 9->6, *->6
-          - State 4: neg(0)->6, neg(1)->6, neg(2)->6, neg(3)->6, neg(4)->6, neg(5)->6, neg(8)->1, 0->6, 1->6, 2->6, 3->6, 4->6, 5->6, 7->6, 8->6, 9->6, *->6
-          - State 5: neg(0)->6, neg(1)->6, neg(2)->6, neg(3)->6, neg(4)->6, neg(5)->6, neg(8)->6, 0->6, 1->2, 2->6, 3->6, 4->6, 5->3, 7->6, 8->4, 9->6, *->6
-          - State 6: neg(0)->6, neg(1)->6, neg(2)->6, neg(3)->6, neg(4)->6, neg(5)->6, neg(8)->6, 0->6, 1->6, 2->6, 3->6, 4->6, 5->6, 7->6, 8->6, 9->6, *->6
-        DFA 1 (for atom 1..=1):
-          - States: 14, Start: 4, Sink: Some(9)
-          - State 0 (final): neg(0)->9, neg(1)->9, neg(2)->9, neg(3)->9, neg(4)->9, neg(5)->9, neg(8)->9, 0->9, 1->9, 2->9, 3->9, 4->9, 5->9, 7->9, 8->9, 9->9, *->9
-          - State 1: neg(0)->9, neg(1)->0, neg(2)->9, neg(3)->9, neg(4)->9, neg(5)->9, neg(8)->9, 0->9, 1->9, 2->9, 3->9, 4->9, 5->9, 7->9, 8->9, 9->9, *->9
-          - State 2: neg(0)->1, neg(1)->9, neg(2)->9, neg(3)->9, neg(4)->9, neg(5)->9, neg(8)->9, 0->9, 1->9, 2->9, 3->9, 4->9, 5->9, 7->9, 8->9, 9->9, *->9
-          - State 3: neg(0)->9, neg(1)->9, neg(2)->9, neg(3)->9, neg(4)->9, neg(5)->2, neg(8)->9, 0->9, 1->9, 2->9, 3->9, 4->9, 5->9, 7->9, 8->9, 9->9, *->9
-          - State 4: neg(0)->9, neg(1)->9, neg(2)->9, neg(3)->9, neg(4)->9, neg(5)->9, neg(8)->9, 0->2, 1->9, 2->10, 3->12, 4->5, 5->9, 7->11, 8->9, 9->7, *->9
-          - State 5: neg(0)->9, neg(1)->9, neg(2)->9, neg(3)->9, neg(4)->9, neg(5)->9, neg(8)->9, 0->9, 1->8, 2->9, 3->9, 4->9, 5->3, 7->9, 8->6, 9->9, *->9
-          - State 6: neg(0)->11, neg(1)->11, neg(2)->11, neg(3)->11, neg(4)->11, neg(5)->11, neg(8)->11, 0->11, 1->11, 2->11, 3->11, 4->11, 5->11, 7->11, 8->11, 9->11, *->11
-          - State 7: neg(0)->6, neg(1)->6, neg(2)->6, neg(3)->6, neg(4)->6, neg(5)->6, neg(8)->6, 0->6, 1->6, 2->6, 3->6, 4->6, 5->6, 7->6, 8->6, 9->6, *->6
-          - State 8: neg(0)->12, neg(1)->9, neg(2)->12, neg(3)->12, neg(4)->12, neg(5)->12, neg(8)->12, 0->12, 1->12, 2->12, 3->12, 4->12, 5->12, 7->12, 8->12, 9->12, *->12
-          - State 9: neg(0)->9, neg(1)->9, neg(2)->9, neg(3)->9, neg(4)->9, neg(5)->9, neg(8)->9, 0->9, 1->9, 2->9, 3->9, 4->9, 5->9, 7->9, 8->9, 9->9, *->9
-          - State 10: neg(0)->13, neg(1)->13, neg(2)->9, neg(3)->13, neg(4)->13, neg(5)->13, neg(8)->13, 0->13, 1->13, 2->13, 3->13, 4->13, 5->13, 7->13, 8->13, 9->13, *->13
-          - State 11: neg(0)->9, neg(1)->9, neg(2)->9, neg(3)->9, neg(4)->9, neg(5)->9, neg(8)->9, 0->9, 1->8, 2->9, 3->9, 4->9, 5->3, 7->9, 8->9, 9->9, *->9
-          - State 12: neg(0)->9, neg(1)->9, neg(2)->9, neg(3)->9, neg(4)->9, neg(5)->9, neg(8)->9, 0->9, 1->9, 2->9, 3->9, 4->9, 5->3, 7->9, 8->9, 9->9, *->9
-          - State 13: neg(0)->12, neg(1)->12, neg(2)->12, neg(3)->12, neg(4)->12, neg(5)->12, neg(8)->12, 0->12, 1->12, 2->12, 3->12, 4->12, 5->12, 7->12, 8->12, 9->12, *->12
-        DFA 2 (for atom 2..=2):
-          - States: 12, Start: 5, Sink: Some(10)
-          - State 0 (final): neg(0)->10, neg(1)->10, neg(2)->10, neg(3)->10, neg(4)->10, neg(5)->10, neg(8)->10, 0->10, 1->10, 2->10, 3->10, 4->10, 5->10, 7->10, 8->10, 9->10, *->10
-          - State 1: neg(0)->10, neg(1)->10, neg(2)->10, neg(3)->10, neg(4)->10, neg(5)->10, neg(8)->0, 0->10, 1->10, 2->10, 3->10, 4->10, 5->10, 7->10, 8->10, 9->10, *->10
-          - State 2: neg(0)->10, neg(1)->10, neg(2)->1, neg(3)->10, neg(4)->10, neg(5)->10, neg(8)->10, 0->10, 1->10, 2->10, 3->10, 4->10, 5->10, 7->10, 8->10, 9->10, *->10
-          - State 3: neg(0)->10, neg(1)->10, neg(2)->10, neg(3)->1, neg(4)->10, neg(5)->10, neg(8)->10, 0->10, 1->10, 2->10, 3->10, 4->10, 5->10, 7->10, 8->10, 9->10, *->10
-          - State 4: neg(0)->10, neg(1)->2, neg(2)->10, neg(3)->10, neg(4)->10, neg(5)->10, neg(8)->10, 0->10, 1->10, 2->10, 3->10, 4->10, 5->10, 7->10, 8->10, 9->10, *->10
-          - State 5: neg(0)->10, neg(1)->10, neg(2)->10, neg(3)->10, neg(4)->10, neg(5)->10, neg(8)->10, 0->10, 1->10, 2->2, 3->3, 4->7, 5->10, 7->11, 8->10, 9->9, *->10
-          - State 6: neg(0)->10, neg(1)->10, neg(2)->10, neg(3)->10, neg(4)->10, neg(5)->3, neg(8)->10, 0->10, 1->10, 2->10, 3->10, 4->10, 5->10, 7->10, 8->10, 9->10, *->10
-          - State 7: neg(0)->10, neg(1)->10, neg(2)->10, neg(3)->10, neg(4)->10, neg(5)->10, neg(8)->10, 0->10, 1->4, 2->10, 3->10, 4->10, 5->6, 7->10, 8->8, 9->10, *->10
-          - State 8: neg(0)->11, neg(1)->11, neg(2)->11, neg(3)->11, neg(4)->11, neg(5)->11, neg(8)->11, 0->11, 1->11, 2->11, 3->11, 4->11, 5->11, 7->11, 8->11, 9->11, *->11
-          - State 9: neg(0)->8, neg(1)->8, neg(2)->8, neg(3)->8, neg(4)->8, neg(5)->8, neg(8)->8, 0->8, 1->8, 2->8, 3->8, 4->8, 5->8, 7->8, 8->8, 9->8, *->8
-          - State 10: neg(0)->10, neg(1)->10, neg(2)->10, neg(3)->10, neg(4)->10, neg(5)->10, neg(8)->10, 0->10, 1->10, 2->10, 3->10, 4->10, 5->10, 7->10, 8->10, 9->10, *->10
-          - State 11: neg(0)->10, neg(1)->10, neg(2)->10, neg(3)->10, neg(4)->10, neg(5)->10, neg(8)->10, 0->10, 1->4, 2->10, 3->10, 4->10, 5->6, 7->10, 8->10, 9->10, *->10
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:116: Enumerated 25 product tuples in 657.666µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:134: Merged into 14 product states in 1.001167ms
-
-      --- MergedProduct (14 states, start=0) ---
-        State 0:
-          - Representative: [5, 4, 5]
-          - Transitions:
-            - Default -> State 0 (via [_, _, _])
-            - neg(0) -> State 0 (via [_, _, _])
-            - neg(1) -> State 0 (via [_, _, _])
-            - neg(2) -> State 0 (via [_, _, _])
-            - neg(3) -> State 0 (via [_, _, _])
-            - neg(4) -> State 0 (via [_, _, _])
-            - neg(5) -> State 0 (via [_, _, _])
-            - neg(8) -> State 0 (via [_, _, _])
-            - 0 -> State 1 (via [_, 2, _])
-            - 1 -> State 1 (via [2, _, _])
-            - 2 -> State 2 (via [_, 10, 2])
-            - 3 -> State 3 (via [_, 12, 3])
-            - 4 -> State 4 (via [_, 5, 7])
-            - 5 -> State 2 (via [3, _, _])
-            - 7 -> State 5 (via [_, 11, 11])
-            - 8 -> State 3 (via [4, _, _])
-            - 9 -> State 6 (via [_, 7, 9])
-          - Contains 2 tuples.
-        State 1:
-          - Representative: [2, 2, 1]
-          - Transitions:
-            - Default -> State 0 (via [_, _, _])
-            - neg(0) -> State 7 (via [_, 1, _])
-            - neg(1) -> State 4 (via [1, _, _])
-            - neg(2) -> State 0 (via [_, _, _])
-            - neg(3) -> State 0 (via [_, _, _])
-            - neg(4) -> State 0 (via [_, _, _])
-            - neg(5) -> State 0 (via [_, _, _])
-            - neg(8) -> State 7 (via [_, _, 0])
-            - 0 -> State 0 (via [_, _, _])
-            - 1 -> State 0 (via [_, _, _])
-            - 2 -> State 0 (via [_, _, _])
-            - 3 -> State 0 (via [_, _, _])
-            - 4 -> State 0 (via [_, _, _])
-            - 5 -> State 0 (via [_, _, _])
-            - 7 -> State 0 (via [_, _, _])
-            - 8 -> State 0 (via [_, _, _])
-            - 9 -> State 0 (via [_, _, _])
-          - Contains 3 tuples.
-        State 2:
-          - Representative: [3, 10, 2]
-          - Transitions:
-            - Default -> State 8 (via [_, 13, _])
-            - neg(0) -> State 8 (via [_, 13, _])
-            - neg(1) -> State 8 (via [_, 13, _])
-            - neg(2) -> State 1 (via [_, _, 1])
-            - neg(3) -> State 8 (via [_, 13, _])
-            - neg(4) -> State 8 (via [_, 13, _])
-            - neg(5) -> State 8 (via [1, 13, _])
-            - neg(8) -> State 8 (via [_, 13, _])
-            - 0 -> State 8 (via [_, 13, _])
-            - 1 -> State 8 (via [_, 13, _])
-            - 2 -> State 8 (via [_, 13, _])
-            - 3 -> State 8 (via [_, 13, _])
-            - 4 -> State 8 (via [_, 13, _])
-            - 5 -> State 8 (via [_, 13, _])
-            - 7 -> State 8 (via [_, 13, _])
-            - 8 -> State 8 (via [_, 13, _])
-            - 9 -> State 8 (via [_, 13, _])
-          - Contains 3 tuples.
-        State 3:
-          - Representative: [4, 12, 3]
-          - Transitions:
-            - Default -> State 0 (via [_, _, _])
-            - neg(0) -> State 0 (via [_, _, _])
-            - neg(1) -> State 0 (via [_, _, _])
-            - neg(2) -> State 0 (via [_, _, _])
-            - neg(3) -> State 1 (via [_, _, 1])
-            - neg(4) -> State 0 (via [_, _, _])
-            - neg(5) -> State 0 (via [_, _, _])
-            - neg(8) -> State 4 (via [1, _, _])
-            - 0 -> State 0 (via [_, _, _])
-            - 1 -> State 0 (via [_, _, _])
-            - 2 -> State 0 (via [_, _, _])
-            - 3 -> State 0 (via [_, _, _])
-            - 4 -> State 0 (via [_, _, _])
-            - 5 -> State 9 (via [_, 3, _])
-            - 7 -> State 0 (via [_, _, _])
-            - 8 -> State 0 (via [_, _, _])
-            - 9 -> State 0 (via [_, _, _])
-          - Contains 3 tuples.
-        State 4:
-          - Representative: [1, 5, 7]
-          - Transitions:
-            - Default -> State 0 (via [_, _, _])
-            - neg(0) -> State 0 (via [_, _, _])
-            - neg(1) -> State 0 (via [_, _, _])
-            - neg(2) -> State 0 (via [_, _, _])
-            - neg(3) -> State 0 (via [_, _, _])
-            - neg(4) -> State 5 (via [0, _, _])
-            - neg(5) -> State 0 (via [_, _, _])
-            - neg(8) -> State 0 (via [_, _, _])
-            - 0 -> State 0 (via [_, _, _])
-            - 1 -> State 10 (via [_, 8, 4])
-            - 2 -> State 0 (via [_, _, _])
-            - 3 -> State 0 (via [_, _, _])
-            - 4 -> State 0 (via [_, _, _])
-            - 5 -> State 9 (via [_, 3, 6])
-            - 7 -> State 0 (via [_, _, _])
-            - 8 -> State 11 (via [_, 6, 8])
-            - 9 -> State 0 (via [_, _, _])
-          - Contains 2 tuples.
-        State 5:
-          - Representative: [0, 11, 11]
-          - Final Weight: [0]
-          - Transitions:
-            - Default -> State 0 (via [_, _, _])
-            - neg(0) -> State 0 (via [_, _, _])
-            - neg(1) -> State 0 (via [_, _, _])
-            - neg(2) -> State 0 (via [_, _, _])
-            - neg(3) -> State 0 (via [_, _, _])
-            - neg(4) -> State 0 (via [_, _, _])
-            - neg(5) -> State 0 (via [_, _, _])
-            - neg(8) -> State 0 (via [_, _, _])
-            - 0 -> State 0 (via [_, _, _])
-            - 1 -> State 10 (via [_, 8, 4])
-            - 2 -> State 0 (via [_, _, _])
-            - 3 -> State 0 (via [_, _, _])
-            - 4 -> State 0 (via [_, _, _])
-            - 5 -> State 9 (via [_, 3, 6])
-            - 7 -> State 0 (via [_, _, _])
-            - 8 -> State 0 (via [_, _, _])
-            - 9 -> State 0 (via [_, _, _])
-          - Contains 2 tuples.
-        State 6:
-          - Representative: [_, 7, 9]
-          - Transitions:
-            - Default -> State 11 (via [_, 6, 8])
-            - neg(0) -> State 11 (via [_, 6, 8])
-            - neg(1) -> State 11 (via [_, 6, 8])
-            - neg(2) -> State 11 (via [_, 6, 8])
-            - neg(3) -> State 11 (via [_, 6, 8])
-            - neg(4) -> State 11 (via [_, 6, 8])
-            - neg(5) -> State 11 (via [_, 6, 8])
-            - neg(8) -> State 11 (via [_, 6, 8])
-            - 0 -> State 11 (via [_, 6, 8])
-            - 1 -> State 11 (via [_, 6, 8])
-            - 2 -> State 11 (via [_, 6, 8])
-            - 3 -> State 11 (via [_, 6, 8])
-            - 4 -> State 11 (via [_, 6, 8])
-            - 5 -> State 11 (via [_, 6, 8])
-            - 7 -> State 11 (via [_, 6, 8])
-            - 8 -> State 11 (via [_, 6, 8])
-            - 9 -> State 11 (via [_, 6, 8])
-          - Contains 1 tuples.
-        State 7:
-          - Representative: [_, 1, 0]
-          - Final Weight: [2]
-          - Transitions:
-            - Default -> State 0 (via [_, _, _])
-            - neg(0) -> State 0 (via [_, _, _])
-            - neg(1) -> State 12 (via [_, 0, _])
-            - neg(2) -> State 0 (via [_, _, _])
-            - neg(3) -> State 0 (via [_, _, _])
-            - neg(4) -> State 0 (via [_, _, _])
-            - neg(5) -> State 0 (via [_, _, _])
-            - neg(8) -> State 0 (via [_, _, _])
-            - 0 -> State 0 (via [_, _, _])
-            - 1 -> State 0 (via [_, _, _])
-            - 2 -> State 0 (via [_, _, _])
-            - 3 -> State 0 (via [_, _, _])
-            - 4 -> State 0 (via [_, _, _])
-            - 5 -> State 0 (via [_, _, _])
-            - 7 -> State 0 (via [_, _, _])
-            - 8 -> State 0 (via [_, _, _])
-            - 9 -> State 0 (via [_, _, _])
-          - Contains 2 tuples.
-        State 8:
-          - Representative: [_, 13, _]
-          - Transitions:
-            - Default -> State 3 (via [_, 12, _])
-            - neg(0) -> State 3 (via [_, 12, _])
-            - neg(1) -> State 3 (via [_, 12, _])
-            - neg(2) -> State 3 (via [_, 12, _])
-            - neg(3) -> State 3 (via [_, 12, _])
-            - neg(4) -> State 3 (via [_, 12, _])
-            - neg(5) -> State 3 (via [_, 12, _])
-            - neg(8) -> State 3 (via [_, 12, _])
-            - 0 -> State 3 (via [_, 12, _])
-            - 1 -> State 3 (via [_, 12, _])
-            - 2 -> State 3 (via [_, 12, _])
-            - 3 -> State 3 (via [_, 12, _])
-            - 4 -> State 3 (via [_, 12, _])
-            - 5 -> State 3 (via [_, 12, _])
-            - 7 -> State 3 (via [_, 12, _])
-            - 8 -> State 3 (via [_, 12, _])
-            - 9 -> State 3 (via [_, 12, _])
-          - Contains 1 tuples.
-        State 9:
-          - Representative: [_, 3, 6]
-          - Transitions:
-            - Default -> State 0 (via [_, _, _])
-            - neg(0) -> State 0 (via [_, _, _])
-            - neg(1) -> State 0 (via [_, _, _])
-            - neg(2) -> State 0 (via [_, _, _])
-            - neg(3) -> State 0 (via [_, _, _])
-            - neg(4) -> State 0 (via [_, _, _])
-            - neg(5) -> State 13 (via [_, 2, 3])
-            - neg(8) -> State 0 (via [_, _, _])
-            - 0 -> State 0 (via [_, _, _])
-            - 1 -> State 0 (via [_, _, _])
-            - 2 -> State 0 (via [_, _, _])
-            - 3 -> State 0 (via [_, _, _])
-            - 4 -> State 0 (via [_, _, _])
-            - 5 -> State 0 (via [_, _, _])
-            - 7 -> State 0 (via [_, _, _])
-            - 8 -> State 0 (via [_, _, _])
-            - 9 -> State 0 (via [_, _, _])
-          - Contains 2 tuples.
-        State 10:
-          - Representative: [_, 8, 4]
-          - Transitions:
-            - Default -> State 3 (via [_, 12, _])
-            - neg(0) -> State 3 (via [_, 12, _])
-            - neg(1) -> State 2 (via [_, _, 2])
-            - neg(2) -> State 3 (via [_, 12, _])
-            - neg(3) -> State 3 (via [_, 12, _])
-            - neg(4) -> State 3 (via [_, 12, _])
-            - neg(5) -> State 3 (via [_, 12, _])
-            - neg(8) -> State 3 (via [_, 12, _])
-            - 0 -> State 3 (via [_, 12, _])
-            - 1 -> State 3 (via [_, 12, _])
-            - 2 -> State 3 (via [_, 12, _])
-            - 3 -> State 3 (via [_, 12, _])
-            - 4 -> State 3 (via [_, 12, _])
-            - 5 -> State 3 (via [_, 12, _])
-            - 7 -> State 3 (via [_, 12, _])
-            - 8 -> State 3 (via [_, 12, _])
-            - 9 -> State 3 (via [_, 12, _])
-          - Contains 1 tuples.
-        State 11:
-          - Representative: [_, 6, 8]
-          - Transitions:
-            - Default -> State 5 (via [_, 11, 11])
-            - neg(0) -> State 5 (via [_, 11, 11])
-            - neg(1) -> State 5 (via [_, 11, 11])
-            - neg(2) -> State 5 (via [_, 11, 11])
-            - neg(3) -> State 5 (via [_, 11, 11])
-            - neg(4) -> State 5 (via [_, 11, 11])
-            - neg(5) -> State 5 (via [_, 11, 11])
-            - neg(8) -> State 5 (via [_, 11, 11])
-            - 0 -> State 5 (via [_, 11, 11])
-            - 1 -> State 5 (via [_, 11, 11])
-            - 2 -> State 5 (via [_, 11, 11])
-            - 3 -> State 5 (via [_, 11, 11])
-            - 4 -> State 5 (via [_, 11, 11])
-            - 5 -> State 5 (via [_, 11, 11])
-            - 7 -> State 5 (via [_, 11, 11])
-            - 8 -> State 5 (via [_, 11, 11])
-            - 9 -> State 5 (via [_, 11, 11])
-          - Contains 1 tuples.
-        State 12:
-          - Representative: [_, 0, _]
-          - Final Weight: [1]
-          - Transitions:
-            - Default -> State 0 (via [_, _, _])
-            - neg(0) -> State 0 (via [_, _, _])
-            - neg(1) -> State 0 (via [_, _, _])
-            - neg(2) -> State 0 (via [_, _, _])
-            - neg(3) -> State 0 (via [_, _, _])
-            - neg(4) -> State 0 (via [_, _, _])
-            - neg(5) -> State 0 (via [_, _, _])
-            - neg(8) -> State 0 (via [_, _, _])
-            - 0 -> State 0 (via [_, _, _])
-            - 1 -> State 0 (via [_, _, _])
-            - 2 -> State 0 (via [_, _, _])
-            - 3 -> State 0 (via [_, _, _])
-            - 4 -> State 0 (via [_, _, _])
-            - 5 -> State 0 (via [_, _, _])
-            - 7 -> State 0 (via [_, _, _])
-            - 8 -> State 0 (via [_, _, _])
-            - 9 -> State 0 (via [_, _, _])
-          - Contains 1 tuples.
-        State 13:
-          - Representative: [_, 2, 3]
-          - Transitions:
-            - Default -> State 0 (via [_, _, _])
-            - neg(0) -> State 7 (via [_, 1, _])
-            - neg(1) -> State 0 (via [_, _, _])
-            - neg(2) -> State 0 (via [_, _, _])
-            - neg(3) -> State 1 (via [_, _, 1])
-            - neg(4) -> State 0 (via [_, _, _])
-            - neg(5) -> State 0 (via [_, _, _])
-            - neg(8) -> State 0 (via [_, _, _])
-            - 0 -> State 0 (via [_, _, _])
-            - 1 -> State 0 (via [_, _, _])
-            - 2 -> State 0 (via [_, _, _])
-            - 3 -> State 0 (via [_, _, _])
-            - 4 -> State 0 (via [_, _, _])
-            - 5 -> State 0 (via [_, _, _])
-            - 7 -> State 0 (via [_, _, _])
-            - 8 -> State 0 (via [_, _, _])
-            - 9 -> State 0 (via [_, _, _])
-          - Contains 1 tuples.
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:183: Merged-product -> DWA conversion completed in 456.875µs
-      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:189: NWA::determinize_to_dwa total time: 8.174458ms
-      [DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:52: DWA::simplify_components (14 states -> 14 states) took: 1.227625ms
-      Roundtrip DWA:
-      DWA (start: 0)
-        State 0:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          0 -> 1 (trans_weight: [1, 3..=18446744073709551615])
-          1 -> 1 (trans_weight: [0, 3..=18446744073709551615])
-          2 -> 2 (trans_weight: [1..=18446744073709551615])
-          3 -> 3 (trans_weight: [1..=18446744073709551615])
-          4 -> 4 (trans_weight: [1..=18446744073709551615])
-          5 -> 2 (trans_weight: [0, 3..=18446744073709551615])
-          7 -> 5 (trans_weight: [1..=18446744073709551615])
-          8 -> 3 (trans_weight: [0, 3..=18446744073709551615])
-          9 -> 6 (trans_weight: ALL)
-        State 1:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          neg(0) -> 7 (trans_weight: [0..=1, 3..=18446744073709551615])
-          neg(1) -> 4 (trans_weight: [0, 3..=18446744073709551615])
-          neg(8) -> 7 (trans_weight: [0, 2..=18446744073709551615])
-        State 2:
-          * -> 8 (trans_weight: ALL)
-          neg(2) -> 1 (trans_weight: [2..=18446744073709551615])
-        State 3:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          neg(3) -> 1 (trans_weight: [2..=18446744073709551615])
-          neg(8) -> 4 (trans_weight: [0, 3..=18446744073709551615])
-          5 -> 9 (trans_weight: [0..=1, 3..=18446744073709551615])
-        State 4:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          neg(4) -> 5 (trans_weight: [0, 3..=18446744073709551615])
-          1 -> 10 (trans_weight: ALL)
-          5 -> 9 (trans_weight: ALL)
-          8 -> 11 (trans_weight: ALL)
-        State 5:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          final_weight: [0]
-          1 -> 10 (trans_weight: ALL)
-          5 -> 9 (trans_weight: ALL)
-        State 6:
-          * -> 11 (trans_weight: ALL)
-        State 7:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          final_weight: [2]
-          neg(1) -> 12 (trans_weight: ALL)
-        State 8:
-          * -> 3 (trans_weight: [1, 3..=18446744073709551615])
-        State 9:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          neg(5) -> 13 (trans_weight: ALL)
-        State 10:
-          * -> 3 (trans_weight: [1, 3..=18446744073709551615])
-          neg(1) -> 2 (trans_weight: [2..=18446744073709551615])
-        State 11:
-          * -> 5 (trans_weight: [1..=18446744073709551615])
-        State 12:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          final_weight: [1]
-        State 13:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          neg(0) -> 7 (trans_weight: [0..=1, 3..=18446744073709551615])
-          neg(3) -> 1 (trans_weight: [2..=18446744073709551615])
-
-      [DEBUG] 5] src/precompute4/test_weighted_automata.rs:256: Starting stochastic equivalence test
-
-
-      thread 'precompute4::test_weighted_automata::test_dwa_to_nwa_to_dwa_roundtrip' (14483386) panicked at src/precompute4/test_weighted_automata.rs:262:13:
-      assertion `left == right` failed: Equivalence fail: A(w) != B(w) for word from A.
-      word: [5, neg(5), neg(4)]
-      A(w): [0]
-      B(w): []
-
-      DWA A:
-      DWA (start: 0)
-        State 0:
-          0 -> 1 (trans_weight: [1])
-          1 -> 2 (trans_weight: [0])
-          2 -> 3 (trans_weight: [1..=2])
-          3 -> 4 (trans_weight: [1..=2])
-          4 -> 5 (trans_weight: [1..=2])
-          5 -> 6 (trans_weight: [0])
-          7 -> 7 (trans_weight: [1..=2])
-          8 -> 8 (trans_weight: [0])
-          9 -> 9 (trans_weight: [1..=2])
-        State 1:
-          neg(0) -> 10 (trans_weight: [1])
-        State 2:
-          neg(1) -> 11 (trans_weight: [0])
-        State 3:
-          * -> 12 (trans_weight: [1])
-          neg(2) -> 13 (trans_weight: [2])
-        State 4:
-          neg(3) -> 13 (trans_weight: [2])
-          5 -> 14 (trans_weight: [1])
-        State 5:
-          1 -> 15 (trans_weight: [1..=2])
-          5 -> 16 (trans_weight: [1..=2])
-          8 -> 17 (trans_weight: [1..=2])
-        State 6:
-          neg(5) -> 11 (trans_weight: [0])
-        State 7:
-          1 -> 15 (trans_weight: [1..=2])
-          5 -> 16 (trans_weight: [1..=2])
-        State 8:
-          neg(8) -> 11 (trans_weight: [0])
-        State 9:
-          * -> 17 (trans_weight: [1..=2])
-        State 10:
-          neg(1) -> 18 (trans_weight: [1])
-        State 11:
-          neg(4) -> 19 (trans_weight: [0])
-        State 12:
-          * -> 20 (trans_weight: [1])
-        State 13:
-          neg(8) -> 21 (trans_weight: [2])
-        State 14:
-          neg(5) -> 1 (trans_weight: [1])
-        State 15:
-          * -> 20 (trans_weight: [1])
-          neg(1) -> 22 (trans_weight: [2])
-        State 16:
-          neg(5) -> 23 (trans_weight: [1..=2])
-        State 17:
-          * -> 7 (trans_weight: [1..=2])
-        State 18:
-          final_weight: [1]
-        State 19:
-          final_weight: [0]
-        State 20:
-          5 -> 14 (trans_weight: [1])
-        State 21:
-          final_weight: [2]
-        State 22:
-          neg(2) -> 13 (trans_weight: [2])
-        State 23:
-          neg(0) -> 10 (trans_weight: [1])
-          neg(3) -> 13 (trans_weight: [2])
-
-
-      DWA B:
-      DWA (start: 0)
-        State 0:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          0 -> 1 (trans_weight: [1, 3..=18446744073709551615])
-          1 -> 1 (trans_weight: [0, 3..=18446744073709551615])
-          2 -> 2 (trans_weight: [1..=18446744073709551615])
-          3 -> 3 (trans_weight: [1..=18446744073709551615])
-          4 -> 4 (trans_weight: [1..=18446744073709551615])
-          5 -> 2 (trans_weight: [0, 3..=18446744073709551615])
-          7 -> 5 (trans_weight: [1..=18446744073709551615])
-          8 -> 3 (trans_weight: [0, 3..=18446744073709551615])
-          9 -> 6 (trans_weight: ALL)
-        State 1:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          neg(0) -> 7 (trans_weight: [0..=1, 3..=18446744073709551615])
-          neg(1) -> 4 (trans_weight: [0, 3..=18446744073709551615])
-          neg(8) -> 7 (trans_weight: [0, 2..=18446744073709551615])
-        State 2:
-          * -> 8 (trans_weight: ALL)
-          neg(2) -> 1 (trans_weight: [2..=18446744073709551615])
-        State 3:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          neg(3) -> 1 (trans_weight: [2..=18446744073709551615])
-          neg(8) -> 4 (trans_weight: [0, 3..=18446744073709551615])
-          5 -> 9 (trans_weight: [0..=1, 3..=18446744073709551615])
-        State 4:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          neg(4) -> 5 (trans_weight: [0, 3..=18446744073709551615])
-          1 -> 10 (trans_weight: ALL)
-          5 -> 9 (trans_weight: ALL)
-          8 -> 11 (trans_weight: ALL)
-        State 5:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          final_weight: [0]
-          1 -> 10 (trans_weight: ALL)
-          5 -> 9 (trans_weight: ALL)
-        State 6:
-          * -> 11 (trans_weight: ALL)
-        State 7:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          final_weight: [2]
-          neg(1) -> 12 (trans_weight: ALL)
-        State 8:
-          * -> 3 (trans_weight: [1, 3..=18446744073709551615])
-        State 9:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          neg(5) -> 13 (trans_weight: ALL)
-        State 10:
-          * -> 3 (trans_weight: [1, 3..=18446744073709551615])
-          neg(1) -> 2 (trans_weight: [2..=18446744073709551615])
-        State 11:
-          * -> 5 (trans_weight: [1..=18446744073709551615])
-        State 12:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          final_weight: [1]
-        State 13:
-          * -> 0 (trans_weight: [3..=18446744073709551615])
-          neg(0) -> 7 (trans_weight: [0..=1, 3..=18446744073709551615])
-          neg(3) -> 1 (trans_weight: [2..=18446744073709551615])
-
-        left: 0..=0
-       right:
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::test_weighted_automata::stochastic_equivalence_test
-                   at ./src/precompute4/test_weighted_automata.rs:262:13
-         5: sep1::precompute4::test_weighted_automata::test_dwa_to_nwa_to_dwa_roundtrip
-                   at ./src/precompute4/test_weighted_automata.rs:1702:5
-         6: sep1::precompute4::test_weighted_automata::test_dwa_to_nwa_to_dwa_roundtrip::{{closure}}
-                   at ./src/precompute4/test_weighted_automata.rs:1595:38
          7: core::ops::function::FnOnce::call_once
                    at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
          8: core::ops::function::FnOnce::call_once
@@ -9448,64 +8776,141 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As an AI assistant, I'd be happy to help you with your Rust code. Dealing with automata determinization can be tricky, especially with tuple-based constructions and greedy merging strategies. The panics and correctness issues you're seeing often point to subtle problems in how states are partitioned and how transitions are calculated for the merged states.
+      Hello! As an AI assistant, I can help you with your code. The panic you're seeing indicates a logic issue in the determinization process, specifically in how product-state tuples are merged and how transitions are created for these merged states.
 
-      Based on the panic logs and test failures, it appears the core issue lies in the greedy merging algorithm within `merge_tuples_to_states` in `src/precompute4/weighted_automata/determinization.rs`. The representative tuple for each merged state is updated on-the-fly as new tuples are added. This makes the condition for joining a group unstable and can lead to partitions that are not bisimilar. When transitions are later calculated from these synthetic, "too-specific" representatives, they can lead to destination tuples that don't correspond to any valid merged state, causing the `Unmapped exception transition tuple` panic.
+      The root cause is that the greedy algorithm for merging tuples doesn't guarantee that the set of merged states is "closed" under transitions. A transition from a representative tuple of a merged state can lead to a new tuple that cannot be mapped to any existing merged state, causing the panic.
 
-      A more stable approach is to keep the representative for each group fixed during the greedy assignment phase (e.g., using the first tuple that formed the group) and only then compute a final, unified representative for each completed group. However, an even simpler change that should resolve the panic is to stop updating the representative during the merge. The representative will remain the first tuple that created the group. Since this is a real, reachable tuple, its successors under any transition will also be reachable tuples that exist in one of the groups, which should prevent `find_group_for_tuple` from failing.
+      To fix this, we need to ensure that all possible destination tuples have a corresponding merged state. We can achieve this by iteratively finding these "unmapped" successor tuples and creating new states for them until no more are found (i.e., we reach a fixed point).
 
-      Here are the step-by-step instructions to apply this fix.
+      Here are the step-by-step instructions to apply the fix:
 
       ### Step-by-step Instructions
 
-      1.  **Modify `src/precompute4/weighted_automata/determinization.rs`:**
-          *   Open the file `src/precompute4/weighted_automata/determinization.rs`.
-          *   Navigate to the `merge_tuples_to_states` function.
-          *   Locate the greedy merging loop (`for t in &tuples`).
-          *   Inside the loop, find this block of code:
-              ```rust
-              if let Some(new_rep) = unify_tuples(&states[gid].representative_tuple, t) {
-                  states[gid].representative_tuple = new_rep;
-                  states[gid].all_tuples.insert(t.clone());
-                  tuple_to_group.insert(t.clone(), gid);
-                  placed = true;
-                  break;
+      1.  **Open the file `src/precompute4/weighted_automata/determinization.rs`**.
+
+      2.  **Navigate to the `merge_tuples_to_states` function**.
+
+      3.  **Locate the end of the greedy merging loop**. This is just after the progress bar message for merging tuples is finished. You will see this code:
+          ```rust
+          // ...
+              if let Some(p) = &pb_merge {
+                  p.set_position(states.len() as u64);
               }
-              ```
-          *   Change it to no longer update the `representative_tuple` inside the loop. The check for unifiability remains, but we only add the tuple to the group if it's compatible with the group's stable representative (the first tuple that created it).
-              ```rust
-              if unify_tuples(&states[gid].representative_tuple, t).is_some() {
-                  states[gid].all_tuples.insert(t.clone());
-                  tuple_to_group.insert(t.clone(), gid);
-                  placed = true;
-                  break;
+          }
+          if let Some(p) = pb_merge {
+              p.finish_with_message(format!("Merged into {} states", states.len()));
+          }
+
+          // Find start group
+          let start = *tuple_to_group.get(&start_tuple).expect("start tuple must have a group");
+          // ...
+          ```
+
+      4.  **Insert the fixpoint loop**. Add the new code block between the `p.finish_with_message(...)` call and the `// Find start group` comment. This loop will ensure that for every representative tuple, all its successor tuples can be mapped to a state group.
+
+          ```rust
+          // ...
+          if let Some(p) = pb_merge {
+              p.finish_with_message(format!("Merged into {} states", states.len()));
+          }
+
+          // Iteratively add states for unmapped successors of representatives until a fixed point is reached.
+          // This ensures that the set of representatives is closed under the successor function,
+          // preventing panics from unmapped destination tuples later.
+          loop {
+              let reps: Vec<_> = states.iter().map(|s| s.representative_tuple.clone()).collect();
+              let mut unmapped_successors = BTreeSet::new();
+
+              for rep in &reps {
+                  for sym in 0..sigma.size() {
+                      let dst = successor_tuple(rep, sym, comps, comp_sinks);
+                      if find_group_for_tuple(&states, &dst).is_none() {
+                          unmapped_successors.insert(dst);
+                      }
+                  }
               }
-              ```
 
-      This change should stabilize the merging process and resolve the panic by ensuring that transitions from representatives always lead to mappable destination tuples. This may also resolve the correctness issue in the roundtrip test.
+              if unmapped_successors.is_empty() {
+                  break; // Fixpoint reached
+              }
 
-      ### Git Diffs
+              // Add new states for the unmapped successors.
+              for t in unmapped_successors {
+                  // It's possible that a new state added in this batch can host another tuple.
+                  // Re-check before adding a new state to avoid redundant groups.
+                  if find_group_for_tuple(&states, &t).is_some() {
+                      continue;
+                  }
+                  let st = ProductDFAState {
+                      representative_tuple: t.clone(),
+                      all_tuples: BTreeSet::new(), // This state is synthetic, not from original enumeration
+                      ..Default::default()
+                  };
+                  states.push(st);
+              }
+          }
 
-      Here is the git diff for the change:
+          // Find start group
+          let start = *tuple_to_group.get(&start_tuple).expect("start tuple must have a group");
+          // ...
+          ```
+
+      5.  **Save the file**. The changes are now applied.
+
+      ### Git Diff
+
+      Here is the corresponding git diff for the change. You can apply this patch directly.
 
       ```diff
-      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
       --- a/src/precompute4/weighted_automata/determinization.rs
       +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -1182,9 +1182,8 @@
-           for t in &tuples {
-               let mut placed = false;
-               for gid in 0..states.len() {
-      -            if let Some(new_rep) = unify_tuples(&states[gid].representative_tuple, t) {
-      -                states[gid].representative_tuple = new_rep;
-      +            if unify_tuples(&states[gid].representative_tuple, t).is_some() {
-                       states[gid].all_tuples.insert(t.clone());
-                       tuple_to_group.insert(t.clone(), gid);
-                       placed = true;
+      @@ -1125,6 +1125,42 @@
+               p.finish_with_message(format!("Merged into {} states", states.len()));
+           }
+       
+      +    // Iteratively add states for unmapped successors of representatives until a fixed point is reached.
+      +    // This ensures that the set of representatives is closed under the successor function,
+      +    // preventing panics from unmapped destination tuples later.
+      +    loop {
+      +        let reps: Vec<_> = states.iter().map(|s| s.representative_tuple.clone()).collect();
+      +        let mut unmapped_successors = BTreeSet::new();
+      +
+      +        for rep in &reps {
+      +            for sym in 0..sigma.size() {
+      +                let dst = successor_tuple(rep, sym, comps, comp_sinks);
+      +                if find_group_for_tuple(&states, &dst).is_none() {
+      +                    unmapped_successors.insert(dst);
+      +                }
+      +            }
+      +        }
+      +
+      +        if unmapped_successors.is_empty() {
+      +            break; // Fixpoint reached
+      +        }
+      +
+      +        // Add new states for the unmapped successors.
+      +        for t in unmapped_successors {
+      +            // It's possible that a new state added in this batch can host another tuple.
+      +            // Re-check before adding a new state to avoid redundant groups.
+      +            if find_group_for_tuple(&states, &t).is_some() {
+      +                continue;
+      +            }
+      +            let st = ProductDFAState {
+      +                representative_tuple: t.clone(),
+      +                all_tuples: BTreeSet::new(), // This state is synthetic, not from original enumeration
+      +                ..Default::default()
+      +            };
+      +            states.push(st);
+      +        }
+      +    }
+      +
+           // Find start group
+           let start = *tuple_to_group.get(&start_tuple).expect("start tuple must have a group");
+       
 
       ```
 
-      Apply this patch, and your tests should no longer panic. Let me know if you have any other questions
+      This change should resolve the panic by making the state-merging process more robust. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -9516,7 +8921,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Stabilize tuple merging by keeping
-      representative fixed; improve unmapped transition panic message"'
+  - user: 'Changes committed with message: "Determinization: Add fixpoint loop to
+      ensure product state set closure, preventing transition panics"'
     metadata:
 ...

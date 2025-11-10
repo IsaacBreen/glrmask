@@ -1169,6 +1169,42 @@ fn merge_tuples_to_states(
         p.finish_with_message(format!("Merged into {} states", states.len()));
     }
 
+    // Iteratively add states for unmapped successors of representatives until a fixed point is reached.
+    // This ensures that the set of representatives is closed under the successor function,
+    // preventing panics from unmapped destination tuples later.
+    loop {
+        let reps: Vec<_> = states.iter().map(|s| s.representative_tuple.clone()).collect();
+        let mut unmapped_successors = BTreeSet::new();
+
+        for rep in &reps {
+            for sym in 0..sigma.size() {
+                let dst = successor_tuple(rep, sym, comps, comp_sinks);
+                if find_group_for_tuple(&states, &dst).is_none() {
+                    unmapped_successors.insert(dst);
+                }
+            }
+        }
+
+        if unmapped_successors.is_empty() {
+            break; // Fixpoint reached
+        }
+
+        // Add new states for the unmapped successors.
+        for t in unmapped_successors {
+            // It's possible that a new state added in this batch can host another tuple.
+            // Re-check before adding a new state to avoid redundant groups.
+            if find_group_for_tuple(&states, &t).is_some() {
+                continue;
+            }
+            let st = ProductDFAState {
+                representative_tuple: t.clone(),
+                all_tuples: BTreeSet::new(), // This state is synthetic, not from original enumeration
+                ..Default::default()
+            };
+            states.push(st);
+        }
+    }
+
     // Find start group
     let start = *tuple_to_group.get(&start_tuple).expect("start tuple must have a group");
 
