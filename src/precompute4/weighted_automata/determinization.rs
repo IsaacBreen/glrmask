@@ -18,15 +18,16 @@ use crate::precompute4::weighted_automata::format_i16_char;
 /// 2) For each atom, determinize the corresponding unweighted NFA to a DFA.
 /// 3) Enumerate the set of reachable product tuples T = Vec<Option<usize>> of component DFA states,
 ///    where None represents the component's sink state.
-/// 4) Merge tuples greedily into product states by unifying on non-sink positions:
-///    two tuples are mergeable iff for each index either both are Some with equal values or at least one is None.
-///    The representative tuple of a merged state is the pointwise "most-specific" unify.
-/// 5) For each merged state, compute:
+/// 4) Compute the coarsest congruence (minimal quotient) of this deterministic Moore machine:
+///    two tuples are equivalent iff they have identical final outputs and, for every symbol,
+///    identical transition outputs and transitions into equivalent classes. We build this
+///    on-the-fly using signature-based union-find with predecessor-triggered refinements.
+/// 5) For each quotient state, compute:
 ///    - final weight = union of atom-weights for indices whose representative component is accepting.
-///    - transitions from representative tuple on the global alphabet (labels + OTHER).
-///      Store per-label destination tuple, and for OTHER store a default destination tuple.
+///    - transitions from a representative tuple on the global alphabet (labels + OTHER),
+///      attached directly as (to_group_id, weight) pairs.
 /// 6) Convert merged product directly to a DWA:
-///    - For a transition with destination tuple U, the edge weight is the union of atom-weights for i with U[i] != None.
+///    - For a transition with destination group, the edge weight is the union of atom-weights for i alive after that symbol.
 ///    - Final weight as computed in (5).
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
@@ -135,7 +136,7 @@ impl NWA {
 
         // 5) Merge tuples greedily and attach transitions/finals from representative tuples
         let now_merge = Instant::now();
-        let merged = merge_tuples_to_states(
+        let merged = minimize_tuples_to_states(
             start_tuple,
             &comp_dfas,
             &sigma,
@@ -169,20 +170,11 @@ impl NWA {
                     println!("    - Final Weight: {}", w);
                 }
                 println!("    - Transitions:");
-                let dest_tuple_def = &state.trans_default;
-                if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_def) {
-                    println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
-                } else {
-                    println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
-                }
+                println!("      - Default -> State {} (weight: {})", state.trans_default_gid, state.trans_default_weight);
 
-                for (lbl, dest_tuple_ex) in &state.trans_exceptions {
+                for (lbl, (gid_to, w)) in &state.trans_exceptions {
                     let char_repr = super::common::format_i16_char(*lbl);
-                    if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_ex) {
-                        println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
-                    } else {
-                        println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
-                    }
+                    println!("      - {} -> State {} (weight: {})", char_repr, gid_to, w);
                 }
                 println!("    - Contains {} tuples.", state.all_tuples.len());
             }
@@ -966,8 +958,25 @@ impl DetDFA {
     }
 }
 
+/// Lightweight 64-bit fingerprint for Weight (SimpleBitset) by hashing its ranges.
+/// We also verify equality with full Weight comparisons when merging, so collisions
+/// cannot produce incorrect merges; this is only used as a map key accelerator.
+fn weight_fingerprint(w: &Weight) -> u64 {
+    // Some constants for simple mixing
+    let mut h: u64 = 0x9E3779B97F4A7C15;
+    let mut it = w.rsb.ranges();
+    while let Some(r) = it.next() {
+        let s = *r.start() as u64;
+        let e = *r.end() as u64;
+        h ^= s.wrapping_mul(0x9E3779B185EBCA87).rotate_left(13);
+        h ^= e.wrapping_mul(0xC2B2AE3D27D4EB4F).rotate_left(7);
+        h = h.wrapping_mul(0x165667B19E3779F9);
+    }
+    h
+}
+
 /* ------------------------------
-   Tuple enumeration and merging
+   Tuple enumeration and optimal merging (minimal quotient)
    ------------------------------ */
 
 type ProductDFAStateTuple = Vec<Option<usize>>;
@@ -1029,15 +1038,29 @@ fn unify_tuples(a: &ProductDFAStateTuple, b: &ProductDFAStateTuple) -> Option<Pr
     Some(out)
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct ProductDFAState {
     representative_tuple: ProductDFAStateTuple,
     all_tuples: BTreeSet<ProductDFAStateTuple>,
     final_weight: Option<Weight>,
-    // Labeled exceptions: label -> destination tuple (unmapped)
-    trans_exceptions: BTreeMap<i16, ProductDFAStateTuple>,
-    // Default (OTHER) transition destination tuple (unmapped)
-    trans_default: ProductDFAStateTuple,
+    // Labeled transitions: label -> (to_group_id, weight)
+    trans_exceptions: BTreeMap<i16, (usize, Weight)>,
+    // Default (OTHER) transition: (to_group_id, weight)
+    trans_default_gid: usize,
+    trans_default_weight: Weight,
+}
+
+impl Default for ProductDFAState {
+    fn default() -> Self {
+        Self {
+            representative_tuple: Vec::new(),
+            all_tuples: BTreeSet::new(),
+            final_weight: None,
+            trans_exceptions: BTreeMap::new(),
+            trans_default_gid: 0,
+            trans_default_weight: Weight::zeros(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1046,119 +1069,301 @@ struct MergedProduct {
     start: usize,
 }
 
-/// An index to accelerate finding a mergeable group for a given tuple.
-struct GroupIndex {
-    /// For each component `i`, maps a state value `v` to a set of group IDs `g`
-    /// where the representative tuple has `rep[i] = Some(v)`.
-    by_value: Vec<HashMap<usize, BTreeSet<usize>>>,
-    /// For each component `i`, a set of group IDs `g` where `rep[i] = None`.
-    by_none: Vec<BTreeSet<usize>>,
-    num_components: usize,
+/// Simple union-find structure for merging groups by signature.
+#[derive(Default)]
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<u8>,
 }
 
-impl GroupIndex {
-    fn new(num_components: usize) -> Self {
+impl UnionFind {
+    fn make_set(&mut self) -> usize {
+        let id = self.parent.len();
+        self.parent.push(id);
+        self.rank.push(0);
+        id
+    }
+    fn find(&mut self, x: usize) -> usize {
+        if self.parent[x] != x {
+            let r = self.find(self.parent[x]);
+            self.parent[x] = r;
+        }
+        self.parent[x]
+    }
+    fn union(&mut self, a: usize, b: usize) -> usize {
+        let mut ra = self.find(a);
+        let mut rb = self.find(b);
+        if ra == rb { return ra; }
+        if self.rank[ra] < self.rank[rb] {
+            std::mem::swap(&mut ra, &mut rb);
+        }
+        self.parent[rb] = ra;
+        if self.rank[ra] == self.rank[rb] {
+            self.rank[ra] += 1;
+        }
+        ra
+    }
+}
+
+/// Internal data for groups during construction/minimization.
+#[derive(Clone)]
+struct GroupData {
+    tuple: ProductDFAStateTuple,
+    final_weight: Option<Weight>,
+    // aligned with sigma.labels order
+    ex_dst: Vec<usize>,
+    ex_w: Vec<Weight>,
+    // default (OTHER)
+    def_dst: usize,
+    def_w: Weight,
+    expanded: bool,
+}
+
+impl GroupData {
+    fn new(tuple: ProductDFAStateTuple, num_labels: usize) -> Self {
         Self {
-            by_value: vec![HashMap::new(); num_components],
-            by_none: vec![BTreeSet::new(); num_components],
-            num_components,
+            tuple,
+            final_weight: None,
+            ex_dst: vec![0; num_labels],
+            ex_w: vec![Weight::zeros(); num_labels],
+            def_dst: 0,
+            def_w: Weight::zeros(),
+            expanded: false,
         }
-    }
-
-    /// Register a new group with its representative tuple in the index.
-    fn add_group(&mut self, gid: usize, rep: &ProductDFAStateTuple) {
-        for i in 0..self.num_components {
-            if let Some(v) = rep[i] {
-                self.by_value[i].entry(v).or_default().insert(gid);
-            } else {
-                self.by_none[i].insert(gid);
-            }
-        }
-    }
-
-    /// Update the index when a group's representative becomes more specific.
-    fn update_rep(&mut self, gid: usize, old_rep: &ProductDFAStateTuple, new_rep: &ProductDFAStateTuple) {
-        for i in 0..self.num_components {
-            if old_rep[i] != new_rep[i] {
-                // This can only happen from None to Some(v)
-                if let Some(v) = new_rep[i] {
-                    self.by_none[i].remove(&gid);
-                    self.by_value[i].entry(v).or_default().insert(gid);
-                }
-            }
-        }
-    }
-
-    /// Find a group that can be unified with the given tuple.
-    /// Uses a heuristic to check the most constrained component first.
-    fn find_unifiable_group(&self, tuple: &ProductDFAStateTuple, states: &[ProductDFAState]) -> Option<usize> {
-        let mut best_comp_idx = None;
-        let mut min_candidates = usize::MAX;
-
-        // Heuristic: find the component with the smallest candidate set to check.
-        for (i, v_opt) in tuple.iter().enumerate() {
-            if let Some(v) = v_opt {
-                let c_val = self.by_value[i].get(v).map_or(0, |s| s.len());
-                let c_none = self.by_none[i].len();
-                let count = c_val + c_none;
-                if count < min_candidates {
-                    min_candidates = count;
-                    best_comp_idx = Some(i);
-                }
-            }
-        }
-
-        if let Some(i) = best_comp_idx {
-            let v = tuple[i].unwrap();
-            let candidates_val = self.by_value[i].get(&v);
-            let candidates_none = &self.by_none[i];
-
-            // Iterate over candidates and perform the full unification check.
-            let iter = candidates_val.into_iter().flatten().chain(candidates_none.iter());
-            for &gid in iter {
-                if unify_tuples(&states[gid].representative_tuple, tuple).is_some() {
-                    return Some(gid);
-                }
-            }
-        } else {
-            // The tuple is all None, so it can unify with any group.
-            // Return the first group if it exists.
-            if !states.is_empty() {
-                return Some(0);
-            }
-        }
-
-        None
     }
 }
 
-/// Merge tuples greedily into product states and compute per-state transitions and final weights from representatives.
-fn merge_tuples_to_states(
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SigKey {
+    final_hash: u64,
+    def_w_hash: u64,
+    def_dst_root: usize,
+    // sorted by sigma.labels order
+    ex: Vec<(i16, u64, usize)>,
+}
+
+/// Check exact (collision-free) signature equality for two groups given sigma and union-find.
+fn signatures_equal(
+    g1: usize,
+    g2: usize,
+    groups: &Vec<GroupData>,
+    sigma: &Alphabet,
+    uf: &mut UnionFind,
+) -> bool {
+    // final weights equal
+    if groups[g1].final_weight != groups[g2].final_weight {
+        return false;
+    }
+    // default weight equal
+    if groups[g1].def_w != groups[g2].def_w {
+        return false;
+    }
+    // default dest root equal
+    if uf.find(groups[g1].def_dst) != uf.find(groups[g2].def_dst) {
+        return false;
+    }
+    // exceptions equal: same length, same labels, same weights and root destinations
+    if groups[g1].ex_w.len() != groups[g2].ex_w.len() {
+        return false;
+    }
+    for (li, &lbl) in sigma.labels.iter().enumerate() {
+        if groups[g1].ex_w[li] != groups[g2].ex_w[li] {
+            return false;
+        }
+        if uf.find(groups[g1].ex_dst[li]) != uf.find(groups[g2].ex_dst[li]) {
+            return false;
+        }
+    }
+    true
+}
+
+fn compute_signature_key(
+    gid: usize,
+    groups: &Vec<GroupData>,
+    sigma: &Alphabet,
+    uf: &mut UnionFind,
+) -> SigKey {
+    let final_hash = match &groups[gid].final_weight {
+        Some(w) => weight_fingerprint(w).wrapping_add(1),
+        None => 0,
+    };
+    let def_w_hash = weight_fingerprint(&groups[gid].def_w);
+    let def_dst_root = uf.find(groups[gid].def_dst);
+    let mut ex = Vec::with_capacity(sigma.labels.len());
+    for (li, &lbl) in sigma.labels.iter().enumerate() {
+        let w_hash = weight_fingerprint(&groups[gid].ex_w[li]);
+        let dst_root = uf.find(groups[gid].ex_dst[li]);
+        ex.push((lbl, w_hash, dst_root));
+    }
+    SigKey { final_hash, def_w_hash, def_dst_root, ex }
+}
+
+/// Optimal merging: compute minimal quotient of reachable tuples under (F, per-symbol W, successors).
+fn minimize_tuples_to_states(
     start_tuple: ProductDFAStateTuple,
     comps: &[DetDFA],
     sigma: &Alphabet,
     comp_sinks: &[Option<usize>],
     atom_weights: &Vec<Weight>,
 ) -> MergedProduct {
-    let mut states: Vec<ProductDFAState> = Vec::new();
-    let mut tuple_to_group: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
-    let mut worklist = VecDeque::new(); // Worklist of group IDs
-    let mut in_worklist = BTreeSet::new();
+    // Interning of tuples to group IDs
+    let mut tuple_to_gid: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
+    // Groups under construction
+    let mut groups: Vec<GroupData> = Vec::new();
+    // Predecessor lists for recheck propagation (by group ID)
+    let mut preds: Vec<BTreeSet<usize>> = Vec::new();
+    // Union-find for merging equivalent groups
+    let mut uf = UnionFind::default();
+    // Signature -> canonical group mapping (use hash keys + equality recheck)
+    let mut sig_to_gid: HashMap<SigKey, usize> = HashMap::new();
 
-    let k = comps.len();
-    let mut group_index = GroupIndex::new(k);
+    // Helper: get or create group for tuple
+    let mut get_or_create = |t: ProductDFAStateTuple| -> usize {
+        if let Some(&gid) = tuple_to_gid.get(&t) {
+            return uf.find(gid);
+        }
+        let gid = uf.make_set();
+        tuple_to_gid.insert(t.clone(), gid);
+        groups.push(GroupData::new(t, sigma.labels.len()));
+        preds.push(BTreeSet::new());
+        gid
+    };
 
-    // Create starting group for the start_tuple
-    {
-        let mut start_state = ProductDFAState::default();
-        start_state.representative_tuple = start_tuple.clone();
-        start_state.all_tuples.insert(start_tuple.clone());
-        states.push(start_state); // gid = 0
-        tuple_to_group.insert(start_tuple, 0);
-        worklist.push_back(0);
-        in_worklist.insert(0);
-        group_index.add_group(0, &states[0].representative_tuple);
+    // Worklists
+    let mut expand_q: VecDeque<usize> = VecDeque::new();
+    let mut recheck_q: VecDeque<usize> = VecDeque::new();
+
+    // Seed
+    let start_gid = get_or_create(start_tuple.clone());
+    expand_q.push_back(start_gid);
+
+    // Expand groups with transitions and base signature data
+    while let Some(gid0) = expand_q.pop_front() {
+        let gid = uf.find(gid0);
+        if groups[gid].expanded {
+            continue;
+        }
+
+        let tuple = groups[gid].tuple.clone();
+        // Compute final weight F(tuple)
+        let mut w_final = Weight::zeros();
+        for (i, pos) in tuple.iter().enumerate() {
+            if let Some(s) = pos {
+                if comps[i].finals[*s] {
+                    w_final |= &atom_weights[i];
+                }
+            }
+        }
+        groups[gid].final_weight = if w_final.is_empty() { None } else { Some(w_final) };
+
+        // Default (OTHER)
+        let succ_def = successor_tuple(&tuple, sigma.other_index, comps, comp_sinks);
+        let def_w = edge_weight_from_tuple(atom_weights, &succ_def);
+        let def_gid = get_or_create(succ_def);
+        groups[gid].def_w = def_w;
+        groups[gid].def_dst = def_gid;
+        preds[def_gid].insert(gid);
+
+        // Exceptions (labels)
+        for (li, _lbl) in sigma.labels.iter().enumerate() {
+            let succ = successor_tuple(&tuple, li, comps, comp_sinks);
+            let w = edge_weight_from_tuple(atom_weights, &succ);
+            let to = get_or_create(succ);
+            groups[gid].ex_w[li] = w;
+            groups[gid].ex_dst[li] = to;
+            preds[to].insert(gid);
+        }
+
+        groups[gid].expanded = true;
+
+        // Try to merge by signature
+        let key = compute_signature_key(gid, &groups, sigma, &mut uf);
+        if let Some(&other) = sig_to_gid.get(&key) {
+            let other_root = uf.find(other);
+            let gid_root = uf.find(gid);
+            if gid_root != other_root && signatures_equal(gid_root, other_root, &groups, sigma, &mut uf) {
+                let r = uf.union(gid_root, other_root);
+                // Merge predecessor sets and schedule rechecks
+                let a = if r == gid_root { other_root } else { gid_root };
+                // Merge preds[a] into preds[r]
+                let mut moved = Vec::new();
+                for p in preds[a].iter() {
+                    moved.push(*p);
+                }
+                for p in moved {
+                    preds[r].insert(p);
+                }
+                preds[a].clear();
+                for &p in preds[r].iter() {
+                    recheck_q.push_back(p);
+                }
+                // Update the signature map to point to the representative
+                sig_to_gid.insert(key, r);
+            } else {
+                sig_to_gid.insert(key, gid_root);
+            }
+        } else {
+            sig_to_gid.insert(key, uf.find(gid));
+        }
     }
+
+    // Propagate merges via predecessor rechecks until stable
+    while let Some(g0) = recheck_q.pop_front() {
+        let g = uf.find(g0);
+        if !groups[g].expanded {
+            continue;
+        }
+        let key = compute_signature_key(g, &groups, sigma, &mut uf);
+        if let Some(&cand) = sig_to_gid.get(&key) {
+            let cand_root = uf.find(cand);
+            let g_root = uf.find(g);
+            if g_root != cand_root && signatures_equal(g_root, cand_root, &groups, sigma, &mut uf) {
+                let r = uf.union(g_root, cand_root);
+                // Merge preds and schedule upstream rechecks
+                let a = if r == g_root { cand_root } else { g_root };
+                let mut moved = Vec::new();
+                for p in preds[a].iter() {
+                    moved.push(*p);
+                }
+                for p in moved {
+                    preds[r].insert(p);
+                }
+                preds[a].clear();
+                for &p in preds[r].iter() {
+                    recheck_q.push_back(p);
+                }
+                sig_to_gid.insert(key, r);
+            } else {
+                sig_to_gid.insert(key, uf.find(g));
+            }
+        } else {
+            // No candidate for this signature yet
+            sig_to_gid.insert(key, uf.find(g));
+        }
+    }
+
+    // Build quotient graph reachable from start root
+    let start_root = uf.find(start_gid);
+    // Map root-id -> representative group id (lowest id in the class)
+    let mut root_repr: HashMap<usize, usize> = HashMap::new();
+    for gid in 0..groups.len() {
+        let r = uf.find(gid);
+        root_repr.entry(r).and_modify(|e| if gid < *e { *e = gid }).or_insert(gid);
+    }
+    // Enumerate reachable roots via BFS
+    let mut root_to_newid: HashMap<usize, usize> = HashMap::new();
+    let mut new_states: Vec<ProductDFAState> = Vec::new();
+    let mut q: VecDeque<usize> = VecDeque::new();
+    root_to_newid.insert(start_root, 0);
+    new_states.push(ProductDFAState {
+        representative_tuple: groups[root_repr[&start_root]].tuple.clone(),
+        all_tuples: BTreeSet::new(), // optional
+        final_weight: groups[root_repr[&start_root]].final_weight.clone(),
+        trans_exceptions: BTreeMap::new(),
+        trans_default_gid: 0, // fill later
+        trans_default_weight: Weight::zeros(),
+    });
+    q.push_back(start_root);
 
     let pb_merge = if PROGRESS_BAR_ENABLED {
         let p = ProgressBar::new_spinner();
@@ -1172,54 +1377,54 @@ fn merge_tuples_to_states(
         None
     };
 
-    if let Some(p) = &pb_merge {
-        p.set_position(states.len() as u64);
-        p.set_message(format!("{}", worklist.len()));
-    }
+    while let Some(r) = q.pop_front() {
+        let my_id = root_to_newid[&r];
+        let repr_gid = root_repr[&r];
+        let g = &groups[repr_gid];
 
-    while let Some(gid) = worklist.pop_front() {
-        in_worklist.remove(&gid);
-        let rep = states[gid].representative_tuple.clone();
-
-        for sym in 0..sigma.size() {
-            let succ_tuple = successor_tuple(&rep, sym, comps, comp_sinks);
-
-            if tuple_to_group.contains_key(&succ_tuple) {
-                continue;
+        // Default
+        let def_root = uf.find(g.def_dst);
+        let def_newid = *root_to_newid.entry(def_root).or_insert_with(|| {
+            let nid = new_states.len();
+            new_states.push(ProductDFAState {
+                representative_tuple: groups[root_repr[&def_root]].tuple.clone(),
+                all_tuples: BTreeSet::new(),
+                final_weight: groups[root_repr[&def_root]].final_weight.clone(),
+                trans_exceptions: BTreeMap::new(),
+                trans_default_gid: 0,
+                trans_default_weight: Weight::zeros(),
+            });
+            q.push_back(def_root);
+            if let Some(p) = &pb_merge {
+                p.set_position(new_states.len() as u64);
+                p.set_message(format!("{}", q.len()));
             }
+            nid
+        });
+        new_states[my_id].trans_default_gid = def_newid;
+        new_states[my_id].trans_default_weight = g.def_w.clone();
 
-            // Find a group for succ_tuple or create a new one
-            if let Some(existing_gid) = group_index.find_unifiable_group(&succ_tuple, &states) {
-                let old_rep = states[existing_gid].representative_tuple.clone();
-                let new_rep = unify_tuples(&old_rep, &succ_tuple).unwrap();
-
-                if new_rep != old_rep {
-                    states[existing_gid].representative_tuple = new_rep.clone();
-                    group_index.update_rep(existing_gid, &old_rep, &new_rep);
-
-                    if in_worklist.insert(existing_gid) {
-                        worklist.push_back(existing_gid);
-                    }
-                }
-                tuple_to_group.insert(succ_tuple.clone(), existing_gid);
-                states[existing_gid].all_tuples.insert(succ_tuple.clone());
-            } else {
-                // Create new group
-                let new_gid = states.len();
-                let mut new_state = ProductDFAState::default();
-                new_state.representative_tuple = succ_tuple.clone();
-                new_state.all_tuples.insert(succ_tuple.clone());
-                states.push(new_state);
-                tuple_to_group.insert(succ_tuple.clone(), new_gid);
-                worklist.push_back(new_gid);
-                in_worklist.insert(new_gid);
-                group_index.add_group(new_gid, &states[new_gid].representative_tuple);
-
+        // Exceptions
+        for (li, &lbl) in sigma.labels.iter().enumerate() {
+            let next_root = uf.find(g.ex_dst[li]);
+            let next_newid = *root_to_newid.entry(next_root).or_insert_with(|| {
+                let nid = new_states.len();
+                new_states.push(ProductDFAState {
+                    representative_tuple: groups[root_repr[&next_root]].tuple.clone(),
+                    all_tuples: BTreeSet::new(),
+                    final_weight: groups[root_repr[&next_root]].final_weight.clone(),
+                    trans_exceptions: BTreeMap::new(),
+                    trans_default_gid: 0,
+                    trans_default_weight: Weight::zeros(),
+                });
+                q.push_back(next_root);
                 if let Some(p) = &pb_merge {
-                    p.set_position(states.len() as u64);
-                    p.set_message(format!("{}", worklist.len()));
+                    p.set_position(new_states.len() as u64);
+                    p.set_message(format!("{}", q.len()));
                 }
-            }
+                nid
+            });
+            new_states[my_id].trans_exceptions.insert(lbl, (next_newid, g.ex_w[li].clone()));
         }
     }
 
@@ -1236,77 +1441,16 @@ fn merge_tuples_to_states(
     };
 
     if let Some(p) = pb_merge {
-        p.finish_with_message(format!("Merged into {} states", states.len()));
+        p.finish_with_message(format!("Merged into {} states", new_states.len()));
     }
 
-    // Compute final weights and per-state transitions from representatives
-    let pb_attach = if PROGRESS_BAR_ENABLED {
-        Some(
-            ProgressBar::new(states.len() as u64).with_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Attach weights/transitions)")
-                    .unwrap(),
-            ),
-        )
-    } else {
-        None
-    };
-
-    for gid in 0..states.len() {
-        let rep = states[gid].representative_tuple.clone();
-
-        // Final weight: union of atom-weights where representative component is accepting
-        let mut w_final = Weight::zeros();
-        for (i, pos) in rep.iter().enumerate() {
-            if let Some(s) = pos {
-                if comps[i].finals[*s] {
-                    w_final |= &atom_weights[i];
-                }
-            }
-        }
-        states[gid].final_weight = if w_final.is_empty() { None } else { Some(w_final) };
-
-        // Transitions from representative
-        // Default (OTHER)
-        let def = successor_tuple(&rep, sigma.other_index, comps, comp_sinks);
-        states[gid].trans_default = def;
-
-        // Labeled exceptions
-        let mut ex: BTreeMap<i16, ProductDFAStateTuple> = BTreeMap::new();
-        for (li, &lbl) in sigma.labels.iter().enumerate() {
-            let dst = successor_tuple(&rep, li, comps, comp_sinks);
-            ex.insert(lbl, dst);
-        }
-        states[gid].trans_exceptions = ex;
-
-        if let Some(p) = &pb_attach {
-            p.inc(1);
-        }
-    }
-    if let Some(p) = pb_attach {
-        p.finish_with_message("Weights/transitions attached");
-    }
-
-    MergedProduct { states, start: 0 }
+    // Start is 0 in new_states by construction
+    MergedProduct { states: new_states, start: 0 }
 }
 
 /* ------------------------------
    Build DWA from merged product
    ------------------------------ */
-
-/// For a given tuple, find the ID of the merged state group it belongs to by checking for unifiability.
-fn find_group_for_tuple(
-    merged_states: &[ProductDFAState],
-    tuple: &ProductDFAStateTuple,
-) -> Option<usize> {
-    // This is a linear scan. Can be optimized if it's a bottleneck.
-    for (gid, state) in merged_states.iter().enumerate() {
-        if unify_tuples(&state.representative_tuple, tuple).is_some() {
-            return Some(gid);
-        }
-    }
-    None
-}
 
 fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &ProductDFAStateTuple) -> Weight {
     let mut w = Weight::zeros();
@@ -1339,23 +1483,12 @@ fn build_dwa_from_merged(
 
     // Transitions
     for sid in 0..merged.states.len() {
-        // Default (OTHER)
-        let def_t = &merged.states[sid].trans_default;
-        let def_w = edge_weight_from_tuple(atom_weights, def_t);
-        if let Some(to_id) = find_group_for_tuple(&merged.states, def_t) {
-            let _ = dwa.set_default_transition(sid, to_id, def_w);
-        } else {
-            assert!(def_t.iter().all(|x| x.is_none()), "Default transition tuple must be all None if unmapped. Found unmapped tuple {:?} for state {}", def_t, sid);
-        }
+        // Default (OTHER): already mapped to group id and weight
+        let _ = dwa.set_default_transition(sid, merged.states[sid].trans_default_gid, merged.states[sid].trans_default_weight.clone());
 
         // Exceptions
-        for (lbl, dst_t) in &merged.states[sid].trans_exceptions {
-            let w = edge_weight_from_tuple(atom_weights, dst_t);
-            if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
-                let _ = dwa.add_transition(sid, *lbl, to_id, w);
-            } else {
-                assert!(dst_t.iter().all(|x| x.is_none()), "Exception transition tuple must be all None if unmapped. Found unmapped tuple {:?} for state {} on label {}", dst_t, sid, format_i16_char(*lbl));
-            }
+        for (lbl, (to_id, w)) in &merged.states[sid].trans_exceptions {
+            let _ = dwa.add_transition(sid, *lbl, *to_id, w.clone());
         }
     }
 
@@ -1365,3 +1498,4 @@ fn build_dwa_from_merged(
 /* ------------------------------
    End of merged determinization
    ------------------------------ */
+
