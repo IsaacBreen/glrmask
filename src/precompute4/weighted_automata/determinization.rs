@@ -1046,6 +1046,92 @@ struct MergedProduct {
     start: usize,
 }
 
+/// An index to accelerate finding a mergeable group for a given tuple.
+struct GroupIndex {
+    /// For each component `i`, maps a state value `v` to a set of group IDs `g`
+    /// where the representative tuple has `rep[i] = Some(v)`.
+    by_value: Vec<HashMap<usize, BTreeSet<usize>>>,
+    /// For each component `i`, a set of group IDs `g` where `rep[i] = None`.
+    by_none: Vec<BTreeSet<usize>>,
+    num_components: usize,
+}
+
+impl GroupIndex {
+    fn new(num_components: usize) -> Self {
+        Self {
+            by_value: vec![HashMap::new(); num_components],
+            by_none: vec![BTreeSet::new(); num_components],
+            num_components,
+        }
+    }
+
+    /// Register a new group with its representative tuple in the index.
+    fn add_group(&mut self, gid: usize, rep: &ProductDFAStateTuple) {
+        for i in 0..self.num_components {
+            if let Some(v) = rep[i] {
+                self.by_value[i].entry(v).or_default().insert(gid);
+            } else {
+                self.by_none[i].insert(gid);
+            }
+        }
+    }
+
+    /// Update the index when a group's representative becomes more specific.
+    fn update_rep(&mut self, gid: usize, old_rep: &ProductDFAStateTuple, new_rep: &ProductDFAStateTuple) {
+        for i in 0..self.num_components {
+            if old_rep[i] != new_rep[i] {
+                // This can only happen from None to Some(v)
+                if let Some(v) = new_rep[i] {
+                    self.by_none[i].remove(&gid);
+                    self.by_value[i].entry(v).or_default().insert(gid);
+                }
+            }
+        }
+    }
+
+    /// Find a group that can be unified with the given tuple.
+    /// Uses a heuristic to check the most constrained component first.
+    fn find_unifiable_group(&self, tuple: &ProductDFAStateTuple, states: &[ProductDFAState]) -> Option<usize> {
+        let mut best_comp_idx = None;
+        let mut min_candidates = usize::MAX;
+
+        // Heuristic: find the component with the smallest candidate set to check.
+        for (i, v_opt) in tuple.iter().enumerate() {
+            if let Some(v) = v_opt {
+                let c_val = self.by_value[i].get(v).map_or(0, |s| s.len());
+                let c_none = self.by_none[i].len();
+                let count = c_val + c_none;
+                if count < min_candidates {
+                    min_candidates = count;
+                    best_comp_idx = Some(i);
+                }
+            }
+        }
+
+        if let Some(i) = best_comp_idx {
+            let v = tuple[i].unwrap();
+            let candidates_val = self.by_value[i].get(&v);
+            let candidates_none = &self.by_none[i];
+
+            // Iterate over candidates and perform the full unification check.
+            let iter = candidates_val.into_iter().flatten().chain(candidates_none.iter());
+            for &gid in iter {
+                if unify_tuples(&states[gid].representative_tuple, tuple).is_some() {
+                    return Some(gid);
+                }
+            }
+        } else {
+            // The tuple is all None, so it can unify with any group.
+            // Return the first group if it exists.
+            if !states.is_empty() {
+                return Some(0);
+            }
+        }
+
+        None
+    }
+}
+
 /// Merge tuples greedily into product states and compute per-state transitions and final weights from representatives.
 fn merge_tuples_to_states(
     start_tuple: ProductDFAStateTuple,
@@ -1056,16 +1142,22 @@ fn merge_tuples_to_states(
 ) -> MergedProduct {
     let mut states: Vec<ProductDFAState> = Vec::new();
     let mut tuple_to_group: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
-    let mut worklist: VecDeque<usize> = VecDeque::new(); // Worklist of group IDs
+    let mut worklist = VecDeque::new(); // Worklist of group IDs
+    let mut in_worklist = BTreeSet::new();
+
+    let k = comps.len();
+    let mut group_index = GroupIndex::new(k);
 
     // Create starting group for the start_tuple
     {
         let mut start_state = ProductDFAState::default();
         start_state.representative_tuple = start_tuple.clone();
         start_state.all_tuples.insert(start_tuple.clone());
-        states.push(start_state);
+        states.push(start_state); // gid = 0
         tuple_to_group.insert(start_tuple, 0);
         worklist.push_back(0);
+        in_worklist.insert(0);
+        group_index.add_group(0, &states[0].representative_tuple);
     }
 
     let pb_merge = if PROGRESS_BAR_ENABLED {
@@ -1086,6 +1178,7 @@ fn merge_tuples_to_states(
     }
 
     while let Some(gid) = worklist.pop_front() {
+        in_worklist.remove(&gid);
         let rep = states[gid].representative_tuple.clone();
 
         for sym in 0..sigma.size() {
@@ -1096,33 +1189,31 @@ fn merge_tuples_to_states(
             }
 
             // Find a group for succ_tuple or create a new one
-            let mut placed = false;
-            for existing_gid in 0..states.len() {
-                let old_rep = &states[existing_gid].representative_tuple;
-                if let Some(new_rep) = unify_tuples(old_rep, &succ_tuple) {
-                    if new_rep != *old_rep {
-                        states[existing_gid].representative_tuple = new_rep;
-                        // Representative changed, so this group needs to be re-processed.
-                        if !worklist.contains(&existing_gid) {
-                            worklist.push_back(existing_gid);
-                        }
-                    }
-                    tuple_to_group.insert(succ_tuple.clone(), existing_gid);
-                    states[existing_gid].all_tuples.insert(succ_tuple.clone());
-                    placed = true;
-                    break;
-                }
-            }
+            if let Some(existing_gid) = group_index.find_unifiable_group(&succ_tuple, &states) {
+                let old_rep = states[existing_gid].representative_tuple.clone();
+                let new_rep = unify_tuples(&old_rep, &succ_tuple).unwrap();
 
-            if !placed {
+                if new_rep != old_rep {
+                    states[existing_gid].representative_tuple = new_rep.clone();
+                    group_index.update_rep(existing_gid, &old_rep, &new_rep);
+
+                    if in_worklist.insert(existing_gid) {
+                        worklist.push_back(existing_gid);
+                    }
+                }
+                tuple_to_group.insert(succ_tuple.clone(), existing_gid);
+                states[existing_gid].all_tuples.insert(succ_tuple.clone());
+            } else {
                 // Create new group
                 let new_gid = states.len();
                 let mut new_state = ProductDFAState::default();
                 new_state.representative_tuple = succ_tuple.clone();
                 new_state.all_tuples.insert(succ_tuple.clone());
                 states.push(new_state);
-                tuple_to_group.insert(succ_tuple, new_gid);
+                tuple_to_group.insert(succ_tuple.clone(), new_gid);
                 worklist.push_back(new_gid);
+                in_worklist.insert(new_gid);
+                group_index.add_group(new_gid, &states[new_gid].representative_tuple);
 
                 if let Some(p) = &pb_merge {
                     p.set_position(states.len() as u64);
