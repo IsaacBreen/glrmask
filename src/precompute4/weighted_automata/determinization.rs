@@ -144,7 +144,7 @@ impl NWA {
 
         // 5) Merge tuples greedily and attach transitions/finals from representative tuples
         let now_merge = Instant::now();
-        let merger_components: Vec<tuple_merger::Component> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
+        let merger_components: Vec<Vec<BTreeMap<usize, usize>>> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
             let mut sparse_trans = Vec::with_capacity(dfa.n_states);
             for s in 0..dfa.n_states {
                 let mut exceptions = BTreeMap::new();
@@ -162,24 +162,23 @@ impl NWA {
                 }
                 sparse_trans.push(exceptions);
             }
-            tuple_merger::Component { transitions: sparse_trans }
+            sparse_trans
         }).collect();
 
-        let merged_automaton = tuple_merger::merge_and_build_automaton(
+        let merged_states = tuple_merger::merge_and_build_automaton(
             start_tuple,
             &merger_components,
-            sigma.size(),
         );
         crate::debug!(
             4,
             "Merged into {} product states in {:?}",
-            merged_automaton.states.len(),
+            merged_states.len(),
             now_merge.elapsed()
         );
 
         // 6) Convert merged product to a DWA
         let now_convert = Instant::now();
-        let dwa = build_dwa_from_merged_automaton(&merged_automaton, &comp_dfas, &atoms.atoms, &sigma);
+        let dwa = build_dwa_from_merged_automaton(&merged_states, &comp_dfas, &atoms.atoms, &sigma);
         crate::debug!(
             4,
             "Merged-product -> DWA conversion completed in {:?}",
@@ -983,20 +982,20 @@ fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &tuple_merger::Prod
 }
 
 fn build_dwa_from_merged_automaton(
-    merged_automaton: &tuple_merger::MergedAutomaton,
+    merged_states: &[tuple_merger::MergedState],
     comps: &[DetDFA],
     atom_weights: &Vec<Weight>,
     sigma: &Alphabet,
 ) -> DWA {
     let mut dwa_states = DWAStates::default();
-    for _ in 0..merged_automaton.states.len() {
+    for _ in 0..merged_states.len() {
         dwa_states.add_state();
     }
-    let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: merged_automaton.start_state_id } };
+    let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: 0 } };
 
     // We need a way to compute successor tuples to determine edge weights.
     // Re-create the component structures for the tuple_merger.
-    let merger_components: Vec<tuple_merger::Component> = comps.iter().map(|dfa| {
+    let merger_components: Vec<Vec<BTreeMap<usize, usize>>> = comps.iter().map(|dfa| {
         let sink = dfa.find_sink_index(sigma);
         let mut sparse_trans = Vec::with_capacity(dfa.n_states);
         for s in 0..dfa.n_states {
@@ -1014,13 +1013,10 @@ fn build_dwa_from_merged_automaton(
             }
             sparse_trans.push(exceptions);
         }
-        tuple_merger::Component { transitions: sparse_trans }
+        sparse_trans
     }).collect();
 
-    for state in &merged_automaton.states {
-        let sid = state.id;
-        let rep = &state.representative_tuple;
-
+    for (sid, (rep, transitions)) in merged_states.iter().enumerate() {
         // Final weight
         let mut w_final = Weight::zeros();
         for (i, pos) in rep.iter().enumerate() {
@@ -1035,14 +1031,14 @@ fn build_dwa_from_merged_automaton(
         }
 
         // Default (OTHER)
-        let def_to_id = state.transitions[sigma.other_index];
+        let def_to_id = transitions[&sigma.other_index];
         let def_succ_tuple = tuple_merger::successor_tuple(rep, sigma.other_index, &merger_components);
         let def_w = edge_weight_from_tuple(atom_weights, &def_succ_tuple);
         let _ = dwa.set_default_transition(sid, def_to_id, def_w);
 
         // Exceptions
         for (li, &lbl) in sigma.labels.iter().enumerate() {
-            let to_id = state.transitions[li];
+            let to_id = transitions[&li];
             let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
             let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
             let _ = dwa.add_transition(sid, lbl, to_id, w);

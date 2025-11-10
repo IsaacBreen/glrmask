@@ -1,26 +1,9 @@
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
-
-#[derive(Clone, Debug)]
-pub struct Component {
-    pub transitions: Vec<BTreeMap<usize, usize>>,
-}
-
-#[derive(Clone, Debug)]
-pub struct MergedState {
-    pub id: usize,
-    pub representative_tuple: ProductTuple,
-    pub transitions: Vec<usize>,
-}
-
-#[derive(Clone, Debug)]
-pub struct MergedAutomaton {
-    pub states: Vec<MergedState>,
-    pub start_state_id: usize,
-}
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 pub type ProductTuple = Vec<Option<usize>>;
+pub type MergedState = (ProductTuple, BTreeMap<usize, usize>);
 
 fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
     if a.len() != b.len() {
@@ -44,13 +27,13 @@ fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
     Some(out)
 }
 
-pub fn successor_tuple(tuple: &ProductTuple, symbol: usize, components: &[Component]) -> ProductTuple {
+pub fn successor_tuple(tuple: &ProductTuple, symbol: usize, components: &[Vec<BTreeMap<usize, usize>>]) -> ProductTuple {
     let k = components.len();
     let mut out = Vec::with_capacity(k);
     for i in 0..k {
         match tuple[i] {
             Some(s) => {
-                if let Some(&v) = components[i].transitions[s].get(&symbol) {
+                if let Some(&v) = components[i][s].get(&symbol) {
                     out.push(Some(v));
                 } else {
                     out.push(None);
@@ -66,9 +49,8 @@ pub fn successor_tuple(tuple: &ProductTuple, symbol: usize, components: &[Compon
 
 pub fn merge_and_build_automaton(
     start_tuple: ProductTuple,
-    components: &[Component],
-    alphabet_size: usize,
-) -> MergedAutomaton {
+    components: &[Vec<BTreeMap<usize, usize>>],
+) -> Vec<MergedState> {
     let mut states: Vec<ProductTuple> = Vec::new();
     let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
     let mut worklist: VecDeque<usize> = VecDeque::new();
@@ -78,11 +60,19 @@ pub fn merge_and_build_automaton(
     point_map.insert(start_tuple, start_id);
     worklist.push_back(start_id);
 
+    let mut alphabet = BTreeSet::new();
+    for comp in components {
+        for state_trans in comp {
+            for &symbol in state_trans.keys() {
+                alphabet.insert(symbol);
+            }
+        }
+    }
+
     while let Some(state_id) = worklist.pop_front() {
         let representative = states[state_id].clone();
 
-        for symbol in 0..alphabet_size {
-
+        for &symbol in &alphabet {
             let successor = successor_tuple(&representative, symbol, components);
 
             if point_map.contains_key(&successor) {
@@ -115,18 +105,16 @@ pub fn merge_and_build_automaton(
     }
 
     let mut final_states = Vec::with_capacity(states.len());
-    for (id, rep) in states.iter().enumerate() {
-        let transitions = (0..alphabet_size)
-            .map(|symbol| {
-                let succ = successor_tuple(rep, symbol, components);
-                *point_map.get(&succ).expect("Successor point must have an assigned state")
-            })
-            .collect();
-
-        final_states.push(MergedState { id, representative_tuple: rep.clone(), transitions });
+    for rep in states.iter() {
+        let mut transitions = BTreeMap::new();
+        for &symbol in &alphabet {
+            let succ = successor_tuple(rep, symbol, components);
+            let target_id = *point_map.get(&succ).expect("Successor point must have an assigned state");
+            transitions.insert(symbol, target_id);
+        }
+        final_states.push((rep.clone(), transitions));
     }
-
-    MergedAutomaton { states: final_states, start_state_id: 0 }
+    final_states
 }
 
 #[cfg(test)]
@@ -144,22 +132,20 @@ mod tests {
 
     #[test]
     fn test_simple_merge() {
-        let comp0 = Component { transitions: vec![BTreeMap::from([(0, 0)])] };
-        let comp1 = Component { transitions: vec![BTreeMap::from([(1, 0)])] };
+        let comp0 = vec![BTreeMap::from([(0, 0)])];
+        let comp1 = vec![BTreeMap::from([(1, 0)])];
         let components = vec![comp0, comp1];
-        let alphabet_size = 2;
 
         let start_tuple = vec![Some(0), Some(0)];
 
-        let automaton = merge_and_build_automaton(start_tuple, &components, alphabet_size);
+        let automaton_states = merge_and_build_automaton(start_tuple, &components);
 
-        assert_eq!(automaton.states.len(), 1);
+        assert_eq!(automaton_states.len(), 1);
 
-        let s0_id = automaton.start_state_id;
-        assert_eq!(automaton.states[s0_id].representative_tuple, vec![Some(0), Some(0)]);
+        let s0_id = 0;
+        assert_eq!(automaton_states[s0_id].0, vec![Some(0), Some(0)]);
 
-        assert_eq!(automaton.states[s0_id].transitions[0], s0_id);
-
-        assert_eq!(automaton.states[s0_id].transitions[1], s0_id);
+        assert_eq!(automaton_states[s0_id].1[&0], s0_id);
+        assert_eq!(automaton_states[s0_id].1[&1], s0_id);
     }
 }
