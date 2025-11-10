@@ -84,8 +84,7 @@
 
 #![allow(dead_code)]
 
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 /// Symbol index in 0..alphabet_size.
 pub type Symbol = usize;
@@ -125,27 +124,6 @@ fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
         }
     }
     Some(out)
-}
-
-/// Checks if tuple `x` is less specific than or equal to tuple `y` (x ≤ y).
-/// Intuitively, `y` is at least as "specific" as `x`: whenever `x` specifies a concrete local
-/// state, `y` agrees. Otherwise `x` leaves the coordinate unspecified (⊥).
-fn is_less_or_equal(x: &ProductTuple, y: &ProductTuple) -> bool {
-    debug_assert_eq!(x.len(), y.len(), "Tuples must have same arity for comparison");
-    for i in 0..x.len() {
-        match (x[i], y[i]) {
-            (Some(xs), Some(ys)) => {
-                if xs != ys {
-                    return false; // Conflict: x specifies something different from y
-                }
-            }
-            (Some(_), None) => {
-                return false; // x specifies a value, but y is masked (x is more specific than y)
-            }
-            _ => {} // OK cases: (None, _), (Some, Some) with equal values
-        }
-    }
-    true
 }
 
 /// Compute the successor of a product point under a given symbol, using sparse components.
@@ -252,8 +230,19 @@ impl Solution {
                 return Err("a tuple in image has wrong arity".into());
             }
             // Check x ≤ reps[id]
-            if !is_less_or_equal(x, &self.reps[id]) {
-                return Err("image well-formedness violated: x is not less than or equal to its rep".into());
+            let rep = &self.reps[id];
+            for i in 0..k {
+                match (x[i], rep[i]) {
+                    (Some(xs), Some(rs)) => {
+                        if xs != rs {
+                            return Err("image well-formedness violated: x is more specific than its rep".into());
+                        }
+                    }
+                    (Some(_), None) => {
+                        return Err("image well-formedness violated: rep is less specific than x".into());
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -274,43 +263,30 @@ impl Solution {
     }
 }
 
-/// An optimized synthesizer that aims to minimize |R|.
+/// Baseline greedy synthesizer:
+/// - Start with R = [start], φ(start) = 0.
+/// - Pop a representative; for each symbol, compute its successor x.
+///   - If φ(x) already exists, continue.
+///   - Else try to unify x with some existing r_j; if compatible:
+///       r_j := unify(r_j, x) (possibly increasing specificity), push j back on worklist.
+///       φ(x) := j.
+///   - Else create a new representative r_new := x, set φ(x) := new_id, and push it.
 ///
-/// It uses a priority queue to process the most general (least specific) representatives
-/// first. When finding a home for a new successor point `x`, it chooses an existing
-/// representative `r_j` to merge with based on a lexicographical cost function that
-/// prioritizes minimal increase in specificity. This combination of a principled
-/// exploration order and a strong local heuristic produces high-quality solutions efficiently.
+/// This guarantees (C1–C3) but is not necessarily minimal. It is deterministic.
 pub fn synthesize_greedy(inst: &Instance) -> Solution {
-    let _ = inst.validate_shape();
+    let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
 
     let mut reps: Vec<ProductTuple> = Vec::new();
     let mut image: HashMap<ProductTuple, usize> = HashMap::new();
-
-    // A min-priority queue storing `(Reverse(specificity), representative_id)`.
-    // We process the most general representatives first.
-    let mut work_pq: BinaryHeap<Reverse<(usize, usize, u64)>> = BinaryHeap::new();
-    // A set to track which representative IDs are currently scheduled in the PQ.
-    let mut work_set: HashSet<usize> = HashSet::new();
-    // A version counter for each representative to handle stale entries in the PQ.
-    let mut rep_versions: Vec<u64> = Vec::new();
-
-    let get_spec = |t: &ProductTuple| t.iter().filter(|o| o.is_some()).count();
+    let mut work: VecDeque<usize> = VecDeque::new();
 
     // Initialize
     reps.push(inst.start.clone());
-    rep_versions.push(0);
     image.insert(inst.start.clone(), 0);
-    let start_spec = get_spec(&reps[0]);
-    work_pq.push(Reverse((start_spec, 0, 0))); // (spec, id, version)
-    work_set.insert(0);
+    work.push_back(0);
 
-    while let Some(Reverse((_spec, rid, version))) = work_pq.pop() {
-        if version != rep_versions[rid] {
-            continue; // Stale entry
-        }
-        work_set.remove(&rid);
-
+    // Explore representatives
+    while let Some(rid) = work.pop_front() {
         let rep = reps[rid].clone();
 
         for a in 0..inst.alphabet_size {
@@ -320,49 +296,31 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
                 continue;
             }
 
-            let mut best_candidate_id = None;
-            let mut best_cost = (usize::MAX, usize::MAX, usize::MAX); // (spec_increase, current_spec, id)
-
+            // Try to assign x to an existing representative via unification
+            let mut assigned = None;
             for j in 0..reps.len() {
                 if let Some(unified) = unify_tuples(&reps[j], &x) {
-                    let current_spec = get_spec(&reps[j]);
-                    let unified_spec = get_spec(&unified);
-                    let spec_increase = unified_spec - current_spec;
-                    let cost = (spec_increase, current_spec, j);
-
-                    if cost < best_cost {
-                        best_cost = cost;
-                        best_candidate_id = Some(j);
+                    if unified != reps[j] {
+                        reps[j] = unified;
+                        if !work.contains(&j) {
+                            work.push_back(j);
+                        }
                     }
+                    assigned = Some(j);
+                    break;
                 }
             }
 
-            if let Some(j) = best_candidate_id {
-                // Found a best-fit representative to merge with.
-                let unified_tuple = unify_tuples(&reps[j], &x).unwrap();
-                image.insert(x, j);
-
-                if unified_tuple != reps[j] {
-                    reps[j] = unified_tuple;
-                    rep_versions[j] += 1;
-                    if !work_set.contains(&j) {
-                        let new_spec = get_spec(&reps[j]);
-                        work_pq.push(Reverse((new_spec, j, rep_versions[j])));
-                        work_set.insert(j);
-                    }
-                }
+            let home = if let Some(j) = assigned {
+                j
             } else {
-                // No compatible representative found. Create a new one.
                 let new_id = reps.len();
                 reps.push(x.clone());
-                rep_versions.push(0);
-                image.insert(x, new_id);
-                if !work_set.contains(&new_id) {
-                    let new_spec = get_spec(&reps[new_id]);
-                    work_pq.push(Reverse((new_spec, new_id, rep_versions[new_id])));
-                    work_set.insert(new_id);
-                }
-            }
+                work.push_back(new_id);
+                new_id
+            };
+
+            image.insert(x, home);
         }
     }
 
@@ -420,20 +378,6 @@ mod tests {
             super::unify_tuples(&vec![None, None], &vec![Some(1), Some(2)]),
             Some(vec![Some(1), Some(2)])
         );
-    }
-
-    #[test]
-    fn test_is_less_or_equal() {
-        // x <= y
-        assert!(is_less_or_equal(&vec![None, None], &vec![Some(1), Some(2)]));
-        assert!(is_less_or_equal(&vec![Some(1), None], &vec![Some(1), Some(2)]));
-        assert!(is_less_or_equal(&vec![None, Some(2)], &vec![Some(1), Some(2)]));
-        assert!(is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]));
-
-        // x not <= y
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), None])); // x is more specific
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)])); // conflict
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![None, Some(2)])); // x is more specific
     }
 
     #[test]
@@ -500,10 +444,5 @@ mod tests {
 
         let sol = synthesize_greedy(&inst);
         sol.verify(&inst).expect("greedy solution must satisfy constraints");
-
-        // The new algorithm should find the minimal solution of size 2.
-        assert_eq!(sol.reps.len(), 2);
-        assert_eq!(sol.reps[0], vec![Some(0), Some(0)]);
-        assert_eq!(sol.reps[1], vec![Some(1), Some(1)]);
     }
 }
