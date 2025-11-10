@@ -113,19 +113,29 @@ impl NWA {
 
         // 4) Enumerate reachable product tuples (Vec<Option<usize>>)
         let now_enum = Instant::now();
-        let (all_tuples, start_tuple_idx) = enumerate_product_tuples(&comp_dfas, &sigma, &comp_sinks);
+        let k = comp_dfas.len();
+        let mut start_tuple = Vec::with_capacity(k);
+        for i in 0..k {
+            let s = comp_dfas[i].start;
+            if let Some(sink) = comp_sinks[i] {
+                if s == sink {
+                    start_tuple.push(None);
+                } else {
+                    start_tuple.push(Some(s));
+                }
+            } else {
+                start_tuple.push(Some(s));
+            }
+        }
         crate::debug!(
             4,
-            "Enumerated {} product tuples in {:?}",
-            all_tuples.len(),
+            "Computed start tuple in {:?}",
             now_enum.elapsed()
         );
-        let start_tuple = all_tuples[start_tuple_idx].clone();
 
         // 5) Merge tuples greedily and attach transitions/finals from representative tuples
         let now_merge = Instant::now();
         let merged = merge_tuples_to_states(
-            all_tuples,
             start_tuple,
             &comp_dfas,
             &sigma,
@@ -993,78 +1003,6 @@ fn successor_tuple(
     out
 }
 
-/// Enumerate reachable product tuples using BFS on the global alphabet.
-fn enumerate_product_tuples(
-    comps: &[DetDFA],
-    sigma: &Alphabet,
-    comp_sinks: &[Option<usize>],
-) -> (Vec<ProductDFAStateTuple>, usize) {
-    let k = comps.len();
-
-    // Start tuple
-    let mut start = Vec::with_capacity(k);
-    for i in 0..k {
-        let s = comps[i].start;
-        if let Some(sink) = comp_sinks[i] {
-            if s == sink {
-                start.push(None);
-            } else {
-                start.push(Some(s));
-            }
-        } else {
-            start.push(Some(s));
-        }
-    }
-
-    let pb_enum = if PROGRESS_BAR_ENABLED {
-        let p = ProgressBar::new_spinner();
-        p.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} [Determinize: {elapsed_precise}] Enumerating tuples... {pos}")
-                .unwrap(),
-        );
-        Some(p)
-    } else {
-        None
-    };
-
-    let mut tuples: Vec<ProductDFAStateTuple> = Vec::new();
-    let mut map: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
-
-    let start_idx = 0usize;
-    tuples.push(start.clone());
-    map.insert(start.clone(), start_idx);
-
-    if let Some(p) = &pb_enum {
-        p.set_position(tuples.len() as u64);
-    }
-
-    let mut q = VecDeque::new();
-    q.push_back(start_idx);
-
-    while let Some(u) = q.pop_front() {
-        let cur = tuples[u].clone();
-        for sym in 0..sigma.size() {
-            let dst = successor_tuple(&cur, sym, comps, comp_sinks);
-            if !map.contains_key(&dst) {
-                let id = tuples.len();
-                tuples.push(dst.clone());
-                map.insert(dst, id);
-                q.push_back(id);
-                if let Some(p) = &pb_enum {
-                    p.set_position(tuples.len() as u64);
-                }
-            }
-        }
-    }
-
-    if let Some(p) = pb_enum {
-        p.finish_with_message(format!("Tuples enumerated: {}", tuples.len()));
-    }
-
-    (tuples, start_idx)
-}
-
 /// Unify two tuples pointwise:
 /// - If both Some(a) and Some(b) with a != b => None (incompatible)
 /// - If one is Some and the other None => result Some(value)
@@ -1108,47 +1046,70 @@ struct MergedProduct {
     start: usize,
 }
 
-struct MergeScheme {
-    representatives: Vec<ProductDFAStateTuple>,
-    tuple_to_group: HashMap<ProductDFAStateTuple, usize>,
-}
-
-/// Decides how to merge tuples greedily based on unifiability.
-/// Returns a scheme containing group representatives and a map from each tuple to its group ID.
-fn decide_tuple_merging(tuples: &[ProductDFAStateTuple]) -> MergeScheme {
-    let mut representatives: Vec<ProductDFAStateTuple> = Vec::new();
-    let mut tuple_to_group: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
-
-    // Greedy merging
-    for t in tuples {
-        let mut placed = false;
-        for gid in 0..representatives.len() {
-            if let Some(new_rep) = unify_tuples(&representatives[gid], t) {
-                representatives[gid] = new_rep;
-                tuple_to_group.insert(t.clone(), gid);
-                placed = true;
-                break;
-            }
-        }
-        if !placed {
-            // Create new group
-            let gid = representatives.len();
-            representatives.push(t.clone());
-            tuple_to_group.insert(t.clone(), gid);
-        }
-    }
-    MergeScheme { representatives, tuple_to_group }
-}
-
 /// Merge tuples greedily into product states and compute per-state transitions and final weights from representatives.
 fn merge_tuples_to_states(
-    tuples: Vec<ProductDFAStateTuple>,
     start_tuple: ProductDFAStateTuple,
     comps: &[DetDFA],
     sigma: &Alphabet,
     comp_sinks: &[Option<usize>],
     atom_weights: &Vec<Weight>,
 ) -> MergedProduct {
+    let mut states: Vec<ProductDFAState> = Vec::new();
+    let mut tuple_to_group: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
+    let mut worklist: VecDeque<usize> = VecDeque::new(); // Worklist of group IDs
+
+    // Create starting group for the start_tuple
+    {
+        let mut start_state = ProductDFAState::default();
+        start_state.representative_tuple = start_tuple.clone();
+        start_state.all_tuples.insert(start_tuple.clone());
+        states.push(start_state);
+        tuple_to_group.insert(start_tuple, 0);
+        worklist.push_back(0);
+    }
+
+    while let Some(gid) = worklist.pop_front() {
+        let rep = states[gid].representative_tuple.clone();
+
+        for sym in 0..sigma.size() {
+            let succ_tuple = successor_tuple(&rep, sym, comps, comp_sinks);
+
+            if tuple_to_group.contains_key(&succ_tuple) {
+                continue;
+            }
+
+            // Find a group for succ_tuple or create a new one
+            let mut placed = false;
+            for existing_gid in 0..states.len() {
+                let old_rep = &states[existing_gid].representative_tuple;
+                if let Some(new_rep) = unify_tuples(old_rep, &succ_tuple) {
+                    if new_rep != *old_rep {
+                        states[existing_gid].representative_tuple = new_rep;
+                        // Representative changed, so this group needs to be re-processed.
+                        if !worklist.contains(&existing_gid) {
+                            worklist.push_back(existing_gid);
+                        }
+                    }
+                    tuple_to_group.insert(succ_tuple.clone(), existing_gid);
+                    states[existing_gid].all_tuples.insert(succ_tuple.clone());
+                    placed = true;
+                    break;
+                }
+            }
+
+            if !placed {
+                // Create new group
+                let new_gid = states.len();
+                let mut new_state = ProductDFAState::default();
+                new_state.representative_tuple = succ_tuple.clone();
+                new_state.all_tuples.insert(succ_tuple.clone());
+                states.push(new_state);
+                tuple_to_group.insert(succ_tuple, new_gid);
+                worklist.push_back(new_gid);
+            }
+        }
+    }
+
     let pb_merge = if PROGRESS_BAR_ENABLED {
         let p = ProgressBar::new_spinner();
         p.set_style(
@@ -1161,26 +1122,9 @@ fn merge_tuples_to_states(
         None
     };
 
-    let merge_scheme = decide_tuple_merging(&tuples);
-    let num_groups = merge_scheme.representatives.len();
-    let mut states: Vec<ProductDFAState> = vec![ProductDFAState::default(); num_groups];
-
-    // Initialize states with representatives and all_tuples
-    for gid in 0..num_groups {
-        states[gid].representative_tuple = merge_scheme.representatives[gid].clone();
-    }
-    for t in &tuples {
-        if let Some(&gid) = merge_scheme.tuple_to_group.get(t) {
-            states[gid].all_tuples.insert(t.clone());
-        }
-    }
-
     if let Some(p) = pb_merge {
         p.finish_with_message(format!("Merged into {} states", states.len()));
     }
-
-    // Find start group
-    let start = *merge_scheme.tuple_to_group.get(&start_tuple).expect("start tuple must have a group");
 
     // Compute final weights and per-state transitions from representatives
     let pb_attach = if PROGRESS_BAR_ENABLED {
@@ -1230,7 +1174,7 @@ fn merge_tuples_to_states(
         p.finish_with_message("Weights/transitions attached");
     }
 
-    MergedProduct { states, start }
+    MergedProduct { states, start: 0 }
 }
 
 /* ------------------------------
