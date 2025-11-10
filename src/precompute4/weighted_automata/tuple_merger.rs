@@ -350,6 +350,7 @@ struct BnBSolver<'a> {
     best_count: usize,
     // Bookkeeping
     nodes_visited: usize,
+    succ_cache: HashMap<(usize, u32, usize), ProductTuple>,
 }
 
 impl<'a> BnBSolver<'a> {
@@ -360,6 +361,7 @@ impl<'a> BnBSolver<'a> {
             best: None,
             best_count: usize::MAX,
             nodes_visited: 0,
+            succ_cache: HashMap::new(),
         }
     }
 
@@ -367,6 +369,17 @@ impl<'a> BnBSolver<'a> {
         let greedy = synthesize_greedy(self.inst);
         self.best_count = greedy.reps.len();
         self.best = Some(greedy);
+    }
+
+    fn get_successor(&mut self, st: &SearchState, rid: usize, symbol: usize) -> ProductTuple {
+        let ver = st.rep_versions[rid];
+        let key = (rid, ver, symbol);
+        if let Some(succ) = self.succ_cache.get(&key) {
+            return succ.clone();
+        }
+        let succ = successor_tuple(&st.reps[rid], symbol, &self.inst.components);
+        self.succ_cache.insert(key, succ.clone());
+        succ
     }
 
     fn solve(mut self) -> Solution {
@@ -431,7 +444,7 @@ impl<'a> BnBSolver<'a> {
                     }
                     Demand::Edge { rid, symbol, ver: _ } => {
                         // Compute s = succ(rep[rid], symbol); if some rep already extends it, map deterministically.
-                        let s = successor_tuple(&st.reps[*rid], *symbol, &self.inst.components);
+                        let s = self.get_successor(&st, *rid, *symbol);
                         if let Some(j) = Self::find_extending_rep(&st.reps, &s) {
                             st.image.insert(s, j);
                             st.delta[*rid][*symbol] = Some(j);
@@ -486,7 +499,7 @@ impl<'a> BnBSolver<'a> {
                     child.image.insert(x.clone(), j);
                 }
                 Demand::Edge { rid, symbol, ver: _ } => {
-                    let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
+                    let s = self.get_successor(&child, *rid, *symbol);
                     child.image.insert(s, j);
                     child.delta[*rid][*symbol] = Some(j);
                 }
@@ -519,7 +532,7 @@ impl<'a> BnBSolver<'a> {
                 child.image.insert(x.clone(), new_rep_id);
             }
             Demand::Edge { rid, symbol, ver: _ } => {
-                let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
+                let s = self.get_successor(&child, *rid, *symbol);
                 child.image.insert(s, new_rep_id);
                 child.delta[*rid][*symbol] = Some(new_rep_id);
             }
@@ -580,7 +593,7 @@ impl<'a> BnBSolver<'a> {
     /// current "hard" demands: those that are not already covered by some existing rep,
     /// and that are incompatible with all existing reps (cannot be merged into one
     /// by extending it).
-    fn greedy_max_clique_on_hard_demands(&self, st: &SearchState) -> usize {
+    fn greedy_max_clique_on_hard_demands(&mut self, st: &SearchState) -> usize {
         // Collect candidate tuples from demands that:
         //  - are current (for Edge: version up-to-date),
         //  - cannot be extended by any existing rep (x ≤ rep[j] for some j),
@@ -608,7 +621,7 @@ impl<'a> BnBSolver<'a> {
                     if *ver != st.rep_versions[*rid] {
                         continue; // outdated; ignore for bound
                     }
-                    let s = successor_tuple(&st.reps[*rid], *symbol, &self.inst.components);
+                    let s = self.get_successor(st, *rid, *symbol);
                     if Self::find_extending_rep(&st.reps, &s).is_none() {
                         let mut compat_with_some_rep = false;
                         for r in &st.reps {
@@ -629,51 +642,57 @@ impl<'a> BnBSolver<'a> {
             return 0;
         }
 
-        // Build a simple greedy clique: repeatedly pick point with highest "incompatibility degree"
-        // relative to current candidate set and keep only those incompatible with the clique so far.
-        // Note: two points are incompatible if unify_tuples returns None.
-        // Step 1: build degrees.
+        // Precompute incompatibility matrix to speed up clique finding.
         let n = points.len();
-        let mut deg: Vec<usize> = vec![0; n];
+        let mut incompatible = vec![vec![false; n]; n];
         for i in 0..n {
             for j in (i + 1)..n {
                 if unify_tuples(&points[i], &points[j]).is_none() {
+                    incompatible[i][j] = true;
+                    incompatible[j][i] = true;
+                }
+            }
+        }
+
+        // Step 1: build degrees from matrix.
+        let mut deg: Vec<usize> = vec![0; n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if incompatible[i][j] {
                     deg[i] += 1;
                     deg[j] += 1;
                 }
             }
         }
-        // Step 2: greedy clique construction
+
+        // Step 2: greedy clique construction using the matrix.
         let mut clique: Vec<usize> = Vec::new();
         let mut candidates: HashSet<usize> = (0..n).collect();
 
         while !candidates.is_empty() {
             // Choose vertex with max degree among candidates.
-            let &v = candidates
-                .iter()
-                .max_by_key(|&&idx| deg[idx])
-                .unwrap();
-            // Check compatibility with current clique: we need incompatibility with all clique members
-            // in the "incompatibility" graph, i.e., unify must fail with all current clique nodes.
-            let mut ok = true;
+            let &v = candidates.iter().max_by_key(|&&idx| deg[idx]).unwrap();
+
+            // Check if v is incompatible with all current clique members.
+            let mut is_compatible_with_clique = false;
             for &u in &clique {
-                if unify_tuples(&points[u], &points[v]).is_some() {
-                    ok = false;
+                if !incompatible[u][v] {
+                    is_compatible_with_clique = true;
                     break;
                 }
             }
-            if ok {
-                // Add v to clique; shrink candidates to those incompatible with v
+
+            if !is_compatible_with_clique {
                 clique.push(v);
-                let mut next: HashSet<usize> = HashSet::new();
+                // Shrink candidates to those incompatible with v.
+                let mut next = HashSet::new();
                 for &w in &candidates {
-                    if unify_tuples(&points[w], &points[v]).is_none() {
+                    if incompatible[w][v] {
                         next.insert(w);
                     }
                 }
                 candidates = next;
             } else {
-                // Remove v and continue
                 candidates.remove(&v);
             }
         }
@@ -687,7 +706,7 @@ impl<'a> BnBSolver<'a> {
     ///  - Fewest compatible existing reps (min branching).
     ///  - Prefer Edge demands (they are structural and must be satisfied) when tie.
     /// Return: (index in pending, demanded tuple, candidate reps, is_edge_flag)
-    fn choose_branch_demand(&self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
+    fn choose_branch_demand(&mut self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
         let mut best_idx = 0usize;
         let mut best_tuple: Option<ProductTuple> = None;
         let mut best_candidates: Vec<usize> = Vec::new();
@@ -701,7 +720,7 @@ impl<'a> BnBSolver<'a> {
                     if *ver != st.rep_versions[*rid] {
                         continue; // outdated; skip
                     }
-                    (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
+                    (true, self.get_successor(st, *rid, *symbol))
                 }
             };
 
@@ -769,7 +788,7 @@ impl<'a> BnBSolver<'a> {
                         if *ver != st.rep_versions[*rid] {
                             continue;
                         }
-                        (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
+                        (true, self.get_successor(st, *rid, *symbol))
                     }
                 };
                 let mut candidates: Vec<usize> = Vec::new();

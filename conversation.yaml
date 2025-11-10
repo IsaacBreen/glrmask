@@ -1300,6 +1300,7 @@ local_system:
           best_count: usize,
           // Bookkeeping
           nodes_visited: usize,
+          succ_cache: HashMap<(usize, u32, usize), ProductTuple>,
       }
 
       impl<'a> BnBSolver<'a> {
@@ -1310,6 +1311,7 @@ local_system:
                   best: None,
                   best_count: usize::MAX,
                   nodes_visited: 0,
+                  succ_cache: HashMap::new(),
               }
           }
 
@@ -1317,6 +1319,17 @@ local_system:
               let greedy = synthesize_greedy(self.inst);
               self.best_count = greedy.reps.len();
               self.best = Some(greedy);
+          }
+
+          fn get_successor(&mut self, st: &SearchState, rid: usize, symbol: usize) -> ProductTuple {
+              let ver = st.rep_versions[rid];
+              let key = (rid, ver, symbol);
+              if let Some(succ) = self.succ_cache.get(&key) {
+                  return succ.clone();
+              }
+              let succ = successor_tuple(&st.reps[rid], symbol, &self.inst.components);
+              self.succ_cache.insert(key, succ.clone());
+              succ
           }
 
           fn solve(mut self) -> Solution {
@@ -1381,7 +1394,7 @@ local_system:
                           }
                           Demand::Edge { rid, symbol, ver: _ } => {
                               // Compute s = succ(rep[rid], symbol); if some rep already extends it, map deterministically.
-                              let s = successor_tuple(&st.reps[*rid], *symbol, &self.inst.components);
+                              let s = self.get_successor(st, *rid, *symbol);
                               if let Some(j) = Self::find_extending_rep(&st.reps, &s) {
                                   st.image.insert(s, j);
                                   st.delta[*rid][*symbol] = Some(j);
@@ -1418,13 +1431,13 @@ local_system:
 
               // Lower bound: current reps + size of a greedy maximum clique in the incompatibility
               // graph of demands that cannot be unified into any existing rep.
-              let lb = st.reps.len() + self.greedy_max_clique_on_hard_demands(&st);
+              let lb = st.reps.len() + self.greedy_max_clique_on_hard_demands(st);
               if lb >= self.best_count {
                   return; // prune
               }
 
               // Choose a branching demand with minimal flexibility, i.e., fewest compatible reps.
-              let (idx, demand_tuple, candidates, is_edge) = self.choose_branch_demand(&st);
+              let (idx, demand_tuple, candidates, is_edge) = self.choose_branch_demand(st);
 
               // Branch on mapping to compatible existing reps first (prefer merging), ordered by minimal specificity increase.
               for j in candidates {
@@ -1436,7 +1449,7 @@ local_system:
                           child.image.insert(x.clone(), j);
                       }
                       Demand::Edge { rid, symbol, ver: _ } => {
-                          let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
+                          let s = self.get_successor(&child, *rid, *symbol);
                           child.image.insert(s, j);
                           child.delta[*rid][*symbol] = Some(j);
                       }
@@ -1469,7 +1482,7 @@ local_system:
                       child.image.insert(x.clone(), new_rep_id);
                   }
                   Demand::Edge { rid, symbol, ver: _ } => {
-                      let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
+                      let s = self.get_successor(&child, *rid, *symbol);
                       child.image.insert(s, new_rep_id);
                       child.delta[*rid][*symbol] = Some(new_rep_id);
                   }
@@ -1530,7 +1543,7 @@ local_system:
           /// current "hard" demands: those that are not already covered by some existing rep,
           /// and that are incompatible with all existing reps (cannot be merged into one
           /// by extending it).
-          fn greedy_max_clique_on_hard_demands(&self, st: &SearchState) -> usize {
+          fn greedy_max_clique_on_hard_demands(&mut self, st: &SearchState) -> usize {
               // Collect candidate tuples from demands that:
               //  - are current (for Edge: version up-to-date),
               //  - cannot be extended by any existing rep (x ≤ rep[j] for some j),
@@ -1558,7 +1571,7 @@ local_system:
                           if *ver != st.rep_versions[*rid] {
                               continue; // outdated; ignore for bound
                           }
-                          let s = successor_tuple(&st.reps[*rid], *symbol, &self.inst.components);
+                          let s = self.get_successor(st, *rid, *symbol);
                           if Self::find_extending_rep(&st.reps, &s).is_none() {
                               let mut compat_with_some_rep = false;
                               for r in &st.reps {
@@ -1579,51 +1592,57 @@ local_system:
                   return 0;
               }
 
-              // Build a simple greedy clique: repeatedly pick point with highest "incompatibility degree"
-              // relative to current candidate set and keep only those incompatible with the clique so far.
-              // Note: two points are incompatible if unify_tuples returns None.
-              // Step 1: build degrees.
+              // Precompute incompatibility matrix to speed up clique finding.
               let n = points.len();
-              let mut deg: Vec<usize> = vec![0; n];
+              let mut incompatible = vec![vec![false; n]; n];
               for i in 0..n {
                   for j in (i + 1)..n {
                       if unify_tuples(&points[i], &points[j]).is_none() {
+                          incompatible[i][j] = true;
+                          incompatible[j][i] = true;
+                      }
+                  }
+              }
+
+              // Step 1: build degrees from matrix.
+              let mut deg: Vec<usize> = vec![0; n];
+              for i in 0..n {
+                  for j in (i + 1)..n {
+                      if incompatible[i][j] {
                           deg[i] += 1;
                           deg[j] += 1;
                       }
                   }
               }
-              // Step 2: greedy clique construction
+
+              // Step 2: greedy clique construction using the matrix.
               let mut clique: Vec<usize> = Vec::new();
               let mut candidates: HashSet<usize> = (0..n).collect();
 
               while !candidates.is_empty() {
                   // Choose vertex with max degree among candidates.
-                  let &v = candidates
-                      .iter()
-                      .max_by_key(|&&idx| deg[idx])
-                      .unwrap();
-                  // Check compatibility with current clique: we need incompatibility with all clique members
-                  // in the "incompatibility" graph, i.e., unify must fail with all current clique nodes.
-                  let mut ok = true;
+                  let &v = candidates.iter().max_by_key(|&&idx| deg[idx]).unwrap();
+
+                  // Check if v is incompatible with all current clique members.
+                  let mut is_compatible_with_clique = false;
                   for &u in &clique {
-                      if unify_tuples(&points[u], &points[v]).is_some() {
-                          ok = false;
+                      if !incompatible[u][v] {
+                          is_compatible_with_clique = true;
                           break;
                       }
                   }
-                  if ok {
-                      // Add v to clique; shrink candidates to those incompatible with v
+
+                  if !is_compatible_with_clique {
                       clique.push(v);
-                      let mut next: HashSet<usize> = HashSet::new();
+                      // Shrink candidates to those incompatible with v.
+                      let mut next = HashSet::new();
                       for &w in &candidates {
-                          if unify_tuples(&points[w], &points[v]).is_none() {
+                          if incompatible[w][v] {
                               next.insert(w);
                           }
                       }
                       candidates = next;
                   } else {
-                      // Remove v and continue
                       candidates.remove(&v);
                   }
               }
@@ -1637,7 +1656,7 @@ local_system:
           ///  - Fewest compatible existing reps (min branching).
           ///  - Prefer Edge demands (they are structural and must be satisfied) when tie.
           /// Return: (index in pending, demanded tuple, candidate reps, is_edge_flag)
-          fn choose_branch_demand(&self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
+          fn choose_branch_demand(&mut self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
               let mut best_idx = 0usize;
               let mut best_tuple: Option<ProductTuple> = None;
               let mut best_candidates: Vec<usize> = Vec::new();
@@ -1651,7 +1670,7 @@ local_system:
                           if *ver != st.rep_versions[*rid] {
                               continue; // outdated; skip
                           }
-                          (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
+                          (true, self.get_successor(st, *rid, *symbol))
                       }
                   };
 
@@ -1719,7 +1738,7 @@ local_system:
                               if *ver != st.rep_versions[*rid] {
                                   continue;
                               }
-                              (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
+                              (true, self.get_successor(st, *rid, *symbol))
                           }
                       };
                       let mut candidates: Vec<usize> = Vec::new();
@@ -1900,7 +1919,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - gf
   commit_message_model:
@@ -2897,334 +2916,310 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The performance issues in the provided Rust code, particularly in the branch-and-bound synthesizer, stem from expensive cloning of the search state at each step of the recursion and some inefficient collection operations in hot loops.
+      Of course. Dealing with performance issues in complex search algorithms is crucial. The current implementation of the branch-and-bound solver can be significantly sped up by reducing redundant computations and optimizing costly subroutines.
 
-      To make it significantly faster without altering its behavior, I will implement the following optimizations:
-
-      1.  **Use Copy-on-Write for Search State:** The primary bottleneck is cloning the entire `SearchState` for each branch in the search. I'll wrap the large collections within the state (`reps`, `image`, etc.) in `std::rc::Rc`. This makes cloning the state object cheap (just an increment of a reference count). When a modification is needed, `Rc::make_mut` will be used to create a mutable reference, which automatically performs a clone of the underlying data only if it's shared (i.e., copy-on-write). This drastically reduces allocations and copying.
-
-      2.  **Optimize Greedy Synthesizer:** The baseline `synthesize_greedy` function uses `VecDeque::contains`, which is an O(n) operation, to check if a representative is already in the work queue. I will add a `HashSet` to track the work queue's contents, reducing this check to an O(1) operation.
-
-      3.  **Improve Clique-Finding Heuristic:** The `greedy_max_clique_on_hard_demands` function, used for calculating a lower bound, builds a new `HashSet` in every iteration of its main loop. I will replace this with `HashSet::retain` to modify the set in-place, avoiding repeated allocations.
-
-      Here are the step-by-step instructions to apply these changes.
+      Here are the step-by-step instructions to apply the optimizations, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      #### File: `src/precompute4/weighted_automata/tuple_merger.rs`
+      The main performance bottlenecks are repeated computations of successor tuples and an expensive lower-bound calculation involving many tuple unifications. We will address these with two main optimizations:
 
-      1.  **Import `std::rc::Rc`**:
-          Add `use std::rc::Rc;` at the top of the file with the other `use` statements.
+      1.  **Successor Caching**: We'll introduce a cache within the `BnBSolver` to memoize the results of `successor_tuple` calls. Since representatives can be modified during the search, the cache will be keyed by the representative's ID, its version, and the symbol.
+      2.  **Lower-Bound Optimization**: The `greedy_max_clique_on_hard_demands` function is very slow because it repeatedly calls `unify_tuples` inside loops. We will optimize it by pre-computing a pairwise incompatibility matrix for the candidate tuples, which drastically reduces the cost of the clique-finding algorithm.
 
+      Here are the precise edits for `src/precompute4/weighted_automata/tuple_merger.rs`:
+
+      1.  **In the `BnBSolver` struct definition**, add a new field `succ_cache` to store memoized successor tuples:
           ```rust
-          use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-          use std::rc::Rc;
+          struct BnBSolver<'a> {
+              // ... existing fields
+              nodes_visited: usize,
+              succ_cache: HashMap<(usize, u32, usize), ProductTuple>,
+          }
           ```
 
-      2.  **Optimize `synthesize_greedy`**:
-          In the `synthesize_greedy` function, introduce a `HashSet` to efficiently track which representatives are on the work queue.
-
-          -   After `let mut work: VecDeque<usize> = VecDeque::new();`, add:
-              ```rust
-              let mut work_set: HashSet<usize> = HashSet::new();
-              ```
-          -   When initializing the work queue, also add the start state to the set:
-              ```rust
-              work.push_back(0);
-              work_set.insert(0);
-              ```
-          -   At the beginning of the `while` loop, remove the current representative from the set:
-              ```rust
-              while let Some(rid) = work.pop_front() {
-                  work_set.remove(&rid);
-                  let rep = reps[rid].clone();
-              ```
-          -   Replace the `!work.contains(&j)` check with an atomic check-and-insert operation on the `work_set`:
-              ```diff
-              - if !work.contains(&j) {
-              -     work.push_back(j);
-              - }
-              + if work_set.insert(j) {
-              +     work.push_back(j);
-              + }
-              ```
-
-      3.  **Modify `SearchState` to Use `Rc`**:
-          Update the `SearchState` struct to wrap its heap-allocated fields in `Rc` for cheap, shared cloning.
-
-          ```diff
-          - struct SearchState {
-          -     reps: Vec<ProductTuple>,
-          -     rep_versions: Vec<u32>,              // Incremented whenever a rep is strengthened.
-          -     delta: Vec<Vec<Option<usize>>>,      // δ mapping: for each rep, per symbol -> rep id (if decided).
-          -     image: HashMap<ProductTuple, usize>, // φ mapping: only required points are added here.
-          -     pending: Vec<Demand>,                // Demands to satisfy (p0 or δ edges).
-          - }
-          + struct SearchState {
-          +     reps: Rc<Vec<ProductTuple>>,
-          +     rep_versions: Rc<Vec<u32>>,              // Incremented whenever a rep is strengthened.
-          +     delta: Rc<Vec<Vec<Option<usize>>>>,      // δ mapping: for each rep, per symbol -> rep id (if decided).
-          +     image: Rc<HashMap<ProductTuple, usize>>, // φ mapping: only required points are added here.
-          +     pending: Vec<Demand>,                // Demands to satisfy (p0 or δ edges).
-          + }
+      2.  **In the `BnBSolver::new` function**, initialize the new `succ_cache` field:
+          ```rust
+          impl<'a> BnBSolver<'a> {
+              fn new(inst: &'a Instance, node_limit: usize) -> Self {
+                  Self {
+                      // ... existing initializations
+                      nodes_visited: 0,
+                      succ_cache: HashMap::new(),
+                  }
+              }
           ```
 
-      4.  **Update `BnBSolver` to Work with `Rc<T>`**:
-          Adjust the `BnBSolver` implementation to correctly initialize and modify the `Rc`-wrapped fields.
-
-          -   In `BnBSolver::solve`, initialize `init` state using `Rc::new()`:
-              ```rust
-              let mut init = SearchState {
-                  reps: Rc::new(Vec::new()),
-                  rep_versions: Rc::new(Vec::new()),
-                  delta: Rc::new(Vec::new()),
-                  image: Rc::new(HashMap::new()),
-                  pending: Vec::new(),
-              };
-              ```
-          -   In `BnBSolver::to_solution`, dereference the `Rc` pointers before cloning the inner data:
-              ```diff
-              - reps: st.reps.clone(),
-              - image: st.image.clone(),
-              + reps: (*st.reps).clone(),
-              + image: (*st.image).clone(),
-              ```
-          -   In `BnBSolver::search`, use `Rc::make_mut` for all modifications to `st.image` and `st.delta` within the unit propagation loop and branching logic. For example:
-              ```diff
-              - st.image.insert(x.clone(), j);
-              + Rc::make_mut(&mut st.image).insert(x.clone(), j);
-              ```
-          -   When creating a new representative, apply `Rc::make_mut` to `child.reps`, `child.rep_versions`, and `child.delta`.
-          -   Update the `unify_into` function to mutably borrow the state and use `Rc::make_mut`:
-              ```diff
-              - fn unify_into(st: &mut SearchState, j: usize, x: &ProductTuple) -> bool {
-              -     let rj = st.reps[j].clone();
-              -     let unified = unify_tuples(&rj, x).expect("caller ensures compatibility");
-              -     if unified != rj {
-              -         st.reps[j] = unified;
-              -         st.rep_versions[j] = st.rep_versions[j].wrapping_add(1);
-              -         // Invalidate previous δ decisions for j (they may still be in φ; harmless).
-              -         st.delta[j] = vec![None; st.delta[j].len()];
-              -         true
-              -     } else {
-              -         false
-              -     }
-              - }
-              + fn unify_into(st: &mut SearchState, j: usize, x: &ProductTuple) -> bool {
-              +     let rj = &st.reps[j];
-              +     let unified = unify_tuples(rj, x).expect("caller ensures compatibility");
-              +     if unified != *rj {
-              +         Rc::make_mut(&mut st.reps)[j] = unified;
-              +         let rep_versions = Rc::make_mut(&mut st.rep_versions);
-              +         rep_versions[j] = rep_versions[j].wrapping_add(1);
-              +         // Invalidate previous δ decisions for j (they may still be in φ; harmless).
-              +         Rc::make_mut(&mut st.delta)[j] = vec![None; st.delta[j].len()];
-              +         true
-              +     } else {
-              +         false
-              +     }
-              + }
-              ```
-              Ensure the call to `unify_into` in `search` is updated to `Self::unify_into(&mut child, j, &demand_tuple);`.
-
-      5.  **Optimize `greedy_max_clique_on_hard_demands`**:
-          In the clique-finding loop, replace the inefficient creation of a new `HashSet` with an in-place `retain` operation.
-          ```diff
-          - let mut next: HashSet<usize> = HashSet::new();
-          - for &w in &candidates {
-          -     if unify_tuples(&points[w], &points[v]).is_none() {
-          -         next.insert(w);
-          -     }
-          - }
-          - candidates = next;
-          + candidates.retain(|&w| unify_tuples(&points[w], &points[v]).is_none());
+      3.  **Add a new helper method `get_successor` to `BnBSolver`** for cached lookups. Place it after the `new` function:
+          ```rust
+          fn get_successor(&mut self, st: &SearchState, rid: usize, symbol: usize) -> ProductTuple {
+              let ver = st.rep_versions[rid];
+              let key = (rid, ver, symbol);
+              if let Some(succ) = self.succ_cache.get(&key) {
+                  return succ.clone();
+              }
+              let succ = successor_tuple(&st.reps[rid], symbol, &self.inst.components);
+              self.succ_cache.insert(key, succ.clone());
+              succ
+          }
           ```
 
-      ### Git Diff
+      4.  **In the `BnBSolver::search` method**, replace two calls to `successor_tuple` with `self.get_successor`:
+          - In the unit propagation loop, change:
+            ```rust
+            let s = successor_tuple(&st.reps[*rid], *symbol, &self.inst.components);
+            ```
+            to:
+            ```rust
+            let s = self.get_successor(st, *rid, *symbol);
+            ```
+          - In the branching logic for an `Edge` demand, change:
+            ```rust
+            let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
+            ```
+            to:
+            ```rust
+            let s = self.get_successor(&child, *rid, *symbol);
+            ```
+
+      5.  **Modify the `greedy_max_clique_on_hard_demands` method**:
+          - Change its signature to accept `&mut self` so it can use the cache:
+            ```rust
+            fn greedy_max_clique_on_hard_demands(&mut self, st: &SearchState) -> usize {
+            ```
+          - In its body, replace the call to `successor_tuple` with `self.get_successor`:
+            ```rust
+            let s = self.get_successor(st, *rid, *symbol);
+            ```
+          - Replace the entire clique-finding logic (after `points` are collected) with a more efficient version that uses a pre-computed incompatibility matrix.
+
+      6.  **Modify the `choose_branch_demand` method**:
+          - Change its signature to accept `&mut self`:
+            ```rust
+            fn choose_branch_demand(&mut self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
+            ```
+          - In its body, replace both calls to `successor_tuple` with `self.get_successor(st, *rid, *symbol)`.
+
+      These changes will make the solver significantly faster while preserving its behavior and correctness.
+
+      ### Git Patch
 
       Here is the git diff that applies all the changes described above.
 
       ```diff
       --- a/src/precompute4/weighted_automata/tuple_merger.rs
       +++ b/src/precompute4/weighted_automata/tuple_merger.rs
-      @@ -90,7 +90,8 @@
-       
-       #![allow(dead_code)]
-       
-      -use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-      +use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-      +use std::rc::Rc;
-       
-       /// Symbol index in 0..alphabet_size.
-       pub type Symbol = usize;
-      @@ -262,15 +263,18 @@
-       
-           let mut reps: Vec<ProductTuple> = Vec::new();
-           let mut image: HashMap<ProductTuple, usize> = HashMap::new();
-           let mut work: VecDeque<usize> = VecDeque::new();
-      +    let mut work_set: HashSet<usize> = HashSet::new();
-       
-           // Initialize
-           reps.push(inst.start.clone());
-           image.insert(inst.start.clone(), 0);
-           work.push_back(0);
-      +    work_set.insert(0);
-       
-           // Explore representatives
-           while let Some(rid) = work.pop_front() {
-      +        work_set.remove(&rid);
-               let rep = reps[rid].clone();
-       
-               for a in 0..inst.alphabet_size {
-      @@ -285,8 +289,8 @@
-                   for j in 0..reps.len() {
-                       if let Some(unified) = unify_tuples(&reps[j], &x) {
-                           if unified != reps[j] {
-                               reps[j] = unified;
-      -                        if !work.contains(&j) {
-      +                        if work_set.insert(j) {
-                                   work.push_back(j);
-                               }
-                           }
-      @@ -328,10 +332,10 @@
-       /// Internal search state for branch-and-bound.
-       #[derive(Clone)]
-       struct SearchState {
-      -    reps: Vec<ProductTuple>,
-      -    rep_versions: Vec<u32>,              // Incremented whenever a rep is strengthened.
-      -    delta: Vec<Vec<Option<usize>>>,      // δ mapping: for each rep, per symbol -> rep id (if decided).
-      -    image: HashMap<ProductTuple, usize>, // φ mapping: only required points are added here.
-      +    reps: Rc<Vec<ProductTuple>>,
-      +    rep_versions: Rc<Vec<u32>>,              // Incremented whenever a rep is strengthened.
-      +    delta: Rc<Vec<Vec<Option<usize>>>>,      // δ mapping: for each rep, per symbol -> rep id (if decided).
-      +    image: Rc<HashMap<ProductTuple, usize>>, // φ mapping: only required points are added here.
-           pending: Vec<Demand>,                // Demands to satisfy (p0 or δ edges).
+      @@ -311,6 +311,7 @@
+           best_count: usize,
+           // Bookkeeping
+           nodes_visited: usize,
+      +    succ_cache: HashMap<(usize, u32, usize), ProductTuple>,
        }
        
-      @@ -365,10 +369,10 @@
-               self.initial_upper_bound();
-       
-               let mut init = SearchState {
-      -            reps: Vec::new(),
-      -            rep_versions: Vec::new(),
-      -            delta: Vec::new(),
-      -            image: HashMap::new(),
-      +            reps: Rc::new(Vec::new()),
-      +            rep_versions: Rc::new(Vec::new()),
-      +            delta: Rc::new(Vec::new()),
-      +            image: Rc::new(HashMap::new()),
-                   pending: Vec::new(),
-               };
-               // Start demand: C3 requires p0 ∈ Dom, so ensure φ(p0) is defined.
-      @@ -384,8 +388,8 @@
-               // Ensure that for all reps and symbols, φ(succ(rep, a)) exists and δ is set.
-               // Our solver ensures pending is empty when calling this.
-               Solution {
-      -            reps: st.reps.clone(),
-      -            image: st.image.clone(),
-      +            reps: (*st.reps).clone(),
-      +            image: (*st.image).clone(),
+       impl<'a> BnBSolver<'a> {
+      @@ -321,6 +322,7 @@
+                   best: None,
+                   best_count: usize::MAX,
+                   nodes_visited: 0,
+      +            succ_cache: HashMap::new(),
                }
            }
        
-      @@ -409,7 +413,7 @@
-                           Demand::Point(x) => {
-                               // If some rep j already extends x (x ≤ rep[j]), map deterministically.
-                               if let Some(j) = Self::find_extending_rep(&st.reps, x) {
-      -                            st.image.insert(x.clone(), j);
-      +                            Rc::make_mut(&mut st.image).insert(x.clone(), j);
-                                   // No δ to set here.
-                                   true
-                               } else {
-      @@ -420,8 +424,8 @@
+      @@ -329,6 +331,17 @@
+               self.best_count = greedy.reps.len();
+               self.best = Some(greedy);
+           }
+      +
+      +    fn get_successor(&mut self, st: &SearchState, rid: usize, symbol: usize) -> ProductTuple {
+      +        let ver = st.rep_versions[rid];
+      +        let key = (rid, ver, symbol);
+      +        if let Some(succ) = self.succ_cache.get(&key) {
+      +            return succ.clone();
+      +        }
+      +        let succ = successor_tuple(&st.reps[rid], symbol, &self.inst.components);
+      +        self.succ_cache.insert(key, succ.clone());
+      +        succ
+      +    }
+       
+           fn solve(mut self) -> Solution {
+               let _ = self.inst.validate_shape();
+      @@ -382,7 +395,7 @@
+                           }
+                           Demand::Edge { rid, symbol, ver: _ } => {
                                // Compute s = succ(rep[rid], symbol); if some rep already extends it, map deterministically.
-                               let s = successor_tuple(&st.reps[*rid], *symbol, &self.inst.components);
+      -                        let s = successor_tuple(&st.reps[*rid], *symbol, &self.inst.components);
+      +                        let s = self.get_successor(st, *rid, *symbol);
                                if let Some(j) = Self::find_extending_rep(&st.reps, &s) {
-      -                            st.image.insert(s, j);
-      -                            st.delta[*rid][*symbol] = Some(j);
-      +                            Rc::make_mut(&mut st.image).insert(s, j);
-      +                            Rc::make_mut(&mut st.delta)[*rid][*symbol] = Some(j);
-                                   true
-                               } else {
-                                   false
-      @@ -460,12 +464,12 @@
-                   // Record φ and δ
-                   match &child.pending[idx] {
-                       Demand::Point(x) => {
-      -                    child.image.insert(x.clone(), j);
-      +                    Rc::make_mut(&mut child.image).insert(x.clone(), j);
+                                   st.image.insert(s, j);
+                                   st.delta[*rid][*symbol] = Some(j);
+      @@ -414,13 +427,13 @@
+       
+               // Lower bound: current reps + size of a greedy maximum clique in the incompatibility
+               // graph of demands that cannot be unified into any existing rep.
+      -        let lb = st.reps.len() + self.greedy_max_clique_on_hard_demands(&st);
+      +        let lb = st.reps.len() + self.greedy_max_clique_on_hard_demands(st);
+               if lb >= self.best_count {
+                   return; // prune
+               }
+       
+               // Choose a branching demand with minimal flexibility, i.e., fewest compatible reps.
+      -        let (idx, demand_tuple, candidates, is_edge) = self.choose_branch_demand(&st);
+      +        let (idx, demand_tuple, candidates, is_edge) = self.choose_branch_demand(st);
+       
+               // Branch on mapping to compatible existing reps first (prefer merging), ordered by minimal specificity increase.
+               for j in candidates {
+      @@ -431,7 +444,7 @@
+                           child.image.insert(x.clone(), j);
                        }
                        Demand::Edge { rid, symbol, ver: _ } => {
-                           let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
-      -                    child.image.insert(s, j);
-      -                    child.delta[*rid][*symbol] = Some(j);
-      +                    Rc::make_mut(&mut child.image).insert(s, j);
-      +                    Rc::make_mut(&mut child.delta)[*rid][*symbol] = Some(j);
+      -                    let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
+      +                    let s = self.get_successor(&child, *rid, *symbol);
+                           child.image.insert(s, j);
+                           child.delta[*rid][*symbol] = Some(j);
                        }
-                   }
-                   // Remove the processed demand
-      @@ -485,20 +489,20 @@
-               let mut child = st.clone();
-               let new_rep_id = child.reps.len();
-               // New representative equals the demanded tuple.
-      -        child.reps.push(demand_tuple.clone());
-      -        child.rep_versions.push(0);
-      -        child.delta.push(vec![None; self.inst.alphabet_size]);
-      +        Rc::make_mut(&mut child.reps).push(demand_tuple.clone());
-      +        Rc::make_mut(&mut child.rep_versions).push(0);
-      +        Rc::make_mut(&mut child.delta).push(vec![None; self.inst.alphabet_size]);
-       
-               // Record φ and δ for this demand
-               match &child.pending[idx] {
-                   Demand::Point(x) => {
-      -                child.image.insert(x.clone(), new_rep_id);
-      +                Rc::make_mut(&mut child.image).insert(x.clone(), new_rep_id);
+      @@ -462,7 +475,7 @@
+                       child.image.insert(x.clone(), new_rep_id);
                    }
                    Demand::Edge { rid, symbol, ver: _ } => {
-                       let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
-      -                child.image.insert(s, new_rep_id);
-      -                child.delta[*rid][*symbol] = Some(new_rep_id);
-      +                Rc::make_mut(&mut child.image).insert(s, new_rep_id);
-      +                Rc::make_mut(&mut child.delta)[*rid][*symbol] = Some(new_rep_id);
+      -                let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
+      +                let s = self.get_successor(&child, *rid, *symbol);
+                       child.image.insert(s, new_rep_id);
+                       child.delta[*rid][*symbol] = Some(new_rep_id);
                    }
+      @@ -521,7 +534,7 @@
+           /// current "hard" demands: those that are not already covered by some existing rep,
+           /// and that are incompatible with all existing reps (cannot be merged into one
+           /// by extending it).
+      -    fn greedy_max_clique_on_hard_demands(&self, st: &SearchState) -> usize {
+      +    fn greedy_max_clique_on_hard_demands(&mut self, st: &SearchState) -> usize {
+               // Collect candidate tuples from demands that:
+               //  - are current (for Edge: version up-to-date),
+               //  - cannot be extended by any existing rep (x ≤ rep[j] for some j),
+      @@ -550,7 +563,7 @@
+                           if *ver != st.rep_versions[*rid] {
+                               continue; // outdated; ignore for bound
+                           }
+      -                    let s = successor_tuple(&st.reps[*rid], *symbol, &self.inst.components);
+      +                    let s = self.get_successor(st, *rid, *symbol);
+                           if Self::find_extending_rep(&st.reps, &s).is_none() {
+                               let mut compat_with_some_rep = false;
+                               for r in &st.reps {
+      @@ -571,62 +584,59 @@
+                   return 0;
                }
-               // Remove processed demand
-      @@ -531,13 +535,14 @@
        
-           /// Return true if the rep[j] changed (was strictly strengthened).
-           fn unify_into(st: &mut SearchState, j: usize, x: &ProductTuple) -> bool {
-      -        let rj = st.reps[j].clone();
-      -        let unified = unify_tuples(&rj, x).expect("caller ensures compatibility");
-      -        if unified != rj {
-      -            st.reps[j] = unified;
-      -            st.rep_versions[j] = st.rep_versions[j].wrapping_add(1);
-      +        let rj = &st.reps[j];
-      +        let unified = unify_tuples(rj, x).expect("caller ensures compatibility");
-      +        if unified != *rj {
-      +            Rc::make_mut(&mut st.reps)[j] = unified;
-      +            let rep_versions = Rc::make_mut(&mut st.rep_versions);
-      +            rep_versions[j] = rep_versions[j].wrapping_add(1);
-                   // Invalidate previous δ decisions for j (they may still be in φ; harmless).
-      -            st.delta[j] = vec![None; st.delta[j].len()];
-      +            Rc::make_mut(&mut st.delta)[j] = vec![None; st.delta[j].len()];
-                   true
-               } else {
-                   false
-      @@ -632,13 +637,7 @@
-                   if ok {
-                       // Add v to clique; shrink candidates to those incompatible with v
+      -        // Build a simple greedy clique: repeatedly pick point with highest "incompatibility degree"
+      -        // relative to current candidate set and keep only those incompatible with the clique so far.
+      -        // Note: two points are incompatible if unify_tuples returns None.
+      -        // Step 1: build degrees.
+      +        // Precompute incompatibility matrix to speed up clique finding.
+               let n = points.len();
+      -        let mut deg: Vec<usize> = vec![0; n];
+      +        let mut incompatible = vec![vec![false; n]; n];
+               for i in 0..n {
+                   for j in (i + 1)..n {
+                       if unify_tuples(&points[i], &points[j]).is_none() {
+      -                    deg[i] += 1;
+      -                    deg[j] += 1;
+      -                }
+      -            }
+      -        }
+      -        // Step 2: greedy clique construction
+      +                    incompatible[i][j] = true;
+      +                    incompatible[j][i] = true;
+      +                }
+      +            }
+      +        }
+      +
+      +        // Step 1: build degrees from matrix.
+      +        let mut deg: Vec<usize> = vec![0; n];
+      +        for i in 0..n {
+      +            for j in (i + 1)..n {
+      +                if incompatible[i][j] {
+      +                    deg[i] += 1;
+      +                    deg[j] += 1;
+      +                }
+      +            }
+      +        }
+      +
+      +        // Step 2: greedy clique construction using the matrix.
+               let mut clique: Vec<usize> = Vec::new();
+               let mut candidates: HashSet<usize> = (0..n).collect();
+       
+               while !candidates.is_empty() {
+                   // Choose vertex with max degree among candidates.
+      -            let &v = candidates
+      -                .iter()
+      -                .max_by_key(|&&idx| deg[idx])
+      -                .unwrap();
+      -            // Check compatibility with current clique: we need incompatibility with all clique members
+      -            // in the "incompatibility" graph, i.e., unify must fail with all current clique nodes.
+      -            let mut ok = true;
+      +            let &v = candidates.iter().max_by_key(|&&idx| deg[idx]).unwrap();
+      +
+      +            // Check if v is incompatible with all current clique members.
+      +            let mut is_compatible_with_clique = false;
+                   for &u in &clique {
+      -                if unify_tuples(&points[u], &points[v]).is_some() {
+      -                    ok = false;
+      +                if !incompatible[u][v] {
+      +                    is_compatible_with_clique = true;
+                           break;
+                       }
+                   }
+      -            if ok {
+      -                // Add v to clique; shrink candidates to those incompatible with v
+      +
+      +            if !is_compatible_with_clique {
                        clique.push(v);
       -                let mut next: HashSet<usize> = HashSet::new();
-      -                for &w in &candidates {
+      +                // Shrink candidates to those incompatible with v.
+      +                let mut next = HashSet::new();
+                       for &w in &candidates {
       -                    if unify_tuples(&points[w], &points[v]).is_none() {
-      -                        next.insert(w);
-      -                    }
-      -                }
-      -                candidates = next;
-      +                candidates.retain(|&w| unify_tuples(&points[w], &points[v]).is_none());
+      +                    if incompatible[w][v] {
+                               next.insert(w);
+                           }
+                       }
+                       candidates = next;
                    } else {
-                       // Remove v and continue
+      -                // Remove v and continue
                        candidates.remove(&v);
+                   }
+               }
+       
+               clique.len()
+           }
+       
+           /// Choose a demand to branch on together with its tuple and compatible rep candidates.
+           /// Preference:
+           ///  - Demand not yet covered by an existing rep.
+           ///  - Fewest compatible existing reps (min branching).
+           ///  - Prefer Edge demands (they are structural and must be satisfied) when tie.
+           /// Return: (index in pending, demanded tuple, candidate reps, is_edge_flag)
+      -    fn choose_branch_demand(&self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
+      +    fn choose_branch_demand(&mut self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
+               let mut best_idx = 0usize;
+               let mut best_tuple: Option<ProductTuple> = None;
+               let mut best_candidates: Vec<usize> = Vec::new();
+      @@ -640,7 +650,7 @@
+                           if *ver != st.rep_versions[*rid] {
+                               continue; // outdated; skip
+                           }
+      -                    (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
+      +                    (true, self.get_successor(st, *rid, *symbol))
+                       }
+                   };
+       
+      @@ -698,7 +708,7 @@
+                               if *ver != st.rep_versions[*rid] {
+                                   continue;
+                               }
+      -                        (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
+      +                        (true, self.get_successor(st, *rid, *symbol))
+                           }
+                       };
+                       let mut candidates: Vec<usize> = Vec::new();
 
       ```
     metadata:
@@ -3233,9 +3228,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Warning: Diff block 1 parsed with no hunks. Skipping.
+      Identified target file: src/precompute4/weighted_automata/tuple_merger.rs
+      Applying patch to 'src/precompute4/weighted_automata/tuple_merger.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/tuple_merger.rs.
     metadata:
-  - user: 'Changes committed with message: "No changes applied as the provided diff
-      block was empty."'
+  - user: 'Changes committed with message: "Perf: Optimize tuple merger BnB solver
+      with successor caching and faster lower bound calculation"'
     metadata:
 ...
