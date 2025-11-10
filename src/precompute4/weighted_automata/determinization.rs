@@ -165,11 +165,65 @@ impl NWA {
             sparse_trans
         }).collect();
 
-        let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
-            start_tuple,
-            &merger_components,
-            sigma.other_index,
-        );
+        let (merged_reps, point_map) = {
+            let mut states: Vec<tuple_merger::ProductTuple> = Vec::new();
+            let mut point_map: HashMap<tuple_merger::ProductTuple, usize> = HashMap::new();
+            let mut worklist: VecDeque<usize> = VecDeque::new();
+
+            let start_id = 0;
+            states.push(start_tuple.clone());
+            point_map.insert(start_tuple, start_id);
+            worklist.push_back(start_id);
+
+            while let Some(state_id) = worklist.pop_front() {
+                let representative = states[state_id].clone();
+
+                let mut alphabet = BTreeSet::new();
+                for (i, comp_state_opt) in representative.iter().enumerate() {
+                    if let Some(comp_state) = comp_state_opt {
+                        for &symbol in merger_components[i][*comp_state].keys() {
+                            alphabet.insert(symbol);
+                        }
+                    }
+                }
+                alphabet.insert(sigma.other_index);
+
+                for symbol in alphabet {
+                    let successor =
+                        tuple_merger::successor_tuple(&representative, symbol, &merger_components);
+
+                    if point_map.contains_key(&successor) {
+                        continue;
+                    }
+
+                    let mut assigned_id = None;
+                    for id in 0..states.len() {
+                        if let Some(new_rep) =
+                            tuple_merger::unify_tuples(&states[id], &successor)
+                        {
+                            if new_rep != states[id] {
+                                states[id] = new_rep;
+                                if !worklist.contains(&id) {
+                                    worklist.push_back(id);
+                                }
+                            }
+                            assigned_id = Some(id);
+                            break;
+                        }
+                    }
+
+                    let home_id = assigned_id.unwrap_or_else(|| {
+                        let new_id = states.len();
+                        states.push(successor.clone());
+                        worklist.push_back(new_id);
+                        new_id
+                    });
+
+                    point_map.insert(successor, home_id);
+                }
+            }
+            (states, point_map)
+        };
         crate::debug!(
             4,
             "Merged into {} product states in {:?}",
