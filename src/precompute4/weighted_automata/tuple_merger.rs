@@ -500,18 +500,18 @@ impl<'a> BnBSolver<'a> {
         // Choose a branching demand with minimal flexibility, i.e., fewest compatible reps.
         let (idx, demand_tuple, candidates, is_edge) = self.choose_branch_demand(&st);
 
-        // Branch on mapping to compatible existing reps first (prefer merging), ordered by minimal specificity increase.
-        for j in candidates {
+        // Branch on mapping to the single best compatible existing rep first (if any).
+        // The candidates are already sorted by `choose_branch_demand` to prefer minimal specificity increase.
+        if let Some(&j) = candidates.first() {
             let mut child = st.clone();
             let changed_rep = Self::unify_into(&mut child, j, &demand_tuple);
             // Record φ and δ
             match &child.pending[idx] {
-                Demand::Point(x) => {
-                    child.image.insert(x.clone(), j);
+                Demand::Point(_) => {
+                    child.image.insert(demand_tuple.clone(), j);
                 }
-                Demand::Edge { rid, symbol, ver: _ } => {
-                    let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
-                    child.image.insert(s, j);
+                Demand::Edge { rid, symbol, .. } => {
+                    child.image.insert(demand_tuple.clone(), j);
                     child.delta[*rid][*symbol] = Some(j);
                 }
             }
@@ -539,12 +539,11 @@ impl<'a> BnBSolver<'a> {
 
         // Record φ and δ for this demand
         match &child.pending[idx] {
-            Demand::Point(x) => {
-                child.image.insert(x.clone(), new_rep_id);
+            Demand::Point(_) => {
+                child.image.insert(demand_tuple.clone(), new_rep_id);
             }
-            Demand::Edge { rid, symbol, ver: _ } => {
-                let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
-                child.image.insert(s, new_rep_id);
+            Demand::Edge { rid, symbol, .. } => {
+                child.image.insert(demand_tuple.clone(), new_rep_id);
                 child.delta[*rid][*symbol] = Some(new_rep_id);
             }
         }
