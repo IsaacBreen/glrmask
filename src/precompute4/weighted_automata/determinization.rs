@@ -168,7 +168,6 @@ impl NWA {
         let merged_automaton = tuple_merger::merge_and_build_automaton(
             start_tuple,
             &merger_components,
-            sigma.size(),
         );
         crate::debug!(
             4,
