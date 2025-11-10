@@ -629,6 +629,13 @@ impl<'a> BnBSolver<'a> {
             return 0;
         }
 
+        // Performance guard: if there are too many hard demands, the clique calculation is too slow.
+        // Return a weak (but fast) lower bound.
+        if points.len() > 250 {
+            // At least one new rep is needed if there are any hard demands.
+            return 1;
+        }
+
         // Build a simple greedy clique: repeatedly pick point with highest "incompatibility degree"
         // relative to current candidate set and keep only those incompatible with the clique so far.
         // Note: two points are incompatible if unify_tuples returns None.
@@ -688,6 +695,33 @@ impl<'a> BnBSolver<'a> {
     ///  - Prefer Edge demands (they are structural and must be satisfied) when tie.
     /// Return: (index in pending, demanded tuple, candidate reps, is_edge_flag)
     fn choose_branch_demand(&self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
+        // Performance guard: if there are too many pending demands, searching for the "best"
+        // one is too slow. Fall back to a simpler heuristic: pick the first valid one.
+        if st.pending.len() > 500 {
+            for (i, d) in st.pending.iter().enumerate() {
+                let (is_edge, t) = match d {
+                    Demand::Point(x) => (false, x.clone()),
+                    Demand::Edge { rid, symbol, ver } => {
+                        if *ver != st.rep_versions[*rid] { continue; }
+                        (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
+                    }
+                };
+
+                if Self::find_extending_rep(&st.reps, &t).is_some() {
+                    continue; // Should have been handled by unit propagation, but check again.
+                }
+
+                // Found a candidate. Compute its compatible reps and return.
+                let mut candidates: Vec<usize> = Vec::new();
+                for j in 0..st.reps.len() {
+                    if unify_tuples(&st.reps[j], &t).is_some() {
+                        candidates.push(j);
+                    }
+                }
+                return (i, t, candidates, is_edge);
+            }
+        }
+
         let mut best_idx = 0usize;
         let mut best_tuple: Option<ProductTuple> = None;
         let mut best_candidates: Vec<usize> = Vec::new();

@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - src/precompute4/weighted_automata/tuple_merger.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/precompute4/weighted_automata/tuple_merger.rs: |
@@ -454,7 +454,7 @@ local_system:
           }
       }
   prev_file_contents:
-    src/precompute4/weighted_automata/tuple_merger.rs: |
+    src/precompute4/weighted_automata/tuple_merger.rs: |-
       //! Masked-Product Point Synthesis (improved implementation with optimization)
       //!
       //! This module provides:
@@ -1086,6 +1086,13 @@ local_system:
                   return 0;
               }
 
+              // Performance guard: if there are too many hard demands, the clique calculation is too slow.
+              // Return a weak (but fast) lower bound.
+              if points.len() > 250 {
+                  // At least one new rep is needed if there are any hard demands.
+                  return 1;
+              }
+
               // Build a simple greedy clique: repeatedly pick point with highest "incompatibility degree"
               // relative to current candidate set and keep only those incompatible with the clique so far.
               // Note: two points are incompatible if unify_tuples returns None.
@@ -1145,6 +1152,33 @@ local_system:
           ///  - Prefer Edge demands (they are structural and must be satisfied) when tie.
           /// Return: (index in pending, demanded tuple, candidate reps, is_edge_flag)
           fn choose_branch_demand(&self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
+              // Performance guard: if there are too many pending demands, searching for the "best"
+              // one is too slow. Fall back to a simpler heuristic: pick the first valid one.
+              if st.pending.len() > 500 {
+                  for (i, d) in st.pending.iter().enumerate() {
+                      let (is_edge, t) = match d {
+                          Demand::Point(x) => (false, x.clone()),
+                          Demand::Edge { rid, symbol, ver } => {
+                              if *ver != st.rep_versions[*rid] { continue; }
+                              (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
+                          }
+                      };
+
+                      if Self::find_extending_rep(&st.reps, &t).is_some() {
+                          continue; // Should have been handled by unit propagation, but check again.
+                      }
+
+                      // Found a candidate. Compute its compatible reps and return.
+                      let mut candidates: Vec<usize> = Vec::new();
+                      for j in 0..st.reps.len() {
+                          if unify_tuples(&st.reps[j], &t).is_some() {
+                              candidates.push(j);
+                          }
+                      }
+                      return (i, t, candidates, is_edge);
+                  }
+              }
+
               let mut best_idx = 0usize;
               let mut best_tuple: Option<ProductTuple> = None;
               let mut best_candidates: Vec<usize> = Vec::new();
@@ -1398,7 +1432,7 @@ local_system:
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: simple
+  prev_apply_mode: git-llm
   default_end_line:
 system:
   message: |-
@@ -1416,7 +1450,7 @@ system:
     - gf
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: simple
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -2895,5 +2929,166 @@ messages:
       Assigned block to src/precompute4/weighted_automata/tuple_merger.rs based on explicit fence path.
       Remaining unassigned blocks: 0, Available files: 0
       --- Phase 6: Applying changes to assigned files ---
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/tuple_merger.rs since previous turn:
+      ```diff
+      --- original version of src/precompute4/weighted_automata/tuple_merger.rs
+      +++ current version of src/precompute4/weighted_automata/tuple_merger.rs
+      @@ -938,4 +938,4 @@
+               let sol_greedy = synthesize_greedy(&inst);
+               sol_greedy.verify(&inst).expect("greedy solution must satisfy constraints");
+           }
+      -}
+      +}
+      ```
+    metadata:
+  - user: It seems to fail to terminate on a large example input where the previous
+      algorithm successfully finished within 10 seconds.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. The performance degradation on large inputs suggests that the branch-and-bound search space is becoming too large to explore effectively, and the overhead of calculating bounds and choosing branches is becoming prohibitive.
+
+      Here are two targeted optimizations to address this. They will gracefully degrade the expensive parts of the search algorithm when the problem size becomes very large, ensuring better performance while still retaining the benefits of the optimized search for smaller and medium-sized problems.
+
+      ### Step-by-step instructions
+
+      1.  **Open the file** `src/precompute4/weighted_automata/tuple_merger.rs`.
+
+      2.  **Add a performance guard to the lower-bound calculation.** The `greedy_max_clique_on_hard_demands` function can be very slow if the number of "hard" demands (those requiring new representatives) is large. We'll add a check to return a simple, fast-to-compute lower bound if this number exceeds a threshold.
+
+          In the function `greedy_max_clique_on_hard_demands`, after the `if points.is_empty()` check, insert the following block:
+
+          ```rust
+                  // Performance guard: if there are too many hard demands, the clique calculation is too slow.
+                  // Return a weak (but fast) lower bound.
+                  if points.len() > 250 {
+                      // At least one new rep is needed if there are any hard demands.
+                      return 1;
+                  }
+          ```
+
+      3.  **Add a performance guard to the branch selection logic.** Similarly, the `choose_branch_demand` function iterates through all pending demands to find the best one to branch on. This is too slow when the pending queue is long. We'll add a fast path that picks the first available demand when the queue size is above a threshold.
+
+          At the very beginning of the `choose_branch_demand` function, insert the following block:
+
+          ```rust
+                  // Performance guard: if there are too many pending demands, searching for the "best"
+                  // one is too slow. Fall back to a simpler heuristic: pick the first valid one.
+                  if st.pending.len() > 500 {
+                      for (i, d) in st.pending.iter().enumerate() {
+                          let (is_edge, t) = match d {
+                              Demand::Point(x) => (false, x.clone()),
+                              Demand::Edge { rid, symbol, ver } => {
+                                  if *ver != st.rep_versions[*rid] { continue; }
+                                  (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
+                              }
+                          };
+          
+                          if Self::find_extending_rep(&st.reps, &t).is_some() {
+                              continue; // Should have been handled by unit propagation, but check again.
+                          }
+          
+                          // Found a candidate. Compute its compatible reps and return.
+                          let mut candidates: Vec<usize> = Vec::new();
+                          for j in 0..st.reps.len() {
+                              if unify_tuples(&st.reps[j], &t).is_some() {
+                                  candidates.push(j);
+                              }
+                          }
+                          return (i, t, candidates, is_edge);
+                      }
+                  }
+          ```
+
+      These changes introduce heuristic thresholds to prevent the solver from spending too much time on expensive calculations in parts of the search space that are likely too large to solve optimally within a short time frame.
+
+      ### Git diff
+
+      Here is the git diff for the changes described above.
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/tuple_merger.rs
+      +++ b/src/precompute4/weighted_automata/tuple_merger.rs
+      @@ -580,6 +580,13 @@
+                   return 0;
+               }
+       
+      +        // Performance guard: if there are too many hard demands, the clique calculation is too slow.
+      +        // Return a weak (but fast) lower bound.
+      +        if points.len() > 250 {
+      +            // At least one new rep is needed if there are any hard demands.
+      +            return 1;
+      +        }
+      +
+               // Build a simple greedy clique: repeatedly pick point with highest "incompatibility degree"
+               // relative to current candidate set and keep only those incompatible with the clique so far.
+               // Note: two points are incompatible if unify_tuples returns None.
+      @@ -641,6 +648,33 @@
+           ///  - Prefer Edge demands (they are structural and must be satisfied) when tie.
+           /// Return: (index in pending, demanded tuple, candidate reps, is_edge_flag)
+           fn choose_branch_demand(&self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
+      +        // Performance guard: if there are too many pending demands, searching for the "best"
+      +        // one is too slow. Fall back to a simpler heuristic: pick the first valid one.
+      +        if st.pending.len() > 500 {
+      +            for (i, d) in st.pending.iter().enumerate() {
+      +                let (is_edge, t) = match d {
+      +                    Demand::Point(x) => (false, x.clone()),
+      +                    Demand::Edge { rid, symbol, ver } => {
+      +                        if *ver != st.rep_versions[*rid] { continue; }
+      +                        (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
+      +                    }
+      +                };
+      +
+      +                if Self::find_extending_rep(&st.reps, &t).is_some() {
+      +                    continue; // Should have been handled by unit propagation, but check again.
+      +                }
+      +
+      +                // Found a candidate. Compute its compatible reps and return.
+      +                let mut candidates: Vec<usize> = Vec::new();
+      +                for j in 0..st.reps.len() {
+      +                    if unify_tuples(&st.reps[j], &t).is_some() {
+      +                        candidates.push(j);
+      +                    }
+      +                }
+      +                return (i, t, candidates, is_edge);
+      +            }
+      +        }
+      +
+               let mut best_idx = 0usize;
+               let mut best_tuple: Option<ProductTuple> = None;
+               let mut best_candidates: Vec<usize> = Vec::new();
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/tuple_merger.rs
+      Applying patch to 'src/precompute4/weighted_automata/tuple_merger.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/tuple_merger.rs.
+    metadata:
+  - user: 'Changes committed with message: "Implement optimized synthesis (BnB) for
+      minimal |R|, update merge_and_build_automaton to use it, and add performance
+      guards to BnB."'
     metadata:
 ...
