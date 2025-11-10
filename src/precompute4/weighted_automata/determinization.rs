@@ -11,6 +11,7 @@ use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::RangeInclusive;
 use std::time::Instant;
+use crate::precompute4::weighted_automata::format_i16_char;
 
 /// This determinization implements a tuple-based merging construction:
 /// 1) Partition weight space into atoms.
@@ -1286,7 +1287,7 @@ fn build_dwa_from_merged(
             if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
                 let _ = dwa.add_transition(sid, *lbl, to_id, w);
             } else {
-                panic!("Unmapped exception transition tuple for state {} on label {}", sid, lbl);
+                panic!("Unmapped exception transition tuple for state {} on label {}", sid, format_i16_char(*lbl));
             }
         }
     }
