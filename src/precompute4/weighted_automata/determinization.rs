@@ -136,13 +136,9 @@ impl NWA {
 
         // 5) Merge tuples greedily and attach transitions/finals from representative tuples
         let now_merge = Instant::now();
-        let merger_components: Vec<tuple_merger::Component> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
-            tuple_merger::Component {
-                num_states: dfa.n_states,
-                start_state: dfa.start,
-                sink_state: *sink,
-                transitions: dfa.trans.clone(),
-            }
+        let merger_components: Vec<tuple_merger::Component> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| tuple_merger::Component {
+            sink_state: *sink,
+            transitions: dfa.trans.clone(),
         }).collect();
 
         let merged_automaton = tuple_merger::merge_and_build_automaton(
@@ -967,13 +963,9 @@ fn build_dwa_from_merged_automaton(
 
     // We need a way to compute successor tuples to determine edge weights.
     // Re-create the component structures for the tuple_merger.
-    let merger_components: Vec<tuple_merger::Component> = comps.iter().map(|dfa| {
-        tuple_merger::Component {
-            num_states: dfa.n_states,
-            start_state: dfa.start,
-            sink_state: dfa.find_sink_index(sigma),
-            transitions: dfa.trans.clone(),
-        }
+    let merger_components: Vec<tuple_merger::Component> = comps.iter().map(|dfa| tuple_merger::Component {
+        sink_state: dfa.find_sink_index(sigma),
+        transitions: dfa.trans.clone(),
     }).collect();
 
     for state in &merged_automaton.states {

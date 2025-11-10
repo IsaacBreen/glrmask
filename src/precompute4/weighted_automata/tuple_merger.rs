@@ -44,10 +44,6 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Represents one of the component automata in the product.
 #[derive(Clone, Debug)]
 pub struct Component {
-    /// Total number of states in this component.
-    pub num_states: usize,
-    /// The start state ID.
-    pub start_state: usize,
     /// A designated sink state, if one exists.
     pub sink_state: Option<usize>,
     /// Transition table: `transitions[state][symbol] -> next_state`.
@@ -124,8 +120,6 @@ pub fn successor_tuple(
 #[derive(Debug)]
 struct MergingState {
     representative_tuple: ProductTuple,
-    // For debugging/verification, not strictly needed for the algorithm.
-    contained_tuples: BTreeSet<ProductTuple>,
 }
 
 pub fn merge_and_build_automaton(
@@ -140,10 +134,7 @@ pub fn merge_and_build_automaton(
     // Create the initial state for the start_tuple.
     {
         let start_id = 0;
-        merging_states.push(MergingState {
-            representative_tuple: start_tuple.clone(),
-            contained_tuples: BTreeSet::from([start_tuple.clone()]),
-        });
+        merging_states.push(MergingState { representative_tuple: start_tuple.clone() });
         tuple_to_state_id.insert(start_tuple, start_id);
         worklist.push_back(start_id);
     }
@@ -170,7 +161,6 @@ pub fn merge_and_build_automaton(
                         }
                     }
                     tuple_to_state_id.insert(succ_tuple.clone(), existing_id);
-                    merging_states[existing_id].contained_tuples.insert(succ_tuple.clone());
                     placed = true;
                     break;
                 }
@@ -178,10 +168,7 @@ pub fn merge_and_build_automaton(
 
             if !placed {
                 let new_id = merging_states.len();
-                merging_states.push(MergingState {
-                    representative_tuple: succ_tuple.clone(),
-                    contained_tuples: BTreeSet::from([succ_tuple.clone()]),
-                });
+                merging_states.push(MergingState { representative_tuple: succ_tuple.clone() });
                 tuple_to_state_id.insert(succ_tuple, new_id);
                 worklist.push_back(new_id);
             }
