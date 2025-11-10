@@ -126,6 +126,31 @@ fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
     Some(out)
 }
 
+/// Fast compatibility check and cost computation used during candidate selection.
+/// Returns Some(spec_increase) if `b` can be merged into `a` without conflict, else None.
+/// - spec_increase = number of coordinates where `a` is None and `b` is Some(v).
+/// - No allocation; early exits on conflict.
+#[inline]
+fn merge_spec_increase_if_compatible(a: &ProductTuple, b: &ProductTuple) -> Option<usize> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut inc = 0usize;
+    // We only care about conflicts and how many new concrete coordinates b would add.
+    for i in 0..a.len() {
+        match (a[i], b[i]) {
+            (Some(x), Some(y)) => {
+                if x != y {
+                    return None; // Conflict
+                }
+            }
+            (None, Some(_)) => inc += 1,
+            _ => {}
+        }
+    }
+    Some(inc)
+}
+
 /// Checks if tuple `a` is less specific than or equal to tuple `b` (a ≤ b).
 fn is_less_or_equal(a: &ProductTuple, b: &ProductTuple) -> bool {
     debug_assert_eq!(a.len(), b.len(), "Tuples must have same arity for comparison");
@@ -287,72 +312,70 @@ impl Solution {
 pub fn synthesize_greedy(inst: &Instance) -> Solution {
     let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
 
-    let mut reps: Vec<ProductTuple> = Vec::new();
-    let mut image: HashMap<ProductTuple, usize> = HashMap::new();
-    let mut work_queue: VecDeque<usize> = VecDeque::new();
-    let mut work_set: HashSet<usize> = HashSet::new(); // To efficiently check if an item is in work_queue
+    // Toggle this to true if you want to re-enable progress logs for diagnostics.
+    const VERBOSE: bool = false;
+
+    // Reserve some space up front to reduce reallocations in large instances.
+    let mut reps: Vec<ProductTuple> = Vec::with_capacity(256);
+    let mut image: HashMap<ProductTuple, usize> = HashMap::with_capacity(1024);
+    let mut work_queue: VecDeque<usize> = VecDeque::with_capacity(256);
+    let mut work_set: HashSet<usize> = HashSet::with_capacity(256); // For efficient presence checks
+    let mut rep_spec: Vec<usize> = Vec::with_capacity(256); // Specificity (count of Some) per representative
 
     // Initialize
     reps.push(inst.start.clone());
+    let start_spec = inst.start.iter().filter(|opt| opt.is_some()).count();
+    rep_spec.push(start_spec);
     image.insert(inst.start.clone(), 0);
     work_queue.push_back(0);
     work_set.insert(0);
-    println!("Starting greedy synthesis...");
-
-    let mut processed_items = 0;
+    if VERBOSE {
+        println!("Starting greedy synthesis...");
+    }
 
     // Explore representatives
     while let Some(rid) = work_queue.pop_front() {
-        processed_items += 1;
-        if processed_items % 500 == 0 {
-            println!(
-                " -> Processed {} items. State: |R|={}, |φ|={}, |Work|={}",
-                processed_items,
-                reps.len(),
-                image.len(),
-                work_queue.len()
-            );
-        }
-
         work_set.remove(&rid);
-        let rep = reps[rid].clone(); // Clone to avoid mutable borrow issues
 
         for a in 0..inst.alphabet_size {
-            let x = successor_tuple(&rep, a, &inst.components);
+            // Compute successor of current representative under symbol a.
+            let x = successor_tuple(&reps[rid], a, &inst.components);
 
+            // Already has a home? Skip.
             if image.contains_key(&x) {
-                continue; // Already processed and mapped
+                continue;
             }
 
-            let mut best_candidate: Option<(usize, (usize, usize))> = None; // (rep_id, (spec_increase, current_spec))
+            // Find the best existing representative to merge with (if any),
+            // using cost = (spec_increase, current_spec). Lower is better; ties keep earlier j.
+            let mut best_j: Option<usize> = None;
+            let mut best_cost: (usize, usize) = (usize::MAX, usize::MAX);
 
-            // Find the best existing representative to merge with
             for j in 0..reps.len() {
-                if let Some(unified) = unify_tuples(&reps[j], &x) {
-                    let current_spec = reps[j].iter().filter(|opt| opt.is_some()).count();
-                    let unified_spec = unified.iter().filter(|opt| opt.is_some()).count();
-                    let spec_increase = unified_spec - current_spec;
-
+                if let Some(spec_increase) = merge_spec_increase_if_compatible(&reps[j], &x) {
+                    let current_spec = rep_spec[j];
                     let current_cost = (spec_increase, current_spec);
-
-                    if let Some((_best_j, best_cost)) = best_candidate {
-                        // Lexicographical comparison: smaller cost is better.
-                        if current_cost < best_cost {
-                            best_candidate = Some((j, current_cost));
-                        }
-                    } else {
-                        best_candidate = Some((j, current_cost));
+                    if current_cost < best_cost {
+                        best_cost = current_cost;
+                        best_j = Some(j);
                     }
                 }
             }
 
-            if let Some((j, _cost)) = best_candidate {
+            if let Some(j) = best_j {
                 // Found a best-fit representative to merge with.
-                let unified_tuple = unify_tuples(&reps[j], &x).unwrap(); // Should not fail
+                // Note: This must succeed because we just checked compatibility.
+                let unified_tuple = unify_tuples(&reps[j], &x).unwrap();
 
                 if unified_tuple != reps[j] {
+                    // Apply the merge and update specificity count incrementally
+                    // using the precomputed spec increase.
+                    let spec_increase = best_cost.0;
                     reps[j] = unified_tuple;
-                    // If the representative changed, it needs to be re-processed.
+                    if spec_increase > 0 {
+                        rep_spec[j] += spec_increase;
+                    }
+                    // If the representative changed, re-queue it for processing.
                     if !work_set.contains(&j) {
                         work_queue.push_back(j);
                         work_set.insert(j);
@@ -362,11 +385,13 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
             } else {
                 // No compatible representative found. Create a new one.
                 let new_id = reps.len();
+                let spec = x.iter().filter(|opt| opt.is_some()).count();
                 reps.push(x.clone());
+                rep_spec.push(spec);
                 image.insert(x, new_id);
                 work_queue.push_back(new_id);
                 work_set.insert(new_id);
-                if reps.len() % 100 == 0 {
+                if VERBOSE && reps.len() % 100 == 0 {
                     println!(
                         " -> Representative count reached {}. |Work|={}",
                         reps.len(),
@@ -377,11 +402,13 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
         }
     }
 
-    println!(
-        "Greedy synthesis finished. Total reps: {}, total image size: {}.",
-        reps.len(),
-        image.len()
-    );
+    if VERBOSE {
+        println!(
+            "Greedy synthesis finished. Total reps: {}, total image size: {}.",
+            reps.len(),
+            image.len()
+        );
+    }
     Solution { reps, image }
 }
 
