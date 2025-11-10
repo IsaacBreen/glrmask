@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
+use super::tuple_merger;
 use super::bitset::SimpleBitset as Weight;
 use super::dwa::{DWAState, DWAStates, DWA, DWABody};
 use super::nwa::{NWA, NWAStates};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
-use range_set_blaze::RangeSetBlaze;
+
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::RangeInclusive;
@@ -135,62 +136,30 @@ impl NWA {
 
         // 5) Merge tuples greedily and attach transitions/finals from representative tuples
         let now_merge = Instant::now();
-        let merged = merge_tuples_to_states(
+        let merger_components: Vec<tuple_merger::Component> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
+            tuple_merger::Component {
+                num_states: dfa.n_states,
+                start_state: dfa.start,
+                sink_state: *sink,
+                transitions: dfa.trans.clone(),
+            }
+        }).collect();
+
+        let merged_automaton = tuple_merger::merge_and_build_automaton(
             start_tuple,
-            &comp_dfas,
-            &sigma,
-            &comp_sinks,
-            &atoms.atoms,
+            &merger_components,
+            sigma.size(),
         );
         crate::debug!(
             4,
             "Merged into {} product states in {:?}",
-            merged.states.len(),
+            merged_automaton.states.len(),
             now_merge.elapsed()
         );
-        if 5 <= crate::r#macro::get_macro_debug_level() {
-            // Helper to format tuples like [0, _, 2] instead of [Some(0), None, Some(2)]
-            let format_tuple = |tuple: &ProductDFAStateTuple| -> String {
-                let parts: Vec<String> = tuple
-                    .iter()
-                    .map(|opt| match opt {
-                        Some(v) => v.to_string(),
-                        None => "_".to_string(),
-                    })
-                    .collect();
-                format!("[{}]", parts.join(", "))
-            };
-
-            println!("\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
-            for (gid, state) in merged.states.iter().enumerate() {
-                println!("  State {}:", gid);
-                println!("    - Representative: {}", format_tuple(&state.representative_tuple));
-                if let Some(w) = &state.final_weight {
-                    println!("    - Final Weight: {}", w);
-                }
-                println!("    - Transitions:");
-                let dest_tuple_def = &state.trans_default;
-                if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_def) {
-                    println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
-                } else {
-                    println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
-                }
-
-                for (lbl, dest_tuple_ex) in &state.trans_exceptions {
-                    let char_repr = super::common::format_i16_char(*lbl);
-                    if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_ex) {
-                        println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
-                    } else {
-                        println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
-                    }
-                }
-                println!("    - Contains {} tuples.", state.all_tuples.len());
-            }
-        }
 
         // 6) Convert merged product to a DWA
         let now_convert = Instant::now();
-        let dwa = build_dwa_from_merged(&merged, &atoms.atoms, &sigma);
+        let dwa = build_dwa_from_merged_automaton(&merged_automaton, &comp_dfas, &atoms.atoms, &sigma);
         crate::debug!(
             4,
             "Merged-product -> DWA conversion completed in {:?}",
@@ -970,254 +939,11 @@ impl DetDFA {
    Tuple enumeration and merging
    ------------------------------ */
 
-type ProductDFAStateTuple = Vec<Option<usize>>;
-
-/// Given a product tuple and a symbol, compute the successor tuple:
-/// - If a component is None (sink), it remains None.
-/// - Otherwise follow the transition; if it goes to the component's sink, record None; else Some(next).
-fn successor_tuple(
-    tuple: &ProductDFAStateTuple,
-    sym: usize,
-    comps: &[DetDFA],
-    comp_sinks: &[Option<usize>],
-) -> ProductDFAStateTuple {
-    let k = comps.len();
-    let mut out = Vec::with_capacity(k);
-    for i in 0..k {
-        match tuple[i] {
-            Some(s) => {
-                let v = comps[i].trans[s][sym];
-                if let Some(sink) = comp_sinks[i] {
-                    if v == sink {
-                        out.push(None);
-                    } else {
-                        out.push(Some(v));
-                    }
-                } else {
-                    out.push(Some(v));
-                }
-            }
-            None => out.push(None),
-        }
-    }
-    out
-}
-
-/// Unify two tuples pointwise:
-/// - If both Some(a) and Some(b) with a != b => None (incompatible)
-/// - If one is Some and the other None => result Some(value)
-/// - If both None => None
-fn unify_tuples(a: &ProductDFAStateTuple, b: &ProductDFAStateTuple) -> Option<ProductDFAStateTuple> {
-    if a.len() != b.len() {
-        return None;
-    }
-    let mut out = a.clone();
-    for i in 0..a.len() {
-        match (out[i], b[i]) {
-            (Some(x), Some(y)) => {
-                if x != y {
-                    return None;
-                }
-            }
-            (Some(_), None) => {}
-            (None, Some(y)) => {
-                out[i] = Some(y);
-            }
-            (None, None) => {}
-        }
-    }
-    Some(out)
-}
-
-#[derive(Clone, Debug, Default)]
-struct ProductDFAState {
-    representative_tuple: ProductDFAStateTuple,
-    all_tuples: BTreeSet<ProductDFAStateTuple>,
-    final_weight: Option<Weight>,
-    // Labeled exceptions: label -> destination tuple (unmapped)
-    trans_exceptions: BTreeMap<i16, ProductDFAStateTuple>,
-    // Default (OTHER) transition destination tuple (unmapped)
-    trans_default: ProductDFAStateTuple,
-}
-
-#[derive(Clone, Debug)]
-struct MergedProduct {
-    states: Vec<ProductDFAState>,
-    start: usize,
-}
-
-/// Merge tuples greedily into product states and compute per-state transitions and final weights from representatives.
-fn merge_tuples_to_states(
-    start_tuple: ProductDFAStateTuple,
-    comps: &[DetDFA],
-    sigma: &Alphabet,
-    comp_sinks: &[Option<usize>],
-    atom_weights: &Vec<Weight>,
-) -> MergedProduct {
-    let mut states: Vec<ProductDFAState> = Vec::new();
-    let mut tuple_to_group: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
-    let mut worklist: VecDeque<usize> = VecDeque::new(); // Worklist of group IDs
-
-    // Create starting group for the start_tuple
-    {
-        let mut start_state = ProductDFAState::default();
-        start_state.representative_tuple = start_tuple.clone();
-        start_state.all_tuples.insert(start_tuple.clone());
-        states.push(start_state);
-        tuple_to_group.insert(start_tuple, 0);
-        worklist.push_back(0);
-    }
-
-    let pb_merge = if PROGRESS_BAR_ENABLED {
-        let p = ProgressBar::new_spinner();
-        p.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} [Determinize: {elapsed_precise}] States: {pos}, Worklist: {msg}")
-                .unwrap(),
-        );
-        Some(p)
-    } else {
-        None
-    };
-
-    if let Some(p) = &pb_merge {
-        p.set_position(states.len() as u64);
-        p.set_message(format!("{}", worklist.len()));
-    }
-
-    while let Some(gid) = worklist.pop_front() {
-        let rep = states[gid].representative_tuple.clone();
-
-        for sym in 0..sigma.size() {
-            let succ_tuple = successor_tuple(&rep, sym, comps, comp_sinks);
-
-            if tuple_to_group.contains_key(&succ_tuple) {
-                continue;
-            }
-
-            // Find a group for succ_tuple or create a new one
-            let mut placed = false;
-            for existing_gid in 0..states.len() {
-                let old_rep = &states[existing_gid].representative_tuple;
-                if let Some(new_rep) = unify_tuples(old_rep, &succ_tuple) {
-                    if new_rep != *old_rep {
-                        states[existing_gid].representative_tuple = new_rep;
-                        // Representative changed, so this group needs to be re-processed.
-                        if !worklist.contains(&existing_gid) {
-                            worklist.push_back(existing_gid);
-                        }
-                    }
-                    tuple_to_group.insert(succ_tuple.clone(), existing_gid);
-                    states[existing_gid].all_tuples.insert(succ_tuple.clone());
-                    placed = true;
-                    break;
-                }
-            }
-
-            if !placed {
-                // Create new group
-                let new_gid = states.len();
-                let mut new_state = ProductDFAState::default();
-                new_state.representative_tuple = succ_tuple.clone();
-                new_state.all_tuples.insert(succ_tuple.clone());
-                states.push(new_state);
-                tuple_to_group.insert(succ_tuple, new_gid);
-                worklist.push_back(new_gid);
-
-                if let Some(p) = &pb_merge {
-                    p.set_position(states.len() as u64);
-                    p.set_message(format!("{}", worklist.len()));
-                }
-            }
-        }
-    }
-
-    let pb_merge = if PROGRESS_BAR_ENABLED {
-        let p = ProgressBar::new_spinner();
-        p.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} [Determinize: {elapsed_precise}] States: {pos}, Worklist: {msg}")
-                .unwrap(),
-        );
-        Some(p)
-    } else {
-        None
-    };
-
-    if let Some(p) = pb_merge {
-        p.finish_with_message(format!("Merged into {} states", states.len()));
-    }
-
-    // Compute final weights and per-state transitions from representatives
-    let pb_attach = if PROGRESS_BAR_ENABLED {
-        Some(
-            ProgressBar::new(states.len() as u64).with_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Attach weights/transitions)")
-                    .unwrap(),
-            ),
-        )
-    } else {
-        None
-    };
-
-    for gid in 0..states.len() {
-        let rep = states[gid].representative_tuple.clone();
-
-        // Final weight: union of atom-weights where representative component is accepting
-        let mut w_final = Weight::zeros();
-        for (i, pos) in rep.iter().enumerate() {
-            if let Some(s) = pos {
-                if comps[i].finals[*s] {
-                    w_final |= &atom_weights[i];
-                }
-            }
-        }
-        states[gid].final_weight = if w_final.is_empty() { None } else { Some(w_final) };
-
-        // Transitions from representative
-        // Default (OTHER)
-        let def = successor_tuple(&rep, sigma.other_index, comps, comp_sinks);
-        states[gid].trans_default = def;
-
-        // Labeled exceptions
-        let mut ex: BTreeMap<i16, ProductDFAStateTuple> = BTreeMap::new();
-        for (li, &lbl) in sigma.labels.iter().enumerate() {
-            let dst = successor_tuple(&rep, li, comps, comp_sinks);
-            ex.insert(lbl, dst);
-        }
-        states[gid].trans_exceptions = ex;
-
-        if let Some(p) = &pb_attach {
-            p.inc(1);
-        }
-    }
-    if let Some(p) = pb_attach {
-        p.finish_with_message("Weights/transitions attached");
-    }
-
-    MergedProduct { states, start: 0 }
-}
-
 /* ------------------------------
    Build DWA from merged product
    ------------------------------ */
 
-/// For a given tuple, find the ID of the merged state group it belongs to by checking for unifiability.
-fn find_group_for_tuple(
-    merged_states: &[ProductDFAState],
-    tuple: &ProductDFAStateTuple,
-) -> Option<usize> {
-    // This is a linear scan. Can be optimized if it's a bottleneck.
-    for (gid, state) in merged_states.iter().enumerate() {
-        if unify_tuples(&state.representative_tuple, tuple).is_some() {
-            return Some(gid);
-        }
-    }
-    None
-}
-
-fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &ProductDFAStateTuple) -> Weight {
+fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &tuple_merger::ProductTuple) -> Weight {
     let mut w = Weight::zeros();
     for (i, pos) in tuple.iter().enumerate() {
         if pos.is_some() {
@@ -1227,43 +953,61 @@ fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &ProductDFAStateTup
     w
 }
 
-fn build_dwa_from_merged(
-    merged: &MergedProduct,
+fn build_dwa_from_merged_automaton(
+    merged_automaton: &tuple_merger::MergedAutomaton,
+    comps: &[DetDFA],
     atom_weights: &Vec<Weight>,
     sigma: &Alphabet,
 ) -> DWA {
-    // Prepare DWA with the required number of states
     let mut dwa_states = DWAStates::default();
-    for _ in 0..merged.states.len() {
+    for _ in 0..merged_automaton.states.len() {
         dwa_states.add_state();
     }
-    let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: merged.start } };
+    let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: merged_automaton.start_state_id } };
 
-    // Final weights
-    for sid in 0..merged.states.len() {
-        if let Some(w) = &merged.states[sid].final_weight {
-            let _ = dwa.set_final_weight(sid, w.clone());
+    // We need a way to compute successor tuples to determine edge weights.
+    // Re-create the component structures for the tuple_merger.
+    let merger_components: Vec<tuple_merger::Component> = comps.iter().map(|dfa| {
+        tuple_merger::Component {
+            num_states: dfa.n_states,
+            start_state: dfa.start,
+            sink_state: dfa.find_sink_index(sigma),
+            transitions: dfa.trans.clone(),
         }
-    }
+    }).collect();
 
-    // Transitions
-    for sid in 0..merged.states.len() {
+    for state in &merged_automaton.states {
+        let sid = state.id;
+        let rep = &state.representative_tuple;
+
+        // Final weight
+        let mut w_final = Weight::zeros();
+        for (i, pos) in rep.iter().enumerate() {
+            if let Some(s) = pos {
+                if comps[i].finals[*s] {
+                    w_final |= &atom_weights[i];
+                }
+            }
+        }
+        if !w_final.is_empty() {
+            let _ = dwa.set_final_weight(sid, w_final);
+        }
+
         // Default (OTHER)
-        let def_t = &merged.states[sid].trans_default;
-        let def_w = edge_weight_from_tuple(atom_weights, def_t);
-        if let Some(to_id) = find_group_for_tuple(&merged.states, def_t) {
-            let _ = dwa.set_default_transition(sid, to_id, def_w);
-        } else {
-            assert!(def_t.iter().all(|x| x.is_none()), "Default transition tuple must be all None if unmapped. Found unmapped tuple {:?} for state {}", def_t, sid);
+        let def_to_id = state.transitions[sigma.other_index];
+        let def_succ_tuple = tuple_merger::successor_tuple(rep, sigma.other_index, &merger_components);
+        let def_w = edge_weight_from_tuple(atom_weights, &def_succ_tuple);
+        if !def_w.is_empty() {
+            let _ = dwa.set_default_transition(sid, def_to_id, def_w);
         }
 
         // Exceptions
-        for (lbl, dst_t) in &merged.states[sid].trans_exceptions {
-            let w = edge_weight_from_tuple(atom_weights, dst_t);
-            if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
-                let _ = dwa.add_transition(sid, *lbl, to_id, w);
-            } else {
-                assert!(dst_t.iter().all(|x| x.is_none()), "Exception transition tuple must be all None if unmapped. Found unmapped tuple {:?} for state {} on label {}", dst_t, sid, format_i16_char(*lbl));
+        for (li, &lbl) in sigma.labels.iter().enumerate() {
+            let to_id = state.transitions[li];
+            let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
+            let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
+            if !w.is_empty() {
+                let _ = dwa.add_transition(sid, lbl, to_id, w);
             }
         }
     }
