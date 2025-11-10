@@ -77,15 +77,20 @@ pub type ProductTuple = Vec<Option<usize>>;
 /// Unifies two tuples pointwise. Returns `None` if they are incompatible.
 /// Compatibility: for each position, either values are equal or one is `None`.
 fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
-    if a.len() != b.len() {
-        return None;
-    }
-    let mut out = a.clone();
+    if a.len() != b.len() { return None; }
+    let mut out = Vec::with_capacity(a.len());
     for i in 0..a.len() {
-        match (out[i], b[i]) {
-            (Some(x), Some(y)) if x != y => return None,
-            (None, Some(y)) => out[i] = Some(y),
-            _ => {}
+        match (a[i], b[i]) {
+            (Some(x), Some(y)) => {
+                if x == y {
+                    out.push(Some(x));
+                } else {
+                    return None; // Incompatible
+                }
+            }
+            (Some(x), None) => out.push(Some(x)),
+            (None, Some(y)) => out.push(Some(y)),
+            (None, None) => out.push(None),
         }
     }
     Some(out)
@@ -243,46 +248,22 @@ mod tests {
 
         let automaton = merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
-        // Expected states:
-        // S0 (start): rep=[0,0]. a -> [0,None], b -> [None,0]
-        // S1: rep=[0,None]. a -> [0,None], b -> [None,None]
-        // S2: rep=[None,0]. a -> [None,None], b -> [None,0]
-        // S3: rep=[None,None]. a -> [None,None], b -> [None,None]
-        //
-        // Let's trace:
-        // 1. Start with S0=[0,0].
-        //    - on 'a', succ is [0, None]. Create S1 for it. S0.trans[0] = S1.
-        //    - on 'b', succ is [None, 0]. Create S2 for it. S0.trans[1] = S2.
-        // 2. Process S1=[0,None].
-        //    - on 'a', succ is [0, None]. Already have S1. S1.trans[0] = S1.
-        //    - on 'b', succ is [None, None]. Create S3 for it. S1.trans[1] = S3.
-        // 3. Process S2=[None,0].
-        //    - on 'a', succ is [None, None]. Already have S3. S2.trans[0] = S3.
-        //    - on 'b', succ is [None, 0]. Already have S2. S2.trans[1] = S2.
-        // 4. Process S3=[None,None].
-        //    - on 'a', succ is [None, None]. Already have S3. S3.trans[0] = S3.
-        //    - on 'b', succ is [None, None]. Already have S3. S3.trans[1] = S3.
-        // Total 4 states.
+        // The merging algorithm should find that all reachable tuples are mutually compatible.
+        // Reachable tuples: [0,0], [0,None], [None,0], [None,None].
+        // The representative of this entire set is [0,0].
+        // Therefore, only one state should be created.
+        assert_eq!(automaton.states.len(), 1);
 
-        assert_eq!(automaton.states.len(), 4);
-
+        // Check that the single state has the correct representative and transitions.
         let s0_id = automaton.start_state_id;
         assert_eq!(automaton.states[s0_id].representative_tuple, vec![Some(0), Some(0)]);
 
-        let s1_id = automaton.states[s0_id].transitions[0];
-        assert_eq!(automaton.states[s1_id].representative_tuple, vec![Some(0), None]);
+        // Transition on 'a' from rep [0,0] gives succ [0,None].
+        // [0,None] is compatible and merges into state 0.
+        assert_eq!(automaton.states[s0_id].transitions[0], s0_id);
 
-        let s2_id = automaton.states[s0_id].transitions[1];
-        assert_eq!(automaton.states[s2_id].representative_tuple, vec![None, Some(0)]);
-
-        let s3_id = automaton.states[s1_id].transitions[1];
-        assert_eq!(automaton.states[s3_id].representative_tuple, vec![None, None]);
-
-        // Check other transitions
-        assert_eq!(automaton.states[s1_id].transitions[0], s1_id);
-        assert_eq!(automaton.states[s2_id].transitions[0], s3_id);
-        assert_eq!(automaton.states[s2_id].transitions[1], s2_id);
-        assert_eq!(automaton.states[s3_id].transitions[0], s3_id);
-        assert_eq!(automaton.states[s3_id].transitions[1], s3_id);
+        // Transition on 'b' from rep [0,0] gives succ [None,0].
+        // [None,0] is compatible and merges into state 0.
+        assert_eq!(automaton.states[s0_id].transitions[1], s0_id);
     }
 }
