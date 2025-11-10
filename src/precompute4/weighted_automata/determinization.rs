@@ -193,7 +193,7 @@ impl NWA {
         let now_convert = Instant::now();
         // New: minimize merged product (near-optimal merging), then convert to DWA
         let minimized = minimize_merged_product(&merged, &atoms.atoms, &sigma);
-        let dwa = build_dwa_from_minimized(&minimized, &sigma);
+        let dwa = build_dwa_from_minimized(&minimized, &sigma, &atoms.atoms);
 
         crate::debug!(
             4,
@@ -1601,44 +1601,7 @@ fn minimize_merged_product(
 /// - For each symbol:
 ///     - If sym == OTHER and transition not to sink: set default transition to (dest, weight(mask)).
 ///     - If sym is a label and transition not to sink: add exception transition with its weight.
-fn build_dwa_from_minimized(min: &MinMergedProduct, sigma: &Alphabet) -> DWA {
-    let n = min.states.len();
-    let mut dwa_states = DWAStates::default();
-    for _ in 0..n {
-        dwa_states.add_state();
-    }
-    let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: min.start } };
-
-    // Final weights
-    for sid in 0..n {
-        let w = weight_from_mask(&min.states[sid].final_mask, &Vec::new()); // placeholder, replaced below
-        // We will compute using the actual atom weights, so we need them here.
-        // But weight_from_mask requires atoms; we don't have them here.
-        // We'll reconstruct via a helper that pulls atoms from a closure.
-    }
-    // Rebuild final weights and transitions with access to atoms by threading them via closure.
-    // To avoid changing the function signature, we reconstruct atoms indirectly by
-    // deriving them from masks' size differences. However, we actually need atoms to compute Weight.
-    // So we pivot: wrap an inner function that takes atoms through a static parameter.
-    build_dwa_from_minimized_with_atoms(min, sigma)
-}
-
-fn build_dwa_from_minimized_with_atoms(min: &MinMergedProduct, sigma: &Alphabet) -> DWA {
-    // We need to extract the number of bits (atoms/components) from any mask.
-    // If there are no states, return a trivial DWA.
-    if min.states.is_empty() {
-        return DWA::new();
-    }
-    // Infer k from any state's final_mask (nbits).
-    let k = min.states[0].final_mask.nbits;
-    // We cannot reconstruct atom weights here; they were available in the caller.
-    // To keep scope consistent, we revise: push the construction to a separate function that
-    // takes atoms explicitly. This helper is just a shim; below will be the real builder.
-    unreachable!("build_dwa_from_minimized_with_atoms should not be called directly without atoms");
-}
-
-/// Real builder that receives atoms explicitly (needed for Weight reconstruction).
-fn build_dwa_from_minimized_with_atoms_and_weights(
+fn build_dwa_from_minimized(
     min: &MinMergedProduct,
     sigma: &Alphabet,
     atom_weights: &Vec<Weight>,
