@@ -3959,6 +3959,7 @@ local_system:
               let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
                   start_tuple,
                   &merger_components,
+                  sigma.size(),
               );
               crate::debug!(
                   4,
@@ -4825,23 +4826,18 @@ local_system:
 
               // Default (OTHER)
               let def_succ_tuple = tuple_merger::successor_tuple(rep, sigma.other_index, &merger_components);
+              let def_to_id =
+                  *point_map.get(&def_succ_tuple).expect("Default successor tuple must be mapped");
               let def_w = edge_weight_from_tuple(atom_weights, &def_succ_tuple);
-              // Only add a default transition if it carries a non-empty weight.
-              if !def_w.is_empty() {
-                  let def_to_id =
-                      *point_map.get(&def_succ_tuple).expect("Default successor tuple must be mapped");
-                  let _ = dwa.set_default_transition(sid, def_to_id, def_w);
-              }
+              let _ = dwa.set_default_transition(sid, def_to_id, def_w);
 
               // Exceptions
               for (li, &lbl) in sigma.labels.iter().enumerate() {
                   let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
+                  let to_id =
+                      *point_map.get(&succ_tuple).expect("Successor tuple must be mapped");
                   let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
-                  if !w.is_empty() {
-                      let to_id =
-                          *point_map.get(&succ_tuple).expect("Successor tuple must be mapped");
-                      let _ = dwa.add_transition(sid, lbl, to_id, w);
-                  }
+                  let _ = dwa.add_transition(sid, lbl, to_id, w);
               }
           }
 
@@ -4907,6 +4903,7 @@ local_system:
       pub fn merge_and_build_automaton(
           start_tuple: ProductTuple,
           components: &[Vec<BTreeMap<usize, usize>>],
+          alphabet_size: usize,
       ) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>) {
           let mut states: Vec<ProductTuple> = Vec::new();
           let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
@@ -4920,16 +4917,7 @@ local_system:
           while let Some(state_id) = worklist.pop_front() {
               let representative = states[state_id].clone();
 
-              let mut alphabet = BTreeSet::new();
-              for (i, comp_state_opt) in representative.iter().enumerate() {
-                  if let Some(comp_state) = comp_state_opt {
-                      for &symbol in components[i][*comp_state].keys() {
-                          alphabet.insert(symbol);
-                      }
-                  }
-              }
-              for symbol in alphabet {
-
+              for symbol in 0..alphabet_size {
                   let successor = successor_tuple(&representative, symbol, components);
 
                   if point_map.contains_key(&successor) {
@@ -4982,10 +4970,11 @@ local_system:
               let comp0 = vec![BTreeMap::from([(0, 0)])];
               let comp1 = vec![BTreeMap::from([(1, 0)])];
               let components = vec![comp0, comp1];
+              let alphabet_size = 3;
 
               let start_tuple = vec![Some(0), Some(0)];
 
-              let (states, point_map) = merge_and_build_automaton(start_tuple, &components);
+              let (states, point_map) = merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
               assert_eq!(states.len(), 1);
               assert_eq!(states[0], vec![Some(0), Some(0)]);
@@ -7970,5 +7959,272 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Remove other_index dependency from tuple
       merger and only create DWA transitions for non-zero weights"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/tuple_merger.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |+
+      Original DWA:
+      DWA (start: 0)
+        State 0:
+          97 -> 1 (trans_weight: ALL)
+        State 1:
+          * -> 2 (trans_weight: ALL)
+          98 -> 3 (trans_weight: ALL)
+        State 2:
+          99 -> 4 (trans_weight: ALL)
+        State 3:
+        State 4:
+          final_weight: [1]
+
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:46: Starting determinization for NWA with 5 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Built weight partition with 3 atoms in 42.167µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:64: Built alphabet with 3 labels in 24.25µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:749: Minimizing DFA with 2 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:87: Atom 0: interval=0..=0, DFA states=2
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:749: Minimizing DFA with 5 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:87: Atom 1: interval=1..=1, DFA states=5
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:749: Minimizing DFA with 2 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:87: Atom 2: interval=2..=18446744073709551615, DFA states=2
+
+      --- Atomic DFAs (3 total) ---
+        DFA 0 (for atom 0..=0):
+          - States: 2, Start: 0, Sink: Some(1)
+          - State 0: 97->1, 98->1, 99->1, *->1
+          - State 1: 97->1, 98->1, 99->1, *->1
+        DFA 1 (for atom 1..=1):
+          - States: 5, Start: 3, Sink: Some(4)
+          - State 0 (final): 97->4, 98->4, 99->4, *->4
+          - State 1: 97->4, 98->4, 99->0, *->4
+          - State 2: 97->1, 98->4, 99->1, *->1
+          - State 3: 97->2, 98->4, 99->4, *->4
+          - State 4: 97->4, 98->4, 99->4, *->4
+        DFA 2 (for atom 2..=18446744073709551615):
+          - States: 2, Start: 0, Sink: Some(1)
+          - State 0: 97->1, 98->1, 99->1, *->1
+          - State 1: 97->1, 98->1, 99->1, *->1
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:139: Computed start tuple in 667ns
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:172: Merged into 4 product states in 42.542µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:183: Merged-product -> DWA conversion completed in 34.083µs
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:189: NWA::determinize_to_dwa total time: 463.167µs
+      Determinized DWA:
+      DWA (start: 0)
+        State 0:
+          97 -> 1 (trans_weight: [1])
+        State 1:
+          * -> 2 (trans_weight: [1])
+          97 -> 2 (trans_weight: [1])
+          99 -> 2 (trans_weight: [1])
+        State 2:
+          99 -> 3 (trans_weight: [1])
+        State 3:
+          final_weight: [1]
+
+
+
+      thread 'precompute4::test_weighted_automata::determinization_tests::test_determinize_default_vs_exception_bug' (15016062) panicked at src/precompute4/test_weighted_automata.rs:1984:9:
+      assertion `left == right` failed
+        left: 1..=1
+       right: 
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::test_weighted_automata::determinization_tests::test_determinize_default_vs_exception_bug
+                   at ./src/precompute4/test_weighted_automata.rs:1984:9
+         5: sep1::precompute4::test_weighted_automata::determinization_tests::test_determinize_default_vs_exception_bug::{{closure}}
+                   at ./src/precompute4/test_weighted_automata.rs:1944:51
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - assistant: |-
+      This is a classic determinization bug. The issue arises from an optimization that is too aggressive, causing a loss of information required to correctly handle transitions that should lead to a rejecting state.
+
+      Here's a breakdown of the problem and the fix:
+
+      1.  **The Root Cause**: When creating the sparse representation of the per-atom component DFAs (`merger_components`), we were omitting transitions that lead to the component's sink state. The `tuple_merger` then used only the symbols present in these sparse maps to explore the product state space. Consequently, if a symbol *only* led to sink states across all active components, it was never explored, and its resulting "all-sink" successor tuple was never added to the `point_map`.
+      2.  **The Symptom**: When building the final DWA in `build_dwa_from_merged_automaton`, the code iterates over the *full* alphabet (`sigma.labels`). When it encountered a symbol that was omitted during tuple merging (like `98` in the failing test case), it computed a successor tuple that was not in `point_map`, causing the `expect("Successor tuple must be mapped")` panic in the previous turn.
+      3.  **The Incorrect Previous Fix**: My last fix was to add `if !w.is_empty()` checks. This avoided the panic by simply not creating transitions for these unmapped sink-bound successors. However, this was incorrect because it failed to create an explicit rejecting transition for `98`. The DWA's default transition then incorrectly handled `98`, causing the automaton to accept a word it should have rejected.
+      4.  **The Correct Solution**: The `tuple_merger` must explore the entire alphabet (`sigma`) for every state to build a complete map of all reachable product tuples, including the "all-sink" tuple. We will achieve this by passing the alphabet size to `merge_and_build_automaton` and having it iterate through all possible symbols. With a complete `point_map`, we can then remove the incorrect `if !w.is_empty()` checks and correctly generate all necessary transitions in the final DWA, including those with empty weights that correctly lead to rejection.
+
+      ### Step-by-step instructions
+
+      1.  **Modify `src/precompute4/weighted_automata/tuple_merger.rs`**:
+          *   Change the signature of `merge_and_build_automaton` to accept a third parameter, `alphabet_size: usize`.
+          *   Inside the function, remove the logic that builds a local `alphabet` set.
+          *   Change the main exploration loop to iterate over all symbols from `0` to `alphabet_size - 1`.
+          *   Update the unit test `test_simple_merge` to pass an alphabet size to the function call.
+
+      2.  **Modify `src/precompute4/weighted_automata/determinization.rs`**:
+          *   Update the call to `tuple_merger::merge_and_build_automaton` to pass `sigma.size()` as the new third argument.
+          *   In `build_dwa_from_merged_automaton`, revert the changes from the previous turn. Remove the `if !w.is_empty()` conditions around the creation of default and exception transitions. The code should now unconditionally create transitions for all symbols, relying on the now-complete `point_map`.
+
+      ### Git diffs
+
+      Here are the patches to apply the fix.
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -168,7 +168,8 @@
+               let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
+                   start_tuple,
+                   &merger_components,
+      +            sigma.size(),
+               );
+               crate::debug!(
+                   4,
+      @@ -1035,22 +1036,16 @@
+       
+               // Default (OTHER)
+               let def_succ_tuple = tuple_merger::successor_tuple(rep, sigma.other_index, &merger_components);
+      +        let def_to_id =
+      +            *point_map.get(&def_succ_tuple).expect("Default successor tuple must be mapped");
+               let def_w = edge_weight_from_tuple(atom_weights, &def_succ_tuple);
+      -        // Only add a default transition if it carries a non-empty weight.
+      -        if !def_w.is_empty() {
+      -            let def_to_id =
+      -                *point_map.get(&def_succ_tuple).expect("Default successor tuple must be mapped");
+      -            let _ = dwa.set_default_transition(sid, def_to_id, def_w);
+      -        }
+      +        let _ = dwa.set_default_transition(sid, def_to_id, def_w);
+       
+               // Exceptions
+               for (li, &lbl) in sigma.labels.iter().enumerate() {
+                   let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
+      +            let to_id =
+      +                *point_map.get(&succ_tuple).expect("Successor tuple must be mapped");
+                   let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
+      -            if !w.is_empty() {
+      -                let to_id =
+      -                    *point_map.get(&succ_tuple).expect("Successor tuple must be mapped");
+      -                let _ = dwa.add_transition(sid, lbl, to_id, w);
+      -            }
+      +            let _ = dwa.add_transition(sid, lbl, to_id, w);
+               }
+           }
+       
+
+      ```
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/tuple_merger.rs b/src/precompute4/weighted_automata/tuple_merger.rs
+      --- a/src/precompute4/weighted_automata/tuple_merger.rs
+      +++ b/src/precompute4/weighted_automata/tuple_merger.rs
+      @@ -46,8 +46,8 @@
+       
+       pub fn merge_and_build_automaton(
+           start_tuple: ProductTuple,
+           components: &[Vec<BTreeMap<usize, usize>>],
+      +    alphabet_size: usize,
+       ) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>) {
+           let mut states: Vec<ProductTuple> = Vec::new();
+           let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
+      @@ -61,18 +61,7 @@
+           while let Some(state_id) = worklist.pop_front() {
+               let representative = states[state_id].clone();
+       
+      -        let mut alphabet = BTreeSet::new();
+      -        for (i, comp_state_opt) in representative.iter().enumerate() {
+      -            if let Some(comp_state) = comp_state_opt {
+      -                for &symbol in components[i][*comp_state].keys() {
+      -                    alphabet.insert(symbol);
+      -                }
+      -            }
+      -        }
+      -
+      -        for symbol in alphabet {
+      -
+      +        for symbol in 0..alphabet_size {
+                   let successor = successor_tuple(&representative, symbol, components);
+       
+                   if point_map.contains_key(&successor) {
+      @@ -111,11 +100,11 @@
+           fn test_simple_merge() {
+               let comp0 = vec![BTreeMap::from([(0, 0)])];
+               let comp1 = vec![BTreeMap::from([(1, 0)])];
+               let components = vec![comp0, comp1];
+      +        let alphabet_size = 3;
+       
+               let start_tuple = vec![Some(0), Some(0)];
+       
+      -        let (states, point_map) = merge_and_build_automaton(start_tuple, &components);
+      +        let (states, point_map) = merge_and_build_automaton(start_tuple, &components, alphabet_size);
+       
+               assert_eq!(states.len(), 1);
+               assert_eq!(states[0], vec![Some(0), Some(0)]);
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/precompute4/weighted_automata/tuple_merger.rs
+      Applying patch to 'src/precompute4/weighted_automata/tuple_merger.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/tuple_merger.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix determinization panic by ensuring
+      tuple merger explores full alphabet and creating all DWA transitions"'
     metadata:
 ...
