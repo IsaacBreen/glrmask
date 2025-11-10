@@ -870,7 +870,7 @@ local_system:
                   return;
               }
               self.nodes_visited += 1;
-              if self.nodes_visited % 10000 == 0 {
+              if self.nodes_visited % 100 == 0 {
                   eprintln!(
                       "[BnB Search] Nodes: {}, Best: {}, Current reps: {}, Pending: {}",
                       self.nodes_visited,
@@ -957,7 +957,8 @@ local_system:
               // Choose a branching demand with minimal flexibility, i.e., fewest compatible reps.
               let (idx, demand_tuple, candidates, is_edge) = self.choose_branch_demand(&st);
 
-              // Branch on mapping to the single best compatible existing rep first (if any).
+              // Strategy: Be decisive. If a merge is possible, do it. Only create a new rep if necessary.
+              // This prunes the search space aggressively, behaving like a smarter greedy algorithm.
               // The candidates are already sorted by `choose_branch_demand` to prefer minimal specificity increase.
               if let Some(&j) = candidates.first() {
                   let mut child = st.clone();
@@ -981,37 +982,31 @@ local_system:
                   }
 
                   self.search(child);
-                  if self.nodes_visited >= self.node_limit {
-                      return;
+              } else {
+                  // No compatible rep found. Create a new one.
+                  let mut child = st.clone();
+                  let new_rep_id = child.reps.len();
+                  child.reps.push(demand_tuple.clone());
+                  child.rep_versions.push(0);
+                  child.delta.push(vec![None; self.inst.alphabet_size]);
+
+                  // Record φ and δ for this demand
+                  match &child.pending[idx] {
+                      Demand::Point(_) => {
+                          child.image.insert(demand_tuple.clone(), new_rep_id);
+                      }
+                      Demand::Edge { rid, symbol, .. } => {
+                          child.image.insert(demand_tuple.clone(), new_rep_id);
+                          child.delta[*rid][*symbol] = Some(new_rep_id);
+                      }
                   }
+                  child.pending.swap_remove(idx);
+
+                  // Enqueue closure demands for the new representative.
+                  Self::enqueue_all_edges_for_rep(&mut child, new_rep_id, self.inst.alphabet_size);
+
+                  self.search(child);
               }
-
-              // Finally, branch by creating a new representative for this demand.
-              let mut child = st.clone();
-              let new_rep_id = child.reps.len();
-              // New representative equals the demanded tuple.
-              child.reps.push(demand_tuple.clone());
-              child.rep_versions.push(0);
-              child.delta.push(vec![None; self.inst.alphabet_size]);
-
-              // Record φ and δ for this demand
-              match &child.pending[idx] {
-                  Demand::Point(_) => {
-                      child.image.insert(demand_tuple.clone(), new_rep_id);
-                  }
-                  Demand::Edge { rid, symbol, .. } => {
-                      child.image.insert(demand_tuple.clone(), new_rep_id);
-                      child.delta[*rid][*symbol] = Some(new_rep_id);
-                  }
-              }
-              // Remove processed demand
-              child.pending.swap_remove(idx);
-
-              // Enqueue closure demands for the new representative.
-              Self::enqueue_all_edges_for_rep(&mut child, new_rep_id, self.inst.alphabet_size);
-
-              self.search(child);
-              // return to caller
           }
 
           /// Find an existing representative j such that x ≤ rep[j].
@@ -3426,5 +3421,172 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Complete implementation of optimized synthesis
       (BnB) with performance guards and logging"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/tuple_merger.rs since previous turn:
+      ```diff
+      --- original version of src/precompute4/weighted_automata/tuple_merger.rs
+      +++ current version of src/precompute4/weighted_automata/tuple_merger.rs
+      @@ -413,7 +413,7 @@
+                   return;
+               }
+               self.nodes_visited += 1;
+      -        if self.nodes_visited % 10000 == 0 {
+      +        if self.nodes_visited % 100 == 0 {
+                   eprintln!(
+                       "[BnB Search] Nodes: {}, Best: {}, Current reps: {}, Pending: {}",
+                       self.nodes_visited,
+
+      ```
+    metadata:
+  - user: |2-
+        [Determinize: 00:00:03] [████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████] 42/42 (per-atom DFAs)[DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:139: Computed start tuple in 2.166µs
+      [BnB Search] Starting search. Initial greedy solution size: 22394
+      [BnB Search] Nodes: 100, Best: 22394, Current reps: 99, Pending: 430
+      [BnB Search] Nodes: 200, Best: 22394, Current reps: 173, Pending: 1136
+      [BnB Search] Nodes: 300, Best: 22394, Current reps: 234, Pending: 1016
+      [BnB Search] Nodes: 400, Best: 22394, Current reps: 320, Pending: 516
+      [BnB Search] Nodes: 500, Best: 22394, Current reps: 419, Pending: 574
+      [BnB Search] Nodes: 600, Best: 22394, Current reps: 518, Pending: 829
+      [BnB Search] Nodes: 700, Best: 22394, Current reps: 617, Pending: 484
+      [BnB Search] Nodes: 800, Best: 22394, Current reps: 715, Pending: 503
+      [BnB Search] Nodes: 900, Best: 22394, Current reps: 812, Pending: 488
+      [BnB Search] Nodes: 1000, Best: 22394, Current reps: 847, Pending: 454
+      [BnB Search] Nodes: 1100, Best: 22394, Current reps: 847, Pending: 761
+      [BnB Search] Nodes: 1200, Best: 22394, Current reps: 890, Pending: 356
+      [BnB Search] Nodes: 1300, Best: 22394, Current reps: 912, Pending: 1447
+      [BnB Search] Nodes: 1400, Best: 22394, Current reps: 1000, Pending: 1461
+
+
+      Still too slow. It needs to be much faster.
+    metadata:
+  - assistant: |-
+      The logs confirm that the search is still getting bogged down. Even with a reduced branching factor, the number of pending demands and representatives is growing uncontrollably. The fundamental issue is that for a problem of this scale, any amount of exploratory branching is too expensive. The search needs to be far more aggressive and greedy.
+
+      The solution is to change the search strategy from "explore the best merge OR create a new rep" to "if a merge is possible, DO IT; otherwise, create a new rep". This makes the choice at each step deterministic, effectively turning the algorithm into a highly focused, smarter version of the original greedy synthesizer. It will find one good solution path quickly instead of trying to explore many parallel paths.
+
+      ### Step-by-step instructions
+
+      1.  **Open the file** `src/precompute4/weighted_automata/tuple_merger.rs`.
+
+      2.  **Go to the `search` method** inside the `impl<'a> BnBSolver<'a>` block.
+
+      3.  **Locate the branching logic.** This is the section that starts with `if let Some(&j) = candidates.first() { ... }` followed by the block that creates a new representative.
+
+      4.  **Restructure the branching logic into a strict `if/else` block.** This ensures that the "create new representative" path is *only* taken when no merges are possible.
+
+          *   Wrap the entire "create new representative" block inside an `else` clause attached to the `if let Some(&j) = candidates.first()` statement.
+          *   Remove the redundant node limit check between the two original blocks.
+
+      ### Git diff
+
+      Here is the git diff for the changes described above.
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/tuple_merger.rs
+      +++ b/src/precompute4/weighted_automata/tuple_merger.rs
+      @@ -494,57 +494,51 @@
+               // Choose a branching demand with minimal flexibility, i.e., fewest compatible reps.
+               let (idx, demand_tuple, candidates, is_edge) = self.choose_branch_demand(&st);
+       
+      -        // Branch on mapping to the single best compatible existing rep first (if any).
+      +        // Strategy: Be decisive. If a merge is possible, do it. Only create a new rep if necessary.
+      +        // This prunes the search space aggressively, behaving like a smarter greedy algorithm.
+               // The candidates are already sorted by `choose_branch_demand` to prefer minimal specificity increase.
+               if let Some(&j) = candidates.first() {
+                   let mut child = st.clone();
+                   let changed_rep = Self::unify_into(&mut child, j, &demand_tuple);
+                   // Record φ and δ
+                   match &child.pending[idx] {
+                       Demand::Point(_) => {
+                           child.image.insert(demand_tuple.clone(), j);
+                       }
+                       Demand::Edge { rid, symbol, .. } => {
+                           child.image.insert(demand_tuple.clone(), j);
+                           child.delta[*rid][*symbol] = Some(j);
+                       }
+                   }
+                   // Remove the processed demand
+                   child.pending.swap_remove(idx);
+       
+                   // If the representative changed, we must re-issue edge demands for its outgoing transitions.
+                   if changed_rep {
+                       Self::enqueue_all_edges_for_rep(&mut child, j, self.inst.alphabet_size);
+                   }
+       
+                   self.search(child);
+      -            if self.nodes_visited >= self.node_limit {
+      -                return;
+      -            }
+      -        }
+      -
+      -        // Finally, branch by creating a new representative for this demand.
+      -        let mut child = st.clone();
+      -        let new_rep_id = child.reps.len();
+      -        // New representative equals the demanded tuple.
+      -        child.reps.push(demand_tuple.clone());
+      -        child.rep_versions.push(0);
+      -        child.delta.push(vec![None; self.inst.alphabet_size]);
+      -
+      -        // Record φ and δ for this demand
+      -        match &child.pending[idx] {
+      -            Demand::Point(_) => {
+      -                child.image.insert(demand_tuple.clone(), new_rep_id);
+      -            }
+      -            Demand::Edge { rid, symbol, .. } => {
+      -                child.image.insert(demand_tuple.clone(), new_rep_id);
+      -                child.delta[*rid][*symbol] = Some(new_rep_id);
+      -            }
+      -        }
+      -        // Remove processed demand
+      -        child.pending.swap_remove(idx);
+      -
+      -        // Enqueue closure demands for the new representative.
+      -        Self::enqueue_all_edges_for_rep(&mut child, new_rep_id, self.inst.alphabet_size);
+      -
+      -        self.search(child);
+      -        // return to caller
+      +        } else {
+      +            // No compatible rep found. Create a new one.
+      +            let mut child = st.clone();
+      +            let new_rep_id = child.reps.len();
+      +            child.reps.push(demand_tuple.clone());
+      +            child.rep_versions.push(0);
+      +            child.delta.push(vec![None; self.inst.alphabet_size]);
+      +
+      +            // Record φ and δ for this demand
+      +            match &child.pending[idx] {
+      +                Demand::Point(_) => {
+      +                    child.image.insert(demand_tuple.clone(), new_rep_id);
+      +                }
+      +                Demand::Edge { rid, symbol, .. } => {
+      +                    child.image.insert(demand_tuple.clone(), new_rep_id);
+      +                    child.delta[*rid][*symbol] = Some(new_rep_id);
+      +                }
+      +            }
+      +            child.pending.swap_remove(idx);
+      +
+      +            // Enqueue closure demands for the new representative.
+      +            Self::enqueue_all_edges_for_rep(&mut child, new_rep_id, self.inst.alphabet_size);
+      +
+      +            self.search(child);
+      +        }
+           }
+       
+           /// Find an existing representative j such that x ≤ rep[j].
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/tuple_merger.rs
+      Applying patch to 'src/precompute4/weighted_automata/tuple_merger.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/tuple_merger.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refine BnB branching to be deterministic:
+      only explore the single best merge candidate or create a new representative"'
     metadata:
 ...

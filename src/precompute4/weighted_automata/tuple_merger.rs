@@ -500,7 +500,8 @@ impl<'a> BnBSolver<'a> {
         // Choose a branching demand with minimal flexibility, i.e., fewest compatible reps.
         let (idx, demand_tuple, candidates, is_edge) = self.choose_branch_demand(&st);
 
-        // Branch on mapping to the single best compatible existing rep first (if any).
+        // Strategy: Be decisive. If a merge is possible, do it. Only create a new rep if necessary.
+        // This prunes the search space aggressively, behaving like a smarter greedy algorithm.
         // The candidates are already sorted by `choose_branch_demand` to prefer minimal specificity increase.
         if let Some(&j) = candidates.first() {
             let mut child = st.clone();
@@ -524,37 +525,31 @@ impl<'a> BnBSolver<'a> {
             }
 
             self.search(child);
-            if self.nodes_visited >= self.node_limit {
-                return;
+        } else {
+            // No compatible rep found. Create a new one.
+            let mut child = st.clone();
+            let new_rep_id = child.reps.len();
+            child.reps.push(demand_tuple.clone());
+            child.rep_versions.push(0);
+            child.delta.push(vec![None; self.inst.alphabet_size]);
+
+            // Record φ and δ for this demand
+            match &child.pending[idx] {
+                Demand::Point(_) => {
+                    child.image.insert(demand_tuple.clone(), new_rep_id);
+                }
+                Demand::Edge { rid, symbol, .. } => {
+                    child.image.insert(demand_tuple.clone(), new_rep_id);
+                    child.delta[*rid][*symbol] = Some(new_rep_id);
+                }
             }
+            child.pending.swap_remove(idx);
+
+            // Enqueue closure demands for the new representative.
+            Self::enqueue_all_edges_for_rep(&mut child, new_rep_id, self.inst.alphabet_size);
+
+            self.search(child);
         }
-
-        // Finally, branch by creating a new representative for this demand.
-        let mut child = st.clone();
-        let new_rep_id = child.reps.len();
-        // New representative equals the demanded tuple.
-        child.reps.push(demand_tuple.clone());
-        child.rep_versions.push(0);
-        child.delta.push(vec![None; self.inst.alphabet_size]);
-
-        // Record φ and δ for this demand
-        match &child.pending[idx] {
-            Demand::Point(_) => {
-                child.image.insert(demand_tuple.clone(), new_rep_id);
-            }
-            Demand::Edge { rid, symbol, .. } => {
-                child.image.insert(demand_tuple.clone(), new_rep_id);
-                child.delta[*rid][*symbol] = Some(new_rep_id);
-            }
-        }
-        // Remove processed demand
-        child.pending.swap_remove(idx);
-
-        // Enqueue closure demands for the new representative.
-        Self::enqueue_all_edges_for_rep(&mut child, new_rep_id, self.inst.alphabet_size);
-
-        self.search(child);
-        // return to caller
     }
 
     /// Find an existing representative j such that x ≤ rep[j].
