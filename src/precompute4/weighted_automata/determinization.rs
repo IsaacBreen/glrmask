@@ -701,7 +701,7 @@ impl DetDFA {
             pre.sort_unstable();
             pre.dedup();
 
-            let mut affected: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
+            let mut affected: BTreeMap<usize, (Vec<usize>, Vec<usize>)> = BTreeMap::new();
             for &s in &pre { 
                 let pid = part_id[s]; 
                 affected.entry(pid).or_default().0.push(s); 
@@ -928,7 +928,7 @@ impl ProductDFA {
         }
 
         // Map tuples to their group id to determine the start state id
-        let mut tuple_to_state_id: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
+        let mut tuple_to_state_id: BTreeMap<ProductDFAStateTuple, usize> = BTreeMap::new();
         for (sid, st) in states.iter().enumerate() {
             for t in &st.all_tuples {
                 tuple_to_state_id.insert(t.clone(), sid);
