@@ -289,7 +289,7 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
 
     // A min-priority queue storing `(Reverse(specificity), representative_id)`.
     // We process the most general representatives first.
-    let mut work_pq: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
+    let mut work_pq: BinaryHeap<Reverse<(usize, usize, u64)>> = BinaryHeap::new();
     // A set to track which representative IDs are currently scheduled in the PQ.
     let mut work_set: HashSet<usize> = HashSet::new();
     // A version counter for each representative to handle stale entries in the PQ.
