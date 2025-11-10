@@ -1045,10 +1045,12 @@ fn build_dwa_from_merged_automaton(
         // Exceptions
         for (li, &lbl) in sigma.labels.iter().enumerate() {
             let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
-            let to_id =
-                *point_map.get(&succ_tuple).expect("Successor tuple must be mapped");
             let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
-            let _ = dwa.add_transition(sid, lbl, to_id, w);
+            if !w.is_empty() {
+                let to_id =
+                    *point_map.get(&succ_tuple).expect("Successor tuple must be mapped");
+                let _ = dwa.add_transition(sid, lbl, to_id, w);
+            }
         }
     }
 
