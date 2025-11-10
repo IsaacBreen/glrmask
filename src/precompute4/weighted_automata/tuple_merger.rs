@@ -39,15 +39,16 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 /// Represents one of the component automata in the product.
 #[derive(Clone, Debug)]
 pub struct Component {
     /// A designated sink state, if one exists.
     pub sink_state: Option<usize>,
-    /// Transition table: `transitions[state][symbol] -> next_state`.
-    pub transitions: Vec<Vec<usize>>,
+    /// Sparse transition table: `transitions[state]` is a map from `symbol` to `next_state`.
+    /// Any symbol not in the map is assumed to transition to the sink state.
+    pub transitions: Vec<BTreeMap<usize, usize>>,
 }
 
 /// A state in the final merged automaton. It corresponds to a set of compatible product tuples.
@@ -103,14 +104,21 @@ pub fn successor_tuple(
     for i in 0..k {
         match tuple[i] {
             Some(s) => {
-                let v = components[i].transitions[s][symbol];
-                if components[i].sink_state == Some(v) {
-                    out.push(None);
+                // Look up in sparse map. If not found, it's a transition to the sink.
+                if let Some(&v) = components[i].transitions[s].get(&symbol) {
+                    if components[i].sink_state == Some(v) {
+                        out.push(None);
+                    } else {
+                        out.push(Some(v));
+                    }
                 } else {
-                    out.push(Some(v));
+                    // Not in map -> transition to sink
+                    out.push(None);
                 }
             }
-            None => out.push(None),
+            None => {
+                out.push(None);
+            }
         }
     }
     out
@@ -201,6 +209,7 @@ pub fn merge_and_build_automaton(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_unify_tuples() {
@@ -215,17 +224,17 @@ mod tests {
     fn test_simple_merge() {
         // Component 0: 2 states (0=start, 1=sink). 0 -> 0 on 'a', 0 -> 1 on 'b'.
         let comp0 = Component {
-            num_states: 2,
-            start_state: 0,
             sink_state: Some(1),
-            transitions: vec![vec![0, 1], vec![1, 1]], // s0: a->s0, b->s1; s1: a->s1, b->s1
+            // s0: a(0)->s0. b(1) is not present, so it goes to sink (1).
+            // s1: all transitions go to sink (1), so map is empty.
+            transitions: vec![BTreeMap::from([(0, 0)]), BTreeMap::new()],
         };
         // Component 1: 2 states (0=start, 1=sink). 0 -> 1 on 'a', 0 -> 0 on 'b'.
         let comp1 = Component {
-            num_states: 2,
-            start_state: 0,
             sink_state: Some(1),
-            transitions: vec![vec![1, 0], vec![1, 1]], // s0: a->s1, b->s0; s1: a->s1, b->s1
+            // s0: b(1)->s0. a(0) is not present, so it goes to sink (1).
+            // s1: all transitions go to sink (1), so map is empty.
+            transitions: vec![BTreeMap::from([(1, 0)]), BTreeMap::new()],
         };
         let components = vec![comp0, comp1];
         let alphabet_size = 2; // 'a', 'b'

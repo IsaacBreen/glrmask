@@ -136,9 +136,25 @@ impl NWA {
 
         // 5) Merge tuples greedily and attach transitions/finals from representative tuples
         let now_merge = Instant::now();
-        let merger_components: Vec<tuple_merger::Component> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| tuple_merger::Component {
-            sink_state: *sink,
-            transitions: dfa.trans.clone(),
+        let merger_components: Vec<tuple_merger::Component> = comp_dfas.iter().zip(comp_sinks.iter()).map(|(dfa, sink)| {
+            let mut sparse_trans = Vec::with_capacity(dfa.n_states);
+            for s in 0..dfa.n_states {
+                let mut exceptions = BTreeMap::new();
+                if let Some(sink_idx) = sink {
+                    for (sym, &target) in dfa.trans[s].iter().enumerate() {
+                        if target != *sink_idx {
+                            exceptions.insert(sym, target);
+                        }
+                    }
+                } else {
+                    // No sink, so all transitions are explicit.
+                    for (sym, &target) in dfa.trans[s].iter().enumerate() {
+                        exceptions.insert(sym, target);
+                    }
+                }
+                sparse_trans.push(exceptions);
+            }
+            tuple_merger::Component { sink_state: *sink, transitions: sparse_trans }
         }).collect();
 
         let merged_automaton = tuple_merger::merge_and_build_automaton(
@@ -963,9 +979,25 @@ fn build_dwa_from_merged_automaton(
 
     // We need a way to compute successor tuples to determine edge weights.
     // Re-create the component structures for the tuple_merger.
-    let merger_components: Vec<tuple_merger::Component> = comps.iter().map(|dfa| tuple_merger::Component {
-        sink_state: dfa.find_sink_index(sigma),
-        transitions: dfa.trans.clone(),
+    let merger_components: Vec<tuple_merger::Component> = comps.iter().map(|dfa| {
+        let sink = dfa.find_sink_index(sigma);
+        let mut sparse_trans = Vec::with_capacity(dfa.n_states);
+        for s in 0..dfa.n_states {
+            let mut exceptions = BTreeMap::new();
+            if let Some(sink_idx) = sink {
+                for (sym, &target) in dfa.trans[s].iter().enumerate() {
+                    if target != sink_idx {
+                        exceptions.insert(sym, target);
+                    }
+                }
+            } else {
+                for (sym, &target) in dfa.trans[s].iter().enumerate() {
+                    exceptions.insert(sym, target);
+                }
+            }
+            sparse_trans.push(exceptions);
+        }
+        tuple_merger::Component { sink_state: sink, transitions: sparse_trans }
     }).collect();
 
     for state in &merged_automaton.states {
