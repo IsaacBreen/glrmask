@@ -22,7 +22,7 @@ impl Display for NWABuildError {
 }
 
 /// A default transition in an NWA. It is taken for any symbol that is NOT in its `exceptions` set.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct NWADefaultTransition {
     pub target: NWAStateID,
     pub weight: Weight,
