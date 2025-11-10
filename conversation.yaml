@@ -3904,6 +3904,24 @@ local_system:
                   p.finish_with_message("Per-atom DFAs built & minimized");
               }
 
+              println!("\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
+              for (i, dfa) in comp_dfas.iter().enumerate() {
+                  println!("  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
+                  println!("    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
+                  for s in 0..dfa.n_states {
+                      let final_marker = if dfa.finals[s] { " (final)" } else { "" };
+                      print!("    - State {}{}: ", s, final_marker);
+                      let mut trans_parts = vec![];
+                      for (sym_idx, &label) in sigma.labels.iter().enumerate() {
+                          let target = dfa.trans[s][sym_idx];
+                          trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+                      }
+                      let other_target = dfa.trans[s][sigma.other_index];
+                      trans_parts.push(format!("*->{}", other_target));
+                      println!("{}", trans_parts.join(", "));
+                  }
+              }
+
               // Edge case: No atoms => no weight can be produced
               if atoms.intervals.is_empty() {
                   return DWA::new();
@@ -7958,5 +7976,133 @@ messages:
     metadata:
   - user: 'Changes committed with message: "debug: Enhance NWA determinization logging
       with structured MergedProduct and tuple mapping"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Print each of the atomic DFA in full as well. Basically I wanna see all
+      data generated.
+    metadata:
+  - assistant: |-
+      Of course. I will add detailed printing for each of the generated atomic DFAs. Here are the step-by-step instructions and the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `src/precompute4/weighted_automata/determinization.rs`**.
+
+      2.  **Navigate to the `determinize_to_dwa` function**.
+
+      3.  **Find the location where the per-atom DFAs are constructed**. This is inside a `for` loop that iterates over `atoms.intervals`. The loop finishes just before a progress bar message is printed.
+
+      4.  **Insert the new printing code** right after the line `p.finish_with_message("Per-atom DFAs built & minimized");` and before the edge case check `if atoms.intervals.is_empty()`.
+
+          The code to insert is as follows. It iterates through the generated DFAs (`comp_dfas`) and prints a summary and transition table for each one.
+
+          ```rust
+                  println!("\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
+                  for (i, dfa) in comp_dfas.iter().enumerate() {
+                      println!("  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
+                      println!("    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
+                      for s in 0..dfa.n_states {
+                          let final_marker = if dfa.finals[s] { " (final)" } else { "" };
+                          print!("    - State {}{}: ", s, final_marker);
+                          let mut trans_parts = vec![];
+                          for (sym_idx, &label) in sigma.labels.iter().enumerate() {
+                              let target = dfa.trans[s][sym_idx];
+                              trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+                          }
+                          let other_target = dfa.trans[s][sigma.other_index];
+                          trans_parts.push(format!("*->{}", other_target));
+                          println!("{}", trans_parts.join(", "));
+                      }
+                  }
+          ```
+
+      ### Git Diff
+
+      Here is the git diff for the change.
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -79,6 +79,23 @@
+               if let Some(p) = pb_atoms {
+                   p.finish_with_message("Per-atom DFAs built & minimized");
+               }
+      +
+      +        println!("\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
+      +        for (i, dfa) in comp_dfas.iter().enumerate() {
+      +            println!("  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
+      +            println!("    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
+      +            for s in 0..dfa.n_states {
+      +                let final_marker = if dfa.finals[s] { " (final)" } else { "" };
+      +                print!("    - State {}{}: ", s, final_marker);
+      +                let mut trans_parts = vec![];
+      +                for (sym_idx, &label) in sigma.labels.iter().enumerate() {
+      +                    let target = dfa.trans[s][sym_idx];
+      +                    trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+      +                }
+      +                let other_target = dfa.trans[s][sigma.other_index];
+      +                trans_parts.push(format!("*->{}", other_target));
+      +                println!("{}", trans_parts.join(", "));
+      +            }
+      +        }
+       
+               // Edge case: No atoms => no weight can be produced
+               if atoms.intervals.is_empty() {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "debug: Add full printing for atomic DFAs,
+      MergedProduct, and tuple mapping during NWA determinization"'
     metadata:
 ...

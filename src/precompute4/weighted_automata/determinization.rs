@@ -85,6 +85,24 @@ impl NWA {
             p.finish_with_message("Per-atom DFAs built & minimized");
         }
 
+        println!("\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
+        for (i, dfa) in comp_dfas.iter().enumerate() {
+            println!("  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
+            println!("    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
+            for s in 0..dfa.n_states {
+                let final_marker = if dfa.finals[s] { " (final)" } else { "" };
+                print!("    - State {}{}: ", s, final_marker);
+                let mut trans_parts = vec![];
+                for (sym_idx, &label) in sigma.labels.iter().enumerate() {
+                    let target = dfa.trans[s][sym_idx];
+                    trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+                }
+                let other_target = dfa.trans[s][sigma.other_index];
+                trans_parts.push(format!("*->{}", other_target));
+                println!("{}", trans_parts.join(", "));
+            }
+        }
+
         // Edge case: No atoms => no weight can be produced
         if atoms.intervals.is_empty() {
             return DWA::new();
