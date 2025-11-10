@@ -1002,9 +1002,12 @@ fn build_dwa_from_merged_automaton(
         // Exceptions
         for (li, &lbl) in sigma.labels.iter().enumerate() {
             let to_id = state.transitions[li];
-            let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
-            let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
-            let _ = dwa.add_transition(sid, lbl, to_id, w);
+            // An exception is only needed if its target differs from the default target.
+            if to_id != def_to_id {
+                let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
+                let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
+                let _ = dwa.add_transition(sid, lbl, to_id, w);
+            }
         }
     }
 
