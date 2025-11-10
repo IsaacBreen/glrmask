@@ -53,14 +53,11 @@ pub fn successor_tuple(
 pub fn merge_and_build_automaton(
     start_tuple: ProductTuple,
     components: &[Vec<BTreeMap<usize, usize>>],
-    alphabet_size: usize,
+    other_index: usize,
 ) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>) {
     let mut states: Vec<ProductTuple> = Vec::new();
     let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
     let mut worklist: VecDeque<usize> = VecDeque::new();
-
-    // The "other" symbol, representing default transitions, is conventionally the largest symbol index.
-    let other_index = if alphabet_size > 0 { alphabet_size - 1 } else { 0 };
 
     let start_id = 0;
     states.push(start_tuple.clone());
@@ -78,7 +75,6 @@ pub fn merge_and_build_automaton(
                 }
             }
         }
-        // The default transition must always be explored to ensure the product automaton is complete.
         alphabet.insert(other_index);
 
         for symbol in alphabet {
@@ -135,10 +131,11 @@ mod tests {
         let comp0 = vec![BTreeMap::from([(0, 0)])];
         let comp1 = vec![BTreeMap::from([(1, 0)])];
         let components = vec![comp0, comp1];
+        let other_index = 2;
 
         let start_tuple = vec![Some(0), Some(0)];
 
-        let (states, point_map) = merge_and_build_automaton(start_tuple, &components, 3);
+        let (states, point_map) = merge_and_build_automaton(start_tuple, &components, other_index);
 
         assert_eq!(states.len(), 1);
         assert_eq!(states[0], vec![Some(0), Some(0)]);
