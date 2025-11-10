@@ -11,6 +11,70 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
+/// Faster ε-closure from a single source with masked propagation.
+/// - scratch_w: a weight array reused across calls; entries are set to zeros() after use via 'touched'.
+/// - touched: the list of indices whose entries in scratch_w are non-zero and must be reset.
+/// Returns a sorted Vec of (state, weight).
+fn eps_closure_masked_vec_one(
+    s: NWAStateID,
+    states: &NWAStates,
+    fut: &[Weight],
+    scratch_w: &mut [Weight],
+    q: &mut VecDeque<NWAStateID>,
+    touched: &mut Vec<NWAStateID>,
+) -> Vec<(NWAStateID, Weight)> {
+    let n = states.len();
+    if s >= n {
+        return Vec::new();
+    }
+    let fs = fut[s].clone();
+    if fs.is_empty() {
+        return Vec::new();
+    }
+
+    // Initialize
+    scratch_w[s] = fs;
+    touched.push(s);
+    q.push_back(s);
+
+    while let Some(u) = q.pop_front() {
+        let base = scratch_w[u].clone();
+        if base.is_empty() { continue; }
+
+        for &(v, ref w_eps) in &states[u].epsilons {
+            if v >= n { continue; }
+
+            let mut prop = &base & w_eps;
+            if prop.is_empty() { continue; }
+
+            prop &= &fut[v];
+            if prop.is_empty() { continue; }
+
+            let old = &scratch_w[v];
+            let new_w = old | &prop;
+            if new_w != *old {
+                scratch_w[v] = new_w;
+                if old.is_empty() {
+                    touched.push(v);
+                }
+                q.push_back(v);
+            }
+        }
+    }
+
+    // Collect results and reset scratch_w for touched indices
+    let mut out: Vec<(NWAStateID, Weight)> = Vec::with_capacity(touched.len());
+    for &i in touched.iter() {
+        if !scratch_w[i].is_empty() {
+            out.push((i, scratch_w[i].clone()));
+        }
+        scratch_w[i] = Weight::zeros();
+    }
+    touched.clear();
+    out.sort_by_key(|(sid, _)| *sid);
+    out
+}
+
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
@@ -35,61 +99,6 @@ impl NWA {
         let n = self.states.len();
         if n == 0 {
             return DWA::new();
-        }
-
-        fn eps_closure_masked(
-            sources: &[NWAStateID],
-            states: &NWAStates,
-            fut: &[Weight],
-        ) -> Vec<(NWAStateID, Weight)> {
-            let mut out: HashMap<NWAStateID, Weight> = HashMap::new();
-            let mut q: VecDeque<NWAStateID> = VecDeque::new();
-            for &s in sources {
-                if s >= states.len() {
-                    continue;
-                }
-                let f = fut[s].clone();
-                if !f.is_empty() {
-                    out.insert(s, f);
-                    q.push_back(s);
-                }
-            }
-            while let Some(u) = q.pop_front() {
-                let base = out.get(&u).cloned().unwrap_or_else(Weight::zeros);
-                if base.is_empty() {
-                    continue;
-                }
-                for &(v, ref w_eps) in &states[u].epsilons {
-                    if v >= states.len() {
-                        continue;
-                    }
-                    let mut prop = &base & w_eps;
-                    if prop.is_empty() {
-                        continue;
-                    }
-                    prop &= &fut[v];
-                    if prop.is_empty() {
-                        continue;
-                    }
-                    match out.entry(v) {
-                        Entry::Occupied(mut e) => {
-                            let old = e.get_mut();
-                            let nu = &*old | &prop;
-                            if nu != *old {
-                                *old = nu;
-                                q.push_back(v);
-                            }
-                        }
-                        Entry::Vacant(e) => {
-                            e.insert(prop);
-                            q.push_back(v);
-                        }
-                    }
-                }
-            }
-            let mut v: Vec<(NWAStateID, Weight)> = out.into_iter().collect();
-            v.sort_by_key(|(sid, _)| *sid);
-            v
         }
 
         fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
@@ -158,6 +167,7 @@ impl NWA {
             ex: Vec<(i16, Vec<usize>)>,
         }
 
+        // Precompute masked ε-closures for all states using fast scratch buffers.
         let pb_eps = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(n as u64).with_style(
                 ProgressStyle::default_bar()
@@ -168,8 +178,11 @@ impl NWA {
             None
         };
         let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
+        let mut scratch_w: Vec<Weight> = vec![Weight::zeros(); n];
+        let mut q: VecDeque<NWAStateID> = VecDeque::new();
+        let mut touched: Vec<NWAStateID> = Vec::new();
         for s in 0..n {
-            eps_cache[s] = eps_closure_masked(std::slice::from_ref(&s), &self.states, &fut);
+            eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
             if let Some(p) = &pb_eps {
                 p.inc(1);
             }

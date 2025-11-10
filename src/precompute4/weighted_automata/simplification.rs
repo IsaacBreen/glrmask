@@ -100,13 +100,16 @@ impl DWA {
             None
         };
 
-        // Initial normalize + prune
+        // Initial normalize + prune + constrain finals
         if let Some(p) = &pb { p.set_message("normalize/prune".to_string()); }
         let _ = Self::run_pass_with_test(states, body, "initial normalize_edges_inplace", |s, _b| {
             Self::normalize_edges_inplace(s)
         });
         let _ = Self::run_pass_with_test(states, body, "initial prune_unreachable", |s, b| {
             Self::prune_unreachable(s, b)
+        });
+        let _ = Self::run_pass_with_test(states, body, "initial constrain finals", |s, b| {
+            Self::propagate_and_constrain_weights(s, b)
         });
 
         let mut changed_any = true;
@@ -127,15 +130,22 @@ impl DWA {
                     Self::absorb_sink_finals_into_incoming(s)
                 });
 
-            // Always relax first: this safely enlarges edge weights with ¬future(target),
-            // exposing more structural equality opportunities for minimization.
+            // Relax edges locally (cheap) to unlock structure equality.
             if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
             changed_any |=
                 Self::run_pass_with_test(states, body, "relax_weights_by_local_future", |s, _b| {
                     Self::relax_weights_by_local_future(s)
                 });
 
-            // For small automata, follow relaxation with a proper minimization pass.
+            // Propagate full future (heavier) for small automata only.
+            if !large {
+                if let Some(p) = &pb { p.set_message("propagate future weights".to_string()); }
+                changed_any |=
+                    Self::run_pass_with_test(states, body, "propagate_future_weights", |s, _b| {
+                        Self::propagate_future_weights(s)
+                    });
+            }
+
             if !large {
                 if let Some(p) = &pb { p.set_message("minimize".to_string()); }
                 changed_any |=
@@ -147,6 +157,12 @@ impl DWA {
             if let Some(p) = &pb { p.set_message("normalize".to_string()); }
             changed_any |= Self::run_pass_with_test(states, body, "normalize_edges_inplace", |s, _b| {
                 Self::normalize_edges_inplace(s)
+            });
+
+            // Constrain finals again with updated reachability (cheap, helps prune/minimize)
+            if let Some(p) = &pb { p.set_message("constrain finals".to_string()); }
+            changed_any |= Self::run_pass_with_test(states, body, "propagate_and_constrain_weights", |s, b| {
+                Self::propagate_and_constrain_weights(s, b)
             });
 
             if let Some(p) = &pb { p.set_message("prune".to_string()); }
@@ -520,6 +536,7 @@ impl DWA {
                 let def_sig = st.transitions.default.map(|d| {
                     (part[d], st.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
                 });
+                // Keep only exceptions that structurally differ from default (dest or weight).
                 let ex_sig: Vec<_> = st.transitions.exceptions.iter()
                     .map(|(ch, &tgt)| (*ch, (part[tgt], st.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all))))
                     .filter(|(_, (cls, w))| def_sig.as_ref().map_or(true, |(dc, dw)| *dc != *cls || dw != w))
@@ -545,73 +562,41 @@ impl DWA {
 
         // Map partition id -> new state id
         let mut pid_to_new: HashMap<usize, usize> = HashMap::new();
-        let mut new_states: Vec<DWAState> = Vec::with_capacity(groups.len());
+        let mut new_states: Vec<DWAState> = vec![DWAState::default(); groups.len()];
 
+        // Pre-assign ids
+        for (pid, _) in &groups {
+            let new_id = pid_to_new.len();
+            pid_to_new.insert(*pid, new_id);
+        }
+
+        // Rebuild states by copying representative weights and remapping targets by partition.
         for (pid, members) in &groups {
             let rep = members[0];
             let rep_state = &states[rep];
+            let new_id = *pid_to_new.get(pid).unwrap();
 
             let mut st = DWAState::default();
             st.state_weight = rep_state.state_weight.clone();
             st.final_weight = rep_state.final_weight.clone();
 
-            // Structure: keep default if present, and exceptions that differ from default class/weight
-            let def_sig_rep = rep_state.transitions.default.map(|d| {
-                (part[d], rep_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
-            });
-            st.transitions.default = def_sig_rep.as_ref().map(|_| 0);
-            for (ch, tgt) in &rep_state.transitions.exceptions {
-                let cls = part[*tgt];
-                let ex_weight = rep_state.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all);
-                if def_sig_rep.as_ref().map_or(true, |(dc, dw)| *dc != cls || *dw != ex_weight) {
-                    st.transitions.exceptions.insert(*ch, 0);
-                }
-            }
-
-            // Aggregate weights (union) across members: default and per-label exceptions
-            if st.transitions.default.is_some() {
-                let mut agg_def: Option<Weight> = None;
-                for &old in members {
-                    if let Some(w) = states[old].trans_weight_default.as_ref() {
-                        if let Some(ref mut a) = agg_def { *a |= w; } else { agg_def = Some(w.clone()); }
-                    }
-                }
-                st.trans_weight_default = agg_def;
-            }
-            for ch in st.transitions.exceptions.keys().cloned().collect::<Vec<_>>() {
-                let mut agg: Option<Weight> = None;
-                for &old in members {
-                    if let Some(w) = states[old].trans_weights_exceptions.get(&ch) {
-                        if let Some(ref mut a) = agg { *a |= w; } else { agg = Some(w.clone()); }
-                    }
-                }
-                if let Some(w) = agg {
-                    st.trans_weights_exceptions.insert(ch, w);
-                }
-            }
-
-            let new_id = new_states.len();
-            pid_to_new.insert(*pid, new_id);
-            new_states.push(st);
-        }
-
-        // Fix transition targets
-        for (pid, members) in &groups {
-            let new_id = *pid_to_new.get(pid).unwrap();
-            let rep = members[0];
-            let rep_state = &states[rep];
-
+            // Default
             if let Some(d) = rep_state.transitions.default {
                 let cls = part[d];
-                new_states[new_id].transitions.default = Some(*pid_to_new.get(&cls).unwrap());
+                st.transitions.default = Some(*pid_to_new.get(&cls).unwrap());
+                st.trans_weight_default = rep_state.trans_weight_default.clone();
             }
 
-            let ex_old = new_states[new_id].transitions.exceptions.clone();
-            new_states[new_id].transitions.exceptions.clear();
-            for (ch, _) in ex_old {
-                let cls = part[*rep_state.transitions.exceptions.get(&ch).unwrap()];
-                new_states[new_id].transitions.exceptions.insert(ch, *pid_to_new.get(&cls).unwrap());
+            // Exceptions (copy rep structure; members have the same by construction)
+            for (ch, tgt) in &rep_state.transitions.exceptions {
+                let cls = part[*tgt];
+                st.transitions.exceptions.insert(*ch, *pid_to_new.get(&cls).unwrap());
+                if let Some(w) = rep_state.trans_weights_exceptions.get(ch) {
+                    st.trans_weights_exceptions.insert(*ch, w.clone());
+                }
             }
+
+            new_states[new_id] = st;
         }
 
         states.0 = new_states;
@@ -761,9 +746,13 @@ impl NWA {
             passes += 1;
             if let Some(p) = &pb { p.inc(1); }
             changed = false;
+
             Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
-            Self::run_pass(&pb, "unify final states", &mut changed, || self.unify_final_states());
+            Self::run_pass(&pb, "dedup labeled", &mut changed, || self.dedup_labeled_edges());
             Self::run_pass(&pb, "dedup epsilons", &mut changed, || self.dedup_epsilon_edges());
+            Self::run_pass(&pb, "unify defaults", &mut changed, || self.unify_default_transitions());
+
+            Self::run_pass(&pb, "unify final states", &mut changed, || self.unify_final_states());
             Self::run_pass(&pb, "bypass ε-chains", &mut changed, || self.bypass_trivial_epsilon_chains());
             Self::run_pass(&pb, "collapse SCCs", &mut changed, || self.collapse_all_weight_epsilon_sccs());
             Self::run_pass(&pb, "prune unreachable", &mut changed, || self.prune_unreachable());
@@ -1019,6 +1008,70 @@ impl NWA {
                 exceptions,
             });
         }
+    }
+
+    /// New: Merge duplicate labeled edges by unioning weights per (label, target).
+    fn dedup_labeled_edges(&mut self) -> bool {
+        let mut changed = false;
+        for st in &mut self.states.0 {
+            let mut new_map: BTreeMap<i16, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
+            for (lbl, targets) in &st.transitions {
+                let entry = new_map.entry(*lbl).or_insert_with(BTreeMap::new);
+                for (to, w) in targets {
+                    let e = entry.entry(*to).or_insert_with(Weight::zeros);
+                    let old = e.clone();
+                    *e |= w;
+                    if *e != old {
+                        changed = true;
+                    }
+                }
+            }
+            if !new_map.is_empty() {
+                let mut new_trans = BTreeMap::new();
+                for (lbl, inner) in new_map {
+                    let vecv: Vec<(NWAStateID, Weight)> = inner.into_iter().collect();
+                    if let Some(old_vec) = st.transitions.get(&lbl) {
+                        if vecv != *old_vec {
+                            changed = true;
+                        }
+                    }
+                    new_trans.insert(lbl, vecv);
+                }
+                st.transitions = new_trans;
+            }
+        }
+        changed
+    }
+
+    /// New: Merge multiple default transitions with identical (target, weight) by intersecting their exception sets.
+    /// Proof: Presence condition across defaults is (∃i: l ∉ Ei) for label l. A single default with exceptions E=⋂Ei
+    /// has presence l ∉ E, which is equivalent.
+    fn unify_default_transitions(&mut self) -> bool {
+        let mut changed = false;
+        for st in &mut self.states.0 {
+            if st.default.len() <= 1 {
+                continue;
+            }
+            let mut merged: Vec<NWADefaultTransition> = Vec::new();
+            for def in st.default.clone() {
+                if let Some(ex) = merged.iter_mut().find(|d| d.target == def.target && d.weight == def.weight) {
+                    // Intersect exception sets
+                    let a = std::mem::take(&mut ex.exceptions);
+                    let b = def.exceptions;
+                    let inter: BTreeSet<i16> = a.intersection(&b).copied().collect();
+                    ex.exceptions = inter;
+                    changed = true;
+                } else {
+                    merged.push(def);
+                }
+            }
+            // Keep canonical ordering
+            if merged != st.default {
+                st.default = merged;
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
