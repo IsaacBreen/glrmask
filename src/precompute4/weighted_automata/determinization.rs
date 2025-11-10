@@ -2,7 +2,7 @@ use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
 use super::common::Weight;
 use super::dwa::DWA;
 use super::nwa::{NWAStates, NWA};
-use crate::precompute4::weighted_automata::NWAStateID;
+use crate::precompute4::weighted_automata::{NWADefaultTransition, NWAStateID};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -192,7 +192,8 @@ impl NWA {
             let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
 
             // Compute default step; skip if out-of-bounds or effect is empty after weighting + ε-closure.
-            let def_steps: Vec<usize> = self.states[s].default.iter().filter_map(|(to, wdef)| {
+            let def_steps: Vec<usize> = self.states[s].default.iter().filter_map(|default| {
+                let NWADefaultTransition { target: to, weight: wdef, .. } = default;
                 if *to < n {
                     let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
                     if pairs_def.is_empty() { None } else { Some(step_pool.intern(pairs_def)) }
