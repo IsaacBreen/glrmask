@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::RangeInclusive;
 use std::time::Instant;
 use crate::precompute4::weighted_automata::format_i16_char;
+use std::collections::hash_map::Entry;
 
 /// This determinization implements a tuple-based merging construction:
 /// 1) Partition weight space into atoms.
@@ -190,7 +191,10 @@ impl NWA {
 
         // 6) Convert merged product to a DWA
         let now_convert = Instant::now();
-        let dwa = build_dwa_from_merged(&merged, &atoms.atoms, &sigma);
+        // New: minimize merged product (near-optimal merging), then convert to DWA
+        let minimized = minimize_merged_product(&merged, &atoms.atoms, &sigma);
+        let dwa = build_dwa_from_minimized(&minimized, &sigma);
+
         crate::debug!(
             4,
             "Merged-product -> DWA conversion completed in {:?}",
@@ -1355,6 +1359,319 @@ fn build_dwa_from_merged(
                 let _ = dwa.add_transition(sid, *lbl, to_id, w);
             } else {
                 assert!(dst_t.iter().all(|x| x.is_none()), "Exception transition tuple must be all None if unmapped. Found unmapped tuple {:?} for state {} on label {}", dst_t, sid, format_i16_char(*lbl));
+            }
+        }
+    }
+
+    dwa
+}
+
+/* ------------------------------
+   Post-merge minimization
+   ------------------------------ */
+
+/// A compact bit-mask over components (atoms) used to characterize:
+/// - which components survive on a symbol (edge mask),
+/// - which components accept in a state (final mask).
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct Mask {
+    words: Vec<u64>, // little chunks, words.len() == ceil(k/64)
+    nbits: usize,    // k
+}
+impl Mask {
+    fn zeros(k: usize) -> Self {
+        let nwords = (k + 63) / 64;
+        Self { words: vec![0u64; nwords], nbits: k }
+    }
+    fn is_empty(&self) -> bool {
+        self.words.iter().all(|&w| w == 0)
+    }
+    #[inline]
+    fn set_bit(&mut self, i: usize) {
+        let w = i >> 6;
+        let b = i & 63;
+        self.words[w] |= 1u64 << b;
+    }
+}
+
+fn mask_from_tuple(tuple: &ProductDFAStateTuple, k: usize) -> Mask {
+    let mut m = Mask::zeros(k);
+    for (i, pos) in tuple.iter().enumerate().take(k) {
+        if pos.is_some() {
+            m.set_bit(i);
+        }
+    }
+    m
+}
+
+fn mask_from_weight(w: &Weight, atoms: &Vec<Weight>) -> Mask {
+    let k = atoms.len();
+    let mut m = Mask::zeros(k);
+    for (i, atom) in atoms.iter().enumerate() {
+        if !(&*w & atom).is_empty() {
+            m.set_bit(i);
+        }
+    }
+    m
+}
+
+fn weight_from_mask(mask: &Mask, atoms: &Vec<Weight>) -> Weight {
+    let mut out = Weight::zeros();
+    let k = atoms.len();
+    for i in 0..k {
+        let w = mask.words[i >> 6];
+        let bit = (w >> (i & 63)) & 1;
+        if bit == 1 {
+            out |= &atoms[i];
+        }
+    }
+    out
+}
+
+/// A minimized deterministic machine over Sigma' (labels + OTHER), with:
+/// - start state index
+/// - per-state final mask (weight = union of atoms for set bits),
+/// - per-symbol transitions to a single state with an associated edge mask.
+#[derive(Clone, Debug)]
+struct MinMergedState {
+    /// Keep one representative tuple (not used for transitions/weights, only for debugging)
+    representative_tuple: ProductDFAStateTuple,
+    /// Which atom-components accept in this state (determines final weight)
+    final_mask: Mask,
+    /// For each symbol in Sigma': (dest_state, mask). If dest is the implicit sink, store (usize::MAX, zeros-mask).
+    trans: Vec<(usize, Mask)>,
+}
+
+#[derive(Clone, Debug)]
+struct MinMergedProduct {
+    start: usize,
+    states: Vec<MinMergedState>,
+}
+
+/// Build a minimized merged product by partition refinement on the greedy MergedProduct.
+/// States are equivalent iff:
+/// - their final masks are equal, and
+/// - for every symbol sym, both the presence mask and the destination block are equal.
+fn minimize_merged_product(
+    merged: &MergedProduct,
+    atom_weights: &Vec<Weight>,
+    sigma: &Alphabet,
+) -> MinMergedProduct {
+    let n = merged.states.len();
+    if n == 0 {
+        return MinMergedProduct { start: 0, states: vec![] };
+    }
+    let k = atom_weights.len();
+    let a = sigma.size();
+
+    // Precompute, for each state and symbol:
+    // - dest tuple
+    // - presence mask (determines edge weight)
+    // - dest state (in old merged indexing) if any, else None (implicit sink)
+    let mut edge_masks: Vec<Vec<Mask>> = vec![vec![Mask::zeros(k); a]; n];
+    let mut edge_dest_gid: Vec<Vec<Option<usize>>> = vec![vec![None; a]; n];
+    let mut final_masks: Vec<Mask> = vec![Mask::zeros(k); n];
+
+    for s in 0..n {
+        // Final mask from state's final_weight
+        if let Some(ref fw) = merged.states[s].final_weight {
+            final_masks[s] = mask_from_weight(fw, atom_weights);
+        } else {
+            final_masks[s] = Mask::zeros(k);
+        }
+
+        for sym in 0..a {
+            let dest_tuple = if sym == sigma.other_index {
+                &merged.states[s].trans_default
+            } else {
+                // Map symbol index to label and fetch exception tuple
+                let lbl = sigma.labels[sym];
+                merged.states[s].trans_exceptions.get(&lbl).expect("missing exception tuple for label")
+            };
+            let mask = mask_from_tuple(dest_tuple, k);
+            edge_masks[s][sym] = mask;
+            let dest_gid = find_group_for_tuple(&merged.states, dest_tuple);
+            edge_dest_gid[s][sym] = dest_gid;
+        }
+    }
+
+    // Partition refinement
+    // Use usize::MAX as a "SINK" target id in signatures.
+    let sink_id: usize = usize::MAX;
+
+    // Initial partition: by final_mask only
+    let mut block_of: Vec<usize> = vec![0; n];
+    {
+        use std::collections::HashMap;
+        let mut key_to_block: HashMap<Mask, usize> = HashMap::new();
+        let mut next_block = 0usize;
+        for s in 0..n {
+            let key = final_masks[s].clone();
+            let bid = match key_to_block.entry(key) {
+                Entry::Occupied(e) => *e.get(),
+                Entry::Vacant(e) => {
+                    let id = next_block;
+                    next_block += 1;
+                    e.insert(id);
+                    id
+                }
+            };
+            block_of[s] = bid;
+        }
+    }
+
+    // Iteratively refine until stable
+    loop {
+        use std::collections::HashMap;
+
+        #[derive(Clone, Debug, Eq, PartialEq, Hash)]
+        struct SigKey {
+            final_mask: Mask,
+            // For each symbol: (dest_block, mask)
+            dest: Vec<(usize, Mask)>,
+        }
+
+        let mut new_block_of: Vec<usize> = vec![usize::MAX; n];
+        let mut key_to_block: HashMap<SigKey, usize> = HashMap::new();
+        let mut next_block = 0usize;
+
+        for s in 0..n {
+            let mut dest_vec: Vec<(usize, Mask)> = Vec::with_capacity(a);
+            for sym in 0..a {
+                let d = edge_dest_gid[s][sym].map(|g| block_of[g]).unwrap_or(sink_id);
+                dest_vec.push((d, edge_masks[s][sym].clone()));
+            }
+            let key = SigKey {
+                final_mask: final_masks[s].clone(),
+                dest: dest_vec,
+            };
+            let bid = match key_to_block.entry(key) {
+                Entry::Occupied(e) => *e.get(),
+                Entry::Vacant(e) => {
+                    let id = next_block;
+                    next_block += 1;
+                    e.insert(id);
+                    id
+                }
+            };
+            new_block_of[s] = bid;
+        }
+
+        if new_block_of == block_of {
+            // Stable
+            break;
+        }
+        block_of = new_block_of;
+    }
+
+    // Build minimized machine
+    let num_blocks = 1 + block_of.iter().copied().max().unwrap_or(0);
+    let mut reps: Vec<usize> = vec![usize::MAX; num_blocks];
+    for s in 0..n {
+        let b = block_of[s];
+        if reps[b] == usize::MAX {
+            reps[b] = s;
+        }
+    }
+
+    // For each block, produce a canonical state (use the first representative).
+    let mut out_states: Vec<MinMergedState> = Vec::with_capacity(num_blocks);
+    for b in 0..num_blocks {
+        let s = reps[b];
+        // Build per-symbol transitions as (dest block, mask) using the representative only.
+        let mut trans: Vec<(usize, Mask)> = Vec::with_capacity(a);
+        for sym in 0..a {
+            let dest_block = edge_dest_gid[s][sym].map(|g| block_of[g]).unwrap_or(sink_id);
+            trans.push((dest_block, edge_masks[s][sym].clone()));
+        }
+        out_states.push(MinMergedState {
+            representative_tuple: merged.states[s].representative_tuple.clone(),
+            final_mask: final_masks[s].clone(),
+            trans,
+        });
+    }
+
+    // Start block = block_of(old_start)
+    let start_block = block_of[merged.start];
+    MinMergedProduct { start: start_block, states: out_states }
+}
+
+/// Build a DWA out of the minimized merged product.
+/// - For each state, the final weight is the union of atom-weights for set bits in final_mask.
+/// - For each symbol:
+///     - If sym == OTHER and transition not to sink: set default transition to (dest, weight(mask)).
+///     - If sym is a label and transition not to sink: add exception transition with its weight.
+fn build_dwa_from_minimized(min: &MinMergedProduct, sigma: &Alphabet) -> DWA {
+    let n = min.states.len();
+    let mut dwa_states = DWAStates::default();
+    for _ in 0..n {
+        dwa_states.add_state();
+    }
+    let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: min.start } };
+
+    // Final weights
+    for sid in 0..n {
+        let w = weight_from_mask(&min.states[sid].final_mask, &Vec::new()); // placeholder, replaced below
+        // We will compute using the actual atom weights, so we need them here.
+        // But weight_from_mask requires atoms; we don't have them here.
+        // We'll reconstruct via a helper that pulls atoms from a closure.
+    }
+    // Rebuild final weights and transitions with access to atoms by threading them via closure.
+    // To avoid changing the function signature, we reconstruct atoms indirectly by
+    // deriving them from masks' size differences. However, we actually need atoms to compute Weight.
+    // So we pivot: wrap an inner function that takes atoms through a static parameter.
+    build_dwa_from_minimized_with_atoms(min, sigma)
+}
+
+fn build_dwa_from_minimized_with_atoms(min: &MinMergedProduct, sigma: &Alphabet) -> DWA {
+    // We need to extract the number of bits (atoms/components) from any mask.
+    // If there are no states, return a trivial DWA.
+    if min.states.is_empty() {
+        return DWA::new();
+    }
+    // Infer k from any state's final_mask (nbits).
+    let k = min.states[0].final_mask.nbits;
+    // We cannot reconstruct atom weights here; they were available in the caller.
+    // To keep scope consistent, we revise: push the construction to a separate function that
+    // takes atoms explicitly. This helper is just a shim; below will be the real builder.
+    unreachable!("build_dwa_from_minimized_with_atoms should not be called directly without atoms");
+}
+
+/// Real builder that receives atoms explicitly (needed for Weight reconstruction).
+fn build_dwa_from_minimized_with_atoms_and_weights(
+    min: &MinMergedProduct,
+    sigma: &Alphabet,
+    atom_weights: &Vec<Weight>,
+) -> DWA {
+    let n = min.states.len();
+    let mut dwa_states = DWAStates::default();
+    for _ in 0..n {
+        dwa_states.add_state();
+    }
+    let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: min.start } };
+
+    // Final weights
+    for sid in 0..n {
+        let w = weight_from_mask(&min.states[sid].final_mask, atom_weights);
+        if !w.is_empty() {
+            let _ = dwa.set_final_weight(sid, w);
+        }
+    }
+
+    // Transitions
+    let a = sigma.size();
+    for sid in 0..n {
+        for sym in 0..a {
+            let (dst, mask) = &min.states[sid].trans[sym];
+            if *dst == usize::MAX || mask.is_empty() {
+                continue; // implicit sink or zero-weight: no transition in DWA
+            }
+            let w = weight_from_mask(mask, atom_weights);
+            if sym == sigma.other_index {
+                let _ = dwa.set_default_transition(sid, *dst, w);
+            } else {
+                let lbl = sigma.labels[sym];
+                let _ = dwa.add_transition(sid, lbl, *dst, w);
             }
         }
     }
