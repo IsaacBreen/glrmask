@@ -164,8 +164,8 @@ mod tests {
         let s0_id = automaton.start_state_id;
         assert_eq!(automaton.states[s0_id].representative_tuple, vec![Some(0), Some(0)]);
 
-        assert_eq!(automaton.states[s0_id].transitions[0], s0_id);
+        assert_eq!(automaton.states[s0_id].transitions[&0], s0_id);
 
-        assert_eq!(automaton.states[s0_id].transitions[1], s0_id);
+        assert_eq!(automaton.states[s0_id].transitions[&1], s0_id);
     }
 }

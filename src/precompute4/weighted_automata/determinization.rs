@@ -1034,14 +1034,14 @@ fn build_dwa_from_merged_automaton(
         }
 
         // Default (OTHER)
-        let def_to_id = state.transitions[sigma.other_index];
+        let def_to_id = state.transitions[&sigma.other_index];
         let def_succ_tuple = tuple_merger::successor_tuple(rep, sigma.other_index, &merger_components);
         let def_w = edge_weight_from_tuple(atom_weights, &def_succ_tuple);
         let _ = dwa.set_default_transition(sid, def_to_id, def_w);
 
         // Exceptions
         for (li, &lbl) in sigma.labels.iter().enumerate() {
-            let to_id = state.transitions[li];
+            let to_id = state.transitions[&li];
             let succ_tuple = tuple_merger::successor_tuple(rep, li, &merger_components);
             let w = edge_weight_from_tuple(atom_weights, &succ_tuple);
             let _ = dwa.add_transition(sid, lbl, to_id, w);
