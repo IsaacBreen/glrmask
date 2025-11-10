@@ -84,7 +84,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Symbol index in 0..alphabet_size.
 pub type Symbol = usize;
@@ -288,6 +288,9 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
     let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
 
     let mut reps: Vec<ProductTuple> = Vec::new();
+    let mut reps_spec: Vec<usize> = Vec::new();
+    let mut inv_idx: Vec<BTreeMap<LocalState, BTreeSet<usize>>> =
+        vec![BTreeMap::new(); inst.components.len()];
     let mut image: HashMap<ProductTuple, usize> = HashMap::new();
     let mut work_queue: VecDeque<usize> = VecDeque::new();
     let mut work_set: HashSet<usize> = HashSet::new(); // To efficiently check if an item is in work_queue
@@ -295,25 +298,22 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
     // Initialize
     reps.push(inst.start.clone());
     image.insert(inst.start.clone(), 0);
+
+    let mut start_spec = 0;
+    for (i, opt_v) in inst.start.iter().enumerate() {
+        if let Some(v) = opt_v {
+            inv_idx[i].entry(*v).or_default().insert(0);
+            start_spec += 1;
+        }
+    }
+    reps_spec.push(start_spec);
+
     work_queue.push_back(0);
     work_set.insert(0);
     println!("Starting greedy synthesis...");
 
-    let mut processed_items = 0;
-
     // Explore representatives
     while let Some(rid) = work_queue.pop_front() {
-        processed_items += 1;
-        if processed_items % 500 == 0 {
-            println!(
-                " -> Processed {} items. State: |R|={}, |φ|={}, |Work|={}",
-                processed_items,
-                reps.len(),
-                image.len(),
-                work_queue.len()
-            );
-        }
-
         work_set.remove(&rid);
         let rep = reps[rid].clone(); // Clone to avoid mutable borrow issues
 
@@ -324,19 +324,35 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
                 continue; // Already processed and mapped
             }
 
-            let mut best_candidate: Option<(usize, (usize, usize))> = None; // (rep_id, (spec_increase, current_spec))
+            // Fast candidate search using an inverted index.
+            // This heuristic only considers representatives that overlap with `x` on at least one coordinate.
+            let x_spec: Vec<(usize, usize)> =
+                x.iter().enumerate().filter_map(|(i, o)| o.map(|v| (i, v))).collect();
+            let x_spec_len = x_spec.len();
 
-            // Find the best existing representative to merge with
-            for j in 0..reps.len() {
-                if let Some(unified) = unify_tuples(&reps[j], &x) {
-                    let current_spec = reps[j].iter().filter(|opt| opt.is_some()).count();
-                    let unified_spec = unified.iter().filter(|opt| opt.is_some()).count();
-                    let spec_increase = unified_spec - current_spec;
+            let mut candidates: BTreeMap<usize, usize> = BTreeMap::new(); // rep_id -> overlap_count
+            for (i, v) in &x_spec {
+                if let Some(reps_with_iv) = inv_idx[*i].get(v) {
+                    for &j in reps_with_iv {
+                        *candidates.entry(j).or_insert(0) += 1;
+                    }
+                }
+            }
 
+            let mut best_candidate: Option<(usize, (usize, usize))> = None; // (rep_id, cost)
+
+            for (&j, &overlap) in &candidates {
+                let is_compatible = x_spec.iter().all(|(i, v_x)| match reps[j][*i] {
+                    Some(v_r) => v_r == *v_x,
+                    None => true,
+                });
+
+                if is_compatible {
+                    let spec_increase = x_spec_len - overlap;
+                    let current_spec = reps_spec[j];
                     let current_cost = (spec_increase, current_spec);
 
-                    if let Some((_best_j, best_cost)) = best_candidate {
-                        // Lexicographical comparison: smaller cost is better.
+                    if let Some((_, best_cost)) = best_candidate {
                         if current_cost < best_cost {
                             best_candidate = Some((j, current_cost));
                         }
@@ -348,10 +364,32 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
 
             if let Some((j, _cost)) = best_candidate {
                 // Found a best-fit representative to merge with.
-                let unified_tuple = unify_tuples(&reps[j], &x).unwrap(); // Should not fail
+                let old_rep = reps[j].clone();
+                let unified_tuple = unify_tuples(&old_rep, &x).unwrap(); // Should not fail
 
-                if unified_tuple != reps[j] {
+                if unified_tuple != old_rep {
+                    // Remove old_rep from inv_idx
+                    for (i, opt_v) in old_rep.iter().enumerate() {
+                        if let Some(v) = opt_v {
+                            if let Some(ids) = inv_idx[i].get_mut(v) {
+                                ids.remove(&j);
+                                if ids.is_empty() {
+                                    inv_idx[i].remove(v);
+                                }
+                            }
+                        }
+                    }
+
+                    // Add unified_tuple to inv_idx and update spec
                     reps[j] = unified_tuple;
+                    reps_spec[j] = 0;
+                    for (i, opt_v) in reps[j].iter().enumerate() {
+                        if let Some(v) = opt_v {
+                            inv_idx[i].entry(*v).or_default().insert(j);
+                            reps_spec[j] += 1;
+                        }
+                    }
+
                     // If the representative changed, it needs to be re-processed.
                     if !work_set.contains(&j) {
                         work_queue.push_back(j);
@@ -360,19 +398,22 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
                 }
                 image.insert(x, j);
             } else {
-                // No compatible representative found. Create a new one.
+                // No compatible representative found among overlapping candidates. Create a new one.
                 let new_id = reps.len();
+
+                let mut spec = 0;
+                for (i, opt_v) in x.iter().enumerate() {
+                    if let Some(v) = opt_v {
+                        inv_idx[i].entry(*v).or_default().insert(new_id);
+                        spec += 1;
+                    }
+                }
+                reps_spec.push(spec);
+
                 reps.push(x.clone());
                 image.insert(x, new_id);
                 work_queue.push_back(new_id);
                 work_set.insert(new_id);
-                if reps.len() % 100 == 0 {
-                    println!(
-                        " -> Representative count reached {}. |Work|={}",
-                        reps.len(),
-                        work_queue.len()
-                    );
-                }
             }
         }
     }
