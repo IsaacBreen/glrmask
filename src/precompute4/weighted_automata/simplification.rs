@@ -1192,35 +1192,38 @@ impl NWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: BTreeMap<
+            let mut sig2pid: HashMap<
                 (
                     Option<Weight>,
-                    BTreeSet<(usize, Weight, BTreeSet<i16>)>,
-                    BTreeMap<usize, Weight>,
-                    BTreeMap<i16, BTreeSet<(usize, Weight)>>,
+                    Vec<(usize, Weight, BTreeSet<i16>)>,
+                    Vec<(usize, Weight)>,
+                    Vec<(i16, Vec<(usize, Weight)>)>,
                 ),
                 usize,
-            > = BTreeMap::new();
+            > = HashMap::new();
 
             for i in 0..n {
                 let st = &self.states[i];
-                let def_sig =
-                    st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect::<BTreeSet<_>>();
+                let mut def_sig =
+                    st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect::<Vec<_>>();
+                def_sig.sort_unstable();
 
                 let eps_sig = st.epsilons.iter()
                     .fold(BTreeMap::new(), |mut acc, (to, w)| {
                         *acc.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
                         acc
-                    });
+                    })
+                    .into_iter().collect::<Vec<_>>();
 
                 let lbl_sig = st.transitions.iter()
                     .map(|(lbl, targets)| {
-                        let target_sigs = targets.iter()
+                        let mut target_sigs = targets.iter()
                             .map(|(to, w)| (part[*to], w.clone()))
-                            .collect::<BTreeSet<_>>();
+                            .collect::<Vec<_>>();
+                        target_sigs.sort_unstable();
                         (*lbl, target_sigs)
                     })
-                    .collect::<BTreeMap<_,_>>();
+                    .collect::<Vec<_>>();
 
                 let sig = (st.final_weight.clone(), def_sig, eps_sig, lbl_sig);
                 let pid_next = sig2pid.len();
