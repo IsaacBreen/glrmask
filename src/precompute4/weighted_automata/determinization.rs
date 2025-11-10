@@ -226,6 +226,8 @@ impl NWA {
                 }
             }
 
+            crate::debug!(6, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
+
             let mut sorted_def_steps = def_steps.clone();
             sorted_def_steps.sort_unstable();
             let key = MacroSigKey {
@@ -342,6 +344,8 @@ impl NWA {
             }
             let node_gates = nodes[idx].gates.clone();
 
+            crate::debug!(6, "\nProcessing composition node {}: gates: {:?}", idx, node_gates);
+
             let mut def_groups: HashMap<usize, Weight> = HashMap::new();
             let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
             let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
@@ -361,6 +365,10 @@ impl NWA {
                     }
                 }
             }
+
+            crate::debug!(6, "  - def_groups: {:?}", def_groups);
+            crate::debug!(6, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
+            crate::debug!(6, "  - def_exers_by_label: {:?}", def_exers_by_label);
 
             let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
             let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
@@ -390,6 +398,14 @@ impl NWA {
                 if !map.is_empty() {
                     target_maps.insert(Some(*lbl), map);
                 }
+            }
+
+            crate::debug!(6, "  - computed target_maps:");
+            for (label, map) in &target_maps {
+                let mut keys: Vec<_> = map.keys().copied().collect();
+                keys.sort_unstable();
+                let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+                crate::debug!(6, "    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
             }
 
             let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
@@ -438,6 +454,16 @@ impl NWA {
                 if let Some(lbl) = label {
                     node.exception_targets.insert(lbl, target_idx);
                     node.exception_masks.insert(lbl, mask);
+                }
+            }
+
+            crate::debug!(6, "  - Resolved transitions for node {}:", idx);
+            if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
+                crate::debug!(6, "    - default -> {} (mask: {})", target, mask);
+            }
+            for (lbl, target) in &node.exception_targets {
+                if let Some(mask) = node.exception_masks.get(lbl) {
+                    crate::debug!(6, "    - on {}: -> {} (mask: {})", lbl, target, mask);
                 }
             }
 
