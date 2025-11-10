@@ -33,7 +33,7 @@ impl NWA {
 
         // Work on a copy to avoid side effects.
         let mut nwa = self.clone();
-        debug_log(3, || format!("Starting determinization for NWA with {} states", nwa.states.len()));
+        crate::debug!(3, "Starting determinization for NWA with {} states", nwa.states.len());
 
         // Compute future-acceptance masks (used to filter alphabet).
         let fut = nwa.compute_future_weights();
@@ -41,16 +41,17 @@ impl NWA {
         // 1) Weight atoms
         let now_atoms = Instant::now();
         let atoms = WeightPartition::from_nwa(&nwa);
-        debug_log(4, || {
-            format!("Built weight partition with {} atoms in {:?}", atoms.intervals.len(), now_atoms.elapsed())
-        });
+        crate::debug!(
+            4,
+            "Built weight partition with {} atoms in {:?}",
+            atoms.intervals.len(),
+            now_atoms.elapsed()
+        );
 
         // 2) Alphabet (labels + OTHER), filtered by future weights
         let now_sigma = Instant::now();
         let sigma = Alphabet::from_nwa_with_future(&nwa, &fut);
-        debug_log(4, || {
-            format!("Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed())
-        });
+        crate::debug!(4, "Built alphabet with {} labels in {:?}", sigma.labels.len(), now_sigma.elapsed());
 
         // 3) Per-atom DFAs
         let pb_atoms = if PROGRESS_BAR_ENABLED {
@@ -85,13 +86,12 @@ impl NWA {
             p.finish_with_message("Per-atom DFAs built & minimized");
         }
 
-        println!("\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
+        crate::debug!(5, "\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
         for (i, dfa) in comp_dfas.iter().enumerate() {
-            println!("  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
-            println!("    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
+            crate::debug!(5, "  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
+            crate::debug!(5, "    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
             for s in 0..dfa.n_states {
                 let final_marker = if dfa.finals[s] { " (final)" } else { "" };
-                print!("    - State {}{}: ", s, final_marker);
                 let mut trans_parts = vec![];
                 for (sym_idx, &label) in sigma.labels.iter().enumerate() {
                     let target = dfa.trans[s][sym_idx];
@@ -99,7 +99,7 @@ impl NWA {
                 }
                 let other_target = dfa.trans[s][sigma.other_index];
                 trans_parts.push(format!("*->{}", other_target));
-                println!("{}", trans_parts.join(", "));
+                crate::debug!(5, "    - State {}{}: {}", s, final_marker, trans_parts.join(", "));
             }
         }
 
@@ -111,13 +111,12 @@ impl NWA {
         // 4) Enumerate reachable product tuples (Vec<Option<usize>>)
         let now_enum = Instant::now();
         let (all_tuples, start_tuple_idx) = enumerate_product_tuples(&comp_dfas, &sigma, &comp_sinks);
-        debug_log(4, || {
-            format!(
-                "Enumerated {} product tuples in {:?}",
-                all_tuples.len(),
-                now_enum.elapsed()
-            )
-        });
+        crate::debug!(
+            4,
+            "Enumerated {} product tuples in {:?}",
+            all_tuples.len(),
+            now_enum.elapsed()
+        );
         let start_tuple = all_tuples[start_tuple_idx].clone();
 
         // 5) Merge tuples greedily and attach transitions/finals from representative tuples
@@ -130,13 +129,12 @@ impl NWA {
             &comp_sinks,
             &atoms.atoms,
         );
-        debug_log(4, || {
-            format!(
-                "Merged into {} product states in {:?}",
-                merged.states.len(),
-                now_merge.elapsed()
-            )
-        });
+        crate::debug!(
+            4,
+            "Merged into {} product states in {:?}",
+            merged.states.len(),
+            now_merge.elapsed()
+        );
         {
             // Helper to format tuples like [0, _, 2] instead of [Some(0), None, Some(2)]
             let format_tuple = |tuple: &ProductDFAStateTuple| -> String {
@@ -150,52 +148,49 @@ impl NWA {
                 format!("[{}]", parts.join(", "))
             };
 
-            println!("\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
+            crate::debug!(5, "\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
             for (gid, state) in merged.states.iter().enumerate() {
-                println!("  State {}:", gid);
-                println!("    - Representative: {}", format_tuple(&state.representative_tuple));
+                crate::debug!(5, "  State {}:", gid);
+                crate::debug!(5, "    - Representative: {}", format_tuple(&state.representative_tuple));
                 if let Some(w) = &state.final_weight {
-                    println!("    - Final Weight: {}", w);
+                    crate::debug!(5, "    - Final Weight: {}", w);
                 }
-                println!("    - Transitions:");
+                crate::debug!(5, "    - Transitions:");
                 let dest_tuple_def = &state.trans_default;
                 if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_def) {
-                    println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
+                    crate::debug!(5, "      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
                 } else {
-                    println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
+                    crate::debug!(5, "      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
                 }
 
                 for (lbl, dest_tuple_ex) in &state.trans_exceptions {
                     let char_repr = super::common::format_i16_char(*lbl);
                     if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_ex) {
-                        println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
+                        crate::debug!(5, "      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
                     } else {
-                        println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
+                        crate::debug!(5, "      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
                     }
                 }
-                println!("    - Contains {} tuples.", state.all_tuples.len());
+                crate::debug!(5, "    - Contains {} tuples.", state.all_tuples.len());
             }
 
-            println!("\n--- tuple_to_group ({} entries) ---", tuple_to_group.len());
+            crate::debug!(5, "\n--- tuple_to_group ({} entries) ---", tuple_to_group.len());
             let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
             for (tuple, gid) in sorted_map {
-                println!("  {} -> State {}", format_tuple(tuple), gid);
+                crate::debug!(5, "  {} -> State {}", format_tuple(tuple), gid);
             }
         }
 
         // 6) Convert merged product to a DWA
         let now_convert = Instant::now();
         let dwa = build_dwa_from_merged(&merged, &tuple_to_group, &atoms.atoms, &sigma);
-        debug_log(4, || {
-            format!(
-                "Merged-product -> DWA conversion completed in {:?}",
-                now_convert.elapsed()
-            )
-        });
+        crate::debug!(
+            4,
+            "Merged-product -> DWA conversion completed in {:?}",
+            now_convert.elapsed()
+        );
 
-        debug_log(3, || {
-            format!("NWA::determinize_to_dwa total time: {:?}", now_total.elapsed())
-        });
+        crate::debug!(3, "NWA::determinize_to_dwa total time: {:?}", now_total.elapsed());
 
         dwa
     }
@@ -204,10 +199,6 @@ impl NWA {
 /* ------------------------------
    Utilities and support structs
    ------------------------------ */
-
-fn debug_log(level: usize, msg: impl FnOnce() -> String) {
-    crate::debug!(level, "{}", msg());
-}
 
 /// Alphabet = all labels that appear as exceptions, plus a special OTHER symbol.
 /// OTHER means "use default transitions"
@@ -750,7 +741,7 @@ struct DetDFA {
 }
 impl DetDFA {
     fn minimize(&mut self, sigma: &Alphabet) {
-        debug_log(4, || format!("Minimizing DFA with {} states", self.n_states));
+        crate::debug!(4, "Minimizing DFA with {} states", self.n_states);
         // Remove states unreachable from start first
         let reachable = {
             let mut visited = vec![false; self.n_states];
