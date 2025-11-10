@@ -18,16 +18,14 @@ use crate::precompute4::weighted_automata::format_i16_char;
 /// 2) For each atom, determinize the corresponding unweighted NFA to a DFA.
 /// 3) Enumerate the set of reachable product tuples T = Vec<Option<usize>> of component DFA states,
 ///    where None represents the component's sink state.
-/// 4) Merge tuples greedily into product states by unifying on non-sink positions:
-///    two tuples are mergeable iff for each index either both are Some with equal values or at least one is None.
-///    The representative tuple of a merged state is the pointwise "most-specific" unify.
-/// 5) For each merged state, compute:
-///    - final weight = union of atom-weights for indices whose representative component is accepting.
-///    - transitions from representative tuple on the global alphabet (labels + OTHER).
-///      Store per-label destination tuple, and for OTHER store a default destination tuple.
-/// 6) Convert merged product directly to a DWA:
-///    - For a transition with destination tuple U, the edge weight is the union of atom-weights for i with U[i] != None.
-///    - Final weight as computed in (5).
+/// 4) Minimize the resulting deterministic Mealy automaton (edge outputs are weights; states have final weights)
+///    via Moore-style partition refinement to obtain the smallest equivalent machine.
+/// 5) Convert the minimized product directly to a DWA:
+///    - For a transition with destination block B and edge weight w, add an exception (for labels) or default (for OTHER) with weight w.
+///    - Final weight = the final weight of the representative of the block.
+///
+/// Compared to the previous greedy merging, this guarantees the coarsest congruence consistent with outputs/transitions,
+/// hence yields a minimal number of states for the Mealy semantics, preventing state blowups and inconsistencies.
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now_total = Instant::now();
@@ -111,90 +109,13 @@ impl NWA {
             return DWA::new();
         }
 
-        // 4) Enumerate reachable product tuples (Vec<Option<usize>>)
-        let now_enum = Instant::now();
-        let k = comp_dfas.len();
-        let mut start_tuple = Vec::with_capacity(k);
-        for i in 0..k {
-            let s = comp_dfas[i].start;
-            if let Some(sink) = comp_sinks[i] {
-                if s == sink {
-                    start_tuple.push(None);
-                } else {
-                    start_tuple.push(Some(s));
-                }
-            } else {
-                start_tuple.push(Some(s));
-            }
-        }
+        // New: Build minimized product Mealy automaton and convert directly to DWA.
+        let now_product = Instant::now();
+        let dwa = build_minimized_dwa_from_components(&comp_dfas, &comp_sinks, &sigma, &atoms.atoms);
         crate::debug!(
-            4,
-            "Computed start tuple in {:?}",
-            now_enum.elapsed()
-        );
-
-        // 5) Merge tuples greedily and attach transitions/finals from representative tuples
-        let now_merge = Instant::now();
-        let merged = merge_tuples_to_states(
-            start_tuple,
-            &comp_dfas,
-            &sigma,
-            &comp_sinks,
-            &atoms.atoms,
-        );
-        crate::debug!(
-            4,
-            "Merged into {} product states in {:?}",
-            merged.states.len(),
-            now_merge.elapsed()
-        );
-        if 5 <= crate::r#macro::get_macro_debug_level() {
-            // Helper to format tuples like [0, _, 2] instead of [Some(0), None, Some(2)]
-            let format_tuple = |tuple: &ProductDFAStateTuple| -> String {
-                let parts: Vec<String> = tuple
-                    .iter()
-                    .map(|opt| match opt {
-                        Some(v) => v.to_string(),
-                        None => "_".to_string(),
-                    })
-                    .collect();
-                format!("[{}]", parts.join(", "))
-            };
-
-            println!("\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
-            for (gid, state) in merged.states.iter().enumerate() {
-                println!("  State {}:", gid);
-                println!("    - Representative: {}", format_tuple(&state.representative_tuple));
-                if let Some(w) = &state.final_weight {
-                    println!("    - Final Weight: {}", w);
-                }
-                println!("    - Transitions:");
-                let dest_tuple_def = &state.trans_default;
-                if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_def) {
-                    println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
-                } else {
-                    println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
-                }
-
-                for (lbl, dest_tuple_ex) in &state.trans_exceptions {
-                    let char_repr = super::common::format_i16_char(*lbl);
-                    if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_ex) {
-                        println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
-                    } else {
-                        println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
-                    }
-                }
-                println!("    - Contains {} tuples.", state.all_tuples.len());
-            }
-        }
-
-        // 6) Convert merged product to a DWA
-        let now_convert = Instant::now();
-        let dwa = build_dwa_from_merged(&merged, &atoms.atoms, &sigma);
-        crate::debug!(
-            4,
-            "Merged-product -> DWA conversion completed in {:?}",
-            now_convert.elapsed()
+            3,
+            "Minimized product -> DWA conversion completed in {:?}",
+            now_product.elapsed()
         );
 
         crate::debug!(3, "NWA::determinize_to_dwa total time: {:?}", now_total.elapsed());
@@ -967,7 +888,268 @@ impl DetDFA {
 }
 
 /* ------------------------------
-   Tuple enumeration and merging
+   New: Minimized product (Mealy) -> DWA
+   ------------------------------ */
+
+/// Intern weights to compact IDs to reduce memory in signatures.
+#[derive(Default)]
+struct WeightInterner {
+    vec: Vec<Weight>,
+    map: HashMap<Weight, usize>,
+}
+impl WeightInterner {
+    fn new() -> Self {
+        let mut wi = WeightInterner { vec: Vec::new(), map: HashMap::new() };
+        // Reserve id 0 for zeros to make frequent case trivial
+        let z = Weight::zeros();
+        wi.map.insert(z.clone(), 0);
+        wi.vec.push(z);
+        wi
+    }
+    fn intern(&mut self, w: &Weight) -> usize {
+        if let Some(&id) = self.map.get(w) { return id; }
+        let id = self.vec.len();
+        self.vec.push(w.clone());
+        self.map.insert(w.clone(), id);
+        id
+    }
+    fn get(&self, id: usize) -> &Weight {
+        &self.vec[id]
+    }
+}
+
+/// A packed tuple representation: -1 means None (sink), otherwise >=0 is DFA state index for the component.
+type PackedTuple = Vec<i32>;
+
+#[inline]
+fn start_packed_tuple(comps: &[DetDFA], comp_sinks: &[Option<usize>]) -> PackedTuple {
+    let mut t = Vec::with_capacity(comps.len());
+    for i in 0..comps.len() {
+        let s0 = comps[i].start as i32;
+        if let Some(sink) = comp_sinks[i] {
+            if comps[i].start == sink {
+                t.push(-1);
+            } else {
+                t.push(s0);
+            }
+        } else {
+            t.push(s0);
+        }
+    }
+    t
+}
+
+#[inline]
+fn succ_packed_tuple(tuple: &PackedTuple, sym: usize, comps: &[DetDFA], comp_sinks: &[Option<usize>]) -> PackedTuple {
+    let mut out = Vec::with_capacity(tuple.len());
+    for i in 0..tuple.len() {
+        let v = tuple[i];
+        if v < 0 {
+            out.push(-1);
+        } else {
+            let next = comps[i].trans[v as usize][sym];
+            if let Some(sink) = comp_sinks[i] {
+                if next == sink {
+                    out.push(-1);
+                } else {
+                    out.push(next as i32);
+                }
+            } else {
+                out.push(next as i32);
+            }
+        }
+    }
+    out
+}
+
+#[inline]
+fn tuple_final_weight(tuple: &PackedTuple, comps: &[DetDFA], atom_weights: &Vec<Weight>) -> Weight {
+    let mut w = Weight::zeros();
+    for i in 0..tuple.len() {
+        if tuple[i] >= 0 {
+            let s = tuple[i] as usize;
+            if comps[i].finals[s] {
+                w |= &atom_weights[i];
+            }
+        }
+    }
+    w
+}
+
+#[inline]
+fn edge_weight_from_succ_tuple(succ: &PackedTuple, atom_weights: &Vec<Weight>) -> Weight {
+    let mut w = Weight::zeros();
+    for i in 0..succ.len() {
+        if succ[i] >= 0 {
+            w |= &atom_weights[i];
+        }
+    }
+    w
+}
+
+/// Build the reachable product Mealy automaton, then minimize via Moore refinement, and convert to DWA.
+fn build_minimized_dwa_from_components(comps: &[DetDFA], comp_sinks: &[Option<usize>], sigma: &Alphabet, atom_weights: &Vec<Weight>) -> DWA {
+    let mut interner = WeightInterner::new();
+
+    // Reachable product graph
+    let mut tuple_to_id: HashMap<PackedTuple, usize> = HashMap::new();
+    let mut id_to_tuple: Vec<PackedTuple> = Vec::new();
+
+    let mut finals_id: Vec<usize> = Vec::new();        // per-state final weight id
+    let mut trans_w_id: Vec<Vec<usize>> = Vec::new();  // per-state per-symbol edge weight id
+    let mut trans_next: Vec<Vec<usize>> = Vec::new();  // per-state per-symbol dst id
+
+    let start = start_packed_tuple(comps, comp_sinks);
+    tuple_to_id.insert(start.clone(), 0);
+    id_to_tuple.push(start);
+    finals_id.push(0); // placeholder; will compute when processing
+    trans_w_id.push(vec![0; sigma.size()]);
+    trans_next.push(vec![0; sigma.size()]);
+
+    let mut q = VecDeque::new();
+    q.push_back(0);
+
+    while let Some(sid) = q.pop_front() {
+        // Compute final weight id for this state
+        let t = id_to_tuple[sid].clone();
+        let w_final = tuple_final_weight(&t, comps, atom_weights);
+        let wf_id = interner.intern(&w_final);
+        finals_id[sid] = wf_id;
+
+        // For each symbol, compute edge weight and next state
+        for sym in 0..sigma.size() {
+            let succ = succ_packed_tuple(&t, sym, comps, comp_sinks);
+            // Edge weight for sym = union of atoms surviving sym
+            let w_edge = edge_weight_from_succ_tuple(&succ, atom_weights);
+            let we_id = interner.intern(&w_edge);
+
+            // Intern the successor
+            let nid = if let Some(&id) = tuple_to_id.get(&succ) {
+                id
+            } else {
+                let id = id_to_tuple.len();
+                tuple_to_id.insert(succ.clone(), id);
+                id_to_tuple.push(succ);
+                finals_id.push(0); // placeholder
+                trans_w_id.push(vec![0; sigma.size()]);
+                trans_next.push(vec![0; sigma.size()]);
+                q.push_back(id);
+                id
+            };
+
+            trans_w_id[sid][sym] = we_id;
+            trans_next[sid][sym] = nid;
+        }
+    }
+
+    // Moore minimization for the Mealy automaton
+    let (class_of, num_blocks) = minimize_mealy(&finals_id, &trans_w_id, &trans_next, sigma.size());
+
+    // Representative per block
+    let mut repr_of: Vec<usize> = vec![usize::MAX; num_blocks];
+    for (sid, &b) in class_of.iter().enumerate() {
+        if repr_of[b] == usize::MAX {
+            repr_of[b] = sid;
+        }
+    }
+
+    // Build DWA: one state per block
+    let mut dwa_states = DWAStates::default();
+    for _ in 0..num_blocks {
+        dwa_states.add_state();
+    }
+    let start_block = class_of[0];
+    let mut dwa = DWA { states: dwa_states, body: DWABody { start_state: start_block } };
+
+    // Set final weights
+    for b in 0..num_blocks {
+        let rep = repr_of[b];
+        let wf_id = finals_id[rep];
+        let w = interner.get(wf_id).clone();
+        if !w.is_empty() {
+            let _ = dwa.set_final_weight(b, w);
+        }
+    }
+
+    // Set transitions: per label exceptions and OTHER default
+    for b in 0..num_blocks {
+        let rep = repr_of[b];
+
+        // Default (OTHER)
+        let def_we_id = trans_w_id[rep][sigma.other_index];
+        let def_dst = class_of[trans_next[rep][sigma.other_index]];
+        let def_w = interner.get(def_we_id).clone();
+        let _ = dwa.set_default_transition(b, def_dst, def_w);
+
+        // Exceptions for all explicit labels
+        for (li, &lbl) in sigma.labels.iter().enumerate() {
+            let we_id = trans_w_id[rep][li];
+            let dst = class_of[trans_next[rep][li]];
+            let w = interner.get(we_id).clone();
+            let _ = dwa.add_transition(b, lbl, dst, w);
+        }
+    }
+
+    dwa
+}
+
+/// Moore-style minimization for deterministic Mealy automata:
+/// Two states are equivalent if they have equal final weight ID and, for all symbols,
+/// their edge weight IDs are equal and their destinations are equivalent.
+/// Returns (state->block mapping, number of blocks).
+fn minimize_mealy(finals: &Vec<usize>, trans_w: &Vec<Vec<usize>>, trans_next: &Vec<Vec<usize>>, alphabet: usize) -> (Vec<usize>, usize) {
+    let n = finals.len();
+    if n == 0 {
+        return (Vec::new(), 0);
+    }
+
+    // Initial partition: by final weight id.
+    let mut block_of: Vec<usize> = vec![0; n];
+    {
+        let mut map: HashMap<usize, usize> = HashMap::new(); // final_w_id -> block id
+        let mut next_bid = 0usize;
+        for s in 0..n {
+            let f = finals[s];
+            let b = *map.entry(f).or_insert_with(|| { let id = next_bid; next_bid += 1; id });
+            block_of[s] = b;
+        }
+    }
+
+    loop {
+        // Build signatures: (final_id, for each sym: (edge_w_id, dest_block))
+        #[derive(Hash, Eq, PartialEq)]
+        struct Sig {
+            data: Vec<usize>,
+        }
+
+        let mut sig_to_block: HashMap<Sig, usize> = HashMap::new();
+        let mut new_block_of: Vec<usize> = vec![0; n];
+        let mut next_bid = 0usize;
+
+        for s in 0..n {
+            let mut data: Vec<usize> = Vec::with_capacity(1 + 2 * alphabet);
+            data.push(finals[s]);
+            for sym in 0..alphabet {
+                let we = trans_w[s][sym];
+                let dst = trans_next[s][sym];
+                data.push(we);
+                data.push(block_of[dst]);
+            }
+            let sig = Sig { data };
+            let b = *sig_to_block.entry(sig).or_insert_with(|| { let id = next_bid; next_bid += 1; id });
+            new_block_of[s] = b;
+        }
+
+        if new_block_of == block_of {
+            let num_blocks = 1 + block_of.iter().copied().max().unwrap_or(0);
+            return (block_of, num_blocks);
+        }
+        block_of = new_block_of;
+    }
+}
+
+/* ------------------------------
+   Tuple enumeration and merging (old, unused now)
    ------------------------------ */
 
 type ProductDFAStateTuple = Vec<Option<usize>>;
@@ -1047,6 +1229,7 @@ struct MergedProduct {
 }
 
 /// Merge tuples greedily into product states and compute per-state transitions and final weights from representatives.
+/// NOTE: This is kept for reference/debug (unused in the new pipeline).
 fn merge_tuples_to_states(
     start_tuple: ProductDFAStateTuple,
     comps: &[DetDFA],
@@ -1200,7 +1383,7 @@ fn merge_tuples_to_states(
 }
 
 /* ------------------------------
-   Build DWA from merged product
+   Build DWA from merged product (old, unused now)
    ------------------------------ */
 
 /// For a given tuple, find the ID of the merged state group it belongs to by checking for unifiability.
@@ -1272,5 +1455,5 @@ fn build_dwa_from_merged(
 }
 
 /* ------------------------------
-   End of merged determinization
+   End of determinization
    ------------------------------ */
