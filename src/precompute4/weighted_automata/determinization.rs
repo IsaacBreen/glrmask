@@ -121,7 +121,7 @@ impl NWA {
 
         // 5) Merge tuples greedily and attach transitions/finals from representative tuples
         let now_merge = Instant::now();
-        let (merged, tuple_to_group) = merge_tuples_to_states(
+        let merged = merge_tuples_to_states(
             all_tuples,
             start_tuple,
             &comp_dfas,
@@ -157,7 +157,7 @@ impl NWA {
                 }
                 crate::debug!(5, "    - Transitions:");
                 let dest_tuple_def = &state.trans_default;
-                if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_def) {
+                if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_def) {
                     crate::debug!(5, "      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
                 } else {
                     crate::debug!(5, "      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
@@ -165,7 +165,7 @@ impl NWA {
 
                 for (lbl, dest_tuple_ex) in &state.trans_exceptions {
                     let char_repr = super::common::format_i16_char(*lbl);
-                    if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_ex) {
+                    if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_ex) {
                         crate::debug!(5, "      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
                     } else {
                         crate::debug!(5, "      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
@@ -173,17 +173,11 @@ impl NWA {
                 }
                 crate::debug!(5, "    - Contains {} tuples.", state.all_tuples.len());
             }
-
-            crate::debug!(5, "\n--- tuple_to_group ({} entries) ---", tuple_to_group.len());
-            let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
-            for (tuple, gid) in sorted_map {
-                crate::debug!(5, "  {} -> State {}", format_tuple(tuple), gid);
-            }
         }
 
         // 6) Convert merged product to a DWA
         let now_convert = Instant::now();
-        let dwa = build_dwa_from_merged(&merged, &tuple_to_group, &atoms.atoms, &sigma);
+        let dwa = build_dwa_from_merged(&merged, &atoms.atoms, &sigma);
         crate::debug!(
             4,
             "Merged-product -> DWA conversion completed in {:?}",
@@ -1119,7 +1113,7 @@ fn merge_tuples_to_states(
     sigma: &Alphabet,
     comp_sinks: &[Option<usize>],
     atom_weights: &Vec<Weight>,
-) -> (MergedProduct, HashMap<ProductDFAStateTuple, usize>) {
+) -> MergedProduct {
     let pb_merge = if PROGRESS_BAR_ENABLED {
         let p = ProgressBar::new_spinner();
         p.set_style(
@@ -1223,12 +1217,26 @@ fn merge_tuples_to_states(
         p.finish_with_message("Weights/transitions attached");
     }
 
-    (MergedProduct { states, start }, tuple_to_group)
+    MergedProduct { states, start }
 }
 
 /* ------------------------------
    Build DWA from merged product
    ------------------------------ */
+
+/// For a given tuple, find the ID of the merged state group it belongs to by checking for unifiability.
+fn find_group_for_tuple(
+    merged_states: &[ProductDFAState],
+    tuple: &ProductDFAStateTuple,
+) -> Option<usize> {
+    // This is a linear scan. Can be optimized if it's a bottleneck.
+    for (gid, state) in merged_states.iter().enumerate() {
+        if unify_tuples(&state.representative_tuple, tuple).is_some() {
+            return Some(gid);
+        }
+    }
+    None
+}
 
 fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &ProductDFAStateTuple) -> Weight {
     let mut w = Weight::zeros();
@@ -1242,7 +1250,6 @@ fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &ProductDFAStateTup
 
 fn build_dwa_from_merged(
     merged: &MergedProduct,
-    tuple_to_group: &HashMap<ProductDFAStateTuple, usize>,
     atom_weights: &Vec<Weight>,
     sigma: &Alphabet,
 ) -> DWA {
@@ -1265,7 +1272,7 @@ fn build_dwa_from_merged(
         // Default (OTHER)
         let def_t = &merged.states[sid].trans_default;
         let def_w = edge_weight_from_tuple(atom_weights, def_t);
-        if let Some(&to_id) = tuple_to_group.get(def_t) {
+        if let Some(to_id) = find_group_for_tuple(&merged.states, def_t) {
             let _ = dwa.set_default_transition(sid, to_id, def_w);
         } else {
             // Should not happen if tuple enumeration was complete, but guard anyway
@@ -1275,7 +1282,7 @@ fn build_dwa_from_merged(
         // Exceptions
         for (lbl, dst_t) in &merged.states[sid].trans_exceptions {
             let w = edge_weight_from_tuple(atom_weights, dst_t);
-            if let Some(&to_id) = tuple_to_group.get(dst_t) {
+            if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
                 let _ = dwa.add_transition(sid, *lbl, to_id, w);
             } else {
                 // Unmapped destination: skip
