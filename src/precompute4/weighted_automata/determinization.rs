@@ -168,7 +168,7 @@ impl NWA {
         let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
             start_tuple,
             &merger_components,
-            sigma.size(),
+            sigma.other_index,
         );
         crate::debug!(
             4,
