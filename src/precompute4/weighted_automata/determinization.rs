@@ -1046,228 +1046,7 @@ struct MergedProduct {
     start: usize,
 }
 
-/// Enumerate all reachable product tuples and build adjacency.
-fn enumerate_reachable_tuples(
-    start_tuple: &ProductDFAStateTuple,
-    comps: &[DetDFA],
-    sigma: &Alphabet,
-    comp_sinks: &[Option<usize>],
-) -> (Vec<ProductDFAStateTuple>, Vec<Vec<usize>>, usize) {
-    let mut map: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
-    let mut tuples: Vec<ProductDFAStateTuple> = Vec::new();
-    let mut succ_ids: Vec<Vec<usize>> = Vec::new();
-    let mut q = VecDeque::new();
-
-    let mut intern = |t: ProductDFAStateTuple,
-                      tuples: &mut Vec<ProductDFAStateTuple>,
-                      map: &mut HashMap<ProductDFAStateTuple, usize>,
-                      succ_ids: &mut Vec<Vec<usize>>| -> usize {
-        if let Some(&id) = map.get(&t) {
-            return id;
-        }
-        let id = tuples.len();
-        tuples.push(t.clone());
-        succ_ids.push(vec![usize::MAX; sigma.size()]);
-        map.insert(t, id);
-        id
-    };
-
-    let start_id = intern(start_tuple.clone(), &mut tuples, &mut map, &mut succ_ids);
-    q.push_back(start_id);
-
-    while let Some(u) = q.pop_front() {
-        let current = tuples[u].clone();
-        for sym in 0..sigma.size() {
-            let succ_t = successor_tuple(&current, sym, comps, comp_sinks);
-            let v = intern(succ_t, &mut tuples, &mut map, &mut succ_ids);
-            succ_ids[u][sym] = v;
-            if succ_ids[v].iter().all(|&x| x == usize::MAX) {
-                // Newly discovered state, need to explore it
-                q.push_back(v);
-            }
-        }
-    }
-    (tuples, succ_ids, start_id)
-}
-
-/// Unify all members' tuples; returns None if internal incompatibility exists.
-fn unify_members(
-    tuples: &[ProductDFAStateTuple],
-    members: &[usize],
-) -> Option<ProductDFAStateTuple> {
-    if members.is_empty() {
-        return None;
-    }
-    let k = tuples[members[0]].len();
-    let mut acc: ProductDFAStateTuple = vec![None; k];
-    for &id in members {
-        acc = match unify_tuples(&acc, &tuples[id]) {
-            Some(u) => u,
-            None => return None,
-        };
-    }
-    Some(acc)
-}
-
-/// Find a dimension that violates internal compatibility and buckets for splitting.
-fn choose_internal_split_dim(
-    tuples: &[ProductDFAStateTuple],
-    members: &[usize],
-) -> Option<(usize, BTreeMap<usize, Vec<usize>>, Vec<usize>)> {
-    if members.is_empty() {
-        return None;
-    }
-    let k = tuples[members[0]].len();
-    for dim in 0..k {
-        let mut buckets: BTreeMap<usize, Vec<usize>> = BTreeMap::new(); // value -> tuple ids
-        let mut none_ids: Vec<usize> = Vec::new();
-        for &id in members {
-            match tuples[id][dim] {
-                Some(v) => {
-                    buckets.entry(v).or_default().push(id);
-                }
-                None => none_ids.push(id),
-            }
-        }
-        if buckets.len() > 1 {
-            // Multiple concrete values -> internal incompatibility at this dimension.
-            return Some((dim, buckets, none_ids));
-        }
-    }
-    None
-}
-
-/// Split a group by a chosen dimension's values.
-fn split_group_by_dim_value(
-    groups: &mut Vec<Vec<usize>>,
-    gid: usize,
-    buckets: BTreeMap<usize, Vec<usize>>,
-    mut none_ids: Vec<usize>,
-    tuple_to_group: &mut [usize],
-) -> Vec<usize> {
-    // Choose the largest bucket to absorb Nones to reduce fragmentation.
-    let mut largest_key: Option<usize> = None;
-    let mut largest_size: usize = 0;
-    for (k, v) in buckets.iter() {
-        if v.len() > largest_size {
-            largest_size = v.len();
-            largest_key = Some(*k);
-        }
-    }
-    let mut new_group_ids: Vec<usize> = Vec::new();
-    let mut it = buckets.into_iter();
-    if let Some((first_key, mut first_bucket)) = it.next() {
-        // Assign Nones to the largest bucket
-        if Some(first_key) == largest_key {
-            first_bucket.extend(none_ids.drain(..));
-        }
-        // Replace current group
-        groups[gid] = first_bucket.clone();
-        for &tid in &groups[gid] {
-            tuple_to_group[tid] = gid;
-        }
-        // Add remaining buckets
-        for (k, mut bucket) in it {
-            if Some(k) == largest_key {
-                bucket.extend(none_ids.drain(..));
-            }
-            let new_gid = groups.len();
-            groups.push(bucket.clone());
-            for &tid in &bucket {
-                tuple_to_group[tid] = new_gid;
-            }
-            new_group_ids.push(new_gid);
-        }
-    } else {
-        // Should not happen (buckets non-empty promised)
-    }
-    new_group_ids
-}
-
-/// Unify successors of all members for a given symbol; if conflict, propose a split on a dimension.
-fn unify_successors_for_group(
-    tuples: &[ProductDFAStateTuple],
-    succ_ids: &[Vec<usize>],
-    members: &[usize],
-    sym: usize,
-) -> Result<ProductDFAStateTuple, (usize, BTreeMap<usize, Vec<usize>>, Vec<usize>)> {
-    if members.is_empty() {
-        // Empty group shouldn't happen; treat as no conflict with empty tuple
-        return Ok(vec![]);
-    }
-    let k = tuples[members[0]].len();
-    // Accumulate unify across successor tuples
-    let mut acc: ProductDFAStateTuple = vec![None; k];
-    for &id in members {
-        let succ_id = succ_ids[id][sym];
-        let succ_t = &tuples[succ_id];
-        acc = match unify_tuples(&acc, succ_t) {
-            Some(u) => u,
-            None => {
-                // Conflict: find a dimension that witnesses conflict for this symbol
-                // Choose a dimension with maximal number of distinct non-None values among successors.
-                let mut best_dim: Option<usize> = None;
-                let mut best_buckets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-                let mut best_none: Vec<usize> = Vec::new();
-                let mut best_variety: usize = 0;
-
-                for dim in 0..k {
-                    let mut buckets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-                    let mut none_ids: Vec<usize> = Vec::new();
-                    for &mid in members {
-                        let sid = succ_ids[mid][sym];
-                        match tuples[sid][dim] {
-                            Some(v) => { buckets.entry(v).or_default().push(mid); }
-                            None => none_ids.push(mid),
-                        }
-                    }
-                    if buckets.len() > 1 && buckets.len() >= best_variety {
-                        best_variety = buckets.len();
-                        best_dim = Some(dim);
-                        best_buckets = buckets;
-                        best_none = none_ids;
-                    }
-                }
-                if let Some(dim) = best_dim {
-                    return Err((dim, best_buckets, best_none));
-                } else {
-                    // Fallback: if we couldn't find a clear split dimension, split by any dimension with at least 2 distinct values.
-                    for dim in 0..k {
-                        let mut buckets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-                        let mut none_ids: Vec<usize> = Vec::new();
-                        for &mid in members {
-                            let sid = succ_ids[mid][sym];
-                            match tuples[sid][dim] {
-                                Some(v) => { buckets.entry(v).or_default().push(mid); }
-                                None => none_ids.push(mid),
-                            }
-                        }
-                        if buckets.len() > 1 {
-                            return Err((dim, buckets, none_ids));
-                        }
-                    }
-                    // If still not found, return a dummy conflict (should be very rare)
-                    return Err((0, BTreeMap::new(), Vec::new()));
-                }
-            }
-        };
-    }
-    Ok(acc)
-}
-
-/// Split a group using successor-derived conflict on (sym, dim).
-fn split_group_by_succ_dim(
-    groups: &mut Vec<Vec<usize>>,
-    gid: usize,
-    buckets: BTreeMap<usize, Vec<usize>>,
-    none_ids: Vec<usize>,
-    tuple_to_group: &mut [usize],
-) -> Vec<usize> {
-    // Reuse the same splitting policy as internal: assign Nones to the largest bucket.
-    split_group_by_dim_value(groups, gid, buckets, none_ids, tuple_to_group)
-}
-
-/// Merge tuples via partition refinement to obtain near-optimal grouping.
+/// Merge tuples greedily into product states and compute per-state transitions and final weights from representatives.
 fn merge_tuples_to_states(
     start_tuple: ProductDFAStateTuple,
     comps: &[DetDFA],
@@ -1275,90 +1054,94 @@ fn merge_tuples_to_states(
     comp_sinks: &[Option<usize>],
     atom_weights: &Vec<Weight>,
 ) -> MergedProduct {
-    // 1) Enumerate all reachable tuples and adjacency
-    let (tuples, succ_ids, start_id) = enumerate_reachable_tuples(&start_tuple, comps, sigma, comp_sinks);
-    crate::debug!(4, "Enumerated {} reachable tuples", tuples.len());
+    let mut states: Vec<ProductDFAState> = Vec::new();
+    let mut tuple_to_group: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
+    let mut worklist: VecDeque<usize> = VecDeque::new(); // Worklist of group IDs
 
-    // 2) Initialize partition with a single group of all tuples
-    let mut groups: Vec<Vec<usize>> = vec![(0..tuples.len()).collect()];
-    let mut tuple_to_group: Vec<usize> = vec![0; tuples.len()];
-    let mut worklist: VecDeque<usize> = VecDeque::new();
-    worklist.push_back(0);
+    // Create starting group for the start_tuple
+    {
+        let mut start_state = ProductDFAState::default();
+        start_state.representative_tuple = start_tuple.clone();
+        start_state.all_tuples.insert(start_tuple.clone());
+        states.push(start_state);
+        tuple_to_group.insert(start_tuple, 0);
+        worklist.push_back(0);
+    }
 
-    // 3) Refinement loop
     while let Some(gid) = worklist.pop_front() {
-        // Skip empty groups (possible after splits with draining)
-        if groups[gid].is_empty() {
-            continue;
-        }
+        let rep = states[gid].representative_tuple.clone();
 
-        // 3a) Enforce internal compatibility
-        if unify_members(&tuples, &groups[gid]).is_none() {
-            if let Some((_dim, buckets, none_ids)) = choose_internal_split_dim(&tuples, &groups[gid]) {
-                let new_gids = split_group_by_dim_value(&mut groups, gid, buckets, none_ids, &mut tuple_to_group);
-                // Re-check this gid and new gids
-                worklist.push_back(gid);
-                for ng in new_gids {
-                    worklist.push_back(ng);
-                }
-                continue;
-            } else {
-                // Shouldn't happen, but if it does, fall back to splitting by tuple id halves
-                let members = std::mem::take(&mut groups[gid]);
-                let mid = members.len() / 2;
-                let g1 = members[..mid].to_vec();
-                let g2 = members[mid..].to_vec();
-                groups[gid] = g1;
-                let ng = groups.len();
-                groups.push(g2);
-                for &t in &groups[gid] { tuple_to_group[t] = gid; }
-                for &t in &groups[ng] { tuple_to_group[t] = ng; }
-                worklist.push_back(gid);
-                worklist.push_back(ng);
+        for sym in 0..sigma.size() {
+            let succ_tuple = successor_tuple(&rep, sym, comps, comp_sinks);
+
+            if tuple_to_group.contains_key(&succ_tuple) {
                 continue;
             }
-        }
 
-        // 3b) Enforce transition compatibility for each symbol
-        let mut split_done = false;
-        for sym in 0..sigma.size() {
-            match unify_successors_for_group(&tuples, &succ_ids, &groups[gid], sym) {
-                Ok(_dest_rep) => {
-                    // ok
-                }
-                Err((_dim, buckets, none_ids)) => {
-                    // Split according to successor-derived conflict.
-                    let new_gids = split_group_by_succ_dim(&mut groups, gid, buckets, none_ids, &mut tuple_to_group);
-                    worklist.push_back(gid);
-                    for ng in new_gids {
-                        worklist.push_back(ng);
+            // Find a group for succ_tuple or create a new one
+            let mut placed = false;
+            for existing_gid in 0..states.len() {
+                let old_rep = &states[existing_gid].representative_tuple;
+                if let Some(new_rep) = unify_tuples(old_rep, &succ_tuple) {
+                    if new_rep != *old_rep {
+                        states[existing_gid].representative_tuple = new_rep;
+                        // Representative changed, so this group needs to be re-processed.
+                        if !worklist.contains(&existing_gid) {
+                            worklist.push_back(existing_gid);
+                        }
                     }
-                    split_done = true;
+                    tuple_to_group.insert(succ_tuple.clone(), existing_gid);
+                    states[existing_gid].all_tuples.insert(succ_tuple.clone());
+                    placed = true;
                     break;
                 }
             }
+
+            if !placed {
+                // Create new group
+                let new_gid = states.len();
+                let mut new_state = ProductDFAState::default();
+                new_state.representative_tuple = succ_tuple.clone();
+                new_state.all_tuples.insert(succ_tuple.clone());
+                states.push(new_state);
+                tuple_to_group.insert(succ_tuple, new_gid);
+                worklist.push_back(new_gid);
+            }
         }
-        if split_done {
-            continue;
-        }
-        // Group gid is stable (internally and for all transitions). Nothing to do.
     }
 
-    // 4) Build merged states with representative tuples and unified transitions
-    let mut states: Vec<ProductDFAState> = vec![ProductDFAState::default(); groups.len()];
-    let start_group = tuple_to_group[start_id];
+    let pb_merge = if PROGRESS_BAR_ENABLED {
+        let p = ProgressBar::new_spinner();
+        p.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [Determinize: {elapsed_precise}] Merging tuples...")
+                .unwrap(),
+        );
+        Some(p)
+    } else {
+        None
+    };
 
-    // Compute representative, all_tuples, and final_weight
-    for gid in 0..groups.len() {
-        if groups[gid].is_empty() {
-            continue;
-        }
-        let rep = unify_members(&tuples, &groups[gid]).expect("Group must be internally compatible");
-        states[gid].representative_tuple = rep.clone();
-        // Collect all member tuples
-        for &tid in &groups[gid] {
-            states[gid].all_tuples.insert(tuples[tid].clone());
-        }
+    if let Some(p) = pb_merge {
+        p.finish_with_message(format!("Merged into {} states", states.len()));
+    }
+
+    // Compute final weights and per-state transitions from representatives
+    let pb_attach = if PROGRESS_BAR_ENABLED {
+        Some(
+            ProgressBar::new(states.len() as u64).with_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Attach weights/transitions)")
+                    .unwrap(),
+            ),
+        )
+    } else {
+        None
+    };
+
+    for gid in 0..states.len() {
+        let rep = states[gid].representative_tuple.clone();
+
         // Final weight: union of atom-weights where representative component is accepting
         let mut w_final = Weight::zeros();
         for (i, pos) in rep.iter().enumerate() {
@@ -1369,55 +1152,29 @@ fn merge_tuples_to_states(
             }
         }
         states[gid].final_weight = if w_final.is_empty() { None } else { Some(w_final) };
-    }
 
-    // Compute transitions by unifying successors across members for each symbol
-    for gid in 0..groups.len() {
-        if groups[gid].is_empty() {
-            // Leave default empty
-            continue;
-        }
+        // Transitions from representative
         // Default (OTHER)
-        let def_tuple = match unify_successors_for_group(&tuples, &succ_ids, &groups[gid], sigma.other_index) {
-            Ok(rep) => rep,
-            Err((_dim, _b, _n)) => {
-                // This shouldn't happen after refinement.
-                // Fall back: use successor of the group's representative tuple (safe but conservative).
-                successor_tuple(&states[gid].representative_tuple, sigma.other_index, comps, comp_sinks)
-            }
-        };
-        states[gid].trans_default = def_tuple;
+        let def = successor_tuple(&rep, sigma.other_index, comps, comp_sinks);
+        states[gid].trans_default = def;
 
-        // Exceptions
+        // Labeled exceptions
         let mut ex: BTreeMap<i16, ProductDFAStateTuple> = BTreeMap::new();
         for (li, &lbl) in sigma.labels.iter().enumerate() {
-            let dst_tuple = match unify_successors_for_group(&tuples, &succ_ids, &groups[gid], li) {
-                Ok(rep) => rep,
-                Err((_dim, _b, _n)) => {
-                    successor_tuple(&states[gid].representative_tuple, li, comps, comp_sinks)
-                }
-            };
-            ex.insert(lbl, dst_tuple);
+            let dst = successor_tuple(&rep, li, comps, comp_sinks);
+            ex.insert(lbl, dst);
         }
         states[gid].trans_exceptions = ex;
+
+        if let Some(p) = &pb_attach {
+            p.inc(1);
+        }
+    }
+    if let Some(p) = pb_attach {
+        p.finish_with_message("Weights/transitions attached");
     }
 
-    let pb_merge = if PROGRESS_BAR_ENABLED {
-        let p = ProgressBar::new_spinner();
-        p.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} [Determinize: {elapsed_precise}] Partition refinement done")
-                .unwrap(),
-        );
-        Some(p)
-    } else {
-        None
-    };
-    if let Some(p) = pb_merge {
-        p.finish_with_message(format!("Merged into {} states", states.len()));
-    }
-
-    MergedProduct { states, start: start_group }
+    MergedProduct { states, start: 0 }
 }
 
 /* ------------------------------
