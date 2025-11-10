@@ -68,8 +68,13 @@ macro_rules! __debug_impl {
                     // let now = Local::now(); // Timestamp removed for brevity, uncomment if needed
                     println!(
                         // The complete format string is constructed here
-                        concat!("[DEBUG-{}] ", $user_fmt),
+                        concat!("[DEBUG] {}] {}:{}: ", $user_fmt),
+                        // concat!("[DEBUG {} {}] {}:{}: ", $user_fmt), // For timestamp
+                        // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Uncomment for timestamp
+                        // now.format("%H:%M:%S%.3f"), // Uncomment for timestamp
                         $level,           // Argument for the first {} in the prefix
+                        file!(),          // Argument for the second {} in the prefix
+                        line!(),          // Argument for the third {} in the prefix
                         $($user_args)*    // Arguments for the user-provided format part
                     );
                 }
