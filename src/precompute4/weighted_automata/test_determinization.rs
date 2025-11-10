@@ -30,6 +30,8 @@ fn test_determinize_simple_divergence() {
     nwa.body.start_state = start;
 
     let dwa = nwa.determinize_to_dwa();
+    println!("{}", nwa);
+    println!("{}", dwa);
 
     // Check accepted words and their weights.
     assert_eq!(
