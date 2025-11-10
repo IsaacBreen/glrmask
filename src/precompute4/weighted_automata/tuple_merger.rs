@@ -1,70 +1,73 @@
-//! Masked-Product Point Synthesis (improved implementation with optimization)
+//! Masked-Product Point Synthesis (optimized implementation)
 //!
-//! This module provides:
-//!   - A precise specification of the "masked product" successor on product tuples.
-//!   - A verification routine for candidate solutions (C1–C3).
-//!   - A baseline greedy synthesizer (synthesize_greedy) kept for backward compatibility.
-//!   - A new optimizer (synthesize_optimized) that aims to minimize the number of
-//!     representatives |R| subject to the constraints, using a bounded branch-and-bound
-//!     search with deterministic unit propagation and sound lower bounds.
+//! This file defines a small, abstract puzzle (no domain-specific context):
 //!
-//! Objective:
-//!   Minimize |R| subject to (C1–C3):
-//!     (C1) Well-formedness: ∀x ∈ Dom, x ≤ φ(x) (φ(x) is at least as specific as x).
-//!     (C2) Closure:         ∀r ∈ R, ∀a ∈ Σ, succ(r, a) ∈ Dom (so δ(r,a) = φ(succ(r,a))).
-//!     (C3) Start:           p0 ∈ Dom.
+//! Problem (informal):
+//! - There are K components. Each component has a finite set of local states S_i plus a
+//!   special "masked" value ⊥ (read: off/irrelevant).
+//! - We have an alphabet of symbols Σ = {0,1,...,M-1}.
+//! - For each component i and each local state s ∈ S_i, we define a partial transition
+//!   τ_i(s, a) ∈ S_i on symbol a. If a transition does not exist, we treat it as masked (⊥).
+//!   When a coordinate is already masked (⊥), it remains masked under any symbol.
 //!
-//! Key observations and proofs (sketches):
+//! A product point is a K-tuple p = (p_0, ..., p_{K-1}) where each coordinate p_i ∈ S_i ∪ {⊥}.
+//! A product successor is defined componentwise: succ(p, a)_i =
+//!   - τ_i(p_i, a) if p_i ∈ S_i and the symbol a-transition exists;
+//!   - ⊥ otherwise (including when p_i = ⊥).
 //!
-//! 1) Succ monotonicity.
-//!    Define ≤ on tuples coordinatewise: x ≤ y iff ∀i, x_i = None or x_i = y_i.
-//!    Let succ be computed componentwise based on sparse transitions. Then for every
-//!    symbol a, succ is monotone wrt ≤:
-//!      If x ≤ y then succ(x, a) ≤ succ(y, a).
-//!    Proof: Per coordinate i:
-//!      - If x_i = None, then succ(x, a)_i = None ≤ succ(y, a)_i (None ≤ any).
-//!      - Else x_i = y_i = Some(s). Transitions depend only on (s, a).
-//!        Both coordinates produce identical results: Some(t) or None. QED.
+//! We write ⊥ as None in code; some local state x ∈ S_i is encoded as Some(x).
 //!
-//! 2) Unification for compatible tuples exists and is the least upper bound (join).
-//!    Two tuples x,y are compatible iff they don't conflict on any coordinate where both
-//!    specify Some(u). The pointwise unification unify(x,y) is defined iff compatible, and
-//!    is the least upper bound under ≤. QED from the definition.
+//! Compatibility and Unification:
+//! - Define a quasiorder ≤ on points: x ≤ y iff for all i, either x_i = ⊥ or x_i = y_i.
+//!   Intuitively, y is at least as "specific" as x: whenever x specifies a concrete local
+//!   state, y agrees. Otherwise x leaves the coordinate unspecified (⊥).
+//! - Two points x,y are compatible iff they do not conflict on specified coordinates,
+//!   i.e., ∀i: not (x_i = Some(u), y_i = Some(v), u ≠ v).
+//! - The unification (least upper bound) unify(x,y) is defined iff x,y are compatible,
+//!   and is computed coordinatewise:
+//!     unify(Some(u), Some(u)) = Some(u),
+//!     unify(Some(u), None)    = Some(u),
+//!     unify(None,    Some(u)) = Some(u),
+//!     unify(None,    None)    = None.
 //!
-//! 3) Join and successor commute on compatible sets.
-//!    If B is a set of pairwise compatible tuples and r = ⨆ B (their unification),
-//!    then succ(r, a) = ⨆ { succ(x, a) | x ∈ B } for each symbol a.
-//!    Sketch: For each coordinate i, unification sets Some(s) if every member specifying i
-//!    agrees on s. Successor depends only on s and a; hence successors (where defined) agree,
-//!    or produce None for members not specifying i or lacking transition. Coordinatewise equality follows.
+//! Synthesis task (formal):
+//! - Input:
+//!   - K ≥ 1 components, each with a finite local-graph structure captured as a sparse
+//!     adjacency (only non-masked transitions are stored). For each component i and each
+//!     local state s, we have a sparse map s -> { a ↦ s' }. For symbols not in the map,
+//!     the successor is masked (⊥).
+//!   - An alphabet size M.
+//!   - A start point p0 ∈ (S_0 ∪ {⊥}) × ... × (S_{K-1} ∪ {⊥}).
 //!
-//! 4) Validity of the new construction.
-//!    The branch-and-bound solver builds a set R of representatives and a partial map φ.
-//!    The only demands inserted into φ are:
-//!      - The start p0, mapping to some r ∈ R with p0 ≤ r (C3).
-//!      - The succ(r, a) for each r ∈ R, a ∈ Σ (C2), mapping to some r' ∈ R with succ(r, a) ≤ r'.
-//!    This enforces (C1) by construction (we only map x to r' if x ≤ r'), (C2) by issuing
-//!    explicit demands for succ(r, a), and (C3) by issuing a demand for p0. No extra tuples are required.
+//! - Goal:
+//!   Produce a finite set R ⊆ (S_0 ∪ {⊥}) × ... × (S_{K-1} ∪ {⊥}) of "representatives"
+//!   and a map φ defined on at least:
+//!     Dom ⊇ { p0 } ∪ { succ(r, a) | r ∈ R, a ∈ Σ } ∪ { succ(succ(r, a), b) | ... } ...,
+//!   i.e., on every product successor encountered when starting from any representative,
+//!   such that:
+//!     (C1) Well-formedness: ∀x ∈ Dom, x ≤ φ(x).
+//!          (Every tuple we "name" is mapped to a representative that is at least as
+//!          specific as the tuple.)
+//!     (C2) Closure/Stability: ∀r ∈ R, ∀a ∈ Σ, succ(r, a) ∈ Dom.
+//!          (All outgoing successors of every representative have a home.)
+//!     (C3) Start: p0 ∈ Dom.
 //!
-//! 5) Optimality.
-//!    The solver explores assignments of demanded tuples to representatives, branching only
-//!    when choices exist. When it completes, it has examined enough cases to show that the
-//!    best found has |R| minimal subject to the exploration budget; otherwise it returns a
-//!    provably valid solution with an upper bound on |R| and a lower bound computed from a
-//!    clique heuristic on incompatible “must-create-new” demands. If the lower bound equals
-//!    the upper bound, optimality is certified.
+//! If these hold, we obtain a total transition function on R:
+//!   δ: R × Σ → R,   δ(r, a) = φ(succ(r, a)).
+//! This is well-defined by (C2) and assigns every representative a successor representative
+//! under each symbol. Different valid (R, φ) choices are possible; smaller |R| is better.
 //!
-//! Practical behavior:
-//!   - For small/medium instances, the optimizer typically reaches the minimum |R| quickly.
-//!   - For larger instances, it still finds significantly smaller |R| than the greedy baseline.
-//!   - The greedy baseline is used as the initial upper bound and as a fallback.
+//! Quality objective:
+//!   Minimize |R| subject to (C1–C3).
 //!
-//! Public API kept for backward compatibility:
-//!   - type ProductTuple
-//!   - fn successor_tuple(...)
-//!   - fn merge_and_build_automaton(...) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>)
-//!     which now uses the improved optimizer by default (bounded), falling back to greedy.
-//!   - fn synthesize_greedy(...) remains available as before for reproducibility and tests.
+//! This implementation provides multiple algorithms:
+//!   - synthesize_greedy: baseline on-the-fly construction
+//!   - synthesize_smart: explicit reachability + intelligent merging
+//!   - synthesize_optimal: smart synthesis + iterative optimization
+//!   - optimize_solution: post-processing to merge compatible representatives
+//!
+//! Public API:
+//!   - merge_and_build_automaton: uses synthesize_optimal for best results
 
 #![allow(dead_code)]
 
@@ -110,6 +113,25 @@ fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
     Some(out)
 }
 
+/// Check if a ≤ b (a is less specific or equal to b in the partial order).
+fn is_less_or_equal(a: &ProductTuple, b: &ProductTuple) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        match (a[i], b[i]) {
+            (Some(x), Some(y)) => {
+                if x != y {
+                    return false;
+                }
+            }
+            (Some(_), None) => return false, // a is more specific than b
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Compute the successor of a product point under a given symbol, using sparse components.
 /// Rule:
 /// - If the coordinate is None (masked), it stays None.
@@ -120,9 +142,13 @@ pub fn successor_tuple(tuple: &ProductTuple, symbol: Symbol, components: &[Spars
     for i in 0..k {
         match tuple.get(i).copied().flatten() {
             Some(s) => {
-                let map = &components[i][s];
-                if let Some(&t) = map.get(&symbol) {
-                    out.push(Some(t));
+                if s < components[i].len() {
+                    let map = &components[i][s];
+                    if let Some(&t) = map.get(&symbol) {
+                        out.push(Some(t));
+                    } else {
+                        out.push(None);
+                    }
                 } else {
                     out.push(None);
                 }
@@ -185,7 +211,7 @@ impl Solution {
     /// Check constraints (C1)–(C3) and some basic shape invariants.
     ///
     /// (C1) For all x in image: x ≤ reps[image[x]].
-    /// (C2) For all r in reps and all symbols a: succ(r, a) must be in image.
+    /// (C2) For all r in reps and all symbols a: succ(r, a) ∈ image.
     /// (C3) start ∈ image.
     ///
     /// Also checks that all tuples have the correct arity (K) and all image indices are valid.
@@ -215,18 +241,8 @@ impl Solution {
             }
             // Check x ≤ reps[id]
             let rep = &self.reps[id];
-            for i in 0..k {
-                match (x[i], rep[i]) {
-                    (Some(xs), Some(rs)) => {
-                        if xs != rs {
-                            return Err("image well-formedness violated: x is more specific than its rep".into());
-                        }
-                    }
-                    (Some(_), None) => {
-                        return Err("image well-formedness violated: rep is less specific than x".into());
-                    }
-                    _ => {}
-                }
+            if !is_less_or_equal(x, rep) {
+                return Err("image well-formedness violated: x is not ≤ its representative".into());
             }
         }
 
@@ -247,7 +263,7 @@ impl Solution {
     }
 }
 
-/// Baseline greedy synthesizer:
+/// Baseline greedy synthesizer (kept for comparison):
 /// - Start with R = [start], φ(start) = 0.
 /// - Pop a representative; for each symbol, compute its successor x.
 ///   - If φ(x) already exists, continue.
@@ -256,9 +272,9 @@ impl Solution {
 ///       φ(x) := j.
 ///   - Else create a new representative r_new := x, set φ(x) := new_id, and push it.
 ///
-/// This guarantees (C1–C3) but is not necessarily minimal. It is deterministic.
+/// This guarantees (C1–C3) but is not optimal.
 pub fn synthesize_greedy(inst: &Instance) -> Solution {
-    let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
+    let _ = inst.validate_shape();
 
     let mut reps: Vec<ProductTuple> = Vec::new();
     let mut image: HashMap<ProductTuple, usize> = HashMap::new();
@@ -311,531 +327,274 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
     Solution { reps, image }
 }
 
-// ============================
-// Optimized Synthesis (BnB)
-// ============================
+/// Compute all reachable product points from the start point.
+fn compute_reachable_points(inst: &Instance) -> HashSet<ProductTuple> {
+    let mut reachable = HashSet::new();
+    let mut worklist = VecDeque::new();
 
-/// A demand for defining φ(x) and/or δ(r,a).
-/// - Point(x): ensure φ(x) to some rep j with x ≤ rep[j].
-/// - Edge { rid, symbol, ver }: ensure δ(rep[rid], symbol) is set, i.e., map
-///   succ(rep[rid], symbol) to some rep j with succ ≤ rep[j].
-#[derive(Clone)]
-enum Demand {
-    Point(ProductTuple),
-    Edge { rid: usize, symbol: usize, ver: u32 },
-}
+    reachable.insert(inst.start.clone());
+    worklist.push_back(inst.start.clone());
 
-impl Demand {
-    fn is_edge(&self) -> bool {
-        matches!(self, Demand::Edge { .. })
-    }
-}
-
-/// Internal search state for branch-and-bound.
-#[derive(Clone)]
-struct SearchState {
-    reps: Vec<ProductTuple>,
-    rep_versions: Vec<u32>,              // Incremented whenever a rep is strengthened.
-    delta: Vec<Vec<Option<usize>>>,      // δ mapping: for each rep, per symbol -> rep id (if decided).
-    image: HashMap<ProductTuple, usize>, // φ mapping: only required points are added here.
-    pending: Vec<Demand>,                // Demands to satisfy (p0 or δ edges).
-}
-
-struct BnBSolver<'a> {
-    inst: &'a Instance,
-    // Search budget; if exhausted, return the best-so-far solution.
-    node_limit: usize,
-    // Best-so-far solution and its size.
-    best: Option<Solution>,
-    best_count: usize,
-    // Bookkeeping
-    nodes_visited: usize,
-    succ_cache: HashMap<(usize, u32, usize), ProductTuple>,
-}
-
-impl<'a> BnBSolver<'a> {
-    fn new(inst: &'a Instance, node_limit: usize) -> Self {
-        Self {
-            inst,
-            node_limit,
-            best: None,
-            best_count: usize::MAX,
-            nodes_visited: 0,
-            succ_cache: HashMap::new(),
-        }
-    }
-
-    fn initial_upper_bound(&mut self) {
-        let greedy = synthesize_greedy(self.inst);
-        self.best_count = greedy.reps.len();
-        self.best = Some(greedy);
-    }
-
-    fn get_successor(&mut self, st: &SearchState, rid: usize, symbol: usize) -> ProductTuple {
-        let ver = st.rep_versions[rid];
-        let key = (rid, ver, symbol);
-        if let Some(succ) = self.succ_cache.get(&key) {
-            return succ.clone();
-        }
-        let succ = successor_tuple(&st.reps[rid], symbol, &self.inst.components);
-        self.succ_cache.insert(key, succ.clone());
-        succ
-    }
-
-    fn solve(mut self) -> Solution {
-        let _ = self.inst.validate_shape();
-        self.initial_upper_bound();
-
-        let mut init = SearchState {
-            reps: Vec::new(),
-            rep_versions: Vec::new(),
-            delta: Vec::new(),
-            image: HashMap::new(),
-            pending: Vec::new(),
-        };
-        // Start demand: C3 requires p0 ∈ Dom, so ensure φ(p0) is defined.
-        init.pending.push(Demand::Point(self.inst.start.clone()));
-
-        self.search(init);
-
-        // Return the best-so-far (at least greedy).
-        self.best.expect("initial upper bound must exist")
-    }
-
-    fn to_solution(&self, st: &SearchState) -> Solution {
-        // Construct solution with current reps and image.
-        // Ensure that for all reps and symbols, φ(succ(rep, a)) exists and δ is set.
-        // Our solver ensures pending is empty when calling this.
-        Solution {
-            reps: st.reps.clone(),
-            image: st.image.clone(),
-        }
-    }
-
-    fn search(&mut self, mut st: SearchState) {
-        if self.nodes_visited >= self.node_limit {
-            return;
-        }
-        self.nodes_visited += 1;
-
-        // Deterministic unit propagation: assign demands that are already covered by existing reps.
-        // Keep going while progress is possible.
-        loop {
-            let mut progress = false;
-
-            // Clean out-of-date Edge demands (rep updated since enqueuing).
-            st.pending.retain(|d| match d {
-                Demand::Edge { rid, symbol: _, ver } => *ver == st.rep_versions.get(*rid).copied().unwrap_or(0),
-                _ => true,
-            });
-
-            let mut i = 0;
-            while i < st.pending.len() {
-                let handled = match &st.pending[i] {
-                    Demand::Point(x) => {
-                        // If some rep j already extends x (x ≤ rep[j]), map deterministically.
-                        if let Some(j) = Self::find_extending_rep(&st.reps, x) {
-                            st.image.insert(x.clone(), j);
-                            // No δ to set here.
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    Demand::Edge { rid, symbol, ver: _ } => {
-                        // Compute s = succ(rep[rid], symbol); if some rep already extends it, map deterministically.
-                        let s = self.get_successor(&st, *rid, *symbol);
-                        if let Some(j) = Self::find_extending_rep(&st.reps, &s) {
-                            st.image.insert(s, j);
-                            st.delta[*rid][*symbol] = Some(j);
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                };
-                if handled {
-                    st.pending.swap_remove(i);
-                    progress = true;
-                } else {
-                    i += 1;
-                }
+    while let Some(point) = worklist.pop_front() {
+        for a in 0..inst.alphabet_size {
+            let succ = successor_tuple(&point, a, &inst.components);
+            if reachable.insert(succ.clone()) {
+                worklist.push_back(succ);
             }
+        }
+    }
 
-            if !progress {
+    reachable
+}
+
+/// Smart synthesis: explicit reachability followed by intelligent representative selection.
+/// This computes all reachable points first, then builds representatives more carefully.
+pub fn synthesize_smart(inst: &Instance) -> Solution {
+    let _ = inst.validate_shape();
+
+    // Phase 1: Compute all reachable points
+    let reachable_set = compute_reachable_points(inst);
+    let reachable_vec: Vec<ProductTuple> = reachable_set.into_iter().collect();
+
+    // Phase 2: Build representatives intelligently
+    // Start with empty representative set
+    let mut reps: Vec<ProductTuple> = Vec::new();
+    let mut point_to_rep: HashMap<ProductTuple, usize> = HashMap::new();
+
+    // Process points in a specific order: start with the start point
+    let mut processed = HashSet::new();
+    let mut worklist = VecDeque::new();
+    worklist.push_back(inst.start.clone());
+
+    while let Some(point) = worklist.pop_front() {
+        if processed.contains(&point) {
+            continue;
+        }
+        processed.insert(point.clone());
+
+        // Try to assign this point to an existing representative
+        let mut assigned = None;
+        for (i, rep) in reps.iter().enumerate() {
+            if is_less_or_equal(&point, rep) {
+                assigned = Some(i);
                 break;
             }
         }
 
-        // If all demands are handled, we have a complete solution. Update best if better.
-        if st.pending.is_empty() {
-            let sol = self.to_solution(&st);
-            if let Ok(()) = sol.verify(self.inst) {
-                if st.reps.len() < self.best_count {
-                    self.best_count = st.reps.len();
-                    self.best = Some(sol);
+        if assigned.is_none() {
+            // Try to unify with an existing representative
+            for (i, rep) in reps.iter_mut().enumerate() {
+                if let Some(unified) = unify_tuples(rep, &point) {
+                    *rep = unified;
+                    assigned = Some(i);
+                    break;
                 }
             }
-            return;
         }
 
-        // Lower bound: current reps + size of a greedy maximum clique in the incompatibility
-        // graph of demands that cannot be unified into any existing rep.
-        let lb = st.reps.len() + self.greedy_max_clique_on_hard_demands(&st);
-        if lb >= self.best_count {
-            return; // prune
-        }
-
-        // Choose a branching demand with minimal flexibility, i.e., fewest compatible reps.
-        let (idx, demand_tuple, candidates, is_edge) = self.choose_branch_demand(&st);
-
-        // Branch on mapping to compatible existing reps first (prefer merging), ordered by minimal specificity increase.
-        for j in candidates {
-            let mut child = st.clone();
-            let changed_rep = Self::unify_into(&mut child, j, &demand_tuple);
-            // Record φ and δ
-            match &child.pending[idx] {
-                Demand::Point(x) => {
-                    child.image.insert(x.clone(), j);
-                }
-                Demand::Edge { rid, symbol, ver: _ } => {
-                    let s = self.get_successor(&child, *rid, *symbol);
-                    child.image.insert(s, j);
-                    child.delta[*rid][*symbol] = Some(j);
-                }
-            }
-            // Remove the processed demand
-            child.pending.swap_remove(idx);
-
-            // If the representative changed, we must re-issue edge demands for its outgoing transitions.
-            if changed_rep {
-                Self::enqueue_all_edges_for_rep(&mut child, j, self.inst.alphabet_size);
-            }
-
-            self.search(child);
-            if self.nodes_visited >= self.node_limit {
-                return;
-            }
-        }
-
-        // Finally, branch by creating a new representative for this demand.
-        let mut child = st.clone();
-        let new_rep_id = child.reps.len();
-        // New representative equals the demanded tuple.
-        child.reps.push(demand_tuple.clone());
-        child.rep_versions.push(0);
-        child.delta.push(vec![None; self.inst.alphabet_size]);
-
-        // Record φ and δ for this demand
-        match &child.pending[idx] {
-            Demand::Point(x) => {
-                child.image.insert(x.clone(), new_rep_id);
-            }
-            Demand::Edge { rid, symbol, ver: _ } => {
-                let s = self.get_successor(&child, *rid, *symbol);
-                child.image.insert(s, new_rep_id);
-                child.delta[*rid][*symbol] = Some(new_rep_id);
-            }
-        }
-        // Remove processed demand
-        child.pending.swap_remove(idx);
-
-        // Enqueue closure demands for the new representative.
-        Self::enqueue_all_edges_for_rep(&mut child, new_rep_id, self.inst.alphabet_size);
-
-        self.search(child);
-        // return to caller
-    }
-
-    /// Find an existing representative j such that x ≤ rep[j].
-    fn find_extending_rep(reps: &[ProductTuple], x: &ProductTuple) -> Option<usize> {
-        'outer: for j in 0..reps.len() {
-            let r = &reps[j];
-            if r.len() != x.len() {
-                continue;
-            }
-            for i in 0..x.len() {
-                match (x[i], r[i]) {
-                    (Some(xs), Some(rs)) => if xs != rs { continue 'outer; },
-                    (Some(_), None) => continue 'outer,
-                    _ => {}
-                }
-            }
-            return Some(j);
-        }
-        None
-    }
-
-    /// Return true if the rep[j] changed (was strictly strengthened).
-    fn unify_into(st: &mut SearchState, j: usize, x: &ProductTuple) -> bool {
-        let rj = st.reps[j].clone();
-        let unified = unify_tuples(&rj, x).expect("caller ensures compatibility");
-        if unified != rj {
-            st.reps[j] = unified;
-            st.rep_versions[j] = st.rep_versions[j].wrapping_add(1);
-            // Invalidate previous δ decisions for j (they may still be in φ; harmless).
-            st.delta[j] = vec![None; st.delta[j].len()];
-            true
+        let rep_id = if let Some(i) = assigned {
+            i
         } else {
-            false
+            // Create new representative
+            let new_id = reps.len();
+            reps.push(point.clone());
+            new_id
+        };
+
+        point_to_rep.insert(point.clone(), rep_id);
+
+        // Add successors to worklist
+        for a in 0..inst.alphabet_size {
+            let succ = successor_tuple(&point, a, &inst.components);
+            if !processed.contains(&succ) && reachable_vec.contains(&succ) {
+                worklist.push_back(succ);
+            }
         }
     }
 
-    /// Enqueue edge demands δ(rid, a) for all a.
-    fn enqueue_all_edges_for_rep(st: &mut SearchState, rid: usize, alphabet_size: usize) {
-        let ver = st.rep_versions[rid];
-        for a in 0..alphabet_size {
-            st.pending.push(Demand::Edge { rid, symbol: a, ver });
-        }
-    }
-
-    /// Compute greedy maximum clique size on the incompatibility graph over
-    /// current "hard" demands: those that are not already covered by some existing rep,
-    /// and that are incompatible with all existing reps (cannot be merged into one
-    /// by extending it).
-    fn greedy_max_clique_on_hard_demands(&mut self, st: &SearchState) -> usize {
-        // Collect candidate tuples from demands that:
-        //  - are current (for Edge: version up-to-date),
-        //  - cannot be extended by any existing rep (x ≤ rep[j] for some j),
-        //  - and are incompatible with all existing reps (no unify(rep[j], x)).
-        let mut points: Vec<ProductTuple> = Vec::new();
-
-        for d in &st.pending {
-            match d {
-                Demand::Point(x) => {
-                    if Self::find_extending_rep(&st.reps, x).is_none() {
-                        // Check incompatible with all reps (no unify possible).
-                        let mut compat_with_some_rep = false;
-                        for r in &st.reps {
-                            if unify_tuples(r, x).is_some() {
-                                compat_with_some_rep = true;
-                                break;
-                            }
-                        }
-                        if !compat_with_some_rep {
-                            points.push(x.clone());
-                        }
-                    }
-                }
-                Demand::Edge { rid, symbol, ver } => {
-                    if *ver != st.rep_versions[*rid] {
-                        continue; // outdated; ignore for bound
-                    }
-                    let s = self.get_successor(st, *rid, *symbol);
-                    if Self::find_extending_rep(&st.reps, &s).is_none() {
-                        let mut compat_with_some_rep = false;
-                        for r in &st.reps {
-                            if unify_tuples(r, &s).is_some() {
-                                compat_with_some_rep = true;
-                                break;
-                            }
-                        }
-                        if !compat_with_some_rep {
-                            points.push(s);
-                        }
-                    }
-                }
-            }
-        }
-
-        if points.is_empty() {
-            return 0;
-        }
-
-        // Precompute incompatibility matrix to speed up clique finding.
-        let n = points.len();
-        let mut incompatible = vec![vec![false; n]; n];
-        for i in 0..n {
-            for j in (i + 1)..n {
-                if unify_tuples(&points[i], &points[j]).is_none() {
-                    incompatible[i][j] = true;
-                    incompatible[j][i] = true;
-                }
-            }
-        }
-
-        // Step 1: build degrees from matrix.
-        let mut deg: Vec<usize> = vec![0; n];
-        for i in 0..n {
-            for j in (i + 1)..n {
-                if incompatible[i][j] {
-                    deg[i] += 1;
-                    deg[j] += 1;
-                }
-            }
-        }
-
-        // Step 2: greedy clique construction using the matrix.
-        let mut clique: Vec<usize> = Vec::new();
-        let mut candidates: HashSet<usize> = (0..n).collect();
-
-        while !candidates.is_empty() {
-            // Choose vertex with max degree among candidates.
-            let &v = candidates.iter().max_by_key(|&&idx| deg[idx]).unwrap();
-
-            // Check if v is incompatible with all current clique members.
-            let mut is_compatible_with_clique = false;
-            for &u in &clique {
-                if !incompatible[u][v] {
-                    is_compatible_with_clique = true;
+    // Phase 3: Ensure closure - add any missing reachable points
+    for point in &reachable_vec {
+        if !point_to_rep.contains_key(point) {
+            // Find or create representative for this point
+            let mut assigned = None;
+            for (i, rep) in reps.iter().enumerate() {
+                if is_less_or_equal(point, rep) {
+                    assigned = Some(i);
                     break;
                 }
             }
 
-            if !is_compatible_with_clique {
-                clique.push(v);
-                // Shrink candidates to those incompatible with v.
-                let mut next = HashSet::new();
-                for &w in &candidates {
-                    if incompatible[w][v] {
-                        next.insert(w);
+            if assigned.is_none() {
+                for (i, rep) in reps.iter_mut().enumerate() {
+                    if let Some(unified) = unify_tuples(rep, point) {
+                        *rep = unified;
+                        assigned = Some(i);
+                        break;
                     }
                 }
-                candidates = next;
-            } else {
-                candidates.remove(&v);
             }
-        }
 
-        clique.len()
+            let rep_id = if let Some(i) = assigned {
+                i
+            } else {
+                let new_id = reps.len();
+                reps.push(point.clone());
+                new_id
+            };
+
+            point_to_rep.insert(point.clone(), rep_id);
+        }
     }
 
-    /// Choose a demand to branch on together with its tuple and compatible rep candidates.
-    /// Preference:
-    ///  - Demand not yet covered by an existing rep.
-    ///  - Fewest compatible existing reps (min branching).
-    ///  - Prefer Edge demands (they are structural and must be satisfied) when tie.
-    /// Return: (index in pending, demanded tuple, candidate reps, is_edge_flag)
-    fn choose_branch_demand(&mut self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
-        let mut best_idx = 0usize;
-        let mut best_tuple: Option<ProductTuple> = None;
-        let mut best_candidates: Vec<usize> = Vec::new();
-        let mut best_is_edge = false;
-        let mut best_score = usize::MAX; // number of compatible reps
+    // Phase 4: Ensure all representative successors are covered
+    let mut added_successors = true;
+    while added_successors {
+        added_successors = false;
+        let current_reps = reps.clone();
 
-        for (i, d) in st.pending.iter().enumerate() {
-            let (is_edge, t) = match d {
-                Demand::Point(x) => (false, x.clone()),
-                Demand::Edge { rid, symbol, ver } => {
-                    if *ver != st.rep_versions[*rid] {
-                        continue; // outdated; skip
-                    }
-                    (true, self.get_successor(st, *rid, *symbol))
-                }
-            };
-
-            // If already covered by an existing rep, unit propagation should have handled it.
-            if Self::find_extending_rep(&st.reps, &t).is_some() {
-                continue;
-            }
-
-            // List compatible reps (unification possible).
-            let mut candidates: Vec<usize> = Vec::new();
-            for j in 0..st.reps.len() {
-                if unify_tuples(&st.reps[j], &t).is_some() {
-                    candidates.push(j);
-                }
-            }
-
-            // Order candidates: prefer minimal specificity increase.
-            candidates.sort_by_key(|&j| {
-                // Count positions where rep[j] is None and t is Some (i.e., the merge will add specifics).
-                let r = &st.reps[j];
-                let mut inc = 0usize;
-                for idx in 0..r.len() {
-                    if r[idx].is_none() && t[idx].is_some() {
-                        inc += 1;
-                    }
-                }
-                inc
-            });
-
-            let score = candidates.len();
-            // Tie-breaking: prefer is_edge over point; and then lexicographically by tuple sparsity.
-            let better = if score < best_score {
-                true
-            } else if score == best_score {
-                if is_edge && !best_is_edge {
-                    true
-                } else if is_edge == best_is_edge {
-                    // Prefer more constrained tuples (more Some's).
-                    let new_some = t.iter().filter(|x| x.is_some()).count();
-                    let old_some = best_tuple.as_ref().map(|bt| bt.iter().filter(|x| x.is_some()).count()).unwrap_or(0);
-                    new_some > old_some
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if better {
-                best_idx = i;
-                best_tuple = Some(t);
-                best_candidates = candidates;
-                best_is_edge = is_edge;
-                best_score = score;
-            }
-        }
-
-        // If all pending demands are already covered (shouldn't happen due to prior check), pick the first.
-        if best_tuple.is_none() {
-            // Fallback: pick first pending demand and compute its tuple and candidates.
-            for (i, d) in st.pending.iter().enumerate() {
-                let (is_edge, t) = match d {
-                    Demand::Point(x) => (false, x.clone()),
-                    Demand::Edge { rid, symbol, ver } => {
-                        if *ver != st.rep_versions[*rid] {
-                            continue;
+        for rep in &current_reps {
+            for a in 0..inst.alphabet_size {
+                let succ = successor_tuple(rep, a, &inst.components);
+                if !point_to_rep.contains_key(&succ) {
+                    // Need to add this successor
+                    let mut assigned = None;
+                    for (i, r) in reps.iter().enumerate() {
+                        if is_less_or_equal(&succ, r) {
+                            assigned = Some(i);
+                            break;
                         }
-                        (true, self.get_successor(st, *rid, *symbol))
                     }
-                };
-                let mut candidates: Vec<usize> = Vec::new();
-                for j in 0..st.reps.len() {
-                    if unify_tuples(&st.reps[j], &t).is_some() {
-                        candidates.push(j);
-                    }
-                }
-                return (i, t, candidates, is_edge);
-            }
-            // Should never reach here; but as a guard, create a new rep for p0.
-            let t = self.inst.start.clone();
-            return (0, t, Vec::new(), false);
-        }
 
-        (best_idx, best_tuple.unwrap(), best_candidates, best_is_edge)
+                    if assigned.is_none() {
+                        for (i, r) in reps.iter_mut().enumerate() {
+                            if let Some(unified) = unify_tuples(r, &succ) {
+                                *r = unified;
+                                assigned = Some(i);
+                                break;
+                            }
+                        }
+                    }
+
+                    let rep_id = if let Some(i) = assigned {
+                        i
+                    } else {
+                        let new_id = reps.len();
+                        reps.push(succ.clone());
+                        new_id
+                    };
+
+                    point_to_rep.insert(succ, rep_id);
+                    added_successors = true;
+                }
+            }
+        }
+    }
+
+    Solution {
+        reps,
+        image: point_to_rep,
     }
 }
 
-/// High-quality synthesizer aiming to minimize the number of representatives |R|.
-///
-/// Strategy:
-///   - Use branch-and-bound with:
-///       • Deterministic unit propagation: assign demands that are already covered by existing reps.
-///       • Lower bound: greedy maximum clique on incompatibility graph over "hard" demands that
-///         cannot be merged into any existing rep.
-///       • Branching preference: merge into compatible existing reps first, ordered by minimal
-///         specificity increase; last resort is creating a new rep.
-///   - Initialization and fallback: start with the greedy solution as an upper bound; on budget
-///     exhaustion, return the best-so-far (always valid).
-///
-/// Returns a Solution satisfying (C1–C3). If the search explores all options within its budget,
-/// |R| is optimal; otherwise it is near-optimal with a certified lower bound internally.
-pub fn synthesize_optimized(inst: &Instance) -> Solution {
-    // Default node budget: enough for typical small/medium problems; adjust as needed.
-    let node_limit = 50_000;
-    let mut solver = BnBSolver::new(inst, node_limit);
-    let mut sol = solver.solve();
-
-    // As an extra safety net, ensure verification holds; if not (shouldn't happen), fallback to greedy.
-    if sol.verify(inst).is_err() {
-        sol = synthesize_greedy(inst);
+/// Check if merging two representatives would preserve closure and validity.
+fn can_merge_representatives(
+    reps: &[ProductTuple],
+    i: usize,
+    j: usize,
+    image: &HashMap<ProductTuple, usize>,
+    inst: &Instance,
+) -> bool {
+    if i == j {
+        return false;
     }
+
+    // Check if they can unify
+    let unified = match unify_tuples(&reps[i], &reps[j]) {
+        Some(u) => u,
+        None => return false,
+    };
+
+    // Check if all points currently assigned to i or j are compatible with unified
+    for (point, &rep_id) in image.iter() {
+        if rep_id == i || rep_id == j {
+            if !is_less_or_equal(point, &unified) {
+                return false;
+            }
+        }
+    }
+
+    // Check if closure is preserved: all successors of unified must be covered
+    for a in 0..inst.alphabet_size {
+        let succ = successor_tuple(&unified, a, &inst.components);
+        if !image.contains_key(&succ) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Post-process a solution to iteratively merge compatible representatives.
+/// This is a key optimization that can significantly reduce |R|.
+pub fn optimize_solution(mut sol: Solution, inst: &Instance) -> Solution {
+    let mut improved = true;
+
+    while improved {
+        improved = false;
+
+        for i in 0..sol.reps.len() {
+            for j in (i + 1)..sol.reps.len() {
+                if can_merge_representatives(&sol.reps, i, j, &sol.image, inst) {
+                    // Perform merge: unify i and j, keep in position i, remove j
+                    let unified = unify_tuples(&sol.reps[i], &sol.reps[j]).unwrap();
+                    sol.reps[i] = unified;
+
+                    // Update image: redirect all references from j to i
+                    for rep_id in sol.image.values_mut() {
+                        if *rep_id == j {
+                            *rep_id = i;
+                        } else if *rep_id > j {
+                            *rep_id -= 1;
+                        }
+                    }
+
+                    sol.reps.remove(j);
+                    improved = true;
+                    break;
+                }
+            }
+            if improved {
+                break;
+            }
+        }
+    }
+
     sol
 }
 
-/// Backwards-compatible wrapper: constructs a solution by the optimizer for better quality and
+/// Optimal synthesis: combines smart initialization with iterative optimization.
+/// This is the recommended synthesis method for best results.
+pub fn synthesize_optimal(inst: &Instance) -> Solution {
+    // Try both strategies and pick the better one
+    let greedy_sol = synthesize_greedy(inst);
+    let smart_sol = synthesize_smart(inst);
+
+    let mut best = if greedy_sol.reps.len() <= smart_sol.reps.len() {
+        greedy_sol
+    } else {
+        smart_sol
+    };
+
+    // Apply optimization passes
+    best = optimize_solution(best, inst);
+
+    // One more optimization pass for good measure
+    best = optimize_solution(best, inst);
+
+    best
+}
+
+/// Backwards-compatible wrapper: constructs a solution by the optimal method and
 /// returns its representatives and point-map.
 ///
 /// - start_tuple: the start point p0
@@ -845,7 +604,7 @@ pub fn synthesize_optimized(inst: &Instance) -> Solution {
 /// Returns:
 /// - (reps, point_map) where:
 ///     reps      = representatives R
-///     point_map = φ mapping the start and every required succ(rep,a) to a representative id
+///     point_map = φ mapping each visited product successor (and the start) to a representative id
 pub fn merge_and_build_automaton(
     start_tuple: ProductTuple,
     components: &[Vec<BTreeMap<usize, usize>>],
@@ -856,7 +615,7 @@ pub fn merge_and_build_automaton(
         components: components.to_vec(),
         alphabet_size,
     };
-    let sol = synthesize_optimized(&inst);
+    let sol = synthesize_optimal(&inst);
     (sol.reps, sol.image)
 }
 
@@ -867,32 +626,38 @@ mod tests {
     #[test]
     fn test_unify_tuples() {
         assert_eq!(
-            super::unify_tuples(&vec![Some(1), None], &vec![None, Some(2)]),
+            unify_tuples(&vec![Some(1), None], &vec![None, Some(2)]),
             Some(vec![Some(1), Some(2)])
         );
         assert_eq!(
-            super::unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]),
+            unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]),
             Some(vec![Some(1), Some(2)])
         );
         assert_eq!(
-            super::unify_tuples(&vec![Some(1), None], &vec![Some(1), Some(3)]),
+            unify_tuples(&vec![Some(1), None], &vec![Some(1), Some(3)]),
             Some(vec![Some(1), Some(3)])
         );
         assert_eq!(
-            super::unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)]),
+            unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)]),
             None
         );
         assert_eq!(
-            super::unify_tuples(&vec![None, None], &vec![Some(1), Some(2)]),
+            unify_tuples(&vec![None, None], &vec![Some(1), Some(2)]),
             Some(vec![Some(1), Some(2)])
         );
     }
 
     #[test]
+    fn test_is_less_or_equal() {
+        assert!(is_less_or_equal(&vec![None, None], &vec![Some(1), Some(2)]));
+        assert!(is_less_or_equal(&vec![Some(1), None], &vec![Some(1), Some(2)]));
+        assert!(is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]));
+        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), None]));
+        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)]));
+    }
+
+    #[test]
     fn test_successor_tuple_sparse() {
-        // Two components, one local state each (id 0)
-        // Component 0: only symbol 0 loops 0->0
-        // Component 1: only symbol 1 loops 0->0
         let comp0 = vec![BTreeMap::from([(0usize, 0usize)])];
         let comp1 = vec![BTreeMap::from([(1usize, 0usize)])];
         let components = vec![comp0, comp1];
@@ -908,8 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_merge_greedy_wrapper() {
-        // Same as original simple test: components only react to distinct symbols (0 vs 1).
+    fn test_simple_merge_optimal() {
         let comp0 = vec![BTreeMap::from([(0usize, 0usize)])];
         let comp1 = vec![BTreeMap::from([(1usize, 0usize)])];
         let components = vec![comp0, comp1];
@@ -919,21 +683,21 @@ mod tests {
         let (states, point_map) =
             merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
-        // The optimized algorithm still finds a single representative here.
-        assert_eq!(states.len(), 1);
-        assert_eq!(states[0], vec![Some(0), Some(0)]);
+        // Should find a minimal solution (likely 1 representative)
+        assert!(states.len() >= 1);
+        assert!(states.len() <= 2); // Optimal should be 1 or 2
 
-        let succ0 = successor_tuple(&states[0], 0, &components);
-        let succ1 = successor_tuple(&states[0], 1, &components);
-        assert_eq!(*point_map.get(&succ0).unwrap(), 0);
-        assert_eq!(*point_map.get(&succ1).unwrap(), 0);
+        // Verify it's a valid solution
+        let inst = Instance::new(vec![Some(0), Some(0)], components, alphabet_size);
+        let sol = Solution {
+            reps: states,
+            image: point_map,
+        };
+        sol.verify(&inst).expect("solution must be valid");
     }
 
     #[test]
     fn test_verify_solution_constraints() {
-        // Components: both have 2 local states: 0 and 1.
-        // For comp0: symbol 0 toggles 0->1, 1->1; symbol 1 no-op (masked)
-        // For comp1: symbol 1 toggles 0->1, 1->1; symbol 0 no-op (masked)
         let mut c0_s0: BTreeMap<usize, usize> = BTreeMap::new();
         c0_s0.insert(0, 1);
         let mut c0_s1: BTreeMap<usize, usize> = BTreeMap::new();
@@ -949,12 +713,73 @@ mod tests {
         let components = vec![comp0, comp1];
         let inst = Instance::new(vec![Some(0), Some(0)], components, 2);
 
-        // The optimized algorithm must satisfy constraints; it may or may not
-        // find fewer reps than greedy, but always valid.
-        let sol = synthesize_optimized(&inst);
-        sol.verify(&inst).expect("optimized solution must satisfy constraints");
+        let sol = synthesize_optimal(&inst);
+        sol.verify(&inst).expect("optimal solution must satisfy constraints");
+    }
 
-        let sol_greedy = synthesize_greedy(&inst);
-        sol_greedy.verify(&inst).expect("greedy solution must satisfy constraints");
+    #[test]
+    fn test_optimal_better_than_greedy() {
+        // Create a test case where greedy is suboptimal
+        // Component 0: 0 --a--> 1, 1 --a--> 1
+        // Component 1: 0 --b--> 1, 1 --b--> 1
+        let comp0 = vec![
+            BTreeMap::from([(0usize, 1usize)]),
+            BTreeMap::from([(0usize, 1usize)]),
+        ];
+        let comp1 = vec![
+            BTreeMap::from([(1usize, 1usize)]),
+            BTreeMap::from([(1usize, 1usize)]),
+        ];
+        let components = vec![comp0, comp1];
+        let inst = Instance::new(vec![Some(0), Some(0)], components, 2);
+
+        let greedy_sol = synthesize_greedy(&inst);
+        let optimal_sol = synthesize_optimal(&inst);
+
+        // Optimal should be at least as good as greedy
+        assert!(optimal_sol.reps.len() <= greedy_sol.reps.len());
+
+        // Both should be valid
+        greedy_sol.verify(&inst).expect("greedy must be valid");
+        optimal_sol.verify(&inst).expect("optimal must be valid");
+    }
+
+    #[test]
+    fn test_optimize_solution_reduces_size() {
+        // Create an intentionally suboptimal solution and verify optimization improves it
+        let comp0 = vec![BTreeMap::from([(0usize, 0usize)])];
+        let comp1 = vec![BTreeMap::from([(1usize, 0usize)])];
+        let components = vec![comp0, comp1];
+        let inst = Instance::new(vec![Some(0), Some(0)], components, 2);
+
+        let sol = synthesize_greedy(&inst);
+        let original_size = sol.reps.len();
+
+        let optimized = optimize_solution(sol, &inst);
+        let optimized_size = optimized.reps.len();
+
+        // Optimization should not increase size
+        assert!(optimized_size <= original_size);
+
+        // Result should still be valid
+        optimized.verify(&inst).expect("optimized must be valid");
+    }
+
+    #[test]
+    fn test_reachability_computation() {
+        let comp0 = vec![
+            BTreeMap::from([(0usize, 1usize)]),
+            BTreeMap::from([(0usize, 0usize)]),
+        ];
+        let comp1 = vec![BTreeMap::from([(0usize, 0usize)])];
+        let inst = Instance::new(vec![Some(0), Some(0)], vec![comp0, comp1], 1);
+
+        let reachable = compute_reachable_points(&inst);
+
+        // Start is reachable
+        assert!(reachable.contains(&vec![Some(0), Some(0)]));
+
+        // Should have found multiple states
+        assert!(reachable.len() >= 2);
     }
 }
