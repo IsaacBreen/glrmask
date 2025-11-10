@@ -138,7 +138,7 @@ impl NWA {
             by_sig: Vec<(usize, Weight)>,
             mask: Weight,
         }
-        #[derive(Clone, Debug)]
+        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
         struct DefSig {
             step_id: usize,
             exceptions: BTreeSet<i16>,
@@ -235,9 +235,10 @@ impl NWA {
 
                 if !step_exs.is_empty() {
                     step_exs.sort_unstable();
-                    let mut sorted_def_steps = def_steps.clone();
-                    sorted_def_steps.sort_unstable();
-                    if step_exs == sorted_def_steps {
+                    let mut sorted_def_step_ids: Vec<usize> =
+                        def_steps.iter().map(|d| d.step_id).collect();
+                    sorted_def_step_ids.sort_unstable();
+                    if step_exs == sorted_def_step_ids {
                         continue;
                     }
                     ex.insert(*lbl, step_exs);
