@@ -372,10 +372,6 @@ impl<'a> BnBSolver<'a> {
     fn solve(mut self) -> Solution {
         let _ = self.inst.validate_shape();
         self.initial_upper_bound();
-        eprintln!(
-            "[BnB Search] Starting search. Initial greedy solution size: {}",
-            self.best_count
-        );
 
         let mut init = SearchState {
             reps: Vec::new(),
@@ -389,11 +385,6 @@ impl<'a> BnBSolver<'a> {
 
         self.search(init);
 
-        eprintln!(
-            "[BnB Search] Search finished. Visited {} nodes. Final solution size: {}",
-            self.nodes_visited,
-            self.best.as_ref().map_or(0, |s| s.reps.len())
-        );
         // Return the best-so-far (at least greedy).
         self.best.expect("initial upper bound must exist")
     }
@@ -413,15 +404,6 @@ impl<'a> BnBSolver<'a> {
             return;
         }
         self.nodes_visited += 1;
-        if self.nodes_visited % 100 == 0 {
-            eprintln!(
-                "[BnB Search] Nodes: {}, Best: {}, Current reps: {}, Pending: {}",
-                self.nodes_visited,
-                self.best_count,
-                st.reps.len(),
-                st.pending.len()
-            );
-        }
 
         // Deterministic unit propagation: assign demands that are already covered by existing reps.
         // Keep going while progress is possible.
@@ -477,12 +459,6 @@ impl<'a> BnBSolver<'a> {
             let sol = self.to_solution(&st);
             if let Ok(()) = sol.verify(self.inst) {
                 if st.reps.len() < self.best_count {
-                    eprintln!(
-                        "[BnB Search] New best solution found: |R| = {} (was {}) at node {}",
-                        st.reps.len(),
-                        self.best_count,
-                        self.nodes_visited
-                    );
                     self.best_count = st.reps.len();
                     self.best = Some(sol);
                 }
@@ -500,19 +476,18 @@ impl<'a> BnBSolver<'a> {
         // Choose a branching demand with minimal flexibility, i.e., fewest compatible reps.
         let (idx, demand_tuple, candidates, is_edge) = self.choose_branch_demand(&st);
 
-        // Strategy: Be decisive. If a merge is possible, do it. Only create a new rep if necessary.
-        // This prunes the search space aggressively, behaving like a smarter greedy algorithm.
-        // The candidates are already sorted by `choose_branch_demand` to prefer minimal specificity increase.
-        if let Some(&j) = candidates.first() {
+        // Branch on mapping to compatible existing reps first (prefer merging), ordered by minimal specificity increase.
+        for j in candidates {
             let mut child = st.clone();
             let changed_rep = Self::unify_into(&mut child, j, &demand_tuple);
             // Record φ and δ
             match &child.pending[idx] {
-                Demand::Point(_) => {
-                    child.image.insert(demand_tuple.clone(), j);
+                Demand::Point(x) => {
+                    child.image.insert(x.clone(), j);
                 }
-                Demand::Edge { rid, symbol, .. } => {
-                    child.image.insert(demand_tuple.clone(), j);
+                Demand::Edge { rid, symbol, ver: _ } => {
+                    let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
+                    child.image.insert(s, j);
                     child.delta[*rid][*symbol] = Some(j);
                 }
             }
@@ -525,31 +500,38 @@ impl<'a> BnBSolver<'a> {
             }
 
             self.search(child);
-        } else {
-            // No compatible rep found. Create a new one.
-            let mut child = st.clone();
-            let new_rep_id = child.reps.len();
-            child.reps.push(demand_tuple.clone());
-            child.rep_versions.push(0);
-            child.delta.push(vec![None; self.inst.alphabet_size]);
-
-            // Record φ and δ for this demand
-            match &child.pending[idx] {
-                Demand::Point(_) => {
-                    child.image.insert(demand_tuple.clone(), new_rep_id);
-                }
-                Demand::Edge { rid, symbol, .. } => {
-                    child.image.insert(demand_tuple.clone(), new_rep_id);
-                    child.delta[*rid][*symbol] = Some(new_rep_id);
-                }
+            if self.nodes_visited >= self.node_limit {
+                return;
             }
-            child.pending.swap_remove(idx);
-
-            // Enqueue closure demands for the new representative.
-            Self::enqueue_all_edges_for_rep(&mut child, new_rep_id, self.inst.alphabet_size);
-
-            self.search(child);
         }
+
+        // Finally, branch by creating a new representative for this demand.
+        let mut child = st.clone();
+        let new_rep_id = child.reps.len();
+        // New representative equals the demanded tuple.
+        child.reps.push(demand_tuple.clone());
+        child.rep_versions.push(0);
+        child.delta.push(vec![None; self.inst.alphabet_size]);
+
+        // Record φ and δ for this demand
+        match &child.pending[idx] {
+            Demand::Point(x) => {
+                child.image.insert(x.clone(), new_rep_id);
+            }
+            Demand::Edge { rid, symbol, ver: _ } => {
+                let s = successor_tuple(&child.reps[*rid], *symbol, &self.inst.components);
+                child.image.insert(s, new_rep_id);
+                child.delta[*rid][*symbol] = Some(new_rep_id);
+            }
+        }
+        // Remove processed demand
+        child.pending.swap_remove(idx);
+
+        // Enqueue closure demands for the new representative.
+        Self::enqueue_all_edges_for_rep(&mut child, new_rep_id, self.inst.alphabet_size);
+
+        self.search(child);
+        // return to caller
     }
 
     /// Find an existing representative j such that x ≤ rep[j].
@@ -647,13 +629,6 @@ impl<'a> BnBSolver<'a> {
             return 0;
         }
 
-        // Performance guard: if there are too many hard demands, the clique calculation is too slow.
-        // Return a weak (but fast) lower bound.
-        if points.len() > 250 {
-            // At least one new rep is needed if there are any hard demands.
-            return 1;
-        }
-
         // Build a simple greedy clique: repeatedly pick point with highest "incompatibility degree"
         // relative to current candidate set and keep only those incompatible with the clique so far.
         // Note: two points are incompatible if unify_tuples returns None.
@@ -713,33 +688,6 @@ impl<'a> BnBSolver<'a> {
     ///  - Prefer Edge demands (they are structural and must be satisfied) when tie.
     /// Return: (index in pending, demanded tuple, candidate reps, is_edge_flag)
     fn choose_branch_demand(&self, st: &SearchState) -> (usize, ProductTuple, Vec<usize>, bool) {
-        // Performance guard: if there are too many pending demands, searching for the "best"
-        // one is too slow. Fall back to a simpler heuristic: pick the first valid one.
-        if st.pending.len() > 500 {
-            for (i, d) in st.pending.iter().enumerate() {
-                let (is_edge, t) = match d {
-                    Demand::Point(x) => (false, x.clone()),
-                    Demand::Edge { rid, symbol, ver } => {
-                        if *ver != st.rep_versions[*rid] { continue; }
-                        (true, successor_tuple(&st.reps[*rid], *symbol, &self.inst.components))
-                    }
-                };
-
-                if Self::find_extending_rep(&st.reps, &t).is_some() {
-                    continue; // Should have been handled by unit propagation, but check again.
-                }
-
-                // Found a candidate. Compute its compatible reps and return.
-                let mut candidates: Vec<usize> = Vec::new();
-                for j in 0..st.reps.len() {
-                    if unify_tuples(&st.reps[j], &t).is_some() {
-                        candidates.push(j);
-                    }
-                }
-                return (i, t, candidates, is_edge);
-            }
-        }
-
         let mut best_idx = 0usize;
         let mut best_tuple: Option<ProductTuple> = None;
         let mut best_candidates: Vec<usize> = Vec::new();
