@@ -1108,6 +1108,38 @@ struct MergedProduct {
     start: usize,
 }
 
+struct MergeScheme {
+    representatives: Vec<ProductDFAStateTuple>,
+    tuple_to_group: HashMap<ProductDFAStateTuple, usize>,
+}
+
+/// Decides how to merge tuples greedily based on unifiability.
+/// Returns a scheme containing group representatives and a map from each tuple to its group ID.
+fn decide_tuple_merging(tuples: &[ProductDFAStateTuple]) -> MergeScheme {
+    let mut representatives: Vec<ProductDFAStateTuple> = Vec::new();
+    let mut tuple_to_group: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
+
+    // Greedy merging
+    for t in tuples {
+        let mut placed = false;
+        for gid in 0..representatives.len() {
+            if let Some(new_rep) = unify_tuples(&representatives[gid], t) {
+                representatives[gid] = new_rep;
+                tuple_to_group.insert(t.clone(), gid);
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            // Create new group
+            let gid = representatives.len();
+            representatives.push(t.clone());
+            tuple_to_group.insert(t.clone(), gid);
+        }
+    }
+    MergeScheme { representatives, tuple_to_group }
+}
+
 /// Merge tuples greedily into product states and compute per-state transitions and final weights from representatives.
 fn merge_tuples_to_states(
     tuples: Vec<ProductDFAStateTuple>,
@@ -1121,7 +1153,7 @@ fn merge_tuples_to_states(
         let p = ProgressBar::new_spinner();
         p.set_style(
             ProgressStyle::default_spinner()
-                .template("{spinner:.green} [Determinize: {elapsed_precise}] Merging tuples... {pos}")
+                .template("{spinner:.green} [Determinize: {elapsed_precise}] Merging tuples...")
                 .unwrap(),
         );
         Some(p)
@@ -1129,48 +1161,26 @@ fn merge_tuples_to_states(
         None
     };
 
-    let mut states: Vec<ProductDFAState> = Vec::new();
-    let mut tuple_to_group: HashMap<ProductDFAStateTuple, usize> = HashMap::new();
+    let merge_scheme = decide_tuple_merging(&tuples);
+    let num_groups = merge_scheme.representatives.len();
+    let mut states: Vec<ProductDFAState> = vec![ProductDFAState::default(); num_groups];
 
-    // Greedy merging
+    // Initialize states with representatives and all_tuples
+    for gid in 0..num_groups {
+        states[gid].representative_tuple = merge_scheme.representatives[gid].clone();
+    }
     for t in &tuples {
-        let mut placed = false;
-        for gid in 0..states.len() {
-            if let Some(new_rep) = unify_tuples(&states[gid].representative_tuple, t) {
-                states[gid].representative_tuple = new_rep;
-                states[gid].all_tuples.insert(t.clone());
-                tuple_to_group.insert(t.clone(), gid);
-                placed = true;
-                break;
-            }
-        }
-        if !placed {
-            // Create new group
-            let mut st = ProductDFAState {
-                representative_tuple: t.clone(),
-                all_tuples: {
-                    let mut s = BTreeSet::new();
-                    s.insert(t.clone());
-                    s
-                },
-                final_weight: None,
-                trans_exceptions: BTreeMap::new(),
-                trans_default: Vec::new(),
-            };
-            let gid = states.len();
-            states.push(st);
-            tuple_to_group.insert(t.clone(), gid);
-        }
-        if let Some(p) = &pb_merge {
-            p.set_position(states.len() as u64);
+        if let Some(&gid) = merge_scheme.tuple_to_group.get(t) {
+            states[gid].all_tuples.insert(t.clone());
         }
     }
+
     if let Some(p) = pb_merge {
         p.finish_with_message(format!("Merged into {} states", states.len()));
     }
 
     // Find start group
-    let start = *tuple_to_group.get(&start_tuple).expect("start tuple must have a group");
+    let start = *merge_scheme.tuple_to_group.get(&start_tuple).expect("start tuple must have a group");
 
     // Compute final weights and per-state transitions from representatives
     let pb_attach = if PROGRESS_BAR_ENABLED {
