@@ -413,7 +413,7 @@ impl<'a> BnBSolver<'a> {
             return;
         }
         self.nodes_visited += 1;
-        if self.nodes_visited % 10000 == 0 {
+        if self.nodes_visited % 100 == 0 {
             eprintln!(
                 "[BnB Search] Nodes: {}, Best: {}, Current reps: {}, Pending: {}",
                 self.nodes_visited,
