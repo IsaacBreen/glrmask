@@ -91,8 +91,7 @@ local_system:
 
       #![allow(dead_code)]
 
-      use std::cmp::Reverse;
-      use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
+      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
       /// Symbol index in 0..alphabet_size.
       pub type Symbol = usize;
@@ -134,22 +133,20 @@ local_system:
           Some(out)
       }
 
-      /// Checks if tuple `x` is less specific than or equal to tuple `y` (x ≤ y).
-      /// Intuitively, `y` is at least as "specific" as `x`: whenever `x` specifies a concrete local
-      /// state, `y` agrees. Otherwise `x` leaves the coordinate unspecified (⊥).
-      fn is_less_or_equal(x: &ProductTuple, y: &ProductTuple) -> bool {
-          debug_assert_eq!(x.len(), y.len(), "Tuples must have same arity for comparison");
-          for i in 0..x.len() {
-              match (x[i], y[i]) {
+      /// Checks if tuple `a` is less specific than or equal to tuple `b` (a ≤ b).
+      fn is_less_or_equal(a: &ProductTuple, b: &ProductTuple) -> bool {
+          debug_assert_eq!(a.len(), b.len(), "Tuples must have same arity for comparison");
+          for i in 0..a.len() {
+              match (a[i], b[i]) {
                   (Some(xs), Some(ys)) => {
                       if xs != ys {
-                          return false; // Conflict: x specifies something different from y
+                          return false; // Conflict: a specifies something different from b
                       }
                   }
                   (Some(_), None) => {
-                      return false; // x specifies a value, but y is masked (x is more specific than y)
+                      return false; // a specifies a value, but b is masked (a is more specific than b)
                   }
-                  _ => {} // OK cases: (None, _), (Some, Some) with equal values
+                  _ => {} // a is masked or both agree; condition holds for this coordinate
               }
           }
           true
@@ -260,7 +257,10 @@ local_system:
                   }
                   // Check x ≤ reps[id]
                   if !is_less_or_equal(x, &self.reps[id]) {
-                      return Err("image well-formedness violated: x is not less than or equal to its rep".into());
+                      return Err(
+                          "image well-formedness violated: x is not less than or equal to its representative"
+                              .into(),
+                      );
                   }
               }
 
@@ -281,94 +281,84 @@ local_system:
           }
       }
 
-      /// An optimized synthesizer that aims to minimize |R|.
+      /// Improved greedy synthesizer that aims to minimize |R| by making principled local choices.
       ///
-      /// It uses a priority queue to process the most general (least specific) representatives
-      /// first. When finding a home for a new successor point `x`, it chooses an existing
-      /// representative `r_j` to merge with based on a lexicographical cost function that
-      /// prioritizes minimal increase in specificity. This combination of a principled
-      /// exploration order and a strong local heuristic produces high-quality solutions efficiently.
+      /// When finding a home for a new successor `x`, it evaluates all existing compatible
+      /// representatives `r_j`. It chooses the one that minimizes a lexicographical cost:
+      ///   cost(j) = (specificity_increase, current_specificity_of_r_j, j)
+      ///
+      /// This prioritizes merges that add the least new information. As a tie-breaker, it
+      /// prefers to modify the most general (least specific) representative, thus preserving
+      /// flexibility in the overall set of representatives. A new representative is created
+      /// only as a last resort.
       pub fn synthesize_greedy(inst: &Instance) -> Solution {
-          let _ = inst.validate_shape();
+          let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
 
           let mut reps: Vec<ProductTuple> = Vec::new();
           let mut image: HashMap<ProductTuple, usize> = HashMap::new();
-
-          // A min-priority queue storing `(Reverse(specificity), representative_id)`.
-          // We process the most general representatives first.
-          let mut work_pq: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
-          // A set to track which representative IDs are currently scheduled in the PQ.
-          let mut work_set: HashSet<usize> = HashSet::new();
-          // A version counter for each representative to handle stale entries in the PQ.
-          let mut rep_versions: Vec<u64> = Vec::new();
-
-          let get_spec = |t: &ProductTuple| t.iter().filter(|o| o.is_some()).count();
+          let mut work_queue: VecDeque<usize> = VecDeque::new();
+          let mut work_set: HashSet<usize> = HashSet::new(); // To efficiently check if an item is in work_queue
 
           // Initialize
           reps.push(inst.start.clone());
-          rep_versions.push(0);
           image.insert(inst.start.clone(), 0);
-          let start_spec = get_spec(&reps[0]);
-          work_pq.push(Reverse((start_spec, 0, 0))); // (spec, id, version)
+          work_queue.push_back(0);
           work_set.insert(0);
 
-          while let Some(Reverse((_spec, rid, version))) = work_pq.pop() {
-              if version != rep_versions[rid] {
-                  continue; // Stale entry
-              }
+          // Explore representatives
+          while let Some(rid) = work_queue.pop_front() {
               work_set.remove(&rid);
-
-              let rep = reps[rid].clone();
+              let rep = reps[rid].clone(); // Clone to avoid mutable borrow issues
 
               for a in 0..inst.alphabet_size {
                   let x = successor_tuple(&rep, a, &inst.components);
 
                   if image.contains_key(&x) {
-                      continue;
+                      continue; // Already processed and mapped
                   }
 
-                  let mut best_candidate_id = None;
-                  let mut best_cost = (usize::MAX, usize::MAX, usize::MAX); // (spec_increase, current_spec, id)
+                  let mut best_candidate: Option<(usize, (usize, usize))> = None; // (rep_id, (spec_increase, current_spec))
 
+                  // Find the best existing representative to merge with
                   for j in 0..reps.len() {
                       if let Some(unified) = unify_tuples(&reps[j], &x) {
-                          let current_spec = get_spec(&reps[j]);
-                          let unified_spec = get_spec(&unified);
+                          let current_spec = reps[j].iter().filter(|opt| opt.is_some()).count();
+                          let unified_spec = unified.iter().filter(|opt| opt.is_some()).count();
                           let spec_increase = unified_spec - current_spec;
-                          let cost = (spec_increase, current_spec, j);
 
-                          if cost < best_cost {
-                              best_cost = cost;
-                              best_candidate_id = Some(j);
+                          let current_cost = (spec_increase, current_spec);
+
+                          if let Some((_best_j, best_cost)) = best_candidate {
+                              // Lexicographical comparison: smaller cost is better.
+                              if current_cost < best_cost {
+                                  best_candidate = Some((j, current_cost));
+                              }
+                          } else {
+                              best_candidate = Some((j, current_cost));
                           }
                       }
                   }
 
-                  if let Some(j) = best_candidate_id {
+                  if let Some((j, _cost)) = best_candidate {
                       // Found a best-fit representative to merge with.
-                      let unified_tuple = unify_tuples(&reps[j], &x).unwrap();
-                      image.insert(x, j);
+                      let unified_tuple = unify_tuples(&reps[j], &x).unwrap(); // Should not fail
 
                       if unified_tuple != reps[j] {
                           reps[j] = unified_tuple;
-                          rep_versions[j] += 1;
+                          // If the representative changed, it needs to be re-processed.
                           if !work_set.contains(&j) {
-                              let new_spec = get_spec(&reps[j]);
-                              work_pq.push(Reverse((new_spec, j, rep_versions[j])));
+                              work_queue.push_back(j);
                               work_set.insert(j);
                           }
                       }
+                      image.insert(x, j);
                   } else {
                       // No compatible representative found. Create a new one.
                       let new_id = reps.len();
                       reps.push(x.clone());
-                      rep_versions.push(0);
                       image.insert(x, new_id);
-                      if !work_set.contains(&new_id) {
-                          let new_spec = get_spec(&reps[new_id]);
-                          work_pq.push(Reverse((new_spec, new_id, rep_versions[new_id])));
-                          work_set.insert(new_id);
-                      }
+                      work_queue.push_back(new_id);
+                      work_set.insert(new_id);
                   }
               }
           }
@@ -474,8 +464,8 @@ local_system:
               let (states, point_map) =
                   merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
-              // The greedy algorithm finds a single representative, because both
-              // successors unify back into the same representative.
+              // The improved algorithm should find a single representative, because all
+              // successors can be merged with the start representative with 0 specificity increase.
               assert_eq!(states.len(), 1);
               assert_eq!(states[0], vec![Some(0), Some(0)]);
 
@@ -508,7 +498,30 @@ local_system:
               let sol = synthesize_greedy(&inst);
               sol.verify(&inst).expect("greedy solution must satisfy constraints");
 
-              // The new algorithm should find the minimal solution of size 2.
+              // Manual trace of the improved algorithm:
+              // Start: p0 = (0,0)
+              // R = [(0,0)], image = {(0,0):0}, work = [0]
+              //
+              // Pop 0, rep = (0,0)
+              // a=0: x = succ((0,0), 0) = (1, None)
+              //   - No existing rep is compatible. Create new.
+              //   - R = [(0,0), (1,None)], image{(1,None):1}, work.push(1)
+              //
+              // a=1: x = succ((0,0), 1) = (None, 1)
+              //   - Check compatibility with existing reps:
+              //     - r0=(0,0): Incompatible (conflict on coords 0 and 1).
+              //     - r1=(1,None): Compatible. unify -> (1,1).
+              //       - cost: spec_inc=1, current_spec=1. best_candidate = (j=1, cost=(1,1)).
+              //   - Merge with r1. reps[1] becomes (1,1). Add 1 back to worklist.
+              //   - R = [(0,0), (1,1)], image{(None,1):1}, work has [1].
+              //
+              // Pop 1, rep = (1,1)
+              // a=0: x = succ((1,1), 0) = (1, None)
+              //   - Already in image. Mapped to 1. is_less_or_equal((1,None), (1,1)) is true. OK.
+              // a=1: x = succ((1,1), 1) = (None, 1)
+              //   - Already in image. Mapped to 1. is_less_or_equal((None,1), (1,1)) is true. OK.
+              //
+              // Worklist empty. Final R = [(0,0), (1,1)]. Size 2. This is minimal.
               assert_eq!(sol.reps.len(), 2);
               assert_eq!(sol.reps[0], vec![Some(0), Some(0)]);
               assert_eq!(sol.reps[1], vec![Some(1), Some(1)]);
@@ -602,8 +615,7 @@ local_system:
 
       #![allow(dead_code)]
 
-      use std::cmp::Reverse;
-      use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
+      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
       /// Symbol index in 0..alphabet_size.
       pub type Symbol = usize;
@@ -645,22 +657,20 @@ local_system:
           Some(out)
       }
 
-      /// Checks if tuple `x` is less specific than or equal to tuple `y` (x ≤ y).
-      /// Intuitively, `y` is at least as "specific" as `x`: whenever `x` specifies a concrete local
-      /// state, `y` agrees. Otherwise `x` leaves the coordinate unspecified (⊥).
-      fn is_less_or_equal(x: &ProductTuple, y: &ProductTuple) -> bool {
-          debug_assert_eq!(x.len(), y.len(), "Tuples must have same arity for comparison");
-          for i in 0..x.len() {
-              match (x[i], y[i]) {
+      /// Checks if tuple `a` is less specific than or equal to tuple `b` (a ≤ b).
+      fn is_less_or_equal(a: &ProductTuple, b: &ProductTuple) -> bool {
+          debug_assert_eq!(a.len(), b.len(), "Tuples must have same arity for comparison");
+          for i in 0..a.len() {
+              match (a[i], b[i]) {
                   (Some(xs), Some(ys)) => {
                       if xs != ys {
-                          return false; // Conflict: x specifies something different from y
+                          return false; // Conflict: a specifies something different from b
                       }
                   }
                   (Some(_), None) => {
-                      return false; // x specifies a value, but y is masked (x is more specific than y)
+                      return false; // a specifies a value, but b is masked (a is more specific than b)
                   }
-                  _ => {} // OK cases: (None, _), (Some, Some) with equal values
+                  _ => {} // a is masked or both agree; condition holds for this coordinate
               }
           }
           true
@@ -771,7 +781,10 @@ local_system:
                   }
                   // Check x ≤ reps[id]
                   if !is_less_or_equal(x, &self.reps[id]) {
-                      return Err("image well-formedness violated: x is not less than or equal to its rep".into());
+                      return Err(
+                          "image well-formedness violated: x is not less than or equal to its representative"
+                              .into(),
+                      );
                   }
               }
 
@@ -792,98 +805,114 @@ local_system:
           }
       }
 
-      /// An optimized synthesizer that aims to minimize |R|.
+      /// Improved greedy synthesizer that aims to minimize |R| by making principled local choices.
       ///
-      /// It uses a priority queue to process the most general (least specific) representatives
-      /// first. When finding a home for a new successor point `x`, it chooses an existing
-      /// representative `r_j` to merge with based on a lexicographical cost function that
-      /// prioritizes minimal increase in specificity. This combination of a principled
-      /// exploration order and a strong local heuristic produces high-quality solutions efficiently.
+      /// When finding a home for a new successor `x`, it evaluates all existing compatible
+      /// representatives `r_j`. It chooses the one that minimizes a lexicographical cost:
+      ///   cost(j) = (specificity_increase, current_specificity_of_r_j, j)
+      ///
+      /// This prioritizes merges that add the least new information. As a tie-breaker, it
+      /// prefers to modify the most general (least specific) representative, thus preserving
+      /// flexibility in the overall set of representatives. A new representative is created
+      /// only as a last resort.
       pub fn synthesize_greedy(inst: &Instance) -> Solution {
-          let _ = inst.validate_shape();
+          let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
 
           let mut reps: Vec<ProductTuple> = Vec::new();
           let mut image: HashMap<ProductTuple, usize> = HashMap::new();
-
-          // A min-priority queue storing `(Reverse(specificity), representative_id)`.
-          // We process the most general representatives first.
-          let mut work_pq: BinaryHeap<Reverse<(usize, usize, u64)>> = BinaryHeap::new();
-          // A set to track which representative IDs are currently scheduled in the PQ.
-          let mut work_set: HashSet<usize> = HashSet::new();
-          // A version counter for each representative to handle stale entries in the PQ.
-          let mut rep_versions: Vec<u64> = Vec::new();
-
-          let get_spec = |t: &ProductTuple| t.iter().filter(|o| o.is_some()).count();
+          let mut work_queue: VecDeque<usize> = VecDeque::new();
+          let mut work_set: HashSet<usize> = HashSet::new(); // To efficiently check if an item is in work_queue
 
           // Initialize
           reps.push(inst.start.clone());
-          rep_versions.push(0);
           image.insert(inst.start.clone(), 0);
-          let start_spec = get_spec(&reps[0]);
-          work_pq.push(Reverse((start_spec, 0, 0))); // (spec, id, version)
+          work_queue.push_back(0);
           work_set.insert(0);
+          println!("Starting greedy synthesis...");
 
-          while let Some(Reverse((_spec, rid, version))) = work_pq.pop() {
-              if version != rep_versions[rid] {
-                  continue; // Stale entry
+          let mut processed_items = 0;
+
+          // Explore representatives
+          while let Some(rid) = work_queue.pop_front() {
+              processed_items += 1;
+              if processed_items % 500 == 0 {
+                  println!(
+                      " -> Processed {} items. State: |R|={}, |φ|={}, |Work|={}",
+                      processed_items,
+                      reps.len(),
+                      image.len(),
+                      work_queue.len()
+                  );
               }
-              work_set.remove(&rid);
 
-              let rep = reps[rid].clone();
+              work_set.remove(&rid);
+              let rep = reps[rid].clone(); // Clone to avoid mutable borrow issues
 
               for a in 0..inst.alphabet_size {
                   let x = successor_tuple(&rep, a, &inst.components);
 
                   if image.contains_key(&x) {
-                      continue;
+                      continue; // Already processed and mapped
                   }
 
-                  let mut best_candidate_id = None;
-                  let mut best_cost = (usize::MAX, usize::MAX, usize::MAX); // (spec_increase, current_spec, id)
+                  let mut best_candidate: Option<(usize, (usize, usize))> = None; // (rep_id, (spec_increase, current_spec))
 
+                  // Find the best existing representative to merge with
                   for j in 0..reps.len() {
                       if let Some(unified) = unify_tuples(&reps[j], &x) {
-                          let current_spec = get_spec(&reps[j]);
-                          let unified_spec = get_spec(&unified);
+                          let current_spec = reps[j].iter().filter(|opt| opt.is_some()).count();
+                          let unified_spec = unified.iter().filter(|opt| opt.is_some()).count();
                           let spec_increase = unified_spec - current_spec;
-                          let cost = (spec_increase, current_spec, j);
 
-                          if cost < best_cost {
-                              best_cost = cost;
-                              best_candidate_id = Some(j);
+                          let current_cost = (spec_increase, current_spec);
+
+                          if let Some((_best_j, best_cost)) = best_candidate {
+                              // Lexicographical comparison: smaller cost is better.
+                              if current_cost < best_cost {
+                                  best_candidate = Some((j, current_cost));
+                              }
+                          } else {
+                              best_candidate = Some((j, current_cost));
                           }
                       }
                   }
 
-                  if let Some(j) = best_candidate_id {
+                  if let Some((j, _cost)) = best_candidate {
                       // Found a best-fit representative to merge with.
-                      let unified_tuple = unify_tuples(&reps[j], &x).unwrap();
-                      image.insert(x, j);
+                      let unified_tuple = unify_tuples(&reps[j], &x).unwrap(); // Should not fail
 
                       if unified_tuple != reps[j] {
                           reps[j] = unified_tuple;
-                          rep_versions[j] += 1;
+                          // If the representative changed, it needs to be re-processed.
                           if !work_set.contains(&j) {
-                              let new_spec = get_spec(&reps[j]);
-                              work_pq.push(Reverse((new_spec, j, rep_versions[j])));
+                              work_queue.push_back(j);
                               work_set.insert(j);
                           }
                       }
+                      image.insert(x, j);
                   } else {
                       // No compatible representative found. Create a new one.
                       let new_id = reps.len();
                       reps.push(x.clone());
-                      rep_versions.push(0);
                       image.insert(x, new_id);
-                      if !work_set.contains(&new_id) {
-                          let new_spec = get_spec(&reps[new_id]);
-                          work_pq.push(Reverse((new_spec, new_id, rep_versions[new_id])));
-                          work_set.insert(new_id);
+                      work_queue.push_back(new_id);
+                      work_set.insert(new_id);
+                      if reps.len() % 100 == 0 {
+                          println!(
+                              " -> Representative count reached {}. |Work|={}",
+                              reps.len(),
+                              work_queue.len()
+                          );
                       }
                   }
               }
           }
 
+          println!(
+              "Greedy synthesis finished. Total reps: {}, total image size: {}.",
+              reps.len(),
+              image.len()
+          );
           Solution { reps, image }
       }
 
@@ -985,8 +1014,8 @@ local_system:
               let (states, point_map) =
                   merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
-              // The greedy algorithm finds a single representative, because both
-              // successors unify back into the same representative.
+              // The improved algorithm should find a single representative, because all
+              // successors can be merged with the start representative with 0 specificity increase.
               assert_eq!(states.len(), 1);
               assert_eq!(states[0], vec![Some(0), Some(0)]);
 
@@ -1019,7 +1048,30 @@ local_system:
               let sol = synthesize_greedy(&inst);
               sol.verify(&inst).expect("greedy solution must satisfy constraints");
 
-              // The new algorithm should find the minimal solution of size 2.
+              // Manual trace of the improved algorithm:
+              // Start: p0 = (0,0)
+              // R = [(0,0)], image = {(0,0):0}, work = [0]
+              //
+              // Pop 0, rep = (0,0)
+              // a=0: x = succ((0,0), 0) = (1, None)
+              //   - No existing rep is compatible. Create new.
+              //   - R = [(0,0), (1,None)], image{(1,None):1}, work.push(1)
+              //
+              // a=1: x = succ((0,0), 1) = (None, 1)
+              //   - Check compatibility with existing reps:
+              //     - r0=(0,0): Incompatible (conflict on coords 0 and 1).
+              //     - r1=(1,None): Compatible. unify -> (1,1).
+              //       - cost: spec_inc=1, current_spec=1. best_candidate = (j=1, cost=(1,1)).
+              //   - Merge with r1. reps[1] becomes (1,1). Add 1 back to worklist.
+              //   - R = [(0,0), (1,1)], image{(None,1):1}, work has [1].
+              //
+              // Pop 1, rep = (1,1)
+              // a=0: x = succ((1,1), 0) = (1, None)
+              //   - Already in image. Mapped to 1. is_less_or_equal((1,None), (1,1)) is true. OK.
+              // a=1: x = succ((1,1), 1) = (None, 1)
+              //   - Already in image. Mapped to 1. is_less_or_equal((None,1), (1,1)) is true. OK.
+              //
+              // Worklist empty. Final R = [(0,0), (1,1)]. Size 2. This is minimal.
               assert_eq!(sol.reps.len(), 2);
               assert_eq!(sol.reps[0], vec![Some(0), Some(0)]);
               assert_eq!(sol.reps[1], vec![Some(1), Some(1)]);
@@ -1155,8 +1207,7 @@ messages:
 
       #![allow(dead_code)]
 
-      use std::cmp::Reverse;
-      use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
+      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
       /// Symbol index in 0..alphabet_size.
       pub type Symbol = usize;
@@ -1198,22 +1249,20 @@ messages:
           Some(out)
       }
 
-      /// Checks if tuple `x` is less specific than or equal to tuple `y` (x ≤ y).
-      /// Intuitively, `y` is at least as "specific" as `x`: whenever `x` specifies a concrete local
-      /// state, `y` agrees. Otherwise `x` leaves the coordinate unspecified (⊥).
-      fn is_less_or_equal(x: &ProductTuple, y: &ProductTuple) -> bool {
-          debug_assert_eq!(x.len(), y.len(), "Tuples must have same arity for comparison");
-          for i in 0..x.len() {
-              match (x[i], y[i]) {
+      /// Checks if tuple `a` is less specific than or equal to tuple `b` (a ≤ b).
+      fn is_less_or_equal(a: &ProductTuple, b: &ProductTuple) -> bool {
+          debug_assert_eq!(a.len(), b.len(), "Tuples must have same arity for comparison");
+          for i in 0..a.len() {
+              match (a[i], b[i]) {
                   (Some(xs), Some(ys)) => {
                       if xs != ys {
-                          return false; // Conflict: x specifies something different from y
+                          return false; // Conflict: a specifies something different from b
                       }
                   }
                   (Some(_), None) => {
-                      return false; // x specifies a value, but y is masked (x is more specific than y)
+                      return false; // a specifies a value, but b is masked (a is more specific than b)
                   }
-                  _ => {} // OK cases: (None, _), (Some, Some) with equal values
+                  _ => {} // a is masked or both agree; condition holds for this coordinate
               }
           }
           true
@@ -1324,7 +1373,10 @@ messages:
                   }
                   // Check x ≤ reps[id]
                   if !is_less_or_equal(x, &self.reps[id]) {
-                      return Err("image well-formedness violated: x is not less than or equal to its rep".into());
+                      return Err(
+                          "image well-formedness violated: x is not less than or equal to its representative"
+                              .into(),
+                      );
                   }
               }
 
@@ -1345,94 +1397,84 @@ messages:
           }
       }
 
-      /// An optimized synthesizer that aims to minimize |R|.
+      /// Improved greedy synthesizer that aims to minimize |R| by making principled local choices.
       ///
-      /// It uses a priority queue to process the most general (least specific) representatives
-      /// first. When finding a home for a new successor point `x`, it chooses an existing
-      /// representative `r_j` to merge with based on a lexicographical cost function that
-      /// prioritizes minimal increase in specificity. This combination of a principled
-      /// exploration order and a strong local heuristic produces high-quality solutions efficiently.
+      /// When finding a home for a new successor `x`, it evaluates all existing compatible
+      /// representatives `r_j`. It chooses the one that minimizes a lexicographical cost:
+      ///   cost(j) = (specificity_increase, current_specificity_of_r_j, j)
+      ///
+      /// This prioritizes merges that add the least new information. As a tie-breaker, it
+      /// prefers to modify the most general (least specific) representative, thus preserving
+      /// flexibility in the overall set of representatives. A new representative is created
+      /// only as a last resort.
       pub fn synthesize_greedy(inst: &Instance) -> Solution {
-          let _ = inst.validate_shape();
+          let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
 
           let mut reps: Vec<ProductTuple> = Vec::new();
           let mut image: HashMap<ProductTuple, usize> = HashMap::new();
-
-          // A min-priority queue storing `(Reverse(specificity), representative_id)`.
-          // We process the most general representatives first.
-          let mut work_pq: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
-          // A set to track which representative IDs are currently scheduled in the PQ.
-          let mut work_set: HashSet<usize> = HashSet::new();
-          // A version counter for each representative to handle stale entries in the PQ.
-          let mut rep_versions: Vec<u64> = Vec::new();
-
-          let get_spec = |t: &ProductTuple| t.iter().filter(|o| o.is_some()).count();
+          let mut work_queue: VecDeque<usize> = VecDeque::new();
+          let mut work_set: HashSet<usize> = HashSet::new(); // To efficiently check if an item is in work_queue
 
           // Initialize
           reps.push(inst.start.clone());
-          rep_versions.push(0);
           image.insert(inst.start.clone(), 0);
-          let start_spec = get_spec(&reps[0]);
-          work_pq.push(Reverse((start_spec, 0, 0))); // (spec, id, version)
+          work_queue.push_back(0);
           work_set.insert(0);
 
-          while let Some(Reverse((_spec, rid, version))) = work_pq.pop() {
-              if version != rep_versions[rid] {
-                  continue; // Stale entry
-              }
+          // Explore representatives
+          while let Some(rid) = work_queue.pop_front() {
               work_set.remove(&rid);
-
-              let rep = reps[rid].clone();
+              let rep = reps[rid].clone(); // Clone to avoid mutable borrow issues
 
               for a in 0..inst.alphabet_size {
                   let x = successor_tuple(&rep, a, &inst.components);
 
                   if image.contains_key(&x) {
-                      continue;
+                      continue; // Already processed and mapped
                   }
 
-                  let mut best_candidate_id = None;
-                  let mut best_cost = (usize::MAX, usize::MAX, usize::MAX); // (spec_increase, current_spec, id)
+                  let mut best_candidate: Option<(usize, (usize, usize))> = None; // (rep_id, (spec_increase, current_spec))
 
+                  // Find the best existing representative to merge with
                   for j in 0..reps.len() {
                       if let Some(unified) = unify_tuples(&reps[j], &x) {
-                          let current_spec = get_spec(&reps[j]);
-                          let unified_spec = get_spec(&unified);
+                          let current_spec = reps[j].iter().filter(|opt| opt.is_some()).count();
+                          let unified_spec = unified.iter().filter(|opt| opt.is_some()).count();
                           let spec_increase = unified_spec - current_spec;
-                          let cost = (spec_increase, current_spec, j);
 
-                          if cost < best_cost {
-                              best_cost = cost;
-                              best_candidate_id = Some(j);
+                          let current_cost = (spec_increase, current_spec);
+
+                          if let Some((_best_j, best_cost)) = best_candidate {
+                              // Lexicographical comparison: smaller cost is better.
+                              if current_cost < best_cost {
+                                  best_candidate = Some((j, current_cost));
+                              }
+                          } else {
+                              best_candidate = Some((j, current_cost));
                           }
                       }
                   }
 
-                  if let Some(j) = best_candidate_id {
+                  if let Some((j, _cost)) = best_candidate {
                       // Found a best-fit representative to merge with.
-                      let unified_tuple = unify_tuples(&reps[j], &x).unwrap();
-                      image.insert(x, j);
+                      let unified_tuple = unify_tuples(&reps[j], &x).unwrap(); // Should not fail
 
                       if unified_tuple != reps[j] {
                           reps[j] = unified_tuple;
-                          rep_versions[j] += 1;
+                          // If the representative changed, it needs to be re-processed.
                           if !work_set.contains(&j) {
-                              let new_spec = get_spec(&reps[j]);
-                              work_pq.push(Reverse((new_spec, j, rep_versions[j])));
+                              work_queue.push_back(j);
                               work_set.insert(j);
                           }
                       }
+                      image.insert(x, j);
                   } else {
                       // No compatible representative found. Create a new one.
                       let new_id = reps.len();
                       reps.push(x.clone());
-                      rep_versions.push(0);
                       image.insert(x, new_id);
-                      if !work_set.contains(&new_id) {
-                          let new_spec = get_spec(&reps[new_id]);
-                          work_pq.push(Reverse((new_spec, new_id, rep_versions[new_id])));
-                          work_set.insert(new_id);
-                      }
+                      work_queue.push_back(new_id);
+                      work_set.insert(new_id);
                   }
               }
           }
@@ -1538,8 +1580,8 @@ messages:
               let (states, point_map) =
                   merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
-              // The greedy algorithm finds a single representative, because both
-              // successors unify back into the same representative.
+              // The improved algorithm should find a single representative, because all
+              // successors can be merged with the start representative with 0 specificity increase.
               assert_eq!(states.len(), 1);
               assert_eq!(states[0], vec![Some(0), Some(0)]);
 
@@ -1572,7 +1614,30 @@ messages:
               let sol = synthesize_greedy(&inst);
               sol.verify(&inst).expect("greedy solution must satisfy constraints");
 
-              // The new algorithm should find the minimal solution of size 2.
+              // Manual trace of the improved algorithm:
+              // Start: p0 = (0,0)
+              // R = [(0,0)], image = {(0,0):0}, work = [0]
+              //
+              // Pop 0, rep = (0,0)
+              // a=0: x = succ((0,0), 0) = (1, None)
+              //   - No existing rep is compatible. Create new.
+              //   - R = [(0,0), (1,None)], image{(1,None):1}, work.push(1)
+              //
+              // a=1: x = succ((0,0), 1) = (None, 1)
+              //   - Check compatibility with existing reps:
+              //     - r0=(0,0): Incompatible (conflict on coords 0 and 1).
+              //     - r1=(1,None): Compatible. unify -> (1,1).
+              //       - cost: spec_inc=1, current_spec=1. best_candidate = (j=1, cost=(1,1)).
+              //   - Merge with r1. reps[1] becomes (1,1). Add 1 back to worklist.
+              //   - R = [(0,0), (1,1)], image{(None,1):1}, work has [1].
+              //
+              // Pop 1, rep = (1,1)
+              // a=0: x = succ((1,1), 0) = (1, None)
+              //   - Already in image. Mapped to 1. is_less_or_equal((1,None), (1,1)) is true. OK.
+              // a=1: x = succ((1,1), 1) = (None, 1)
+              //   - Already in image. Mapped to 1. is_less_or_equal((None,1), (1,1)) is true. OK.
+              //
+              // Worklist empty. Final R = [(0,0), (1,1)]. Size 2. This is minimal.
               assert_eq!(sol.reps.len(), 2);
               assert_eq!(sol.reps[0], vec![Some(0), Some(0)]);
               assert_eq!(sol.reps[1], vec![Some(1), Some(1)]);
@@ -1581,92 +1646,9 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata/tuple_merger.rs
-  - user: |
-      /Users/isaacbreen/.cargo/bin/cargo test --color=always --message-format=json-diagnostic-rendered-ansi --no-run --package sep1 --lib test_constraint_basic --profile test
-         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-      error[E0308]: mismatched types
-         --> src/precompute4/weighted_automata/tuple_merger.rs:305:26
-          |
-      305 |     work_pq.push(Reverse((start_spec, 0, 0))); // (spec, id, version)
-          |                  ------- ^^^^^^^^^^^^^^^^^^ expected a tuple with 2 elements, found one with 3 elements
-          |                  |
-          |                  arguments to this struct are incorrect
-          |
-          = note: expected tuple `(usize, usize)`
-                     found tuple `(usize, usize, {integer})`
-      help: the type constructed contains `(usize, usize, {integer})` due to the type of the argument passed
-         --> src/precompute4/weighted_automata/tuple_merger.rs:305:18
-          |
-      305 |     work_pq.push(Reverse((start_spec, 0, 0))); // (spec, id, version)
-          |                  ^^^^^^^^------------------^
-          |                          |
-          |                          this argument influences the type of `Reverse`
-      note: tuple struct defined here
-         --> /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:666:12
-          |
-      666 | pub struct Reverse<T>(#[stable(feature = "reverse_cmp_key", since = "1.19.0")] pub T);
-          |            ^^^^^^^
-
-      error[E0308]: mismatched types
-         --> src/precompute4/weighted_automata/tuple_merger.rs:308:28
-          |
-      308 |     while let Some(Reverse((_spec, rid, version))) = work_pq.pop() {
-          |                            ^^^^^^^^^^^^^^^^^^^^^     ------------- this expression has type `std::option::Option<Reverse<(usize, usize)>>`
-          |                            |
-          |                            expected a tuple with 2 elements, found one with 3 elements
-          |
-          = note: expected tuple `(usize, usize)`
-                     found tuple `(_, _, _)`
-
-      error[E0308]: mismatched types
-         --> src/precompute4/weighted_automata/tuple_merger.rs:350:46
-          |
-      350 |                         work_pq.push(Reverse((new_spec, j, rep_versions[j])));
-          |                                      ------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected a tuple with 2 elements, found one with 3 elements
-          |                                      |
-          |                                      arguments to this struct are incorrect
-          |
-          = note: expected tuple `(usize, usize)`
-                     found tuple `(usize, usize, u64)`
-      help: the type constructed contains `(usize, usize, u64)` due to the type of the argument passed
-         --> src/precompute4/weighted_automata/tuple_merger.rs:350:38
-          |
-      350 |                         work_pq.push(Reverse((new_spec, j, rep_versions[j])));
-          |                                      ^^^^^^^^------------------------------^
-          |                                              |
-          |                                              this argument influences the type of `Reverse`
-      note: tuple struct defined here
-         --> /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:666:12
-          |
-      666 | pub struct Reverse<T>(#[stable(feature = "reverse_cmp_key", since = "1.19.0")] pub T);
-          |            ^^^^^^^
-
-      error[E0308]: mismatched types
-         --> src/precompute4/weighted_automata/tuple_merger.rs:362:42
-          |
-      362 |                     work_pq.push(Reverse((new_spec, new_id, rep_versions[new_id])));
-          |                                  ------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected a tuple with 2 elements, found one with 3 elements
-          |                                  |
-          |                                  arguments to this struct are incorrect
-          |
-          = note: expected tuple `(usize, usize)`
-                     found tuple `(usize, usize, u64)`
-      help: the type constructed contains `(usize, usize, u64)` due to the type of the argument passed
-         --> src/precompute4/weighted_automata/tuple_merger.rs:362:34
-          |
-      362 |                     work_pq.push(Reverse((new_spec, new_id, rep_versions[new_id])));
-          |                                  ^^^^^^^^----------------------------------------^
-          |                                          |
-          |                                          this argument influences the type of `Reverse`
-      note: tuple struct defined here
-         --> /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:666:12
-          |
-      666 | pub struct Reverse<T>(#[stable(feature = "reverse_cmp_key", since = "1.19.0")] pub T);
-          |            ^^^^^^^
-
-      For more information about this error, try `rustc --explain E0308`.
-      error: could not compile `sep1` (lib test) due to 4 previous errors
-      Process finished with exit code 101
+  - user: Add print statements to this to debug. It's taking a very long time and
+      we have no feedback. Ensure the prints are frequent enough that we're not left
+      in the dark for long, but also that they don't flood the output.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1686,51 +1668,126 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! I see you're running into some compilation errors. The issue seems to be a type mismatch in your priority queue declaration. The queue is configured to hold tuples with two elements, but the code is trying to use three-element tuples to include a version number for handling stale entries.
-
-      Here are the step-by-step instructions to fix the errors:
+      Of course. Dealing with long-running processes without feedback can be frustrating. Here are step-by-step instructions to add logging to the `synthesize_greedy` function, followed by a git diff to apply the changes. The logging will provide updates on progress without overwhelming the console.
 
       ### Step-by-step Instructions
 
-      In the file `src/precompute4/weighted_automata/tuple_merger.rs`, you need to update the type definition for the `work_pq` variable inside the `synthesize_greedy` function.
+      In the file `src/precompute4/weighted_automata/tuple_merger.rs`, you will make the following edits to the `synthesize_greedy` function:
 
-      1.  **Open the file** `src/precompute4/weighted_automata/tuple_merger.rs`.
+      1.  **Add a starting log message:**
+          After the line `work_set.insert(0);`, add a `println!` to show that the process is starting.
 
-      2.  **Navigate to the `synthesize_greedy` function**, around line 289.
-
-      3.  **Find the line where `work_pq` is declared**, which is around line 297. It currently looks like this:
           ```rust
-          let mut work_pq: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
+          println!("Starting greedy synthesis...");
           ```
 
-      4.  **Modify the type** to correctly represent the three-element tuple `(specificity, id, version)` which corresponds to the types `(usize, usize, u64)`. Change the line to:
+      2.  **Initialize a processed items counter:**
+          Immediately after the new `println!`, declare a counter to track how many items have been processed from the work queue.
+
           ```rust
-          let mut work_pq: BinaryHeap<Reverse<(usize, usize, u64)>> = BinaryHeap::new();
+          let mut processed_items = 0;
           ```
 
-      This single change will resolve all four `E0308` errors, as they all originate from this incorrect type definition.
+      3.  **Add periodic progress reporting:**
+          At the very beginning of the `while let Some(rid) = work_queue.pop_front()` loop, insert the following snippet. It will print a status update every 500 items processed from the work queue.
+
+          ```rust
+          processed_items += 1;
+          if processed_items % 500 == 0 {
+              println!(
+                  " -> Processed {} items. State: |R|={}, |φ|={}, |Work|={}",
+                  processed_items,
+                  reps.len(),
+                  image.len(),
+                  work_queue.len()
+              );
+          }
+          ```
+
+      4.  **Log new representative creation:**
+          In the `else` block where a new representative is created, after the line `work_set.insert(new_id);`, add the following code. This will log a message every time the representative count crosses a multiple of 100.
+
+          ```rust
+          if reps.len() % 100 == 0 {
+              println!(
+                  " -> Representative count reached {}. |Work|={}",
+                  reps.len(),
+                  work_queue.len()
+              );
+          }
+          ```
+
+      5.  **Add a final summary message:**
+          After the `while` loop concludes, add a final `println!` to summarize the results.
+
+          ```rust
+          println!(
+              "Greedy synthesis finished. Total reps: {}, total image size: {}.",
+              reps.len(),
+              image.len()
+          );
+          ```
 
       ### Git Diff
 
-      Here is the corresponding git diff for the change:
+      Here is the git diff to apply these changes directly:
 
       ```diff
-      diff --git a/src/precompute4/weighted_automata/tuple_merger.rs b/src/precompute4/weighted_automata/tuple_merger.rs
       --- a/src/precompute4/weighted_automata/tuple_merger.rs
       +++ b/src/precompute4/weighted_automata/tuple_merger.rs
-      @@ -295,7 +295,7 @@
+      @@ -310,12 +310,27 @@
+           image.insert(inst.start.clone(), 0);
+           work_queue.push_back(0);
+           work_set.insert(0);
+      +    println!("Starting greedy synthesis...");
+      +
+      +    let mut processed_items = 0;
        
-           // A min-priority queue storing `(Reverse(specificity), representative_id)`.
-           // We process the most general representatives first.
-      -    let mut work_pq: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
-      +    let mut work_pq: BinaryHeap<Reverse<(usize, usize, u64)>> = BinaryHeap::new();
-           // A set to track which representative IDs are currently scheduled in the PQ.
-           let mut work_set: HashSet<usize> = HashSet::new();
-           // A version counter for each representative to handle stale entries in the PQ.
+           // Explore representatives
+           while let Some(rid) = work_queue.pop_front() {
+      +        processed_items += 1;
+      +        if processed_items % 500 == 0 {
+      +            println!(
+      +                " -> Processed {} items. State: |R|={}, |φ|={}, |Work|={}",
+      +                processed_items,
+      +                reps.len(),
+      +                image.len(),
+      +                work_queue.len()
+      +            );
+      +        }
+      +
+               work_set.remove(&rid);
+               let rep = reps[rid].clone(); // Clone to avoid mutable borrow issues
+       
+               for a in 0..inst.alphabet_size {
+                   let x = successor_tuple(&rep, a, &inst.components);
+       
+                   if image.contains_key(&x) {
+      @@ -361,11 +376,22 @@
+                       image.insert(x, new_id);
+                       work_queue.push_back(new_id);
+                       work_set.insert(new_id);
+      +                if reps.len() % 100 == 0 {
+      +                    println!(
+      +                        " -> Representative count reached {}. |Work|={}",
+      +                        reps.len(),
+      +                        work_queue.len()
+      +                    );
+      +                }
+                   }
+               }
+           }
+       
+      +    println!(
+      +        "Greedy synthesis finished. Total reps: {}, total image size: {}.",
+      +        reps.len(),
+      +        image.len()
+      +    );
+           Solution { reps, image }
+       }
+       
 
       ```
-
-      After applying this change, your code should compile successfully. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -1741,7 +1798,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/tuple_merger.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/tuple_merger.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Update work_pq type in synthesize_greedy
-      to include representative version"'
+  - user: 'Changes committed with message: "Add progress logging to `synthesize_greedy`
+      for better feedback"'
     metadata:
 ...

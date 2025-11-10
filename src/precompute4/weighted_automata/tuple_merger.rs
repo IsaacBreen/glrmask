@@ -297,9 +297,23 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
     image.insert(inst.start.clone(), 0);
     work_queue.push_back(0);
     work_set.insert(0);
+    println!("Starting greedy synthesis...");
+
+    let mut processed_items = 0;
 
     // Explore representatives
     while let Some(rid) = work_queue.pop_front() {
+        processed_items += 1;
+        if processed_items % 500 == 0 {
+            println!(
+                " -> Processed {} items. State: |R|={}, |φ|={}, |Work|={}",
+                processed_items,
+                reps.len(),
+                image.len(),
+                work_queue.len()
+            );
+        }
+
         work_set.remove(&rid);
         let rep = reps[rid].clone(); // Clone to avoid mutable borrow issues
 
@@ -352,10 +366,22 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
                 image.insert(x, new_id);
                 work_queue.push_back(new_id);
                 work_set.insert(new_id);
+                if reps.len() % 100 == 0 {
+                    println!(
+                        " -> Representative count reached {}. |Work|={}",
+                        reps.len(),
+                        work_queue.len()
+                    );
+                }
             }
         }
     }
 
+    println!(
+        "Greedy synthesis finished. Total reps: {}, total image size: {}.",
+        reps.len(),
+        image.len()
+    );
     Solution { reps, image }
 }
 
