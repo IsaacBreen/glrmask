@@ -372,6 +372,10 @@ impl<'a> BnBSolver<'a> {
     fn solve(mut self) -> Solution {
         let _ = self.inst.validate_shape();
         self.initial_upper_bound();
+        eprintln!(
+            "[BnB Search] Starting search. Initial greedy solution size: {}",
+            self.best_count
+        );
 
         let mut init = SearchState {
             reps: Vec::new(),
@@ -385,6 +389,11 @@ impl<'a> BnBSolver<'a> {
 
         self.search(init);
 
+        eprintln!(
+            "[BnB Search] Search finished. Visited {} nodes. Final solution size: {}",
+            self.nodes_visited,
+            self.best.as_ref().map_or(0, |s| s.reps.len())
+        );
         // Return the best-so-far (at least greedy).
         self.best.expect("initial upper bound must exist")
     }
@@ -404,6 +413,15 @@ impl<'a> BnBSolver<'a> {
             return;
         }
         self.nodes_visited += 1;
+        if self.nodes_visited % 10000 == 0 {
+            eprintln!(
+                "[BnB Search] Nodes: {}, Best: {}, Current reps: {}, Pending: {}",
+                self.nodes_visited,
+                self.best_count,
+                st.reps.len(),
+                st.pending.len()
+            );
+        }
 
         // Deterministic unit propagation: assign demands that are already covered by existing reps.
         // Keep going while progress is possible.
@@ -459,6 +477,12 @@ impl<'a> BnBSolver<'a> {
             let sol = self.to_solution(&st);
             if let Ok(()) = sol.verify(self.inst) {
                 if st.reps.len() < self.best_count {
+                    eprintln!(
+                        "[BnB Search] New best solution found: |R| = {} (was {}) at node {}",
+                        st.reps.len(),
+                        self.best_count,
+                        self.nodes_visited
+                    );
                     self.best_count = st.reps.len();
                     self.best = Some(sol);
                 }

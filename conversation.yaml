@@ -829,6 +829,10 @@ local_system:
           fn solve(mut self) -> Solution {
               let _ = self.inst.validate_shape();
               self.initial_upper_bound();
+              eprintln!(
+                  "[BnB Search] Starting search. Initial greedy solution size: {}",
+                  self.best_count
+              );
 
               let mut init = SearchState {
                   reps: Vec::new(),
@@ -842,6 +846,11 @@ local_system:
 
               self.search(init);
 
+              eprintln!(
+                  "[BnB Search] Search finished. Visited {} nodes. Final solution size: {}",
+                  self.nodes_visited,
+                  self.best.as_ref().map_or(0, |s| s.reps.len())
+              );
               // Return the best-so-far (at least greedy).
               self.best.expect("initial upper bound must exist")
           }
@@ -861,6 +870,15 @@ local_system:
                   return;
               }
               self.nodes_visited += 1;
+              if self.nodes_visited % 10000 == 0 {
+                  eprintln!(
+                      "[BnB Search] Nodes: {}, Best: {}, Current reps: {}, Pending: {}",
+                      self.nodes_visited,
+                      self.best_count,
+                      st.reps.len(),
+                      st.pending.len()
+                  );
+              }
 
               // Deterministic unit propagation: assign demands that are already covered by existing reps.
               // Keep going while progress is possible.
@@ -916,6 +934,12 @@ local_system:
                   let sol = self.to_solution(&st);
                   if let Ok(()) = sol.verify(self.inst) {
                       if st.reps.len() < self.best_count {
+                          eprintln!(
+                              "[BnB Search] New best solution found: |R| = {} (was {}) at node {}",
+                              st.reps.len(),
+                              self.best_count,
+                              self.nodes_visited
+                          );
                           self.best_count = st.reps.len();
                           self.best = Some(sol);
                       }
@@ -3090,5 +3114,112 @@ messages:
   - user: 'Changes committed with message: "Implement optimized synthesis (BnB) for
       minimal |R|, update merge_and_build_automaton to use it, and add performance
       guards to BnB."'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/tuple_merger.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Still not working. Add some prints so we can track progress. Try not to
+      flood the output.
+    metadata:
+  - assistant: |-
+      Of course. Adding some targeted logging is a great way to understand the solver's behavior without creating too much noise. We'll add prints to stderr for key events: starting the search, finding a better solution, and periodic progress updates.
+
+      ### Step-by-step instructions
+
+      1.  **Open the file** `src/precompute4/weighted_automata/tuple_merger.rs`.
+
+      2.  **Add logging at the start and end of the main `solve` function.** This will frame the search process.
+          *   In the `solve` method of `BnBSolver`, after the call to `self.initial_upper_bound()`, add an `eprintln!` to show the initial state.
+          *   At the end of the `solve` method, before the final `return`, add another `eprintln!` to summarize the search results.
+
+      3.  **Add logging inside the recursive `search` function.**
+          *   At the beginning of the `search` method, add a periodic progress message that prints every 10,000 nodes visited. This will show if the search is making progress or is stuck.
+          *   When a new best solution is found (inside the `if st.pending.is_empty()` block), add an `eprintln!` to announce it immediately. This is a key progress indicator.
+
+      These changes will print progress to the standard error stream, so it won't interfere with the program's standard output.
+
+      ### Git diff
+
+      Here is the git diff for the changes described above.
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/tuple_merger.rs
+      +++ b/src/precompute4/weighted_automata/tuple_merger.rs
+      @@ -398,12 +398,22 @@
+           fn solve(mut self) -> Solution {
+               let _ = self.inst.validate_shape();
+               self.initial_upper_bound();
+      +        eprintln!(
+      +            "[BnB Search] Starting search. Initial greedy solution size: {}",
+      +            self.best_count
+      +        );
+       
+               let mut init = SearchState {
+                   reps: Vec::new(),
+                   rep_versions: Vec::new(),
+                   delta: Vec::new(),
+                   image: HashMap::new(),
+                   pending: Vec::new(),
+               };
+               // Start demand: C3 requires p0 ∈ Dom, so ensure φ(p0) is defined.
+               init.pending.push(Demand::Point(self.inst.start.clone()));
+       
+               self.search(init);
+       
+      +        eprintln!(
+      +            "[BnB Search] Search finished. Visited {} nodes. Final solution size: {}",
+      +            self.nodes_visited,
+      +            self.best.as_ref().map_or(0, |s| s.reps.len())
+      +        );
+               // Return the best-so-far (at least greedy).
+               self.best.expect("initial upper bound must exist")
+           }
+      @@ -422,6 +432,15 @@
+                   return;
+               }
+               self.nodes_visited += 1;
+      +        if self.nodes_visited % 10000 == 0 {
+      +            eprintln!(
+      +                "[BnB Search] Nodes: {}, Best: {}, Current reps: {}, Pending: {}",
+      +                self.nodes_visited,
+      +                self.best_count,
+      +                st.reps.len(),
+      +                st.pending.len()
+      +            );
+      +        }
+       
+               // Deterministic unit propagation: assign demands that are already covered by existing reps.
+               // Keep going while progress is possible.
+      @@ -471,6 +490,12 @@
+               if st.pending.is_empty() {
+                   let sol = self.to_solution(&st);
+                   if let Ok(()) = sol.verify(self.inst) {
+                       if st.reps.len() < self.best_count {
+      +                    eprintln!(
+      +                        "[BnB Search] New best solution found: |R| = {} (was {}) at node {}",
+      +                        st.reps.len(),
+      +                        self.best_count,
+      +                        self.nodes_visited
+      +                    );
+                           self.best_count = st.reps.len();
+                           self.best = Some(sol);
+                       }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/tuple_merger.rs
+      Applying patch to 'src/precompute4/weighted_automata/tuple_merger.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/tuple_merger.rs.
+    metadata:
+  - user: 'Changes committed with message: "Add progress logging to the branch-and-bound
+      solver"'
     metadata:
 ...
