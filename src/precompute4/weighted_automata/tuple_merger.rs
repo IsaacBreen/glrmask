@@ -1,4 +1,4 @@
-//! Masked-Product Point Synthesis (optimized implementation)
+//! Masked-Product Point Synthesis (self-contained spec and baseline)
 //!
 //! This file defines a small, abstract puzzle (no domain-specific context):
 //!
@@ -57,21 +57,34 @@
 //! This is well-defined by (C2) and assigns every representative a successor representative
 //! under each symbol. Different valid (R, φ) choices are possible; smaller |R| is better.
 //!
-//! Quality objective:
+//! Quality objective (to optimize in future work):
 //!   Minimize |R| subject to (C1–C3).
 //!
-//! This implementation provides multiple algorithms:
-//!   - synthesize_greedy: baseline on-the-fly construction
-//!   - synthesize_smart: explicit reachability + intelligent merging
-//!   - synthesize_optimal: smart synthesis + iterative optimization
-//!   - optimize_solution: post-processing to merge compatible representatives
+//! Baseline algorithm (provided here):
+//!   synthesize_greedy implements a simple, deterministic construction:
+//!   - Maintain a growing vector of representatives R = [r_0, r_1, ...] and a map φ from
+//!     product points to indices in R.
+//!   - Initialize with r_0 := p0 and φ(p0) = 0.
+//!   - Perform a worklist exploration of representatives. Whenever a new product successor
+//!     x arises, either assign it to an existing representative r_j that can unify with x
+//!     (updating r_j := unify(r_j, x) if this increases specificity), or create a fresh
+//!     representative r_new := x.
+//!   This satisfies (C1–C3), but is not guaranteed to be minimal.
 //!
-//! Public API:
-//!   - merge_and_build_automaton: uses synthesize_optimal for best results
+//! Verification:
+//!   The struct Solution offers verify(&Instance) -> Result<(), String> to mechanically
+//!   check (C1–C3). Any alternative algorithm can output (reps, image) and be verified the
+//!   same way.
+//!
+//! Public API kept for backward compatibility:
+//!   - type ProductTuple
+//!   - fn successor_tuple(...)
+//!   - fn merge_and_build_automaton(...) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>)
+//!     which simply wraps the greedy synthesizer.
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 /// Symbol index in 0..alphabet_size.
 pub type Symbol = usize;
@@ -113,25 +126,6 @@ fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
     Some(out)
 }
 
-/// Check if a ≤ b (a is less specific or equal to b in the partial order).
-fn is_less_or_equal(a: &ProductTuple, b: &ProductTuple) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    for i in 0..a.len() {
-        match (a[i], b[i]) {
-            (Some(x), Some(y)) => {
-                if x != y {
-                    return false;
-                }
-            }
-            (Some(_), None) => return false, // a is more specific than b
-            _ => {}
-        }
-    }
-    true
-}
-
 /// Compute the successor of a product point under a given symbol, using sparse components.
 /// Rule:
 /// - If the coordinate is None (masked), it stays None.
@@ -142,13 +136,9 @@ pub fn successor_tuple(tuple: &ProductTuple, symbol: Symbol, components: &[Spars
     for i in 0..k {
         match tuple.get(i).copied().flatten() {
             Some(s) => {
-                if s < components[i].len() {
-                    let map = &components[i][s];
-                    if let Some(&t) = map.get(&symbol) {
-                        out.push(Some(t));
-                    } else {
-                        out.push(None);
-                    }
+                let map = &components[i][s];
+                if let Some(&t) = map.get(&symbol) {
+                    out.push(Some(t));
                 } else {
                     out.push(None);
                 }
@@ -241,8 +231,18 @@ impl Solution {
             }
             // Check x ≤ reps[id]
             let rep = &self.reps[id];
-            if !is_less_or_equal(x, rep) {
-                return Err("image well-formedness violated: x is not ≤ its representative".into());
+            for i in 0..k {
+                match (x[i], rep[i]) {
+                    (Some(xs), Some(rs)) => {
+                        if xs != rs {
+                            return Err("image well-formedness violated: x is more specific than its rep".into());
+                        }
+                    }
+                    (Some(_), None) => {
+                        return Err("image well-formedness violated: rep is less specific than x".into());
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -263,7 +263,7 @@ impl Solution {
     }
 }
 
-/// Baseline greedy synthesizer (kept for comparison):
+/// Baseline greedy synthesizer:
 /// - Start with R = [start], φ(start) = 0.
 /// - Pop a representative; for each symbol, compute its successor x.
 ///   - If φ(x) already exists, continue.
@@ -272,9 +272,9 @@ impl Solution {
 ///       φ(x) := j.
 ///   - Else create a new representative r_new := x, set φ(x) := new_id, and push it.
 ///
-/// This guarantees (C1–C3) but is not optimal.
+/// This guarantees (C1–C3) but is not necessarily minimal. It is deterministic.
 pub fn synthesize_greedy(inst: &Instance) -> Solution {
-    let _ = inst.validate_shape();
+    let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
 
     let mut reps: Vec<ProductTuple> = Vec::new();
     let mut image: HashMap<ProductTuple, usize> = HashMap::new();
@@ -327,274 +327,7 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
     Solution { reps, image }
 }
 
-/// Compute all reachable product points from the start point.
-fn compute_reachable_points(inst: &Instance) -> HashSet<ProductTuple> {
-    let mut reachable = HashSet::new();
-    let mut worklist = VecDeque::new();
-
-    reachable.insert(inst.start.clone());
-    worklist.push_back(inst.start.clone());
-
-    while let Some(point) = worklist.pop_front() {
-        for a in 0..inst.alphabet_size {
-            let succ = successor_tuple(&point, a, &inst.components);
-            if reachable.insert(succ.clone()) {
-                worklist.push_back(succ);
-            }
-        }
-    }
-
-    reachable
-}
-
-/// Smart synthesis: explicit reachability followed by intelligent representative selection.
-/// This computes all reachable points first, then builds representatives more carefully.
-pub fn synthesize_smart(inst: &Instance) -> Solution {
-    let _ = inst.validate_shape();
-
-    // Phase 1: Compute all reachable points
-    let reachable_set = compute_reachable_points(inst);
-    let reachable_vec: Vec<ProductTuple> = reachable_set.into_iter().collect();
-
-    // Phase 2: Build representatives intelligently
-    // Start with empty representative set
-    let mut reps: Vec<ProductTuple> = Vec::new();
-    let mut point_to_rep: HashMap<ProductTuple, usize> = HashMap::new();
-
-    // Process points in a specific order: start with the start point
-    let mut processed = HashSet::new();
-    let mut worklist = VecDeque::new();
-    worklist.push_back(inst.start.clone());
-
-    while let Some(point) = worklist.pop_front() {
-        if processed.contains(&point) {
-            continue;
-        }
-        processed.insert(point.clone());
-
-        // Try to assign this point to an existing representative
-        let mut assigned = None;
-        for (i, rep) in reps.iter().enumerate() {
-            if is_less_or_equal(&point, rep) {
-                assigned = Some(i);
-                break;
-            }
-        }
-
-        if assigned.is_none() {
-            // Try to unify with an existing representative
-            for (i, rep) in reps.iter_mut().enumerate() {
-                if let Some(unified) = unify_tuples(rep, &point) {
-                    *rep = unified;
-                    assigned = Some(i);
-                    break;
-                }
-            }
-        }
-
-        let rep_id = if let Some(i) = assigned {
-            i
-        } else {
-            // Create new representative
-            let new_id = reps.len();
-            reps.push(point.clone());
-            new_id
-        };
-
-        point_to_rep.insert(point.clone(), rep_id);
-
-        // Add successors to worklist
-        for a in 0..inst.alphabet_size {
-            let succ = successor_tuple(&point, a, &inst.components);
-            if !processed.contains(&succ) && reachable_vec.contains(&succ) {
-                worklist.push_back(succ);
-            }
-        }
-    }
-
-    // Phase 3: Ensure closure - add any missing reachable points
-    for point in &reachable_vec {
-        if !point_to_rep.contains_key(point) {
-            // Find or create representative for this point
-            let mut assigned = None;
-            for (i, rep) in reps.iter().enumerate() {
-                if is_less_or_equal(point, rep) {
-                    assigned = Some(i);
-                    break;
-                }
-            }
-
-            if assigned.is_none() {
-                for (i, rep) in reps.iter_mut().enumerate() {
-                    if let Some(unified) = unify_tuples(rep, point) {
-                        *rep = unified;
-                        assigned = Some(i);
-                        break;
-                    }
-                }
-            }
-
-            let rep_id = if let Some(i) = assigned {
-                i
-            } else {
-                let new_id = reps.len();
-                reps.push(point.clone());
-                new_id
-            };
-
-            point_to_rep.insert(point.clone(), rep_id);
-        }
-    }
-
-    // Phase 4: Ensure all representative successors are covered
-    let mut added_successors = true;
-    while added_successors {
-        added_successors = false;
-        let current_reps = reps.clone();
-
-        for rep in &current_reps {
-            for a in 0..inst.alphabet_size {
-                let succ = successor_tuple(rep, a, &inst.components);
-                if !point_to_rep.contains_key(&succ) {
-                    // Need to add this successor
-                    let mut assigned = None;
-                    for (i, r) in reps.iter().enumerate() {
-                        if is_less_or_equal(&succ, r) {
-                            assigned = Some(i);
-                            break;
-                        }
-                    }
-
-                    if assigned.is_none() {
-                        for (i, r) in reps.iter_mut().enumerate() {
-                            if let Some(unified) = unify_tuples(r, &succ) {
-                                *r = unified;
-                                assigned = Some(i);
-                                break;
-                            }
-                        }
-                    }
-
-                    let rep_id = if let Some(i) = assigned {
-                        i
-                    } else {
-                        let new_id = reps.len();
-                        reps.push(succ.clone());
-                        new_id
-                    };
-
-                    point_to_rep.insert(succ, rep_id);
-                    added_successors = true;
-                }
-            }
-        }
-    }
-
-    Solution {
-        reps,
-        image: point_to_rep,
-    }
-}
-
-/// Check if merging two representatives would preserve closure and validity.
-fn can_merge_representatives(
-    reps: &[ProductTuple],
-    i: usize,
-    j: usize,
-    image: &HashMap<ProductTuple, usize>,
-    inst: &Instance,
-) -> bool {
-    if i == j {
-        return false;
-    }
-
-    // Check if they can unify
-    let unified = match unify_tuples(&reps[i], &reps[j]) {
-        Some(u) => u,
-        None => return false,
-    };
-
-    // Check if all points currently assigned to i or j are compatible with unified
-    for (point, &rep_id) in image.iter() {
-        if rep_id == i || rep_id == j {
-            if !is_less_or_equal(point, &unified) {
-                return false;
-            }
-        }
-    }
-
-    // Check if closure is preserved: all successors of unified must be covered
-    for a in 0..inst.alphabet_size {
-        let succ = successor_tuple(&unified, a, &inst.components);
-        if !image.contains_key(&succ) {
-            return false;
-        }
-    }
-
-    true
-}
-
-/// Post-process a solution to iteratively merge compatible representatives.
-/// This is a key optimization that can significantly reduce |R|.
-pub fn optimize_solution(mut sol: Solution, inst: &Instance) -> Solution {
-    let mut improved = true;
-
-    while improved {
-        improved = false;
-
-        for i in 0..sol.reps.len() {
-            for j in (i + 1)..sol.reps.len() {
-                if can_merge_representatives(&sol.reps, i, j, &sol.image, inst) {
-                    // Perform merge: unify i and j, keep in position i, remove j
-                    let unified = unify_tuples(&sol.reps[i], &sol.reps[j]).unwrap();
-                    sol.reps[i] = unified;
-
-                    // Update image: redirect all references from j to i
-                    for rep_id in sol.image.values_mut() {
-                        if *rep_id == j {
-                            *rep_id = i;
-                        } else if *rep_id > j {
-                            *rep_id -= 1;
-                        }
-                    }
-
-                    sol.reps.remove(j);
-                    improved = true;
-                    break;
-                }
-            }
-            if improved {
-                break;
-            }
-        }
-    }
-
-    sol
-}
-
-/// Optimal synthesis: combines smart initialization with iterative optimization.
-/// This is the recommended synthesis method for best results.
-pub fn synthesize_optimal(inst: &Instance) -> Solution {
-    // Try both strategies and pick the better one
-    let greedy_sol = synthesize_greedy(inst);
-    let smart_sol = synthesize_smart(inst);
-
-    let mut best = if greedy_sol.reps.len() <= smart_sol.reps.len() {
-        greedy_sol
-    } else {
-        smart_sol
-    };
-
-    // Apply optimization passes
-    best = optimize_solution(best, inst);
-
-    // One more optimization pass for good measure
-    best = optimize_solution(best, inst);
-
-    best
-}
-
-/// Backwards-compatible wrapper: constructs a solution by the optimal method and
+/// Backwards-compatible wrapper: constructs a solution by the greedy method and
 /// returns its representatives and point-map.
 ///
 /// - start_tuple: the start point p0
@@ -615,7 +348,7 @@ pub fn merge_and_build_automaton(
         components: components.to_vec(),
         alphabet_size,
     };
-    let sol = synthesize_optimal(&inst);
+    let sol = synthesize_greedy(&inst);
     (sol.reps, sol.image)
 }
 
@@ -626,38 +359,32 @@ mod tests {
     #[test]
     fn test_unify_tuples() {
         assert_eq!(
-            unify_tuples(&vec![Some(1), None], &vec![None, Some(2)]),
+            super::unify_tuples(&vec![Some(1), None], &vec![None, Some(2)]),
             Some(vec![Some(1), Some(2)])
         );
         assert_eq!(
-            unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]),
+            super::unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]),
             Some(vec![Some(1), Some(2)])
         );
         assert_eq!(
-            unify_tuples(&vec![Some(1), None], &vec![Some(1), Some(3)]),
+            super::unify_tuples(&vec![Some(1), None], &vec![Some(1), Some(3)]),
             Some(vec![Some(1), Some(3)])
         );
         assert_eq!(
-            unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)]),
+            super::unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)]),
             None
         );
         assert_eq!(
-            unify_tuples(&vec![None, None], &vec![Some(1), Some(2)]),
+            super::unify_tuples(&vec![None, None], &vec![Some(1), Some(2)]),
             Some(vec![Some(1), Some(2)])
         );
-    }
-
-    #[test]
-    fn test_is_less_or_equal() {
-        assert!(is_less_or_equal(&vec![None, None], &vec![Some(1), Some(2)]));
-        assert!(is_less_or_equal(&vec![Some(1), None], &vec![Some(1), Some(2)]));
-        assert!(is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]));
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), None]));
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)]));
     }
 
     #[test]
     fn test_successor_tuple_sparse() {
+        // Two components, one local state each (id 0)
+        // Component 0: only symbol 0 loops 0->0
+        // Component 1: only symbol 1 loops 0->0
         let comp0 = vec![BTreeMap::from([(0usize, 0usize)])];
         let comp1 = vec![BTreeMap::from([(1usize, 0usize)])];
         let components = vec![comp0, comp1];
@@ -673,7 +400,8 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_merge_optimal() {
+    fn test_simple_merge_greedy_wrapper() {
+        // Same as original simple test: components only react to distinct symbols (0 vs 1).
         let comp0 = vec![BTreeMap::from([(0usize, 0usize)])];
         let comp1 = vec![BTreeMap::from([(1usize, 0usize)])];
         let components = vec![comp0, comp1];
@@ -683,21 +411,22 @@ mod tests {
         let (states, point_map) =
             merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
-        // Should find a minimal solution (likely 1 representative)
-        assert!(states.len() >= 1);
-        assert!(states.len() <= 2); // Optimal should be 1 or 2
+        // The greedy algorithm finds a single representative, because both
+        // successors unify back into the same representative.
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0], vec![Some(0), Some(0)]);
 
-        // Verify it's a valid solution
-        let inst = Instance::new(vec![Some(0), Some(0)], components, alphabet_size);
-        let sol = Solution {
-            reps: states,
-            image: point_map,
-        };
-        sol.verify(&inst).expect("solution must be valid");
+        let succ0 = successor_tuple(&states[0], 0, &components);
+        let succ1 = successor_tuple(&states[0], 1, &components);
+        assert_eq!(*point_map.get(&succ0).unwrap(), 0);
+        assert_eq!(*point_map.get(&succ1).unwrap(), 0);
     }
 
     #[test]
     fn test_verify_solution_constraints() {
+        // Components: both have 2 local states: 0 and 1.
+        // For comp0: symbol 0 toggles 0->1, 1->1; symbol 1 no-op (masked)
+        // For comp1: symbol 1 toggles 0->1, 1->1; symbol 0 no-op (masked)
         let mut c0_s0: BTreeMap<usize, usize> = BTreeMap::new();
         c0_s0.insert(0, 1);
         let mut c0_s1: BTreeMap<usize, usize> = BTreeMap::new();
@@ -713,73 +442,7 @@ mod tests {
         let components = vec![comp0, comp1];
         let inst = Instance::new(vec![Some(0), Some(0)], components, 2);
 
-        let sol = synthesize_optimal(&inst);
-        sol.verify(&inst).expect("optimal solution must satisfy constraints");
-    }
-
-    #[test]
-    fn test_optimal_better_than_greedy() {
-        // Create a test case where greedy is suboptimal
-        // Component 0: 0 --a--> 1, 1 --a--> 1
-        // Component 1: 0 --b--> 1, 1 --b--> 1
-        let comp0 = vec![
-            BTreeMap::from([(0usize, 1usize)]),
-            BTreeMap::from([(0usize, 1usize)]),
-        ];
-        let comp1 = vec![
-            BTreeMap::from([(1usize, 1usize)]),
-            BTreeMap::from([(1usize, 1usize)]),
-        ];
-        let components = vec![comp0, comp1];
-        let inst = Instance::new(vec![Some(0), Some(0)], components, 2);
-
-        let greedy_sol = synthesize_greedy(&inst);
-        let optimal_sol = synthesize_optimal(&inst);
-
-        // Optimal should be at least as good as greedy
-        assert!(optimal_sol.reps.len() <= greedy_sol.reps.len());
-
-        // Both should be valid
-        greedy_sol.verify(&inst).expect("greedy must be valid");
-        optimal_sol.verify(&inst).expect("optimal must be valid");
-    }
-
-    #[test]
-    fn test_optimize_solution_reduces_size() {
-        // Create an intentionally suboptimal solution and verify optimization improves it
-        let comp0 = vec![BTreeMap::from([(0usize, 0usize)])];
-        let comp1 = vec![BTreeMap::from([(1usize, 0usize)])];
-        let components = vec![comp0, comp1];
-        let inst = Instance::new(vec![Some(0), Some(0)], components, 2);
-
         let sol = synthesize_greedy(&inst);
-        let original_size = sol.reps.len();
-
-        let optimized = optimize_solution(sol, &inst);
-        let optimized_size = optimized.reps.len();
-
-        // Optimization should not increase size
-        assert!(optimized_size <= original_size);
-
-        // Result should still be valid
-        optimized.verify(&inst).expect("optimized must be valid");
-    }
-
-    #[test]
-    fn test_reachability_computation() {
-        let comp0 = vec![
-            BTreeMap::from([(0usize, 1usize)]),
-            BTreeMap::from([(0usize, 0usize)]),
-        ];
-        let comp1 = vec![BTreeMap::from([(0usize, 0usize)])];
-        let inst = Instance::new(vec![Some(0), Some(0)], vec![comp0, comp1], 1);
-
-        let reachable = compute_reachable_points(&inst);
-
-        // Start is reachable
-        assert!(reachable.contains(&vec![Some(0), Some(0)]));
-
-        // Should have found multiple states
-        assert!(reachable.len() >= 2);
+        sol.verify(&inst).expect("greedy solution must satisfy constraints");
     }
 }
