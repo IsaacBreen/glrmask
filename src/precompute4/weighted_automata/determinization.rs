@@ -1184,6 +1184,53 @@ fn merge_tuples_to_states(
     // Find start group
     let start = *tuple_to_group.get(&start_tuple).expect("start tuple must have a group");
 
+    // The set of reachable tuples is not closed under the (unify -> successor) operation.
+    // We must explore the state space of merged states to find all reachable representatives' successors
+    // and ensure they are also merged into a group.
+    let mut worklist: VecDeque<ProductDFAStateTuple> = VecDeque::new();
+    for state in &states {
+        let rep = &state.representative_tuple;
+        worklist.push_back(successor_tuple(rep, sigma.other_index, comps, comp_sinks));
+        for i in 0..sigma.labels.len() {
+            worklist.push_back(successor_tuple(rep, i, comps, comp_sinks));
+        }
+    }
+
+    while let Some(t) = worklist.pop_front() {
+        if tuple_to_group.contains_key(&t) {
+            continue;
+        }
+
+        let mut placed = false;
+        for gid in 0..states.len() {
+            let old_rep = states[gid].representative_tuple.clone();
+            if let Some(new_rep) = unify_tuples(&old_rep, &t) {
+                tuple_to_group.insert(t.clone(), gid);
+                states[gid].all_tuples.insert(t.clone());
+                placed = true;
+
+                if new_rep != old_rep {
+                    states[gid].representative_tuple = new_rep;
+                    // Representative changed, its successors might be new.
+                    let rep = &states[gid].representative_tuple;
+                    let next_def = successor_tuple(rep, sigma.other_index, comps, comp_sinks);
+                    if !tuple_to_group.contains_key(&next_def) { worklist.push_back(next_def); }
+                    for i in 0..sigma.labels.len() {
+                        let next_ex = successor_tuple(rep, i, comps, comp_sinks);
+                        if !tuple_to_group.contains_key(&next_ex) { worklist.push_back(next_ex); }
+                    }
+                }
+                break;
+            }
+        }
+
+        if !placed {
+            // This should not happen. Any tuple reachable from a representative should be mergeable
+            // with one of the groups formed from the original set of reachable tuples.
+            panic!("Could not place emergent tuple {:?}; this indicates a flaw in the merging logic.", t);
+        }
+    }
+
     // Compute final weights and per-state transitions from representatives
     let pb_attach = if PROGRESS_BAR_ENABLED {
         Some(

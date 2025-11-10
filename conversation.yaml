@@ -5003,6 +5003,53 @@ local_system:
           // Find start group
           let start = *tuple_to_group.get(&start_tuple).expect("start tuple must have a group");
 
+          // The set of reachable tuples is not closed under the (unify -> successor) operation.
+          // We must explore the state space of merged states to find all reachable representatives' successors
+          // and ensure they are also merged into a group.
+          let mut worklist: VecDeque<ProductDFAStateTuple> = VecDeque::new();
+          for state in &states {
+              let rep = &state.representative_tuple;
+              worklist.push_back(successor_tuple(rep, sigma.other_index, comps, comp_sinks));
+              for i in 0..sigma.labels.len() {
+                  worklist.push_back(successor_tuple(rep, i, comps, comp_sinks));
+              }
+          }
+
+          while let Some(t) = worklist.pop_front() {
+              if tuple_to_group.contains_key(&t) {
+                  continue;
+              }
+
+              let mut placed = false;
+              for gid in 0..states.len() {
+                  let old_rep = states[gid].representative_tuple.clone();
+                  if let Some(new_rep) = unify_tuples(&old_rep, &t) {
+                      tuple_to_group.insert(t.clone(), gid);
+                      states[gid].all_tuples.insert(t.clone());
+                      placed = true;
+
+                      if new_rep != old_rep {
+                          states[gid].representative_tuple = new_rep;
+                          // Representative changed, its successors might be new.
+                          let rep = &states[gid].representative_tuple;
+                          let next_def = successor_tuple(rep, sigma.other_index, comps, comp_sinks);
+                          if !tuple_to_group.contains_key(&next_def) { worklist.push_back(next_def); }
+                          for i in 0..sigma.labels.len() {
+                              let next_ex = successor_tuple(rep, i, comps, comp_sinks);
+                              if !tuple_to_group.contains_key(&next_ex) { worklist.push_back(next_ex); }
+                          }
+                      }
+                      break;
+                  }
+              }
+
+              if !placed {
+                  // This should not happen. Any tuple reachable from a representative should be mergeable
+                  // with one of the groups formed from the original set of reachable tuples.
+                  panic!("Could not place emergent tuple {:?}; this indicates a flaw in the merging logic.", t);
+              }
+          }
+
           // Compute final weights and per-state transitions from representatives
           let pb_attach = if PROGRESS_BAR_ENABLED {
               Some(
@@ -8104,5 +8151,320 @@ messages:
     metadata:
   - user: 'Changes committed with message: "debug: Add full printing for atomic DFAs,
       MergedProduct, and tuple mapping during NWA determinization"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |+
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:209: Starting determinization for NWA with 7 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:209: Built weight partition with 3 atoms in 683.958µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:209: Built alphabet with 3 labels in 340.875µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:209: Minimizing DFA with 4 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:76: Atom 0: interval=0..=0, DFA states=4
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:209: Minimizing DFA with 4 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:76: Atom 1: interval=1..=1, DFA states=4
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:209: Minimizing DFA with 2 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:76: Atom 2: interval=2..=18446744073709551615, DFA states=2
+
+      --- Atomic DFAs (3 total) ---
+        DFA 0 (for atom 0..=0):
+          - States: 4, Start: 2, Sink: Some(3)
+          - State 0 (final): 97->3, 98->3, 99->3, *->3
+          - State 1: 97->3, 98->3, 99->0, *->3
+          - State 2: 97->1, 98->3, 99->3, *->3
+          - State 3: 97->3, 98->3, 99->3, *->3
+        DFA 1 (for atom 1..=1):
+          - States: 4, Start: 2, Sink: Some(3)
+          - State 0 (final): 97->3, 98->3, 99->3, *->3
+          - State 1: 97->3, 98->3, 99->0, *->3
+          - State 2: 97->3, 98->1, 99->3, *->3
+          - State 3: 97->3, 98->3, 99->3, *->3
+        DFA 2 (for atom 2..=18446744073709551615):
+          - States: 2, Start: 0, Sink: Some(1)
+          - State 0: 97->1, 98->1, 99->1, *->1
+          - State 1: 97->1, 98->1, 99->1, *->1
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:209: Enumerated 6 product tuples in 145.708µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:209: Merged into 3 product states in 333.291µs
+
+      --- MergedProduct (3 states, start=0) ---
+        State 0:
+          - Representative: [2, 2, 0]
+          - Transitions:
+            - Default -> State 0 (via [_, _, _])
+            - 97 -> State 1 (via [1, _, _])
+            - 98 -> State 1 (via [_, 1, _])
+            - 99 -> State 0 (via [_, _, _])
+          - Contains 2 tuples.
+        State 1:
+          - Representative: [1, 1, _]
+          - Transitions:
+            - Default -> State 0 (via [_, _, _])
+            - 97 -> State 0 (via [_, _, _])
+            - 98 -> State 0 (via [_, _, _])
+            - 99 -> UNMAPPED (via [0, 0, _])
+          - Contains 2 tuples.
+        State 2:
+          - Representative: [0, 0, _]
+          - Final Weight: [0..=1]
+          - Transitions:
+            - Default -> State 0 (via [_, _, _])
+            - 97 -> State 0 (via [_, _, _])
+            - 98 -> State 0 (via [_, _, _])
+            - 99 -> State 0 (via [_, _, _])
+          - Contains 2 tuples.
+
+      --- tuple_to_group (6 entries) ---
+        [_, _, _] -> State 0
+        [_, 0, _] -> State 2
+        [_, 1, _] -> State 1
+        [0, _, _] -> State 2
+        [1, _, _] -> State 1
+        [2, 2, 0] -> State 0
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:209: Merged-product -> DWA conversion completed in 579.958µs
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:209: NWA::determinize_to_dwa total time: 6.538416ms
+      NWA (start: 6)
+        State 0:
+          97 -> 1 (weight: ALL)
+        State 1:
+          99 -> 2 (weight: ALL)
+        State 2:
+          final_weight: [0]
+        State 3:
+          98 -> 4 (weight: ALL)
+        State 4:
+          99 -> 5 (weight: ALL)
+        State 5:
+          final_weight: [1]
+        State 6:
+          ε -> 0 (weight: ALL)
+          ε -> 3 (weight: ALL)
+
+      DWA (start: 0)
+        State 0:
+          * -> 0 (trans_weight: [])
+          97 -> 1 (trans_weight: [0])
+          98 -> 1 (trans_weight: [1])
+          99 -> 0 (trans_weight: [])
+        State 1:
+          * -> 0 (trans_weight: [])
+          97 -> 0 (trans_weight: [])
+          98 -> 0 (trans_weight: [])
+        State 2:
+          * -> 0 (trans_weight: [])
+          final_weight: [0..=1]
+          97 -> 0 (trans_weight: [])
+          98 -> 0 (trans_weight: [])
+          99 -> 0 (trans_weight: [])
+
+
+
+      thread 'precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence' (14380615) panicked at src/precompute4/weighted_automata/test_determinization.rs:37:5:
+      assertion `left == right` failed
+        left:
+       right: 0..=0
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence
+                   at ./src/precompute4/weighted_automata/test_determinization.rs:37:5
+         5: sep1::precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence::{{closure}}
+                   at ./src/precompute4/weighted_automata/test_determinization.rs:6:40
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - user: This can't be right. There shouldn't be any UNMAPPED.
+    metadata:
+  - assistant: |-
+      You are absolutely right. The `UNMAPPED` transition indicates a flaw in the determinization logic, and the subsequent panic shows the generated DWA is incorrect. My apologies for that.
+
+      The issue is that the algorithm's phases are disconnected. It first enumerates all reachable "base" tuples, then merges them to create "representative" tuples. However, the successors of these new representative tuples might not have been in the original enumerated set, leading to the `UNMAPPED` error.
+
+      The fix is to perform a fixpoint iteration after the initial merge. This process finds all these "emergent" successor tuples and correctly merges them into the state groups, ensuring that all transitions from any representative tuple lead to a known, mapped state group.
+
+      Here are the step-by-step instructions to apply the fix.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `src/precompute4/weighted_automata/determinization.rs`**.
+
+      2.  **Navigate to the `merge_tuples_to_states` function**.
+
+      3.  **Find the line that finds the start group**, which is `let start = *tuple_to_group.get(&start_tuple).expect("start tuple must have a group");`.
+
+      4.  **Insert the following code block immediately after that line**. This code implements the fixpoint iteration to discover and map all emergent tuples.
+
+          ```rust
+              // The set of reachable tuples is not closed under the (unify -> successor) operation.
+              // We must explore the state space of merged states to find all reachable representatives' successors
+              // and ensure they are also merged into a group.
+              let mut worklist: VecDeque<ProductDFAStateTuple> = VecDeque::new();
+              for state in &states {
+                  let rep = &state.representative_tuple;
+                  worklist.push_back(successor_tuple(rep, sigma.other_index, comps, comp_sinks));
+                  for i in 0..sigma.labels.len() {
+                      worklist.push_back(successor_tuple(rep, i, comps, comp_sinks));
+                  }
+              }
+          
+              while let Some(t) = worklist.pop_front() {
+                  if tuple_to_group.contains_key(&t) {
+                      continue;
+                  }
+          
+                  let mut placed = false;
+                  for gid in 0..states.len() {
+                      let old_rep = states[gid].representative_tuple.clone();
+                      if let Some(new_rep) = unify_tuples(&old_rep, &t) {
+                          tuple_to_group.insert(t.clone(), gid);
+                          states[gid].all_tuples.insert(t.clone());
+                          placed = true;
+          
+                          if new_rep != old_rep {
+                              states[gid].representative_tuple = new_rep;
+                              // Representative changed, its successors might be new.
+                              let rep = &states[gid].representative_tuple;
+                              let next_def = successor_tuple(rep, sigma.other_index, comps, comp_sinks);
+                              if !tuple_to_group.contains_key(&next_def) { worklist.push_back(next_def); }
+                              for i in 0..sigma.labels.len() {
+                                  let next_ex = successor_tuple(rep, i, comps, comp_sinks);
+                                  if !tuple_to_group.contains_key(&next_ex) { worklist.push_back(next_ex); }
+                              }
+                          }
+                          break;
+                      }
+                  }
+          
+                  if !placed {
+                      // This should not happen. Any tuple reachable from a representative should be mergeable
+                      // with one of the groups formed from the original set of reachable tuples.
+                      panic!("Could not place emergent tuple {:?}; this indicates a flaw in the merging logic.", t);
+                  }
+              }
+          ```
+
+      ### Git Diff
+
+      Here is the git diff for the change.
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -1000,6 +1000,53 @@
+           // Find start group
+           let start = *tuple_to_group.get(&start_tuple).expect("start tuple must have a group");
+       
+      +    // The set of reachable tuples is not closed under the (unify -> successor) operation.
+      +    // We must explore the state space of merged states to find all reachable representatives' successors
+      +    // and ensure they are also merged into a group.
+      +    let mut worklist: VecDeque<ProductDFAStateTuple> = VecDeque::new();
+      +    for state in &states {
+      +        let rep = &state.representative_tuple;
+      +        worklist.push_back(successor_tuple(rep, sigma.other_index, comps, comp_sinks));
+      +        for i in 0..sigma.labels.len() {
+      +            worklist.push_back(successor_tuple(rep, i, comps, comp_sinks));
+      +        }
+      +    }
+      +
+      +    while let Some(t) = worklist.pop_front() {
+      +        if tuple_to_group.contains_key(&t) {
+      +            continue;
+      +        }
+      +
+      +        let mut placed = false;
+      +        for gid in 0..states.len() {
+      +            let old_rep = states[gid].representative_tuple.clone();
+      +            if let Some(new_rep) = unify_tuples(&old_rep, &t) {
+      +                tuple_to_group.insert(t.clone(), gid);
+      +                states[gid].all_tuples.insert(t.clone());
+      +                placed = true;
+      +
+      +                if new_rep != old_rep {
+      +                    states[gid].representative_tuple = new_rep;
+      +                    // Representative changed, its successors might be new.
+      +                    let rep = &states[gid].representative_tuple;
+      +                    let next_def = successor_tuple(rep, sigma.other_index, comps, comp_sinks);
+      +                    if !tuple_to_group.contains_key(&next_def) { worklist.push_back(next_def); }
+      +                    for i in 0..sigma.labels.len() {
+      +                        let next_ex = successor_tuple(rep, i, comps, comp_sinks);
+      +                        if !tuple_to_group.contains_key(&next_ex) { worklist.push_back(next_ex); }
+      +                    }
+      +                }
+      +                break;
+      +            }
+      +        }
+      +
+      +        if !placed {
+      +            // This should not happen. Any tuple reachable from a representative should be mergeable
+      +            // with one of the groups formed from the original set of reachable tuples.
+      +            panic!("Could not place emergent tuple {:?}; this indicates a flaw in the merging logic.", t);
+      +        }
+      +    }
+      +
+           // Compute final weights and per-state transitions from representatives
+           let pb_attach = if PROGRESS_BAR_ENABLED {
+               Some(
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "fix: Close product state space via fixpoint
+      iteration and add verbose logging for atomic DFAs and merged states"'
     metadata:
 ...
