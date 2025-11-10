@@ -1,55 +1,87 @@
-//! # Tuple Merger Problem
+//! # The Point Compatibility Partitioning Problem
 //!
-//! This module solves an abstract problem of merging state tuples from a product of several
-//! component state machines. The goal is to find a minimal set of "merged states" that
-//! covers all reachable product states, where merging is based on a compatibility relation.
+//! This module solves an abstract problem of partitioning a set of points (tuples) into a
+//! minimal number of "compatible" sets. This is used in automata determinization to merge
+//! states from a product construction, but the problem itself is self-contained.
 //!
 //! ## Problem Definition
 //!
-//! - We have `K` **components**. Each component `i` is a finite automaton with a set of states
-//!   `S_i`, a start state `s_i_start`, and a transition function `d_i(state, symbol)`.
-//!   Each component may have a designated **sink state**.
+//! Let `K` be a number of components. For each component `i ∈ {0, ..., K-1}`, let `S_i` be a
+//! finite set of component-states. We define an augmented state space `S'_i = S_i ∪ {⊥}`, where
+//! `⊥` is a special "sink" or "bottom" element.
 //!
-//! - A **product state** is a tuple `(s_0, s_1, ..., s_{K-1})` where `s_i` is a state from
-//!   component `i`. We represent this as `Vec<Option<usize>>`, where `None` indicates that the
-//!   component is in its sink state.
+//! A **point** is an element of the product space `P = S'_0 × S'_1 × ... × S'_{K-1}`.
+//! A point is thus a tuple of length `K`, where each element is either a component-state or `⊥`.
+//! In this implementation, `Point` is `Vec<Option<usize>>`, where `None` represents `⊥`.
 //!
-//! - Two product states (tuples) `T1` and `T2` are **compatible** if for every component `i`,
-//!   either `T1[i] == T2[i]`, or at least one of them is `None` (sink).
+//! ### Compatibility and Joining
 //!
-//! - A **merged state** is a set of mutually compatible product states. It can be uniquely
-//!   represented by a **representative tuple**, which is the pointwise unification of all
-//!   tuples in the set. Unification of `Some(s)` and `None` is `Some(s)`.
+//! Two points `p` and `q` are **compatible** if for every coordinate `i`, either `p[i] == q[i]`,
+//! or at least one of them is `⊥`.
 //!
-//! - The task is to, given a `start_tuple`, explore all reachable product states and partition
-//!   them into a minimal set of merged states. The output is a new automaton where states
-//!   correspond to these merged states.
+//! The **join** (`∨`) of two compatible points `p` and `q` is their pointwise unification. The
+//! result `r = p ∨ q` is defined as:
+//! - `r[i] = p[i]` if `q[i] == ⊥`
+//! - `r[i] = q[i]` if `p[i] == ⊥`
+//! - `r[i] = p[i]` (which equals `q[i]`) otherwise.
 //!
-//! ## Algorithm
+//! A set of points `C` is a **compatible set** if all pairs of points in `C` are compatible.
+//! For any compatible set `C`, we can define its **representative** as `rep(C) = ⋁_{p ∈ C} p`.
 //!
-//! 1. Start with the `start_tuple`. Find or create a merged state for it.
-//! 2. Maintain a worklist of merged states whose transitions have not been computed.
-//! 3. For each merged state `M` on the worklist, take its representative tuple `R`.
-//! 4. For each symbol in the alphabet, compute the successor tuple `R_succ` by applying the
-//!    transition functions of all components to `R`.
-//! 5. Find or create a merged state for `R_succ`. This defines the transition from `M` on that symbol.
-//! 6. If a successor tuple is merged into an existing state `M'`, and this changes `M'`'s
-//!    representative, `M'` must be added back to the worklist.
-//! 7. Repeat until the worklist is empty.
+//! ### System Dynamics
+//!
+//! We are given a finite alphabet `Σ` and a **successor function** `Succ(point, symbol) -> Point`
+//! which defines the system's dynamics.
+//!
+//! The **reachable set** `R` is the set of all points reachable from a given `start_point` by
+//! applying the successor function with any sequence of symbols.
+//!
+//! ### The Goal
+//!
+//! The problem is to find a partition `Π = {C_1, C_2, ..., C_M}` of the reachable set `R` such that:
+//! 1. Each `C_j` is a compatible set.
+//! 2. The number of sets `M` is minimized.
+//!
+//! The output is a description of this partition and the dynamics between the sets, represented
+//! as a new, smaller state machine where each state corresponds to a set `C_j`.
+//!
+//! ## Complexity and The Implemented Heuristic
+//!
+//! This partitioning problem is equivalent to the **graph coloring problem**. Consider an
+//! "incompatibility graph" `G = (R, E)` where an edge `(p, q)` exists if `p` and `q` are
+//! incompatible. A compatible set `C_j` is an **independent set** in `G`. A partition of `R`
+//! into compatible sets is a valid coloring of `G`. Minimizing `M` is equivalent to finding the
+//! chromatic number of `G`, a classic NP-hard problem.
+//!
+//! Given this, we implement a **greedy, online heuristic** to find a valid, and hopefully small,
+//! partition. The algorithm explores the reachable set and assigns each new point to the first
+//! compatible partition set it finds. If no such set exists, a new one is created.
+//!
+//! ### Correctness of the Heuristic
+//!
+//! The algorithm is guaranteed to produce a valid partition. A partition requires that every
+//! point belongs to exactly one set, and that every set is compatible.
+//! - **Partition Property**: The algorithm maintains a map from each discovered point to a
+//!   single set ID, ensuring each point has exactly one home. The exploration process guarantees
+//!   all reachable points are discovered and assigned.
+//! - **Compatibility Property**: A point `p` is added to a set `C` only if it is compatible
+//!   with `rep(C)`. Since `rep(C)` is the join of all points already in `C`, compatibility with
+//!   the representative implies compatibility with all individual points that formed it.
+//!   Thus, the new set `C ∪ {p}` remains a compatible set.
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
-/// Represents one of the component automata in the product.
+/// Represents one of the component systems in the product.
 #[derive(Clone, Debug)]
 pub struct Component {
     /// Sparse transition table: `transitions[state]` is a map from `symbol` to `next_state`.
-    /// Any symbol not in the map is assumed to transition to the sink state.
+    /// Any symbol not in the map is assumed to transition to the sink state (`None`).
     pub transitions: Vec<BTreeMap<usize, usize>>,
 }
 
-/// A state in the final merged automaton. It corresponds to a set of compatible product tuples.
+/// A state in the final merged automaton, corresponding to a set of compatible product tuples.
 #[derive(Clone, Debug)]
 pub struct MergedState {
     /// The unique ID of this merged state.
@@ -60,19 +92,22 @@ pub struct MergedState {
     pub transitions: Vec<usize>,
 }
 
-/// The final automaton built from merged states.
+/// The final automaton built from merged states, representing the partitioned system.
 #[derive(Clone, Debug)]
 pub struct MergedAutomaton {
     pub states: Vec<MergedState>,
     pub start_state_id: usize,
 }
 
+/// A point in the product space, `Vec<Option<usize>>`, where `None` is the sink state.
 pub type ProductTuple = Vec<Option<usize>>;
 
 /// Unifies two tuples pointwise. Returns `None` if they are incompatible.
 /// Compatibility: for each position, either values are equal or one is `None`.
 fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
-    if a.len() != b.len() { return None; }
+    if a.len() != b.len() {
+        return None;
+    }
     let mut out = Vec::with_capacity(a.len());
     for i in 0..a.len() {
         match (a[i], b[i]) {
@@ -92,11 +127,7 @@ fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
 }
 
 /// Given a product tuple and a symbol, compute the successor tuple.
-pub fn successor_tuple(
-    tuple: &ProductTuple,
-    symbol: usize,
-    components: &[Component],
-) -> ProductTuple {
+pub fn successor_tuple(tuple: &ProductTuple, symbol: usize, components: &[Component]) -> ProductTuple {
     let k = components.len();
     let mut out = Vec::with_capacity(k);
     for i in 0..k {
@@ -110,99 +141,94 @@ pub fn successor_tuple(
                 }
             }
             None => {
-                out.push(None);
+                out.push(None); // Sink state is absorbing.
             }
         }
     }
     out
 }
 
-/// Internal state representation during the merging process.
-#[derive(Debug)]
-struct MergingState {
-    representative_tuple: ProductTuple,
-}
-
+/// Finds a compatible partition of the reachable state space using a greedy heuristic.
 pub fn merge_and_build_automaton(
     start_tuple: ProductTuple,
     components: &[Component],
     alphabet_size: usize,
 ) -> MergedAutomaton {
-    let mut merging_states: Vec<MergingState> = Vec::new();
-    let mut tuple_to_state_id: HashMap<ProductTuple, usize> = HashMap::new();
+    // `states` stores the representative tuple for each merged state ID.
+    let mut states: Vec<ProductTuple> = Vec::new();
+    // `point_map` maps a discovered point to the ID of the merged state it belongs to.
+    let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
+    // `worklist` contains IDs of merged states whose representatives have changed and need reprocessing.
     let mut worklist: VecDeque<usize> = VecDeque::new();
 
     // Create the initial state for the start_tuple.
-    {
-        let start_id = 0;
-        merging_states.push(MergingState { representative_tuple: start_tuple.clone() });
-        tuple_to_state_id.insert(start_tuple, start_id);
-        worklist.push_back(start_id);
-    }
+    let start_id = 0;
+    states.push(start_tuple.clone());
+    point_map.insert(start_tuple, start_id);
+    worklist.push_back(start_id);
 
+    // Pass 1: Discover all merged states and their final representatives.
     while let Some(state_id) = worklist.pop_front() {
-        let representative = merging_states[state_id].representative_tuple.clone();
+        let representative = states[state_id].clone();
 
         for symbol in 0..alphabet_size {
-            let succ_tuple = successor_tuple(&representative, symbol, components);
+            let successor = successor_tuple(&representative, symbol, components);
 
-            if tuple_to_state_id.contains_key(&succ_tuple) {
-                continue;
+            if point_map.contains_key(&successor) {
+                continue; // This point has already been assigned to a merged state.
             }
 
-            // Find a compatible existing state or create a new one.
-            let mut placed = false;
-            for existing_id in 0..merging_states.len() {
-                let old_rep = &merging_states[existing_id].representative_tuple;
-                if let Some(new_rep) = unify_tuples(old_rep, &succ_tuple) {
-                    if new_rep != *old_rep {
-                        merging_states[existing_id].representative_tuple = new_rep;
-                        if !worklist.contains(&existing_id) {
-                            worklist.push_back(existing_id);
+            // Find a home for the new successor point by finding the first compatible state.
+            let mut assigned_id = None;
+            for id in 0..states.len() {
+                if let Some(new_rep) = unify_tuples(&states[id], &successor) {
+                    // This state is compatible. Merge the point in.
+                    if new_rep != states[id] {
+                        // The representative has become more specific.
+                        states[id] = new_rep;
+                        // This state must be re-processed as its successors may change.
+                        if !worklist.contains(&id) {
+                            worklist.push_back(id);
                         }
                     }
-                    tuple_to_state_id.insert(succ_tuple.clone(), existing_id);
-                    placed = true;
-                    break;
+                    assigned_id = Some(id);
+                    break; // Greedy choice: commit to the first compatible state found.
                 }
             }
 
-            if !placed {
-                let new_id = merging_states.len();
-                merging_states.push(MergingState { representative_tuple: succ_tuple.clone() });
-                tuple_to_state_id.insert(succ_tuple, new_id);
+            // If no existing state was compatible, create a new one.
+            let home_id = assigned_id.unwrap_or_else(|| {
+                let new_id = states.len();
+                states.push(successor.clone());
                 worklist.push_back(new_id);
-            }
+                new_id
+            });
+
+            point_map.insert(successor, home_id);
         }
     }
 
-    // Finalize: build the MergedAutomaton with computed transitions.
-    let mut final_states = Vec::with_capacity(merging_states.len());
-    for (id, state) in merging_states.iter().enumerate() {
-        let mut transitions = Vec::with_capacity(alphabet_size);
-        for symbol in 0..alphabet_size {
-            let succ_tuple = successor_tuple(&state.representative_tuple, symbol, components);
-            // After the main loop, every reachable tuple must have an assigned state.
-            let dest_id = *tuple_to_state_id.get(&succ_tuple).unwrap();
-            transitions.push(dest_id);
-        }
-        final_states.push(MergedState {
-            id,
-            representative_tuple: state.representative_tuple.clone(),
-            transitions,
-        });
+    // Pass 2: Build the final automaton structure with computed transitions.
+    let mut final_states = Vec::with_capacity(states.len());
+    for (id, rep) in states.iter().enumerate() {
+        let transitions = (0..alphabet_size)
+            .map(|symbol| {
+                let succ = successor_tuple(rep, symbol, components);
+                // This lookup must succeed. Every reachable successor from a final
+                // representative must have been found and assigned a home in Pass 1.
+                *point_map.get(&succ).expect("Successor point must have an assigned state")
+            })
+            .collect();
+
+        final_states.push(MergedState { id, representative_tuple: rep.clone(), transitions });
     }
 
-    MergedAutomaton {
-        states: final_states,
-        start_state_id: 0, // By construction, the start state is always ID 0.
-    }
+    MergedAutomaton { states: final_states, start_state_id: 0 }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     #[test]
     fn test_unify_tuples() {
@@ -215,42 +241,33 @@ mod tests {
 
     #[test]
     fn test_simple_merge() {
-        // Component 0: 2 states (0=start, 1=sink). 0 -> 0 on 'a', 0 -> 1 on 'b'.
-        let comp0 = Component {
-            // s0: a(0)->s0. b(1) is not present, so it goes to sink (1).
-            // s1: all transitions go to sink (1), so map is empty.
-            transitions: vec![BTreeMap::from([(0, 0)]), BTreeMap::new()],
-        };
-        // Component 1: 2 states (0=start, 1=sink). 0 -> 1 on 'a', 0 -> 0 on 'b'.
-        let comp1 = Component {
-            // s0: b(1)->s0. a(0) is not present, so it goes to sink (1).
-            // s1: all transitions go to sink (1), so map is empty.
-            transitions: vec![BTreeMap::from([(1, 0)]), BTreeMap::new()],
-        };
+        // Component 0: 2 states (0=start). 0 -> 0 on symbol 0. Transitions to sink on symbol 1.
+        let comp0 = Component { transitions: vec![BTreeMap::from([(0, 0)])] };
+        // Component 1: 2 states (0=start). 0 -> 0 on symbol 1. Transitions to sink on symbol 0.
+        let comp1 = Component { transitions: vec![BTreeMap::from([(1, 0)])] };
         let components = vec![comp0, comp1];
-        let alphabet_size = 2; // 'a', 'b'
+        let alphabet_size = 2;
 
         // Start tuple: [Some(0), Some(0)]
         let start_tuple = vec![Some(0), Some(0)];
 
         let automaton = merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
-        // The merging algorithm should find that all reachable tuples are mutually compatible.
-        // Reachable tuples: [0,0], [0,None], [None,0], [None,None].
-        // The representative of this entire set is [0,0].
-        // Therefore, only one state should be created.
+        // The reachable points are [0,0], [0,None], [None,0], and [None,None] (from sink).
+        // All these points are mutually compatible. Their join is [0,0].
+        // The greedy algorithm should therefore find a single merged state.
         assert_eq!(automaton.states.len(), 1);
 
         // Check that the single state has the correct representative and transitions.
         let s0_id = automaton.start_state_id;
         assert_eq!(automaton.states[s0_id].representative_tuple, vec![Some(0), Some(0)]);
 
-        // Transition on 'a' from rep [0,0] gives succ [0,None].
-        // [0,None] is compatible and merges into state 0.
+        // Transition on symbol 0 from rep [0,0] gives succ [0,None].
+        // [0,None] is compatible and merges into state 0. The transition should be a self-loop.
         assert_eq!(automaton.states[s0_id].transitions[0], s0_id);
 
-        // Transition on 'b' from rep [0,0] gives succ [None,0].
-        // [None,0] is compatible and merges into state 0.
+        // Transition on symbol 1 from rep [0,0] gives succ [None,0].
+        // [None,0] is compatible and merges into state 0. The transition should be a self-loop.
         assert_eq!(automaton.states[s0_id].transitions[1], s0_id);
     }
 }
