@@ -7,7 +7,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
@@ -209,20 +209,21 @@ impl NWA {
                         continue;
                     }
                     let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
-                    if !pairs_ex.is_empty() {
-                        step_exs.push(step_pool.intern(pairs_ex));
+                    if pairs_ex.is_empty() {
+                        continue;
                     }
+                    step_exs.push(step_pool.intern(pairs_ex));
                 }
 
-                // Always record presence of an exception label, even if its effect is empty,
-                // unless it is provably redundant (identical to default steps).
-                step_exs.sort_unstable();
-                let mut sorted_def_steps = def_steps.clone();
-                sorted_def_steps.sort_unstable();
-                if step_exs == sorted_def_steps {
-                    continue;
+                if !step_exs.is_empty() {
+                    step_exs.sort_unstable();
+                    let mut sorted_def_steps = def_steps.clone();
+                    sorted_def_steps.sort_unstable();
+                    if step_exs == sorted_def_steps {
+                        continue;
+                    }
+                    ex.insert(*lbl, step_exs);
                 }
-                ex.insert(*lbl, step_exs);
             }
 
             crate::debug!(6, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
@@ -348,16 +349,12 @@ impl NWA {
             let mut def_groups: HashMap<usize, Weight> = HashMap::new();
             let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
             let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-            // Track which labels are present as exceptions in any active macro-signature,
-            // even if their step effects are empty.
-            let mut ex_presence_by_label: BTreeSet<i16> = BTreeSet::new();
 
             for (sig_id, gate) in &node_gates {
                 for def_id in &sigs[*sig_id].def {
                     *def_groups.entry(*def_id).or_default() |= gate;
                 }
                 for (lbl, ex_steps) in &sigs[*sig_id].ex {
-                    ex_presence_by_label.insert(*lbl);
                     for ex_step in ex_steps {
                         *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
                     }
@@ -382,13 +379,9 @@ impl NWA {
                 target_maps.insert(None, def_target_map);
             }
 
-            // Build target maps for all labels that are present as exceptions in any member,
-            // even if ex_groups_by_label has no compiled effects for them (sink case).
-            let mut labels_to_process: BTreeSet<i16> = ex_presence_by_label.clone();
-            labels_to_process.extend(ex_groups_by_label.keys().copied());
-            for lbl in labels_to_process {
+            for (lbl, ex_groups) in &ex_groups_by_label {
                 let mut map = HashMap::new();
-                let def_exers = def_exers_by_label.get(&lbl);
+                let def_exers = def_exers_by_label.get(lbl);
                 for (def_step, total_g) in &def_groups {
                     let g_exers = def_exers.and_then(|de| de.get(def_step));
                     let mut g_nonex = total_g.clone();
@@ -399,14 +392,12 @@ impl NWA {
                         accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
                     }
                 }
-                if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
-                    for (ex_step, g_ex) in ex_groups {
-                        accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
-                    }
+                for (ex_step, g_ex) in ex_groups {
+                    accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
                 }
-                // Insert even if empty -> this creates/uses the sink node for this label,
-                // ensuring the exception structurally exists and blocks default.
-                target_maps.insert(Some(lbl), map);
+                if !map.is_empty() {
+                    target_maps.insert(Some(*lbl), map);
+                }
             }
 
             crate::debug!(6, "  - computed target_maps:");
@@ -507,8 +498,9 @@ impl NWA {
             }
             for (lbl, &target_idx) in &node.exception_targets {
                 if let Some(mask) = node.exception_masks.get(lbl) {
-                    // Always add exception edge, even with empty mask, to shadow the default.
-                    dwa.add_transition(i, *lbl, target_idx, mask.clone()).unwrap();
+                    if !mask.is_empty() {
+                        dwa.add_transition(i, *lbl, target_idx, mask.clone()).unwrap();
+                    }
                 }
             }
         }
