@@ -1519,7 +1519,7 @@ local_system:
 
               // 5) Merge tuples greedily and attach transitions/finals from representative tuples
               let now_merge = Instant::now();
-              let (merged, tuple_to_group) = merge_tuples_to_states(
+              let merged = merge_tuples_to_states(
                   all_tuples,
                   start_tuple,
                   &comp_dfas,
@@ -1555,7 +1555,7 @@ local_system:
                       }
                       crate::debug!(5, "    - Transitions:");
                       let dest_tuple_def = &state.trans_default;
-                      if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_def) {
+                      if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_def) {
                           crate::debug!(5, "      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
                       } else {
                           crate::debug!(5, "      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
@@ -1563,7 +1563,7 @@ local_system:
 
                       for (lbl, dest_tuple_ex) in &state.trans_exceptions {
                           let char_repr = super::common::format_i16_char(*lbl);
-                          if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_ex) {
+                          if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_ex) {
                               crate::debug!(5, "      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
                           } else {
                               crate::debug!(5, "      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
@@ -1571,17 +1571,11 @@ local_system:
                       }
                       crate::debug!(5, "    - Contains {} tuples.", state.all_tuples.len());
                   }
-
-                  crate::debug!(5, "\n--- tuple_to_group ({} entries) ---", tuple_to_group.len());
-                  let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
-                  for (tuple, gid) in sorted_map {
-                      crate::debug!(5, "  {} -> State {}", format_tuple(tuple), gid);
-                  }
               }
 
               // 6) Convert merged product to a DWA
               let now_convert = Instant::now();
-              let dwa = build_dwa_from_merged(&merged, &tuple_to_group, &atoms.atoms, &sigma);
+              let dwa = build_dwa_from_merged(&merged, &atoms.atoms, &sigma);
               crate::debug!(
                   4,
                   "Merged-product -> DWA conversion completed in {:?}",
@@ -2517,7 +2511,7 @@ local_system:
           sigma: &Alphabet,
           comp_sinks: &[Option<usize>],
           atom_weights: &Vec<Weight>,
-      ) -> (MergedProduct, HashMap<ProductDFAStateTuple, usize>) {
+      ) -> MergedProduct {
           let pb_merge = if PROGRESS_BAR_ENABLED {
               let p = ProgressBar::new_spinner();
               p.set_style(
@@ -2621,12 +2615,26 @@ local_system:
               p.finish_with_message("Weights/transitions attached");
           }
 
-          (MergedProduct { states, start }, tuple_to_group)
+          MergedProduct { states, start }
       }
 
       /* ------------------------------
          Build DWA from merged product
          ------------------------------ */
+
+      /// For a given tuple, find the ID of the merged state group it belongs to by checking for unifiability.
+      fn find_group_for_tuple(
+          merged_states: &[ProductDFAState],
+          tuple: &ProductDFAStateTuple,
+      ) -> Option<usize> {
+          // This is a linear scan. Can be optimized if it's a bottleneck.
+          for (gid, state) in merged_states.iter().enumerate() {
+              if unify_tuples(&state.representative_tuple, tuple).is_some() {
+                  return Some(gid);
+              }
+          }
+          None
+      }
 
       fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &ProductDFAStateTuple) -> Weight {
           let mut w = Weight::zeros();
@@ -2640,7 +2648,6 @@ local_system:
 
       fn build_dwa_from_merged(
           merged: &MergedProduct,
-          tuple_to_group: &HashMap<ProductDFAStateTuple, usize>,
           atom_weights: &Vec<Weight>,
           sigma: &Alphabet,
       ) -> DWA {
@@ -2663,7 +2670,7 @@ local_system:
               // Default (OTHER)
               let def_t = &merged.states[sid].trans_default;
               let def_w = edge_weight_from_tuple(atom_weights, def_t);
-              if let Some(&to_id) = tuple_to_group.get(def_t) {
+              if let Some(to_id) = find_group_for_tuple(&merged.states, def_t) {
                   let _ = dwa.set_default_transition(sid, to_id, def_w);
               } else {
                   // Should not happen if tuple enumeration was complete, but guard anyway
@@ -2673,7 +2680,7 @@ local_system:
               // Exceptions
               for (lbl, dst_t) in &merged.states[sid].trans_exceptions {
                   let w = edge_weight_from_tuple(atom_weights, dst_t);
-                  if let Some(&to_id) = tuple_to_group.get(dst_t) {
+                  if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
                       let _ = dwa.add_transition(sid, *lbl, to_id, w);
                   } else {
                       // Unmapped destination: skip
@@ -2759,8 +2766,13 @@ local_system:
                           // let now = Local::now(); // Timestamp removed for brevity, uncomment if needed
                           println!(
                               // The complete format string is constructed here
-                              concat!("[DEBUG-{}] ", $user_fmt),
+                              concat!("[DEBUG] {}] {}:{}: ", $user_fmt),
+                              // concat!("[DEBUG {} {}] {}:{}: ", $user_fmt), // For timestamp
+                              // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Uncomment for timestamp
+                              // now.format("%H:%M:%S%.3f"), // Uncomment for timestamp
                               $level,           // Argument for the first {} in the prefix
+                              file!(),          // Argument for the second {} in the prefix
+                              line!(),          // Argument for the third {} in the prefix
                               $($user_args)*    // Arguments for the user-provided format part
                           );
                       }
@@ -4156,20 +4168,22 @@ local_system:
                   p.finish_with_message("Per-atom DFAs built & minimized");
               }
 
-              crate::debug!(5, "\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
-              for (i, dfa) in comp_dfas.iter().enumerate() {
-                  crate::debug!(5, "  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
-                  crate::debug!(5, "    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
-                  for s in 0..dfa.n_states {
-                      let final_marker = if dfa.finals[s] { " (final)" } else { "" };
-                      let mut trans_parts = vec![];
-                      for (sym_idx, &label) in sigma.labels.iter().enumerate() {
-                          let target = dfa.trans[s][sym_idx];
-                          trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+              if 5 <= crate::r#macro::get_macro_debug_level() {
+                  println!("\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
+                  for (i, dfa) in comp_dfas.iter().enumerate() {
+                      println!("  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
+                      println!("    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
+                      for s in 0..dfa.n_states {
+                          let final_marker = if dfa.finals[s] { " (final)" } else { "" };
+                          let mut trans_parts = vec![];
+                          for (sym_idx, &label) in sigma.labels.iter().enumerate() {
+                              let target = dfa.trans[s][sym_idx];
+                              trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+                          }
+                          let other_target = dfa.trans[s][sigma.other_index];
+                          trans_parts.push(format!("*->{}", other_target));
+                          println!("    - State {}{}: {}", s, final_marker, trans_parts.join(", "));
                       }
-                      let other_target = dfa.trans[s][sigma.other_index];
-                      trans_parts.push(format!("*->{}", other_target));
-                      crate::debug!(5, "    - State {}{}: {}", s, final_marker, trans_parts.join(", "));
                   }
               }
 
@@ -4205,7 +4219,7 @@ local_system:
                   merged.states.len(),
                   now_merge.elapsed()
               );
-              {
+              if 5 <= crate::r#macro::get_macro_debug_level() {
                   // Helper to format tuples like [0, _, 2] instead of [Some(0), None, Some(2)]
                   let format_tuple = |tuple: &ProductDFAStateTuple| -> String {
                       let parts: Vec<String> = tuple
@@ -4218,30 +4232,30 @@ local_system:
                       format!("[{}]", parts.join(", "))
                   };
 
-                  crate::debug!(5, "\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
+                  println!("\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
                   for (gid, state) in merged.states.iter().enumerate() {
-                      crate::debug!(5, "  State {}:", gid);
-                      crate::debug!(5, "    - Representative: {}", format_tuple(&state.representative_tuple));
+                      println!("  State {}:", gid);
+                      println!("    - Representative: {}", format_tuple(&state.representative_tuple));
                       if let Some(w) = &state.final_weight {
-                          crate::debug!(5, "    - Final Weight: {}", w);
+                          println!("    - Final Weight: {}", w);
                       }
-                      crate::debug!(5, "    - Transitions:");
+                      println!("    - Transitions:");
                       let dest_tuple_def = &state.trans_default;
                       if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_def) {
-                          crate::debug!(5, "      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
+                          println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
                       } else {
-                          crate::debug!(5, "      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
+                          println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
                       }
 
                       for (lbl, dest_tuple_ex) in &state.trans_exceptions {
                           let char_repr = super::common::format_i16_char(*lbl);
                           if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_ex) {
-                              crate::debug!(5, "      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
+                              println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
                           } else {
-                              crate::debug!(5, "      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
+                              println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
                           }
                       }
-                      crate::debug!(5, "    - Contains {} tuples.", state.all_tuples.len());
+                      println!("    - Contains {} tuples.", state.all_tuples.len());
                   }
               }
 
@@ -6950,7 +6964,7 @@ messages:
 
               // 5) Merge tuples greedily and attach transitions/finals from representative tuples
               let now_merge = Instant::now();
-              let (merged, tuple_to_group) = merge_tuples_to_states(
+              let merged = merge_tuples_to_states(
                   all_tuples,
                   start_tuple,
                   &comp_dfas,
@@ -6986,7 +7000,7 @@ messages:
                       }
                       crate::debug!(5, "    - Transitions:");
                       let dest_tuple_def = &state.trans_default;
-                      if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_def) {
+                      if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_def) {
                           crate::debug!(5, "      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
                       } else {
                           crate::debug!(5, "      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
@@ -6994,7 +7008,7 @@ messages:
 
                       for (lbl, dest_tuple_ex) in &state.trans_exceptions {
                           let char_repr = super::common::format_i16_char(*lbl);
-                          if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_ex) {
+                          if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_ex) {
                               crate::debug!(5, "      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
                           } else {
                               crate::debug!(5, "      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
@@ -7002,17 +7016,11 @@ messages:
                       }
                       crate::debug!(5, "    - Contains {} tuples.", state.all_tuples.len());
                   }
-
-                  crate::debug!(5, "\n--- tuple_to_group ({} entries) ---", tuple_to_group.len());
-                  let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
-                  for (tuple, gid) in sorted_map {
-                      crate::debug!(5, "  {} -> State {}", format_tuple(tuple), gid);
-                  }
               }
 
               // 6) Convert merged product to a DWA
               let now_convert = Instant::now();
-              let dwa = build_dwa_from_merged(&merged, &tuple_to_group, &atoms.atoms, &sigma);
+              let dwa = build_dwa_from_merged(&merged, &atoms.atoms, &sigma);
               crate::debug!(
                   4,
                   "Merged-product -> DWA conversion completed in {:?}",
@@ -7948,7 +7956,7 @@ messages:
           sigma: &Alphabet,
           comp_sinks: &[Option<usize>],
           atom_weights: &Vec<Weight>,
-      ) -> (MergedProduct, HashMap<ProductDFAStateTuple, usize>) {
+      ) -> MergedProduct {
           let pb_merge = if PROGRESS_BAR_ENABLED {
               let p = ProgressBar::new_spinner();
               p.set_style(
@@ -8052,12 +8060,26 @@ messages:
               p.finish_with_message("Weights/transitions attached");
           }
 
-          (MergedProduct { states, start }, tuple_to_group)
+          MergedProduct { states, start }
       }
 
       /* ------------------------------
          Build DWA from merged product
          ------------------------------ */
+
+      /// For a given tuple, find the ID of the merged state group it belongs to by checking for unifiability.
+      fn find_group_for_tuple(
+          merged_states: &[ProductDFAState],
+          tuple: &ProductDFAStateTuple,
+      ) -> Option<usize> {
+          // This is a linear scan. Can be optimized if it's a bottleneck.
+          for (gid, state) in merged_states.iter().enumerate() {
+              if unify_tuples(&state.representative_tuple, tuple).is_some() {
+                  return Some(gid);
+              }
+          }
+          None
+      }
 
       fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &ProductDFAStateTuple) -> Weight {
           let mut w = Weight::zeros();
@@ -8071,7 +8093,6 @@ messages:
 
       fn build_dwa_from_merged(
           merged: &MergedProduct,
-          tuple_to_group: &HashMap<ProductDFAStateTuple, usize>,
           atom_weights: &Vec<Weight>,
           sigma: &Alphabet,
       ) -> DWA {
@@ -8094,7 +8115,7 @@ messages:
               // Default (OTHER)
               let def_t = &merged.states[sid].trans_default;
               let def_w = edge_weight_from_tuple(atom_weights, def_t);
-              if let Some(&to_id) = tuple_to_group.get(def_t) {
+              if let Some(to_id) = find_group_for_tuple(&merged.states, def_t) {
                   let _ = dwa.set_default_transition(sid, to_id, def_w);
               } else {
                   // Should not happen if tuple enumeration was complete, but guard anyway
@@ -8104,7 +8125,7 @@ messages:
               // Exceptions
               for (lbl, dst_t) in &merged.states[sid].trans_exceptions {
                   let w = edge_weight_from_tuple(atom_weights, dst_t);
-                  if let Some(&to_id) = tuple_to_group.get(dst_t) {
+                  if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
                       let _ = dwa.add_transition(sid, *lbl, to_id, w);
                   } else {
                       // Unmapped destination: skip
@@ -8122,90 +8143,17 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata/determinization.rs
-  - user: |
-      /Users/isaacbreen/.cargo/bin/cargo test --color=always --package sep1 --lib precompute4::weighted_automata::test_determinization --profile test --no-fail-fast -- --format=json -Z unstable-options --show-output
-      Testing started at 12:14 pm ...
-          Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
-           Running unittests src/lib.rs (target/debug/deps/sep1-ab994d3f4be66692)
-      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:36: Starting determinization for NWA with 5 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:44: Built weight partition with 5 atoms in 59.375µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Built alphabet with 4 labels in 36.083µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:744: Minimizing DFA with 3 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 0: interval=0..=0, DFA states=2
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:744: Minimizing DFA with 3 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 1: interval=1..=1, DFA states=2
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:744: Minimizing DFA with 3 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 2: interval=2..=2, DFA states=2
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:744: Minimizing DFA with 3 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 3: interval=3..=3, DFA states=2
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:744: Minimizing DFA with 2 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 4: interval=4..=18446744073709551615, DFA states=2
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:89:
-      --- Atomic DFAs (5 total) ---
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:91:   DFA 0 (for atom 0..=0):
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:92:     - States: 2, Start: 0, Sink: Some(1)
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 0 (final): 97->1, 98->0, 99->0, 100->0, *->1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 1: 97->1, 98->1, 99->1, 100->1, *->1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:91:   DFA 1 (for atom 1..=1):
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:92:     - States: 2, Start: 0, Sink: Some(1)
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 0 (final): 97->0, 98->1, 99->0, 100->0, *->1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 1: 97->1, 98->1, 99->1, 100->1, *->1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:91:   DFA 2 (for atom 2..=2):
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:92:     - States: 2, Start: 0, Sink: Some(1)
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 0 (final): 97->0, 98->0, 99->1, 100->0, *->1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 1: 97->1, 98->1, 99->1, 100->1, *->1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:91:   DFA 3 (for atom 3..=3):
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:92:     - States: 2, Start: 0, Sink: Some(1)
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 0 (final): 97->0, 98->0, 99->0, 100->1, *->1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 1: 97->1, 98->1, 99->1, 100->1, *->1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:91:   DFA 4 (for atom 4..=18446744073709551615):
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:92:     - States: 2, Start: 0, Sink: Some(1)
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 0: 97->1, 98->1, 99->1, 100->1, *->1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 1: 97->1, 98->1, 99->1, 100->1, *->1
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:114: Enumerated 16 product tuples in 99.375µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:132: Merged into 1 product states in 65.458µs
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:151:
-      --- MergedProduct (1 states, start=0) ---
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:153:   State 0:
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:154:     - Representative: [0, 0, 0, 0, 0]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:156:     - Final Weight: [0..=3]
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:158:     - Transitions:
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:161:       - Default -> State 0 (via [_, _, _, _, _])
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:169:       - 97 -> State 0 (via [_, 0, 0, 0, _])
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:169:       - 98 -> State 0 (via [0, _, 0, 0, _])
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:169:       - 99 -> State 0 (via [0, 0, _, 0, _])
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:169:       - 100 -> State 0 (via [0, 0, 0, _, _])
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:174:     - Contains 16 tuples.
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:177:
-      --- tuple_to_group (16 entries) ---
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, _, _, _, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, _, _, 0, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, _, 0, _, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, _, 0, 0, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, 0, _, _, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, 0, _, 0, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, 0, 0, _, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, 0, 0, 0, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [0, _, _, _, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [0, _, _, 0, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [0, _, 0, _, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [0, _, 0, 0, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [0, 0, _, _, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [0, 0, _, 0, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [0, 0, 0, _, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [0, 0, 0, 0, 0] -> State 0
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:187: Merged-product -> DWA conversion completed in 22µs
-      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:193: NWA::determinize_to_dwa total time: 860.958µs
+  - user: |+
       [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:36: Starting determinization for NWA with 7 states
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:44: Built weight partition with 3 atoms in 73.25µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Built alphabet with 3 labels in 36.042µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:744: Minimizing DFA with 4 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:44: Built weight partition with 3 atoms in 57.958µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:54: Built alphabet with 3 labels in 28µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:738: Minimizing DFA with 4 states
       [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 0: interval=0..=0, DFA states=4
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:744: Minimizing DFA with 4 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:738: Minimizing DFA with 4 states
       [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 1: interval=1..=1, DFA states=4
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:744: Minimizing DFA with 2 states
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:738: Minimizing DFA with 2 states
       [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:77: Atom 2: interval=2..=18446744073709551615, DFA states=2
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:89:
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:89: 
       --- Atomic DFAs (3 total) ---
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:91:   DFA 0 (for atom 0..=0):
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:92:     - States: 4, Start: 2, Sink: Some(3)
@@ -8223,9 +8171,9 @@ messages:
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:92:     - States: 2, Start: 0, Sink: Some(1)
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 0: 97->1, 98->1, 99->1, *->1
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:102:     - State 1: 97->1, 98->1, 99->1, *->1
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:114: Enumerated 6 product tuples in 36.583µs
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:132: Merged into 3 product states in 37.625µs
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:151:
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:114: Enumerated 6 product tuples in 50.084µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:132: Merged into 3 product states in 59.375µs
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:151: 
       --- MergedProduct (3 states, start=0) ---
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:153:   State 0:
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:154:     - Representative: [2, 2, 0]
@@ -8241,7 +8189,7 @@ messages:
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:161:       - Default -> State 0 (via [_, _, _])
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:169:       - 97 -> State 0 (via [_, _, _])
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:169:       - 98 -> State 0 (via [_, _, _])
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:171:       - 99 -> UNMAPPED (via [0, 0, _])
+      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:169:       - 99 -> State 2 (via [0, 0, _])
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:174:     - Contains 2 tuples.
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:153:   State 2:
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:154:     - Representative: [0, 0, _]
@@ -8252,16 +8200,8 @@ messages:
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:169:       - 98 -> State 0 (via [_, _, _])
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:169:       - 99 -> State 0 (via [_, _, _])
       [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:174:     - Contains 2 tuples.
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:177:
-      --- tuple_to_group (6 entries) ---
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, _, _] -> State 0
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, 0, _] -> State 2
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [_, 1, _] -> State 1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [0, _, _] -> State 2
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [1, _, _] -> State 1
-      [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:180:   [2, 2, 0] -> State 0
-      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:187: Merged-product -> DWA conversion completed in 32.75µs
-      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:193: NWA::determinize_to_dwa total time: 750.458µs
+      [DEBUG] 4] src/precompute4/weighted_automata/determinization.rs:181: Merged-product -> DWA conversion completed in 72.458µs
+      [DEBUG] 3] src/precompute4/weighted_automata/determinization.rs:187: NWA::determinize_to_dwa total time: 915.25µs
       NWA (start: 6)
         State 0:
           97 -> 1 (weight: ALL)
@@ -8289,6 +8229,7 @@ messages:
           * -> 0 (trans_weight: [])
           97 -> 0 (trans_weight: [])
           98 -> 0 (trans_weight: [])
+          99 -> 2 (trans_weight: [0..=1])
         State 2:
           * -> 0 (trans_weight: [])
           final_weight: [0..=1]
@@ -8296,38 +8237,9 @@ messages:
           98 -> 0 (trans_weight: [])
           99 -> 0 (trans_weight: [])
 
-
-
-      thread 'precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence' (14451296) panicked at src/precompute4/weighted_automata/test_determinization.rs:37:5:
-      assertion `left == right` failed
-        left:
-       right: 0..=0
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence
-                   at ./src/precompute4/weighted_automata/test_determinization.rs:37:5
-         5: sep1::precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence::{{closure}}
-                   at ./src/precompute4/weighted_automata/test_determinization.rs:6:40
-         6: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         7: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-      error: test failed, to rerun pass `-p sep1 --lib`
-      error: 1 target failed:
-          `-p sep1 --lib`
-
-      Process finished with exit code 101
     metadata:
   - user: This output looks so messy when we have every line like [DEBUG] 5] src/precompute4/weighted_automata/determinization.rs:153:.
-      Make it pretty.
+      Make it pretty. Don't modify macro.rs.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8347,196 +8259,133 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with tricky automaton algorithms and cleaning up debug output are common tasks. Here are the step-by-step instructions and corresponding git diffs to fix the test failure and improve log readability.
+      Of course. Dealing with verbose debug logs can be distracting. Here are the step-by-step instructions to clean up the output by replacing the noisy, multi-line debug dumps with a cleaner format, followed by the corresponding git diff.
 
       ### Step-by-Step Instructions
 
-      #### 1. Improve Debug Macro Readability
+      I will modify `src/precompute4/weighted_automata/determinization.rs` to make the detailed debug logs for automata structures more readable. This is achieved by replacing the `crate::debug!` macro calls for these specific logs with direct `println!` calls, guarded by the same debug level check that the macro uses internally. This preserves the filtering functionality while removing the repetitive `[DEBUG... file:line]` prefix from the output.
 
-      I'll adjust the debug macro to produce cleaner, less cluttered output by removing the file path and line number.
+      1.  **File: `src/precompute4/weighted_automata/determinization.rs`**
 
-      -   **File:** `src/macro.rs`
-      -   **Action:** In the `__debug_impl!` macro, modify the `println!` call.
-          -   Change the format string to `concat!("[DEBUG-{}] ", $user_fmt)`.
-          -   Remove the `file!()` and `line!()` arguments.
+          *   I will find the block of `crate::debug!` calls responsible for printing the details of each "Atomic DFA" (starting around line 89). I will replace this entire block with an `if 5 <= crate::r#macro::get_macro_debug_level() { ... }` block that uses `println!` to format the output without the noisy prefix.
 
-      #### 2. Correct the Determinization Logic
+          *   Next, I will find the scoped block `{ ... }` that contains the `crate::debug!` calls for printing the "MergedProduct" details (around line 133). I will replace this block with a similar `if 5 <= crate::r#macro::get_macro_debug_level() { ... }` block that uses `println!` for cleaner output. The helper closure `format_tuple` will be kept inside this new block.
 
-      The core issue is that when calculating transitions for a merged state, the destination "tuple" might not be one of the original tuples that were enumerated. The current logic fails to find which merged state this new destination tuple belongs to. I'll fix this by implementing a more robust lookup mechanism.
+      This approach directly addresses your request to make the output "pretty" while respecting the constraint of not modifying `macro.rs`.
 
-      -   **File:** `src/precompute4/weighted_automata/determinization.rs`
-      -   **Actions:**
-          1.  **Add a helper function `find_group_for_tuple`** before `build_dwa_from_merged`. This function will correctly find the group for any given tuple by checking which representative it can be unified with.
-          2.  **Update `merge_tuples_to_states`** to return only the `MergedProduct` struct, as the internal `tuple_to_group` map will no longer be needed by the caller.
-          3.  **In `determinize_to_dwa`**:
-              -   Update the call to `merge_tuples_to_states`.
-              -   Modify the debug-printing block to use the new `find_group_for_tuple` helper for resolving transition destinations, ensuring the logs are accurate.
-              -   Remove the now-redundant debug block that printed the old `tuple_to_group` map.
-              -   Update the call to `build_dwa_from_merged` to pass only the necessary arguments.
-          4.  **Update `build_dwa_from_merged`**:
-              -   Change its signature to remove the `tuple_to_group` parameter.
-              -   Use the new `find_group_for_tuple` helper to correctly resolve all transition destination states.
+      ### Git Diff
 
-      These changes will ensure that the determinization algorithm correctly constructs the DWA, allowing the tests to pass.
-
-      ### Git Diffs
-
-      Here are the git diffs to apply the changes:
+      Here is the git patch to apply these changes.
 
       ```diff
-      diff --git a/src/macro.rs b/src/macro.rs
-      --- a/src/macro.rs
-      +++ b/src/macro.rs
-      @@ -62,12 +62,8 @@
-                           // let now = Local::now(); // Timestamp removed for brevity, uncomment if needed
-                           println!(
-                               // The complete format string is constructed here
-      -                        concat!("[DEBUG] {}] {}:{}: ", $user_fmt),
-      -                        // concat!("[DEBUG {} {}] {}:{}: ", $user_fmt), // For timestamp
-      -                        // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Uncomment for timestamp
-      -                        // now.format("%H:%M:%S%.3f"), // Uncomment for timestamp
-      +                        concat!("[DEBUG-{}] ", $user_fmt),
-                               $level,           // Argument for the first {} in the prefix
-      -                        file!(),          // Argument for the second {} in the prefix
-      -                        line!(),          // Argument for the third {} in the prefix
-                               $($user_args)*    // Arguments for the user-provided format part
-                           );
-                       }
-
-      ```
-
-      ```diff
-      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
       --- a/src/precompute4/weighted_automata/determinization.rs
       +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -120,7 +120,7 @@
+      @@ -86,22 +86,24 @@
+                   p.finish_with_message("Per-atom DFAs built & minimized");
+               }
        
-               // 5) Merge tuples greedily and attach transitions/finals from representative tuples
-               let now_merge = Instant::now();
-      -        let (merged, tuple_to_group) = merge_tuples_to_states(
-      +        let merged = merge_tuples_to_states(
-                   all_tuples,
-                   start_tuple,
-                   &comp_dfas,
-      @@ -152,29 +152,24 @@
+      -        crate::debug!(5, "\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
+      -        for (i, dfa) in comp_dfas.iter().enumerate() {
+      -            crate::debug!(5, "  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
+      -            crate::debug!(5, "    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
+      -            for s in 0..dfa.n_states {
+      -                let final_marker = if dfa.finals[s] { " (final)" } else { "" };
+      -                let mut trans_parts = vec![];
+      -                for (sym_idx, &label) in sigma.labels.iter().enumerate() {
+      -                    let target = dfa.trans[s][sym_idx];
+      -                    trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+      +        if 5 <= crate::r#macro::get_macro_debug_level() {
+      +            println!("\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
+      +            for (i, dfa) in comp_dfas.iter().enumerate() {
+      +                println!("  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
+      +                println!("    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
+      +                for s in 0..dfa.n_states {
+      +                    let final_marker = if dfa.finals[s] { " (final)" } else { "" };
+      +                    let mut trans_parts = vec![];
+      +                    for (sym_idx, &label) in sigma.labels.iter().enumerate() {
+      +                        let target = dfa.trans[s][sym_idx];
+      +                        trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+      +                    }
+      +                    let other_target = dfa.trans[s][sigma.other_index];
+      +                    trans_parts.push(format!("*->{}", other_target));
+      +                    println!("    - State {}{}: {}", s, final_marker, trans_parts.join(", "));
                        }
-                       crate::debug!(5, "    - Transitions:");
+      -                let other_target = dfa.trans[s][sigma.other_index];
+      -                trans_parts.push(format!("*->{}", other_target));
+      -                crate::debug!(5, "    - State {}{}: {}", s, final_marker, trans_parts.join(", "));
+                   }
+               }
+       
+               // Edge case: No atoms => no weight can be produced
+      @@ -130,46 +132,44 @@
+                   merged.states.len(),
+                   now_merge.elapsed()
+               );
+      -        {
+      +        if 5 <= crate::r#macro::get_macro_debug_level() {
+                   // Helper to format tuples like [0, _, 2] instead of [Some(0), None, Some(2)]
+                   let format_tuple = |tuple: &ProductDFAStateTuple| -> String {
+                       let parts: Vec<String> = tuple
+                           .iter()
+                           .map(|opt| match opt {
+                               Some(v) => v.to_string(),
+                               None => "_".to_string(),
+                           })
+                           .collect();
+                       format!("[{}]", parts.join(", "))
+                   };
+       
+      -            crate::debug!(5, "\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
+      +            println!("\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
+                   for (gid, state) in merged.states.iter().enumerate() {
+      -                crate::debug!(5, "  State {}:", gid);
+      -                crate::debug!(5, "    - Representative: {}", format_tuple(&state.representative_tuple));
+      +                println!("  State {}:", gid);
+      +                println!("    - Representative: {}", format_tuple(&state.representative_tuple));
+                       if let Some(w) = &state.final_weight {
+      -                    crate::debug!(5, "    - Final Weight: {}", w);
+      +                    println!("    - Final Weight: {}", w);
+                       }
+      -                crate::debug!(5, "    - Transitions:");
+      +                println!("    - Transitions:");
                        let dest_tuple_def = &state.trans_default;
-      -                if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_def) {
-      +                if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_def) {
-                           crate::debug!(5, "      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
+                       if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_def) {
+      -                    crate::debug!(5, "      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
+      +                    println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
                        } else {
-                           crate::debug!(5, "      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
+      -                    crate::debug!(5, "      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
+      +                    println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
                        }
        
                        for (lbl, dest_tuple_ex) in &state.trans_exceptions {
                            let char_repr = super::common::format_i16_char(*lbl);
-      -                    if let Some(&dest_gid) = tuple_to_group.get(dest_tuple_ex) {
-      +                    if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_ex) {
-                               crate::debug!(5, "      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
+                           if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_ex) {
+      -                        crate::debug!(5, "      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
+      +                        println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
                            } else {
-                               crate::debug!(5, "      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
+      -                        crate::debug!(5, "      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
+      +                        println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
                            }
                        }
-                       crate::debug!(5, "    - Contains {} tuples.", state.all_tuples.len());
+      -                crate::debug!(5, "    - Contains {} tuples.", state.all_tuples.len());
+      +                println!("    - Contains {} tuples.", state.all_tuples.len());
                    }
-      -
-      -            crate::debug!(5, "\n--- tuple_to_group ({} entries) ---", tuple_to_group.len());
-      -            let sorted_map: BTreeMap<_, _> = tuple_to_group.iter().collect();
-      -            for (tuple, gid) in sorted_map {
-      -                crate::debug!(5, "  {} -> State {}", format_tuple(tuple), gid);
-      -            }
                }
        
                // 6) Convert merged product to a DWA
-               let now_convert = Instant::now();
-      -        let dwa = build_dwa_from_merged(&merged, &tuple_to_group, &atoms.atoms, &sigma);
-      +        let dwa = build_dwa_from_merged(&merged, &atoms.atoms, &sigma);
-               crate::debug!(
-                   4,
-                   "Merged-product -> DWA conversion completed in {:?}",
-      @@ -1071,7 +1066,7 @@
-           sigma: &Alphabet,
-           comp_sinks: &[Option<usize>],
-           atom_weights: &Vec<Weight>,
-      -) -> (MergedProduct, HashMap<ProductDFAStateTuple, usize>) {
-      +) -> MergedProduct {
-           let pb_merge = if PROGRESS_BAR_ENABLED {
-               let p = ProgressBar::new_spinner();
-               p.set_style(
-      @@ -1157,11 +1152,26 @@
-               p.finish_with_message("Weights/transitions attached");
-           }
-       
-      -    (MergedProduct { states, start }, tuple_to_group)
-      +    MergedProduct { states, start }
-       }
-       
-       /* ------------------------------
-          Build DWA from merged product
-          ------------------------------ */
-       
-      +/// For a given tuple, find the ID of the merged state group it belongs to by checking for unifiability.
-      +fn find_group_for_tuple(
-      +    merged_states: &[ProductDFAState],
-      +    tuple: &ProductDFAStateTuple,
-      +) -> Option<usize> {
-      +    // This is a linear scan. Can be optimized if it's a bottleneck.
-      +    for (gid, state) in merged_states.iter().enumerate() {
-      +        if unify_tuples(&state.representative_tuple, tuple).is_some() {
-      +            return Some(gid);
-      +        }
-      +    }
-      +    None
-      +}
-      +
-       fn edge_weight_from_tuple(atom_weights: &Vec<Weight>, tuple: &ProductDFAStateTuple) -> Weight {
-           let mut w = Weight::zeros();
-           for (i, pos) in tuple.iter().enumerate() {
-      @@ -1174,7 +1184,6 @@
-       
-       fn build_dwa_from_merged(
-           merged: &MergedProduct,
-      -    tuple_to_group: &HashMap<ProductDFAStateTuple, usize>,
-           atom_weights: &Vec<Weight>,
-           sigma: &Alphabet,
-       ) -> DWA {
-      @@ -1196,7 +1205,7 @@
-               // Default (OTHER)
-               let def_t = &merged.states[sid].trans_default;
-               let def_w = edge_weight_from_tuple(atom_weights, def_t);
-      -        if let Some(&to_id) = tuple_to_group.get(def_t) {
-      +        if let Some(to_id) = find_group_for_tuple(&merged.states, def_t) {
-                   let _ = dwa.set_default_transition(sid, to_id, def_w);
-               } else {
-                   // Should not happen if tuple enumeration was complete, but guard anyway
-      @@ -1206,7 +1215,7 @@
-               // Exceptions
-               for (lbl, dst_t) in &merged.states[sid].trans_exceptions {
-                   let w = edge_weight_from_tuple(atom_weights, dst_t);
-      -            if let Some(&to_id) = tuple_to_group.get(dst_t) {
-      +            if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
-                       let _ = dwa.add_transition(sid, *lbl, to_id, w);
-                   } else {
-                       // Unmapped destination: skip
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/macro.rs
-      Applying patch to 'src/macro.rs' using custom patcher...
-      Successfully applied patch and wrote to src/macro.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/precompute4/weighted_automata/determinization.rs
       Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor determinization to use tuple
-      unifiability for state lookup and clean up debug macro output"'
+  - user: 'Changes committed with message: "Clean up determinization debug output
+      by replacing verbose macro calls with direct println! for automata structures"'
     metadata:
 ...

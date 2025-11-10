@@ -86,20 +86,22 @@ impl NWA {
             p.finish_with_message("Per-atom DFAs built & minimized");
         }
 
-        crate::debug!(5, "\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
-        for (i, dfa) in comp_dfas.iter().enumerate() {
-            crate::debug!(5, "  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
-            crate::debug!(5, "    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
-            for s in 0..dfa.n_states {
-                let final_marker = if dfa.finals[s] { " (final)" } else { "" };
-                let mut trans_parts = vec![];
-                for (sym_idx, &label) in sigma.labels.iter().enumerate() {
-                    let target = dfa.trans[s][sym_idx];
-                    trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+        if 5 <= crate::r#macro::get_macro_debug_level() {
+            println!("\n--- Atomic DFAs ({} total) ---", comp_dfas.len());
+            for (i, dfa) in comp_dfas.iter().enumerate() {
+                println!("  DFA {} (for atom {:?}):", i, atoms.intervals[i]);
+                println!("    - States: {}, Start: {}, Sink: {:?}", dfa.n_states, dfa.start, comp_sinks[i]);
+                for s in 0..dfa.n_states {
+                    let final_marker = if dfa.finals[s] { " (final)" } else { "" };
+                    let mut trans_parts = vec![];
+                    for (sym_idx, &label) in sigma.labels.iter().enumerate() {
+                        let target = dfa.trans[s][sym_idx];
+                        trans_parts.push(format!("{}->{}", super::common::format_i16_char(label), target));
+                    }
+                    let other_target = dfa.trans[s][sigma.other_index];
+                    trans_parts.push(format!("*->{}", other_target));
+                    println!("    - State {}{}: {}", s, final_marker, trans_parts.join(", "));
                 }
-                let other_target = dfa.trans[s][sigma.other_index];
-                trans_parts.push(format!("*->{}", other_target));
-                crate::debug!(5, "    - State {}{}: {}", s, final_marker, trans_parts.join(", "));
             }
         }
 
@@ -135,7 +137,7 @@ impl NWA {
             merged.states.len(),
             now_merge.elapsed()
         );
-        {
+        if 5 <= crate::r#macro::get_macro_debug_level() {
             // Helper to format tuples like [0, _, 2] instead of [Some(0), None, Some(2)]
             let format_tuple = |tuple: &ProductDFAStateTuple| -> String {
                 let parts: Vec<String> = tuple
@@ -148,30 +150,30 @@ impl NWA {
                 format!("[{}]", parts.join(", "))
             };
 
-            crate::debug!(5, "\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
+            println!("\n--- MergedProduct ({} states, start={}) ---", merged.states.len(), merged.start);
             for (gid, state) in merged.states.iter().enumerate() {
-                crate::debug!(5, "  State {}:", gid);
-                crate::debug!(5, "    - Representative: {}", format_tuple(&state.representative_tuple));
+                println!("  State {}:", gid);
+                println!("    - Representative: {}", format_tuple(&state.representative_tuple));
                 if let Some(w) = &state.final_weight {
-                    crate::debug!(5, "    - Final Weight: {}", w);
+                    println!("    - Final Weight: {}", w);
                 }
-                crate::debug!(5, "    - Transitions:");
+                println!("    - Transitions:");
                 let dest_tuple_def = &state.trans_default;
                 if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_def) {
-                    crate::debug!(5, "      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
+                    println!("      - Default -> State {} (via {})", dest_gid, format_tuple(dest_tuple_def));
                 } else {
-                    crate::debug!(5, "      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
+                    println!("      - Default -> UNMAPPED (via {})", format_tuple(dest_tuple_def));
                 }
 
                 for (lbl, dest_tuple_ex) in &state.trans_exceptions {
                     let char_repr = super::common::format_i16_char(*lbl);
                     if let Some(dest_gid) = find_group_for_tuple(&merged.states, dest_tuple_ex) {
-                        crate::debug!(5, "      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
+                        println!("      - {} -> State {} (via {})", char_repr, dest_gid, format_tuple(dest_tuple_ex));
                     } else {
-                        crate::debug!(5, "      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
+                        println!("      - {} -> UNMAPPED (via {})", char_repr, format_tuple(dest_tuple_ex));
                     }
                 }
-                crate::debug!(5, "    - Contains {} tuples.", state.all_tuples.len());
+                println!("    - Contains {} tuples.", state.all_tuples.len());
             }
         }
 
