@@ -47,10 +47,8 @@ impl NWA {
                     continue;
                 }
                 let f = fut[s].clone();
-                if !f.is_empty() {
-                    out.insert(s, f);
-                    q.push_back(s);
-                }
+                out.insert(s, f);
+                q.push_back(s);
             }
             while let Some(u) = q.pop_front() {
                 let base = out.get(&u).cloned().unwrap_or_else(Weight::zeros);
@@ -96,7 +94,6 @@ impl NWA {
             }
             base.iter()
                 .map(|(sid, wt)| (*sid, wt & w))
-                .filter(|(_, x)| !x.is_empty())
                 .collect()
         }
 
@@ -115,7 +112,6 @@ impl NWA {
                     .fold(FP_ZERO, |fp, (sid, w)| mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2)))
             }
             fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
-                pairs.retain(|(_, w)| !w.is_empty());
                 let fp = Self::fingerprint(&pairs);
                 if let Some(cands) = self.map.get(&fp) {
                     for &id in cands {

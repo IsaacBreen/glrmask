@@ -362,7 +362,7 @@ impl DWA {
 
         for state in &self.states.0 {
             num_exceptions += state.transitions.exceptions.len();
-            if state.final_weight.is_some() {
+            if state.final_weight.as_ref().map_or(false, |w| !w.is_empty()) {
                 num_final_states += 1;
             }
             if state.transitions.default.is_some() {
