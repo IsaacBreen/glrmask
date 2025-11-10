@@ -805,10 +805,7 @@ impl DetDFA {
         // Initial partition: accepting vs non-accepting
         let mut part_id = vec![0usize; n];
         let mut blocks: Vec<Vec<usize>> = Vec::new();
-        let (mut accepting_block, mut non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| self.finals[s]);
-
-        accepting_block.sort_unstable();
-        non_accepting_block.sort_unstable();
+        let (accepting_block, non_accepting_block): (Vec<_>, Vec<_>) = (0..n).partition(|&s| self.finals[s]);
 
         if accepting_block.is_empty() || non_accepting_block.is_empty() {
             // All accepting or all non-accepting -> nothing to split
