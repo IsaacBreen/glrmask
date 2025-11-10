@@ -192,12 +192,14 @@ impl NWA {
             let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
 
             // Compute default step; skip if out-of-bounds or effect is empty after weighting + ε-closure.
-            let def_steps: Vec<usize> = self.states[s].default.iter().filter_map(|default| {
+            let def_steps: Vec<usize> = self.states[s].default.iter().map(|default| {
                 let NWADefaultTransition { target: to, weight: wdef, .. } = default;
-                if *to < n {
-                    let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
-                    if pairs_def.is_empty() { None } else { Some(step_pool.intern(pairs_def)) }
-                } else { None }
+                let pairs = if *to < n {
+                    apply_weight_to_pairs(&eps_cache[*to], wdef)
+                } else {
+                    vec![]
+                };
+                step_pool.intern(pairs)
             }).collect();
 
             // Compute exceptions; drop those that are empty or identical to the default step effect.
@@ -205,13 +207,11 @@ impl NWA {
             for (lbl, targets) in self.states[s].transitions.iter() {
                 let mut step_exs: Vec<usize> = Vec::new();
                 for (to, wlbl) in targets {
-                    if *to >= n {
-                        continue;
-                    }
-                    let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
-                    if pairs_ex.is_empty() {
-                        continue;
-                    }
+                    let pairs_ex = if *to < n {
+                        apply_weight_to_pairs(&eps_cache[*to], wlbl)
+                    } else {
+                        vec![]
+                    };
                     step_exs.push(step_pool.intern(pairs_ex));
                 }
 
