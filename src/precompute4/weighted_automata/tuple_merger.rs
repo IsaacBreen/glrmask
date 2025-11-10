@@ -117,64 +117,85 @@ pub fn successor_tuple(
     out
 }
 
+/// Internal state representation during the merging process.
+#[derive(Debug)]
+struct MergingState {
+    representative_tuple: ProductTuple,
+}
+
 pub fn merge_and_build_automaton(
     start_tuple: ProductTuple,
     components: &[Component],
     alphabet_size: usize,
 ) -> MergedAutomaton {
-    let mut representatives: Vec<ProductTuple> = vec![start_tuple.clone()];
+    let mut merging_states: Vec<MergingState> = Vec::new();
     let mut tuple_to_state_id: HashMap<ProductTuple, usize> = HashMap::new();
-    let mut worklist = VecDeque::from([start_tuple.clone()]);
-    tuple_to_state_id.insert(start_tuple.clone(), 0);
+    let mut worklist: VecDeque<usize> = VecDeque::new();
 
-    while let Some(tuple) = worklist.pop_front() {
+    // Create the initial state for the start_tuple.
+    {
+        let start_id = 0;
+        merging_states.push(MergingState { representative_tuple: start_tuple.clone() });
+        tuple_to_state_id.insert(start_tuple, start_id);
+        worklist.push_back(start_id);
+    }
+
+    while let Some(state_id) = worklist.pop_front() {
+        let representative = merging_states[state_id].representative_tuple.clone();
+
         for symbol in 0..alphabet_size {
-            let succ_tuple = successor_tuple(&tuple, symbol, components);
+            let succ_tuple = successor_tuple(&representative, symbol, components);
+
             if tuple_to_state_id.contains_key(&succ_tuple) {
                 continue;
             }
 
-            worklist.push_back(succ_tuple.clone());
-
-            let mut assigned_id = None;
-            for (id, rep) in representatives.iter().enumerate() {
-                if unify_tuples(rep, &succ_tuple).is_some() {
-                    assigned_id = Some(id);
+            // Find a compatible existing state or create a new one.
+            let mut placed = false;
+            for existing_id in 0..merging_states.len() {
+                let old_rep = &merging_states[existing_id].representative_tuple;
+                if let Some(new_rep) = unify_tuples(old_rep, &succ_tuple) {
+                    if new_rep != *old_rep {
+                        merging_states[existing_id].representative_tuple = new_rep;
+                        if !worklist.contains(&existing_id) {
+                            worklist.push_back(existing_id);
+                        }
+                    }
+                    tuple_to_state_id.insert(succ_tuple.clone(), existing_id);
+                    placed = true;
                     break;
                 }
             }
 
-            let id = if let Some(id) = assigned_id {
-                id
-            } else {
-                let new_id = representatives.len();
-                representatives.push(succ_tuple.clone());
-                new_id
-            };
-            tuple_to_state_id.insert(succ_tuple, id);
+            if !placed {
+                let new_id = merging_states.len();
+                merging_states.push(MergingState { representative_tuple: succ_tuple.clone() });
+                tuple_to_state_id.insert(succ_tuple, new_id);
+                worklist.push_back(new_id);
+            }
         }
     }
 
     // Finalize: build the MergedAutomaton with computed transitions.
-    let final_states = representatives.iter().enumerate().map(|(id, rep)| {
-        let transitions = (0..alphabet_size).map(|symbol| {
-            let succ = successor_tuple(rep, symbol, components);
-            // Find which state this successor tuple belongs to.
-            // It must be compatible with one of the representatives.
-            representatives.iter().position(|r| unify_tuples(r, &succ).is_some()).unwrap()
-        }).collect();
-        MergedState {
-            id,
-            representative_tuple: rep.clone(),
-            transitions,
+    let mut final_states = Vec::with_capacity(merging_states.len());
+    for (id, state) in merging_states.iter().enumerate() {
+        let mut transitions = Vec::with_capacity(alphabet_size);
+        for symbol in 0..alphabet_size {
+            let succ_tuple = successor_tuple(&state.representative_tuple, symbol, components);
+            // After the main loop, every reachable tuple must have an assigned state.
+            let dest_id = *tuple_to_state_id.get(&succ_tuple).unwrap();
+            transitions.push(dest_id);
         }
-    }).collect();
-
-    let start_state_id = *tuple_to_state_id.get(&start_tuple).unwrap();
+        final_states.push(MergedState {
+            id,
+            representative_tuple: state.representative_tuple.clone(),
+            transitions,
+        });
+    }
 
     MergedAutomaton {
         states: final_states,
-        start_state_id,
+        start_state_id: 0, // By construction, the start state is always ID 0.
     }
 }
 
