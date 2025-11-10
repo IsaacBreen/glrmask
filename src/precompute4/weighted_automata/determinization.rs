@@ -168,7 +168,6 @@ impl NWA {
         let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
             start_tuple,
             &merger_components,
-            sigma.other_index,
         );
         crate::debug!(
             4,
@@ -1035,10 +1034,13 @@ fn build_dwa_from_merged_automaton(
 
         // Default (OTHER)
         let def_succ_tuple = tuple_merger::successor_tuple(rep, sigma.other_index, &merger_components);
-        let def_to_id =
-            *point_map.get(&def_succ_tuple).expect("Default successor tuple must be mapped");
         let def_w = edge_weight_from_tuple(atom_weights, &def_succ_tuple);
-        let _ = dwa.set_default_transition(sid, def_to_id, def_w);
+        // Only add a default transition if it carries a non-empty weight.
+        if !def_w.is_empty() {
+            let def_to_id =
+                *point_map.get(&def_succ_tuple).expect("Default successor tuple must be mapped");
+            let _ = dwa.set_default_transition(sid, def_to_id, def_w);
+        }
 
         // Exceptions
         for (li, &lbl) in sigma.labels.iter().enumerate() {
