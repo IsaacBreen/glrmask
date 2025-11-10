@@ -155,51 +155,6 @@ fn build_ignore_terminal_dwa() -> DWA {
     dwa
 }
 
-/// For any state with a final weight, subtract that weight from all outgoing transitions.
-/// This prunes paths that continue after a word has already been accepted with a given weight.
-fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
-    let mut changed = false;
-    for i in 0..nwa.states.len() {
-        if let Some(final_weight) = nwa.states[i].final_weight.clone() {
-            if final_weight.is_empty() {
-                continue;
-            }
-
-            let state = &mut nwa.states[i];
-
-            // Epsilon transitions
-            for (_, w) in &mut state.epsilons {
-                let old_w = w.clone();
-                *w -= &final_weight;
-                if *w != old_w {
-                    changed = true;
-                }
-            }
-
-            // Labeled transitions
-            for targets in state.transitions.values_mut() {
-                for (_, w) in targets {
-                    let old_w = w.clone();
-                    *w -= &final_weight;
-                    if *w != old_w {
-                        changed = true;
-                    }
-                }
-            }
-
-            // Default transitions
-            for def in &mut state.default {
-                let old_w = def.weight.clone();
-                def.weight -= &final_weight;
-                if def.weight != old_w {
-                    changed = true;
-                }
-            }
-        }
-    }
-    changed
-}
-
 // Helper: collect final states of a DWA
 fn collect_final_states(dwa: &DWA) -> BTreeSet<usize> {
     let mut finals = BTreeSet::new();
@@ -374,16 +329,9 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     crate::debug!(4, "Stats for combined NWA after negative resolution:\n{}", combined_nwa.stats());
 
     let now = Instant::now();
-    crate::debug!(4, "Pruning continuations from final states...");
-    // prune_continuations_from_final_states(&mut combined_nwa);
-    combined_nwa.simplify();
-    crate::debug!(4, "Pruning and simplifying took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
-    crate::debug!(4, "Stats for combined NWA after pruning:\n{}", combined_nwa.stats());
-
-    let now = Instant::now();
     // Determinize the single combined NWA
     crate::debug!(4, "Determinizing final combined NWA...");
-    let mut final_dwa = combined_nwa.determinize_to_dwa();
+    let mut final_dwa = combined_nwa.determinize_to_dwa_with_final_state_simplification();
     final_dwa.simplify();
     crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
     crate::debug!(4, "Stats for final DWA:\n{}", final_dwa.stats());
