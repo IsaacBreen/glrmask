@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 #[derive(Clone, Debug)]
 pub struct Component {
@@ -11,7 +11,7 @@ pub struct Component {
 pub struct MergedState {
     pub id: usize,
     pub representative_tuple: ProductTuple,
-    pub transitions: BTreeMap<usize, usize>,
+    pub transitions: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,16 +67,8 @@ pub fn successor_tuple(tuple: &ProductTuple, symbol: usize, components: &[Compon
 pub fn merge_and_build_automaton(
     start_tuple: ProductTuple,
     components: &[Component],
+    alphabet_size: usize,
 ) -> MergedAutomaton {
-    let mut alphabet = BTreeSet::new();
-    for component in components {
-        for state_transitions in &component.transitions {
-            for &symbol in state_transitions.keys() {
-                alphabet.insert(symbol);
-            }
-        }
-    }
-
     let mut states: Vec<ProductTuple> = Vec::new();
     let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
     let mut worklist: VecDeque<usize> = VecDeque::new();
@@ -89,7 +81,8 @@ pub fn merge_and_build_automaton(
     while let Some(state_id) = worklist.pop_front() {
         let representative = states[state_id].clone();
 
-        for &symbol in &alphabet {
+        for symbol in 0..alphabet_size {
+
             let successor = successor_tuple(&representative, symbol, components);
 
             if point_map.contains_key(&successor) {
@@ -123,12 +116,12 @@ pub fn merge_and_build_automaton(
 
     let mut final_states = Vec::with_capacity(states.len());
     for (id, rep) in states.iter().enumerate() {
-        let mut transitions = BTreeMap::new();
-        for &symbol in &alphabet {
-            let succ = successor_tuple(rep, symbol, components);
-            let target_id = *point_map.get(&succ).expect("Successor point must have an assigned state");
-            transitions.insert(symbol, target_id);
-        }
+        let transitions = (0..alphabet_size)
+            .map(|symbol| {
+                let succ = successor_tuple(rep, symbol, components);
+                *point_map.get(&succ).expect("Successor point must have an assigned state")
+            })
+            .collect();
 
         final_states.push(MergedState { id, representative_tuple: rep.clone(), transitions });
     }
@@ -154,18 +147,19 @@ mod tests {
         let comp0 = Component { transitions: vec![BTreeMap::from([(0, 0)])] };
         let comp1 = Component { transitions: vec![BTreeMap::from([(1, 0)])] };
         let components = vec![comp0, comp1];
+        let alphabet_size = 2;
 
         let start_tuple = vec![Some(0), Some(0)];
 
-        let automaton = merge_and_build_automaton(start_tuple, &components);
+        let automaton = merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
         assert_eq!(automaton.states.len(), 1);
 
         let s0_id = automaton.start_state_id;
         assert_eq!(automaton.states[s0_id].representative_tuple, vec![Some(0), Some(0)]);
 
-        assert_eq!(automaton.states[s0_id].transitions[&0], s0_id);
+        assert_eq!(automaton.states[s0_id].transitions[0], s0_id);
 
-        assert_eq!(automaton.states[s0_id].transitions[&1], s0_id);
+        assert_eq!(automaton.states[s0_id].transitions[1], s0_id);
     }
 }
