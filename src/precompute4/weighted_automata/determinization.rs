@@ -119,6 +119,7 @@ impl NWA {
                 now_merge.elapsed()
             )
         });
+        todo!();
 
         // 6) Convert merged product to a DWA
         let now_convert = Instant::now();
