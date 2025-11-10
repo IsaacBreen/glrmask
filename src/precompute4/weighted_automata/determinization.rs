@@ -1277,8 +1277,7 @@ fn build_dwa_from_merged(
         if let Some(to_id) = find_group_for_tuple(&merged.states, def_t) {
             let _ = dwa.set_default_transition(sid, to_id, def_w);
         } else {
-            // Should not happen if tuple enumeration was complete, but guard anyway
-            // No default transition if unmapped (safe no-op)
+            panic!("Unmapped default transition tuple for state {}", sid);
         }
 
         // Exceptions
@@ -1287,7 +1286,7 @@ fn build_dwa_from_merged(
             if let Some(to_id) = find_group_for_tuple(&merged.states, dst_t) {
                 let _ = dwa.add_transition(sid, *lbl, to_id, w);
             } else {
-                // Unmapped destination: skip
+                panic!("Unmapped exception transition tuple for state {}", sid);
             }
         }
     }
