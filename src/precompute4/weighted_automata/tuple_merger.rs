@@ -77,15 +77,16 @@ pub type ProductTuple = Vec<Option<usize>>;
 /// Unifies two tuples pointwise. Returns `None` if they are incompatible.
 /// Compatibility: for each position, either values are equal or one is `None`.
 fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
-    if a.len() != b.len() {
-        return None;
-    }
+    if a.len() != b.len() { return None; }
     let mut out = Vec::with_capacity(a.len());
     for i in 0..a.len() {
         match (a[i], b[i]) {
             (Some(x), Some(y)) => {
-                if x != y { return None; }
-                out.push(Some(x));
+                if x == y {
+                    out.push(Some(x));
+                } else {
+                    return None; // Incompatible
+                }
             }
             (Some(x), None) => out.push(Some(x)),
             (None, Some(y)) => out.push(Some(y)),
@@ -119,47 +120,93 @@ pub fn successor_tuple(
     out
 }
 
-/// This function implements a standard product construction over the component automata.
-/// Each unique reachable product tuple becomes a state in the resulting automaton.
-/// The "merging" aspect of the original design was found to be a faulty heuristic and has been removed
-/// in favor of this more standard and correct approach. The state explosion is managed by
-/// representing sink states as `None` in the tuples.
+/// Internal state representation during the merging process.
+#[derive(Debug)]
+struct MergingState {
+    representative_tuple: ProductTuple,
+    // For debugging/verification, not strictly needed for the algorithm.
+    contained_tuples: BTreeSet<ProductTuple>,
+}
+
 pub fn merge_and_build_automaton(
     start_tuple: ProductTuple,
     components: &[Component],
     alphabet_size: usize,
 ) -> MergedAutomaton {
-    let mut states: Vec<MergedState> = Vec::new();
-    let mut tuple_to_id: HashMap<ProductTuple, usize> = HashMap::new();
+    let mut merging_states: Vec<MergingState> = Vec::new();
+    let mut tuple_to_state_id: HashMap<ProductTuple, usize> = HashMap::new();
+    let mut worklist: VecDeque<usize> = VecDeque::new();
 
-    // Initial state
-    tuple_to_id.insert(start_tuple.clone(), 0);
-    states.push(MergedState { id: 0, representative_tuple: start_tuple, transitions: vec![] });
+    // Create the initial state for the start_tuple.
+    {
+        let start_id = 0;
+        merging_states.push(MergingState {
+            representative_tuple: start_tuple.clone(),
+            contained_tuples: BTreeSet::from([start_tuple.clone()]),
+        });
+        tuple_to_state_id.insert(start_tuple, start_id);
+        worklist.push_back(start_id);
+    }
 
-    let mut head = 0;
-    while head < states.len() {
-        let current_tuple = states[head].representative_tuple.clone();
-        let mut transitions = Vec::with_capacity(alphabet_size);
+    while let Some(state_id) = worklist.pop_front() {
+        let representative = merging_states[state_id].representative_tuple.clone();
 
         for symbol in 0..alphabet_size {
-            let succ_tuple = successor_tuple(&current_tuple, symbol, components);
-            let dest_id = *tuple_to_id.entry(succ_tuple.clone()).or_insert_with(|| {
-                let new_id = states.len();
-                states.push(MergedState {
-                    id: new_id,
-                    representative_tuple: succ_tuple,
-                    transitions: vec![], // placeholder
+            let succ_tuple = successor_tuple(&representative, symbol, components);
+
+            if tuple_to_state_id.contains_key(&succ_tuple) {
+                continue;
+            }
+
+            // Find a compatible existing state or create a new one.
+            let mut placed = false;
+            for existing_id in 0..merging_states.len() {
+                let old_rep = &merging_states[existing_id].representative_tuple;
+                if let Some(new_rep) = unify_tuples(old_rep, &succ_tuple) {
+                    if new_rep != *old_rep {
+                        merging_states[existing_id].representative_tuple = new_rep;
+                        if !worklist.contains(&existing_id) {
+                            worklist.push_back(existing_id);
+                        }
+                    }
+                    tuple_to_state_id.insert(succ_tuple.clone(), existing_id);
+                    merging_states[existing_id].contained_tuples.insert(succ_tuple.clone());
+                    placed = true;
+                    break;
+                }
+            }
+
+            if !placed {
+                let new_id = merging_states.len();
+                merging_states.push(MergingState {
+                    representative_tuple: succ_tuple.clone(),
+                    contained_tuples: BTreeSet::from([succ_tuple.clone()]),
                 });
-                new_id
-            });
+                tuple_to_state_id.insert(succ_tuple, new_id);
+                worklist.push_back(new_id);
+            }
+        }
+    }
+
+    // Finalize: build the MergedAutomaton with computed transitions.
+    let mut final_states = Vec::with_capacity(merging_states.len());
+    for (id, state) in merging_states.iter().enumerate() {
+        let mut transitions = Vec::with_capacity(alphabet_size);
+        for symbol in 0..alphabet_size {
+            let succ_tuple = successor_tuple(&state.representative_tuple, symbol, components);
+            // After the main loop, every reachable tuple must have an assigned state.
+            let dest_id = *tuple_to_state_id.get(&succ_tuple).unwrap();
             transitions.push(dest_id);
         }
-        states[head].transitions = transitions;
-        head += 1;
+        final_states.push(MergedState {
+            id,
+            representative_tuple: state.representative_tuple.clone(),
+            transitions,
+        });
     }
 
     MergedAutomaton {
-        states,
+        states: final_states,
         start_state_id: 0, // By construction, the start state is always ID 0.
     }
 }
@@ -201,46 +248,22 @@ mod tests {
 
         let automaton = merge_and_build_automaton(start_tuple, &components, alphabet_size);
 
-        // Expected states:
-        // S0 (start): rep=[0,0]. a -> [0,None], b -> [None,0]
-        // S1: rep=[0,None]. a -> [0,None], b -> [None,None]
-        // S2: rep=[None,0]. a -> [None,None], b -> [None,0]
-        // S3: rep=[None,None]. a -> [None,None], b -> [None,None]
-        //
-        // Let's trace:
-        // 1. Start with S0=[0,0].
-        //    - on 'a', succ is [0, None]. Create S1 for it. S0.trans[0] = S1.
-        //    - on 'b', succ is [None, 0]. Create S2 for it. S0.trans[1] = S2.
-        // 2. Process S1=[0,None].
-        //    - on 'a', succ is [0, None]. Already have S1. S1.trans[0] = S1.
-        //    - on 'b', succ is [None, None]. Create S3 for it. S1.trans[1] = S3.
-        // 3. Process S2=[None,0].
-        //    - on 'a', succ is [None, None]. Already have S3. S2.trans[0] = S3.
-        //    - on 'b', succ is [None, 0]. Already have S2. S2.trans[1] = S2.
-        // 4. Process S3=[None,None].
-        //    - on 'a', succ is [None, None]. Already have S3. S3.trans[0] = S3.
-        //    - on 'b', succ is [None, None]. Already have S3. S3.trans[1] = S3.
-        // Total 4 states.
+        // The merging algorithm should find that all reachable tuples are mutually compatible.
+        // Reachable tuples: [0,0], [0,None], [None,0], [None,None].
+        // The representative of this entire set is [0,0].
+        // Therefore, only one state should be created.
+        assert_eq!(automaton.states.len(), 1);
 
-        assert_eq!(automaton.states.len(), 4);
-
+        // Check that the single state has the correct representative and transitions.
         let s0_id = automaton.start_state_id;
         assert_eq!(automaton.states[s0_id].representative_tuple, vec![Some(0), Some(0)]);
 
-        let s1_id = automaton.states[s0_id].transitions[0];
-        assert_eq!(automaton.states[s1_id].representative_tuple, vec![Some(0), None]);
+        // Transition on 'a' from rep [0,0] gives succ [0,None].
+        // [0,None] is compatible and merges into state 0.
+        assert_eq!(automaton.states[s0_id].transitions[0], s0_id);
 
-        let s2_id = automaton.states[s0_id].transitions[1];
-        assert_eq!(automaton.states[s2_id].representative_tuple, vec![None, Some(0)]);
-
-        let s3_id = automaton.states[s1_id].transitions[1];
-        assert_eq!(automaton.states[s3_id].representative_tuple, vec![None, None]);
-
-        // Check other transitions
-        assert_eq!(automaton.states[s1_id].transitions[0], s1_id);
-        assert_eq!(automaton.states[s2_id].transitions[0], s3_id);
-        assert_eq!(automaton.states[s2_id].transitions[1], s2_id);
-        assert_eq!(automaton.states[s3_id].transitions[0], s3_id);
-        assert_eq!(automaton.states[s3_id].transitions[1], s3_id);
+        // Transition on 'b' from rep [0,0] gives succ [None,0].
+        // [None,0] is compatible and merges into state 0.
+        assert_eq!(automaton.states[s0_id].transitions[1], s0_id);
     }
 }
