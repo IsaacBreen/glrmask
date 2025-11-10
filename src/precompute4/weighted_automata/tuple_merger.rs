@@ -84,7 +84,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Symbol index in 0..alphabet_size.
 pub type Symbol = usize;
@@ -126,6 +126,31 @@ fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
     Some(out)
 }
 
+/// Fast compatibility check and cost computation used during candidate selection.
+/// Returns Some(spec_increase) if `b` can be merged into `a` without conflict, else None.
+/// - spec_increase = number of coordinates where `a` is None and `b` is Some(v).
+/// - No allocation; early exits on conflict.
+#[inline]
+fn merge_spec_increase_if_compatible(a: &ProductTuple, b: &ProductTuple) -> Option<usize> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut inc = 0usize;
+    // We only care about conflicts and how many new concrete coordinates b would add.
+    for i in 0..a.len() {
+        match (a[i], b[i]) {
+            (Some(x), Some(y)) => {
+                if x != y {
+                    return None; // Conflict
+                }
+            }
+            (None, Some(_)) => inc += 1,
+            _ => {}
+        }
+    }
+    Some(inc)
+}
+
 /// Checks if tuple `a` is less specific than or equal to tuple `b` (a ≤ b).
 fn is_less_or_equal(a: &ProductTuple, b: &ProductTuple) -> bool {
     debug_assert_eq!(a.len(), b.len(), "Tuples must have same arity for comparison");
@@ -157,6 +182,52 @@ pub fn successor_tuple(tuple: &ProductTuple, symbol: Symbol, components: &[Spars
             Some(s) => {
                 let map = &components[i][s];
                 if let Some(&t) = map.get(&symbol) {
+                    out.push(Some(t));
+                } else {
+                    out.push(None);
+                }
+            }
+            None => out.push(None),
+        }
+    }
+    out
+}
+
+/// A dense encoding for components to speed up successor computations.
+/// For each component i, we store for every local state s (row) an array over all symbols (columns).
+/// Missing transitions are represented as None.
+type DenseComponent = Vec<Vec<Option<LocalState>>>;
+type DenseComponents = Vec<DenseComponent>;
+
+/// Build a dense (state × symbol) table for each component.
+fn build_dense_components(components: &[SparseComponent], alphabet_size: usize) -> DenseComponents {
+    let mut dense: DenseComponents = Vec::with_capacity(components.len());
+    for comp in components {
+        let mut dc: DenseComponent = Vec::with_capacity(comp.len());
+        for state_map in comp {
+            let mut row = vec![None; alphabet_size];
+            for (&sym, &succ) in state_map {
+                // Symbols beyond alphabet_size should not appear; ignore them defensively.
+                if sym < alphabet_size {
+                    row[sym] = Some(succ);
+                }
+            }
+            dc.push(row);
+        }
+        dense.push(dc);
+    }
+    dense
+}
+
+/// Fast successor using dense components. Mirrors successor_tuple semantics.
+fn successor_tuple_dense(tuple: &ProductTuple, symbol: Symbol, dense: &DenseComponents) -> ProductTuple {
+    let k = dense.len();
+    let mut out = Vec::with_capacity(k);
+    for i in 0..k {
+        match tuple.get(i).copied().flatten() {
+            Some(s) => {
+                // Panics if s is out-of-range, matching the original behavior that indexed directly.
+                if let Some(t) = dense[i][s][symbol] {
                     out.push(Some(t));
                 } else {
                     out.push(None);
@@ -274,6 +345,59 @@ impl Solution {
     }
 }
 
+/// An index to drastically prune the set of candidate representatives for merging.
+/// - present[i][v] contains reps j where reps[j][i] == Some(v) (append-only; filtered at query time).
+/// - masked[i] contains reps j that had reps[j][i] == None when created (append-only; filtered at query time).
+/// - spec_buckets[spec] is a set of rep ids with current specificity = spec, used when x is all-None.
+struct CandidateIndex {
+    present: Vec<HashMap<LocalState, Vec<usize>>>,
+    masked: Vec<Vec<usize>>,
+    spec_buckets: Vec<BTreeSet<usize>>, // buckets by specificity 0..=K
+}
+
+impl CandidateIndex {
+    fn new(k: usize) -> Self {
+        Self {
+            present: (0..k).map(|_| HashMap::new()).collect(),
+            masked: vec![Vec::new(); k],
+            spec_buckets: vec![BTreeSet::new(); k + 1],
+        }
+    }
+
+    /// Add a fresh representative and index it.
+    fn on_new_rep(&mut self, rid: usize, tuple: &ProductTuple, spec: usize) {
+        for (i, &coord) in tuple.iter().enumerate() {
+            match coord {
+                Some(v) => self.present[i].entry(v).or_default().push(rid),
+                None => self.masked[i].push(rid),
+            }
+        }
+        self.spec_buckets[spec].insert(rid);
+    }
+
+    /// Update buckets when a representative's specificity increases.
+    fn on_rep_spec_increase(&mut self, rid: usize, old_spec: usize, new_spec: usize) {
+        if old_spec != new_spec {
+            let _ = self.spec_buckets[old_spec].remove(&rid);
+            self.spec_buckets[new_spec].insert(rid);
+        }
+    }
+
+    /// Record that a coordinate turned from None to Some(v) for a representative.
+    fn on_rep_coordinate_becomes_some(&mut self, rid: usize, i: usize, v: LocalState) {
+        self.present[i].entry(v).or_default().push(rid);
+    }
+
+    fn argmin_rep_for_all_none(&self) -> Option<usize> {
+        for bucket in &self.spec_buckets {
+            if let Some(&rid) = bucket.iter().next() {
+                return Some(rid);
+            }
+        }
+        None
+    }
+}
+
 /// Improved greedy synthesizer that aims to minimize |R| by making principled local choices.
 ///
 /// When finding a home for a new successor `x`, it evaluates all existing compatible
@@ -287,58 +411,137 @@ impl Solution {
 pub fn synthesize_greedy(inst: &Instance) -> Solution {
     let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
 
-    let mut reps: Vec<ProductTuple> = Vec::new();
-    let mut image: HashMap<ProductTuple, usize> = HashMap::new();
-    let mut work_queue: VecDeque<usize> = VecDeque::new();
-    let mut work_set: HashSet<usize> = HashSet::new(); // To efficiently check if an item is in work_queue
+    // Toggle this to true if you want to re-enable progress logs for diagnostics.
+    const VERBOSE: bool = false;
+
+    // Precompute a dense adjacency for fast successors.
+    let k = inst.components.len();
+    let dense_components = build_dense_components(&inst.components, inst.alphabet_size);
+
+    // Reserve some space up front to reduce reallocations in large instances.
+    let mut reps: Vec<ProductTuple> = Vec::with_capacity(256);
+    let mut image: HashMap<ProductTuple, usize> = HashMap::with_capacity(1024);
+    let mut work_queue: VecDeque<usize> = VecDeque::with_capacity(256);
+    let mut work_set: HashSet<usize> = HashSet::with_capacity(256); // For efficient presence checks
+    let mut rep_spec: Vec<usize> = Vec::with_capacity(256); // Specificity (count of Some) per representative
+    let mut index = CandidateIndex::new(k);
 
     // Initialize
     reps.push(inst.start.clone());
+    let start_spec = inst.start.iter().filter(|opt| opt.is_some()).count();
+    rep_spec.push(start_spec);
     image.insert(inst.start.clone(), 0);
     work_queue.push_back(0);
     work_set.insert(0);
+    index.on_new_rep(0, &inst.start, start_spec);
+    if VERBOSE {
+        println!("Starting greedy synthesis...");
+    }
 
     // Explore representatives
     while let Some(rid) = work_queue.pop_front() {
         work_set.remove(&rid);
-        let rep = reps[rid].clone(); // Clone to avoid mutable borrow issues
 
         for a in 0..inst.alphabet_size {
-            let x = successor_tuple(&rep, a, &inst.components);
+            // Compute successor of current representative under symbol a.
+            let x = successor_tuple_dense(&reps[rid], a, &dense_components);
 
+            // Already has a home? Skip.
             if image.contains_key(&x) {
-                continue; // Already processed and mapped
+                continue;
             }
 
-            let mut best_candidate: Option<(usize, (usize, usize))> = None; // (rep_id, (spec_increase, current_spec))
+            // Find the best existing representative to merge with (if any),
+            // using cost = (spec_increase, current_spec). Lower is better; ties pick lower j.
+            let mut best_j: Option<usize> = None;
+            let mut best_cost: (usize, usize) = (usize::MAX, usize::MAX);
+            let mut best_spec_increase: usize = 0;
 
-            // Find the best existing representative to merge with
-            for j in 0..reps.len() {
-                if let Some(unified) = unify_tuples(&reps[j], &x) {
-                    let current_spec = reps[j].iter().filter(|opt| opt.is_some()).count();
-                    let unified_spec = unified.iter().filter(|opt| opt.is_some()).count();
-                    let spec_increase = unified_spec - current_spec;
+            // Collect coordinates where x is Some(v).
+            let mut coords: Vec<(usize, LocalState)> = Vec::new();
+            for i in 0..k {
+                if let Some(v) = x[i] {
+                    coords.push((i, v));
+                }
+            }
 
-                    let current_cost = (spec_increase, current_spec);
+            if coords.is_empty() {
+                // x is all masked; any representative is compatible with spec_increase=0.
+                if let Some(j) = index.argmin_rep_for_all_none() {
+                    best_j = Some(j);
+                    best_cost = (0, rep_spec[j]);
+                    best_spec_increase = 0;
+                }
+            } else {
+                // Choose an anchor coordinate with smallest (present + masked) list size.
+                let mut anchor_idx = 0usize;
+                let mut anchor_size = {
+                    let (ai, av) = coords[0];
+                    let present_len = index.present[ai].get(&av).map(|v| v.len()).unwrap_or(0);
+                    present_len + index.masked[ai].len()
+                };
+                for (idx, &(ai, av)) in coords.iter().enumerate().skip(1) {
+                    let present_len = index.present[ai].get(&av).map(|v| v.len()).unwrap_or(0);
+                    let size = present_len + index.masked[ai].len();
+                    if size < anchor_size {
+                        anchor_size = size;
+                        anchor_idx = idx;
+                    }
+                }
+                let (ai, av) = coords[anchor_idx];
 
-                    if let Some((_best_j, best_cost)) = best_candidate {
-                        // Lexicographical comparison: smaller cost is better.
-                        if current_cost < best_cost {
-                            best_candidate = Some((j, current_cost));
+                // Helper to consider a candidate j. Fully checks compatibility and updates best.
+                let mut consider = |j: usize| {
+                    if let Some(spec_increase) = merge_spec_increase_if_compatible(&reps[j], &x) {
+                        let current_cost = (spec_increase, rep_spec[j]);
+                        if current_cost < best_cost || (current_cost == best_cost && Some(j) < best_j) {
+                            best_cost = current_cost;
+                            best_j = Some(j);
+                            best_spec_increase = spec_increase;
                         }
-                    } else {
-                        best_candidate = Some((j, current_cost));
+                    }
+                };
+
+                // Candidates from reps where coordinate ai == Some(av).
+                if let Some(list) = index.present[ai].get(&av) {
+                    for &j in list {
+                        // Filter out stale entries (coordinates may have changed since insertion).
+                        if reps[j][ai] == Some(av) {
+                            consider(j);
+                        }
+                    }
+                }
+                // Candidates from reps where coordinate ai == None.
+                for &j in &index.masked[ai] {
+                    if reps[j][ai].is_none() {
+                        consider(j);
                     }
                 }
             }
 
-            if let Some((j, _cost)) = best_candidate {
+            if let Some(j) = best_j {
                 // Found a best-fit representative to merge with.
-                let unified_tuple = unify_tuples(&reps[j], &x).unwrap(); // Should not fail
+                // Note: This must succeed because we just checked compatibility.
+                let unified_tuple = unify_tuples(&reps[j], &x).unwrap();
 
                 if unified_tuple != reps[j] {
-                    reps[j] = unified_tuple;
-                    // If the representative changed, it needs to be re-processed.
+                    // Apply the merge and update specificity count incrementally
+                    // using the precomputed spec increase.
+                    let old_rep = std::mem::replace(&mut reps[j], unified_tuple);
+                    // Count and index the coordinates that became Some.
+                    let mut inc_count = 0usize;
+                    for i in 0..k {
+                        if old_rep[i].is_none() && reps[j][i].is_some() {
+                            inc_count += 1;
+                            index.on_rep_coordinate_becomes_some(j, i, reps[j][i].unwrap());
+                        }
+                    }
+                    if inc_count > 0 {
+                        let old_spec = rep_spec[j];
+                        rep_spec[j] += inc_count;
+                        index.on_rep_spec_increase(j, old_spec, rep_spec[j]);
+                    }
+                    // If the representative changed, re-queue it for processing.
                     if !work_set.contains(&j) {
                         work_queue.push_back(j);
                         work_set.insert(j);
@@ -348,14 +551,31 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
             } else {
                 // No compatible representative found. Create a new one.
                 let new_id = reps.len();
+                let spec = x.iter().filter(|opt| opt.is_some()).count();
                 reps.push(x.clone());
+                rep_spec.push(spec);
                 image.insert(x, new_id);
                 work_queue.push_back(new_id);
                 work_set.insert(new_id);
+                index.on_new_rep(new_id, &reps[new_id], spec);
+                if VERBOSE && reps.len() % 100 == 0 {
+                    println!(
+                        " -> Representative count reached {}. |Work|={}",
+                        reps.len(),
+                        work_queue.len()
+                    );
+                }
             }
         }
     }
 
+    if VERBOSE {
+        println!(
+            "Greedy synthesis finished. Total reps: {}, total image size: {}.",
+            reps.len(),
+            image.len()
+        );
+    }
     Solution { reps, image }
 }
 
