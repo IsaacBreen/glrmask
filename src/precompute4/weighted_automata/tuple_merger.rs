@@ -53,6 +53,7 @@ pub fn successor_tuple(
 pub fn merge_and_build_automaton(
     start_tuple: ProductTuple,
     components: &[Vec<BTreeMap<usize, usize>>],
+    other_index: usize,
 ) -> (Vec<ProductTuple>, HashMap<ProductTuple, usize>) {
     let mut states: Vec<ProductTuple> = Vec::new();
     let mut point_map: HashMap<ProductTuple, usize> = HashMap::new();
@@ -74,6 +75,7 @@ pub fn merge_and_build_automaton(
                 }
             }
         }
+        alphabet.insert(other_index);
 
         for symbol in alphabet {
 
@@ -129,10 +131,11 @@ mod tests {
         let comp0 = vec![BTreeMap::from([(0, 0)])];
         let comp1 = vec![BTreeMap::from([(1, 0)])];
         let components = vec![comp0, comp1];
+        let other_index = 2;
 
         let start_tuple = vec![Some(0), Some(0)];
 
-        let (states, point_map) = merge_and_build_automaton(start_tuple, &components);
+        let (states, point_map) = merge_and_build_automaton(start_tuple, &components, other_index);
 
         assert_eq!(states.len(), 1);
         assert_eq!(states[0], vec![Some(0), Some(0)]);
