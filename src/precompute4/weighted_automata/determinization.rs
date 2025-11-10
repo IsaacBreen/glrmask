@@ -680,6 +680,13 @@ impl PerAtomNFA {
             p.finish_with_message(format!("Subset construction done, {} states", states.len()));
         }
 
+        // From final states, all transitions go to a sink.
+        for s in 0..states.len() {
+            if finals[s] {
+                trans[s] = vec![None; sigma.size()];
+            }
+        }
+
         // Build sink state if any transition is None
         let needs_sink = trans.iter().any(|row| row.iter().any(|x| x.is_none()));
         let mut sink_index: Option<usize> = None;
