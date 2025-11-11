@@ -364,10 +364,6 @@ impl NWA {
             exception_targets: BTreeMap<i16, usize>,
             exception_masks: BTreeMap<i16, Weight>,
             gates: HashMap<usize, Weight>,
-            // New: the set of macro signatures represented by this node (superset of all merged keys)
-            members: BTreeSet<usize>,
-            // New: union of incoming transition masks accumulated so far
-            in_mask: Weight,
         }
 
         fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
@@ -377,28 +373,6 @@ impl NWA {
                     *dst.entry(*sid).or_default() |= &x;
                 }
             }
-        }
-
-        // New: try to find an existing node whose members is a superset of the given keys.
-        // If multiple, choose the one with the smallest members set (tightest superset).
-        fn find_superset_node(nodes: &[CompositionNode], keys: &[usize]) -> Option<usize> {
-            let mut best: Option<(usize, usize)> = None; // (idx, members_len)
-            'outer: for (idx, node) in nodes.iter().enumerate() {
-                for &k in keys {
-                    if !node.members.contains(&k) {
-                        continue 'outer;
-                    }
-                }
-                let size = node.members.len();
-                if let Some((_, best_size)) = best {
-                    if size < best_size {
-                        best = Some((idx, size));
-                    }
-                } else {
-                    best = Some((idx, size));
-                }
-            }
-            best.map(|(idx, _)| idx)
         }
 
         let mut nodes: Vec<CompositionNode> = Vec::new();
@@ -423,11 +397,9 @@ impl NWA {
         }
         let mut init_keys: Vec<_> = init_map.keys().copied().collect();
         init_keys.sort_unstable();
-        let init_key = MembersKey(init_keys.clone());
+        let init_key = MembersKey(init_keys);
         let start_idx = 0;
         key_to_idx.insert(init_key, start_idx);
-        let init_members: BTreeSet<usize> = init_keys.iter().copied().collect();
-        let init_in_mask = init_map.values().fold(Weight::zeros(), |mut acc, w| { acc |= w; acc });
         nodes.push(CompositionNode {
             final_weight: None,
             default_target_idx: None,
@@ -435,8 +407,6 @@ impl NWA {
             exception_targets: BTreeMap::new(),
             exception_masks: BTreeMap::new(),
             gates: init_map,
-            members: init_members,
-            in_mask: init_in_mask,
         });
         let mut in_queue = vec![false; 1];
         in_queue[start_idx] = true;
@@ -559,18 +529,9 @@ impl NWA {
             for (label, map) in target_maps {
                 let mut keys: Vec<_> = map.keys().copied().collect();
                 keys.sort_unstable();
-                let key = MembersKey(keys.clone());
-                let mask_total = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-
-                // Superset-aware merge: prefer to reuse an existing node whose members is a superset of keys.
-                let target_idx = if let Some(&idx) = key_to_idx.get(&key) {
-                    idx
-                } else if let Some(idx) = find_superset_node(&nodes, &keys) {
-                    key_to_idx.insert(key.clone(), idx);
-                    idx
-                } else {
+                let key = MembersKey(keys);
+                let target_idx = *key_to_idx.entry(key).or_insert_with(|| {
                     let new_idx = nodes.len();
-                    let members: BTreeSet<usize> = keys.iter().copied().collect();
                     nodes.push(CompositionNode {
                         final_weight: None,
                         default_target_idx: None,
@@ -578,23 +539,13 @@ impl NWA {
                         exception_targets: BTreeMap::new(),
                         exception_masks: BTreeMap::new(),
                         gates: HashMap::new(),
-                        members,
-                        in_mask: Weight::zeros(),
                     });
                     if new_idx >= in_queue.len() {
                         in_queue.resize(new_idx + 1, false);
                     }
-                    key_to_idx.insert(key.clone(), new_idx);
                     new_idx
-                };
+                });
 
-                // Merge members and incoming mask
-                for &k in &keys {
-                    nodes[target_idx].members.insert(k);
-                }
-                nodes[target_idx].in_mask |= &mask_total;
-
-                // Merge/accumulate gates; if any change, queue target for processing
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
                     let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
@@ -608,7 +559,7 @@ impl NWA {
                     in_queue[target_idx] = true;
                     work.push_back(target_idx);
                 }
-                resolved_transitions.insert(label, (target_idx, mask_total));
+                resolved_transitions.insert(label, (target_idx, map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a })));
             }
 
             let node = &mut nodes[idx];
