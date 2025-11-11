@@ -147,15 +147,6 @@ impl DWA {
                     Self::relax_weights_by_local_future(s)
                 });
 
-            // Propagate full future (heavier) for small automata only.
-            if !large {
-                if let Some(p) = &pb { p.set_message("propagate future weights".to_string()); }
-                changed_any |=
-                    Self::run_pass_with_test(states, body, "propagate_future_weights", |s, _b| {
-                        Self::propagate_future_weights(s)
-                    });
-            }
-
             if !large {
                 if let Some(p) = &pb { p.set_message("minimize".to_string()); }
                 changed_any |=
@@ -637,8 +628,8 @@ impl DWA {
                 live[i] = true;
                 q_live.push_back(i);
             }
-            for (_lbl, v, _w) in states[i].iter_edges() {
-                if v < n {
+            for (_lbl, v, w) in states[i].iter_edges() {
+                if v < n && !w.is_empty() {
                     rev_adj[v].push(i);
                 }
             }
