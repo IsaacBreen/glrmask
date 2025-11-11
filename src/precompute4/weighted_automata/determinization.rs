@@ -88,6 +88,7 @@ struct CompositionNode {
     exception_targets: BTreeMap<i16, usize>,
     exception_masks: BTreeMap<i16, Weight>,
     gates: HashMap<usize, Weight>,
+    incoming_weight_union: Weight,
 }
 
 fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
@@ -99,25 +100,72 @@ fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], ga
     }
 }
 
-/// Finds or creates a composition node for a given key.
+/// Finds the best existing node to merge a new state composition into, or creates a new node.
+/// This function contains a heuristic to merge distinct sets of NWA states into a single DWA
+/// state if their incoming transition weights are disjoint. This can reduce the size of the
+/// resulting DWA, but is more complex than the standard subset construction.
 fn find_or_create_target_node(
     key: MembersKey,
     nodes: &mut Vec<CompositionNode>,
     key_to_idx: &mut HashMap<MembersKey, usize>,
+    incoming_transition_weight: &Weight,
 ) -> usize {
-    *key_to_idx.entry(key).or_insert_with(|| {
-        let new_idx = nodes.len();
-        nodes.push(CompositionNode {
-            final_weight: None,
-            default_target_idx: None,
-            default_mask: None,
-            exception_targets: BTreeMap::new(),
-            exception_masks: BTreeMap::new(),
-            gates: HashMap::new(),
-        });
-        new_idx
-    })
+    // Case 1: This exact set of NWA states (the key) has been seen before.
+    if let Some(&existing_idx) = key_to_idx.get(&key) {
+        // Update the incoming weight union for the existing node and return its index.
+        nodes[existing_idx].incoming_weight_union |= incoming_transition_weight;
+        return existing_idx;
+    }
+
+    // Case 2: The key is new. Try to find an existing node to merge with as a heuristic.
+    // A merge is valid if the new transition's weight is disjoint from all other weights
+    // already leading into the candidate node.
+    let calculate_merge_cost = |candidate_node: &CompositionNode| -> (usize, usize) {
+        let current_spec = candidate_node.gates.len();
+        let mut spec_increase = 0;
+        for sig_id in &key.0 {
+            if !candidate_node.gates.contains_key(sig_id) {
+                spec_increase += 1;
+            }
+        }
+        (spec_increase, current_spec)
+    };
+
+    let best_cand_idx = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_idx, cand_node)| cand_node.incoming_weight_union.is_disjoint(incoming_transition_weight))
+        .min_by_key(|(idx, cand_node)| {
+            let cost = calculate_merge_cost(cand_node);
+            (cost, *idx) // Tie-break with index for determinism
+        })
+        .map(|(idx, _)| idx);
+
+    if let Some(merge_idx) = best_cand_idx {
+        // Found a suitable existing node to merge with.
+        // Map the new key to this existing node's index.
+        key_to_idx.insert(key, merge_idx);
+        // Update the node's incoming weight union.
+        nodes[merge_idx].incoming_weight_union |= incoming_transition_weight;
+        return merge_idx;
+    }
+
+    // Case 3: No suitable node found for merging. Create a new one.
+    let new_idx = nodes.len();
+    nodes.push(CompositionNode {
+        final_weight: None,
+        default_target_idx: None,
+        default_mask: None,
+        exception_targets: BTreeMap::new(),
+        exception_masks: BTreeMap::new(),
+        gates: HashMap::new(), // Gates will be populated by the caller.
+        incoming_weight_union: incoming_transition_weight.clone(),
+    });
+    key_to_idx.insert(key, new_idx);
+    new_idx
 }
+
+/// Faster ε-closure from a single source with masked propagation.
 
 /// Faster ε-closure from a single source with masked propagation.
 /// - scratch_w: a weight array reused across calls; entries are set to zeros() after use via 'touched'.
@@ -415,6 +463,7 @@ impl NWA {
             exception_targets: BTreeMap::new(),
             exception_masks: BTreeMap::new(),
             gates: init_map,
+            incoming_weight_union: Weight::all(),
         });
         let mut in_queue = vec![false; 1];
         in_queue[start_idx] = true;
@@ -550,7 +599,7 @@ impl NWA {
                 keys.sort_unstable();
                 let key = MembersKey(keys);
 
-                let target_idx = find_or_create_target_node(key, &mut nodes, &mut key_to_idx);
+                let target_idx = find_or_create_target_node(key, &mut nodes, &mut key_to_idx, &total_weight);
 
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
