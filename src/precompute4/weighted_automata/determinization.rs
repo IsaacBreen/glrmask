@@ -178,11 +178,16 @@ impl NWA {
             labels: Vec<i16>, // sorted
             // A fingerprint (OR of fps) of union of final weights for the macro-signatures present.
             final_fp: u64,
+            // A sorted list of (step_id, sorted_exceptions) for all default transitions
+            // present in the macro-signature set.
+            defaults: Vec<(usize, Vec<i16>)>,
         }
 
         fn label_shape_for_keys(keys: &[usize], sigs: &[MacroSig]) -> LabelShapeKey {
             let mut labels_set: BTreeSet<i16> = BTreeSet::new();
             let mut fp = FP_ZERO;
+            let mut defaults_set: BTreeSet<(usize, Vec<i16>)> = BTreeSet::new();
+
             for &sid in keys {
                 if let Some(w) = &sigs[sid].final_w {
                     fp |= w.fp;
@@ -190,12 +195,16 @@ impl NWA {
                 for (&lbl, _) in &sigs[sid].ex {
                     labels_set.insert(lbl);
                 }
-                // Note: we intentionally ignore defaults in the shape; defaults are
-                // handled when emitting transitions, with explicit exceptions if needed.
+                for def in &sigs[sid].def {
+                    let mut exceptions: Vec<i16> = def.exceptions.iter().copied().collect();
+                    exceptions.sort_unstable();
+                    defaults_set.insert((def.step_id, exceptions));
+                }
             }
             LabelShapeKey {
                 labels: labels_set.into_iter().collect(),
                 final_fp: fp,
+                defaults: defaults_set.into_iter().collect(),
             }
         }
 

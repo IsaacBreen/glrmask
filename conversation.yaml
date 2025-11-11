@@ -11,7 +11,7 @@ local_system:
     - src/precompute4/weighted_automata/test_determinization.rs
     - src/precompute4/weighted_automata/determinization.rs
     - /Users/isaacbreen/Projects2/obsidian/grammars25/output1.md
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     /Users/isaacbreen/Projects2/obsidian/grammars25/Efficient Weighted Automata Determinization.md: |-
@@ -5886,11 +5886,16 @@ local_system:
                   labels: Vec<i16>, // sorted
                   // A fingerprint (OR of fps) of union of final weights for the macro-signatures present.
                   final_fp: u64,
+                  // A sorted list of (step_id, sorted_exceptions) for all default transitions
+                  // present in the macro-signature set.
+                  defaults: Vec<(usize, Vec<i16>)>,
               }
 
               fn label_shape_for_keys(keys: &[usize], sigs: &[MacroSig]) -> LabelShapeKey {
                   let mut labels_set: BTreeSet<i16> = BTreeSet::new();
                   let mut fp = FP_ZERO;
+                  let mut defaults_set: BTreeSet<(usize, Vec<i16>)> = BTreeSet::new();
+
                   for &sid in keys {
                       if let Some(w) = &sigs[sid].final_w {
                           fp |= w.fp;
@@ -5898,12 +5903,16 @@ local_system:
                       for (&lbl, _) in &sigs[sid].ex {
                           labels_set.insert(lbl);
                       }
-                      // Note: we intentionally ignore defaults in the shape; defaults are
-                      // handled when emitting transitions, with explicit exceptions if needed.
+                      for def in &sigs[sid].def {
+                          let mut exceptions: Vec<i16> = def.exceptions.iter().copied().collect();
+                          exceptions.sort_unstable();
+                          defaults_set.insert((def.step_id, exceptions));
+                      }
                   }
                   LabelShapeKey {
                       labels: labels_set.into_iter().collect(),
                       final_fp: fp,
+                      defaults: defaults_set.into_iter().collect(),
                   }
               }
 
@@ -7071,7 +7080,7 @@ local_system:
       ```
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: simple
+  prev_apply_mode: git-llm
   default_end_line:
 system:
   message: |-
@@ -7080,7 +7089,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -7089,7 +7098,7 @@ system:
     - gf
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: simple
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -11429,5 +11438,936 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Implement shape-based product state merging
       in DWA determinization to avoid state explosion"'
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/Efficient Weighted Automata Determinization.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/tuple_merger.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/output1.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --package sep1 --lib precompute4::test_weighted_automata::test_concatenate_complex_from_attachment --profile test --no-fail-fast -- --format=json --exact -Z unstable-options --show-output
+      Testing started at 12:13 pm ...
+          Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+           Running unittests src/lib.rs (target/debug/deps/sep1-ab994d3f4be66692)
+      DWA simplify pass 'initial normalize_edges_inplace' took 22.541µs (changed: false)
+      DWA simplify pass 'initial prune_dead_ends' took 100.333µs (changed: true)
+      DWA simplify pass 'initial prune_unreachable' took 81.208µs (changed: true)
+      DWA simplify pass 'initial constrain and absorb' took 342.875µs (changed: true)
+      DWA simplify pass 'normalize_edges_inplace' took 5.25µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 286.583µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 93.292µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 313.875µs (changed: true)
+      DWA simplify pass 'prune_dead_ends' took 13.583µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 6.75µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.416µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 204.459µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 43.042µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 105.625µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 11.125µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 6.084µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.584µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 295.584µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 83.959µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 233.375µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 15.625µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 45.042µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 4.584µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 211.375µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 49.958µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 114.208µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 12.375µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 6.208µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.791µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 200.834µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 42.958µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.875µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 11.333µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.958µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.667µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 199.667µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.958µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 103.458µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 11.125µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 6.167µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.416µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.584µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.75µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 102.292µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.75µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.708µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.375µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.917µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.833µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.625µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.625µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.834µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.583µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.708µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.709µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 107.333µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 11.792µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.75µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.542µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 199.875µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.042µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.916µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.791µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.708µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.334µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 199.083µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 40.583µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 107.5µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.959µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.959µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.416µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 199.541µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.125µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.875µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.917µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.958µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.5µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.416µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.375µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.791µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.666µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.875µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.375µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 199.417µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 40.959µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 102.042µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.75µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.792µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.375µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 196.916µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.042µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.125µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.542µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.708µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.375µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.583µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.667µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 100.458µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.833µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.625µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.458µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.958µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.875µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.125µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.834µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.833µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.333µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.334µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 40.917µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 100.875µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.542µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.75µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.583µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.875µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.25µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 102µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 11.041µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.5µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.375µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 199.084µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.458µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 100.541µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.667µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.791µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.5µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.25µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.667µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 102.167µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.75µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.792µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.417µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.5µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.375µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 100.208µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.75µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.958µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.458µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 199.709µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 42µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.542µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.667µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.75µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.417µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.083µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 42.667µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 245.292µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 14.584µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 6.416µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 5.041µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 442.375µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 49.208µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 113.875µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 12.625µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 6.333µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 4.125µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 199.792µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 42.541µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 102.459µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 11.417µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.833µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.708µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 200.708µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.875µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.208µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 11.208µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.916µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.583µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 200.292µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.291µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.083µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.833µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.875µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.375µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.083µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.834µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.917µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.625µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.75µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.541µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.75µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.042µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.292µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.792µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.708µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.417µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.208µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.375µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.583µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.834µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 6.166µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.417µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 196.917µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.875µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 102.041µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.667µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.791µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.334µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 196.958µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.458µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 102.042µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.875µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.792µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.375µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.667µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.333µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 102.667µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.375µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.667µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.334µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.375µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 102.833µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 11.917µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 6.083µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.625µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 203µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.042µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.833µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.542µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.625µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.417µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.917µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.167µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 102.542µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 11.125µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.75µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.458µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.5µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.667µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.166µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.584µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.625µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.375µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 196.541µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 40.875µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.75µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.625µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.708µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.417µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.834µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.25µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.958µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.833µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.708µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.417µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.459µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 40.833µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 100.625µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.625µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.708µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.5µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 198.041µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.084µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.25µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.583µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.792µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.334µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.5µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 40.75µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.292µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.792µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.541µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.375µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 204.125µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.542µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.917µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.625µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.541µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.458µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 194.5µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.5µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 100.167µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.792µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.708µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.458µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 196.917µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 40.667µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.583µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.792µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.583µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.292µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 196.292µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.375µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 100.625µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.75µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.709µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.5µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 196.25µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.708µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 101.959µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 11.042µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.959µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.375µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 197.583µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 40.541µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 100.792µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.458µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.708µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 3.459µs (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 196.167µs (changed: true)
+      DWA simplify pass 'relax_weights_by_local_future' took 41.625µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 100µs (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 10.834µs (changed: false)
+      DWA simplify pass 'prune_unreachable' took 5.833µs (changed: false)
+      DWA::simplify_components (26 states -> 12 states) took: 19.924042ms
+      DWA simplify pass 'initial normalize_edges_inplace' took 375ns (changed: false)
+      DWA simplify pass 'initial prune_dead_ends' took 1.292µs (changed: false)
+      DWA simplify pass 'initial prune_unreachable' took 375ns (changed: false)
+      DWA simplify pass 'initial constrain and absorb' took 7.958µs (changed: false)
+      DWA simplify pass 'normalize_edges_inplace' took 125ns (changed: false)
+      DWA simplify pass 'constrain_and_absorb_sinks_fixpoint' took 3.458µs (changed: false)
+      DWA simplify pass 'relax_weights_by_local_future' took 1.291µs (changed: false)
+      DWA simplify pass 'minimize_partition_refinement' took 42ns (changed: false)
+      DWA simplify pass 'prune_dead_ends' took 709ns (changed: false)
+      DWA simplify pass 'prune_unreachable' took 375ns (changed: false)
+      DWA::simplify_components (1 states -> 1 states) took: 20.167µs
+      NWA simplify pass 'normalize' took 13.083µs (changed: false)
+      NWA simplify pass 'dedup labeled' took 1.875µs (changed: false)
+      NWA simplify pass 'dedup epsilons' took 209ns (changed: false)
+      NWA simplify pass 'unify defaults' took 125ns (changed: false)
+      NWA simplify pass 'unify final states' took 4.292µs (changed: false)
+      NWA simplify pass 'bypass ε-chains' took 35.208µs (changed: true)
+      NWA simplify pass 'collapse SCCs' took 6.084µs (changed: false)
+      NWA simplify pass 'prune unreachable' took 3.5µs (changed: false)
+      NWA simplify pass 'prune dead ends' took 7.875µs (changed: false)
+      NWA simplify pass 'merge equivalent' took 202.75µs (changed: false)
+      NWA simplify pass 'normalize' took 5.167µs (changed: false)
+      NWA simplify pass 'normalize' took 4µs (changed: false)
+      NWA simplify pass 'dedup labeled' took 1.584µs (changed: false)
+      NWA simplify pass 'dedup epsilons' took 125ns (changed: false)
+      NWA simplify pass 'unify defaults' took 125ns (changed: false)
+      NWA simplify pass 'unify final states' took 1.541µs (changed: false)
+      NWA simplify pass 'bypass ε-chains' took 1.042µs (changed: false)
+      NWA simplify pass 'collapse SCCs' took 4.083µs (changed: false)
+      NWA simplify pass 'prune unreachable' took 4.542µs (changed: false)
+      NWA simplify pass 'prune dead ends' took 6.25µs (changed: false)
+      NWA simplify pass 'merge equivalent' took 129.167µs (changed: false)
+      NWA simplify pass 'normalize' took 4.375µs (changed: false)
+      NWA::simplify (13 states -> 12 states) took: 454.458µs
+      NWA after simplify:
+      NWA (start: 0)
+        State 0:
+          5 -> 1 (weight: [0..=1])
+          6 -> 2 (weight: [0..=1])
+          8 -> 3 (weight: [0..=1])
+          9 -> 4 (weight: [0..=1])
+          10 -> 5 (weight: [0..=1])
+        State 1:
+          7 -> 4 (weight: ALL)
+        State 2:
+          * -> 1 (weight: ALL)
+        State 3:
+          * -> 4 (weight: ALL)
+        State 4:
+          0 -> 6 (weight: ALL)
+          3 -> 7 (weight: ALL)
+          7 -> 8 (weight: ALL)
+        State 5:
+          5 -> 1 (weight: ALL)
+        State 6:
+          neg(0) -> 9 (weight: ALL)
+        State 7:
+          neg(3) -> 9 (weight: ALL)
+        State 8:
+          neg(7) -> 9 (weight: ALL)
+        State 9:
+          neg(5) -> 10 (weight: ALL)
+        State 10:
+          neg(10) -> 11 (weight: [0..=1])
+        State 11:
+          final_weight: ALL
+
+      NWA state 0: final_w: None, def_steps: [], ex_steps: {5: [0], 6: [1], 8: [2], 9: [3], 10: [4]}
+      NWA state 1: final_w: None, def_steps: [], ex_steps: {7: [3]}
+      NWA state 2: final_w: None, def_steps: [DefSig { step_id: 0, exceptions: {} }], ex_steps: {}
+      NWA state 3: final_w: None, def_steps: [DefSig { step_id: 3, exceptions: {} }], ex_steps: {}
+      NWA state 4: final_w: None, def_steps: [], ex_steps: {0: [5], 3: [6], 7: [7]}
+      NWA state 5: final_w: None, def_steps: [], ex_steps: {5: [0]}
+      NWA state 6: final_w: None, def_steps: [], ex_steps: {-32768: [8]}
+      NWA state 7: final_w: None, def_steps: [], ex_steps: {-32765: [8]}
+      NWA state 8: final_w: None, def_steps: [], ex_steps: {-32761: [8]}
+      NWA state 9: final_w: None, def_steps: [], ex_steps: {-32763: [9]}
+      NWA state 10: final_w: None, def_steps: [], ex_steps: {-32758: [10]}
+      NWA state 11: final_w: Some(SimpleBitset(ALL)), def_steps: [], ex_steps: {}
+      All MacroSigs (12):
+        Sig 0: final_w: None, def: [], ex: {5: [0], 6: [1], 8: [2], 9: [3], 10: [4]}
+        Sig 1: final_w: None, def: [], ex: {7: [3]}
+        Sig 2: final_w: None, def: [DefSig { step_id: 0, exceptions: {} }], ex: {}
+        Sig 3: final_w: None, def: [DefSig { step_id: 3, exceptions: {} }], ex: {}
+        Sig 4: final_w: None, def: [], ex: {0: [5], 3: [6], 7: [7]}
+        Sig 5: final_w: None, def: [], ex: {5: [0]}
+        Sig 6: final_w: None, def: [], ex: {-32768: [8]}
+        Sig 7: final_w: None, def: [], ex: {-32765: [8]}
+        Sig 8: final_w: None, def: [], ex: {-32761: [8]}
+        Sig 9: final_w: None, def: [], ex: {-32763: [9]}
+        Sig 10: final_w: None, def: [], ex: {-32758: [10]}
+        Sig 11: final_w: Some(SimpleBitset(ALL)), def: [], ex: {}
+      state_to_sig_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+      Step Pool (11):
+        Step 0: [(1, 0..=1)]
+        Step 1: [(2, 0..=1)]
+        Step 2: [(3, 0..=1)]
+        Step 3: [(4, 0..=1)]
+        Step 4: [(5, 0..=1)]
+        Step 5: [(6, 0..=1)]
+        Step 6: [(7, 0..=1)]
+        Step 7: [(8, 0..=1)]
+        Step 8: [(9, 0..=1)]
+        Step 9: [(10, 0..=1)]
+        Step 10: [(11, 0..=1)]
+      Compiled Steps (11):
+        Compiled 0: by_sig: [(1, 0..=1)], mask: [0..=1]
+        Compiled 1: by_sig: [(2, 0..=1)], mask: [0..=1]
+        Compiled 2: by_sig: [(3, 0..=1)], mask: [0..=1]
+        Compiled 3: by_sig: [(4, 0..=1)], mask: [0..=1]
+        Compiled 4: by_sig: [(5, 0..=1)], mask: [0..=1]
+        Compiled 5: by_sig: [(6, 0..=1)], mask: [0..=1]
+        Compiled 6: by_sig: [(7, 0..=1)], mask: [0..=1]
+        Compiled 7: by_sig: [(8, 0..=1)], mask: [0..=1]
+        Compiled 8: by_sig: [(9, 0..=1)], mask: [0..=1]
+        Compiled 9: by_sig: [(10, 0..=1)], mask: [0..=1]
+        Compiled 10: by_sig: [(11, 0..=1)], mask: [0..=1]
+
+      Processing composition node 0: gates: {0: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {5: {0: 0..=1}, 6: {1: 0..=1}, 8: {2: 0..=1}, 9: {3: 0..=1}, 10: {4: 0..=1}}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+          - processing exception label 5
+            - considering exception step 0 with g_ex [0..=1]
+          - processing exception label 6
+            - considering exception step 1 with g_ex [0..=1]
+          - processing exception label 8
+            - considering exception step 2 with g_ex [0..=1]
+          - processing exception label 9
+            - considering exception step 3 with g_ex [0..=1]
+          - processing exception label 10
+            - considering exception step 4 with g_ex [0..=1]
+        - computed target_maps:
+          - label Some(5): target_sigs=[1], total_weight=[0..=1]
+          - label Some(6): target_sigs=[2], total_weight=[0..=1]
+          - label Some(8): target_sigs=[3], total_weight=[0..=1]
+          - label Some(9): target_sigs=[4], total_weight=[0..=1]
+          - label Some(10): target_sigs=[5], total_weight=[0..=1]
+        - Resolved transitions for node 0:
+          - on 5: -> 1 (mask: [0..=1])
+          - on 6: -> 2 (mask: [0..=1])
+          - on 8: -> 2 (mask: [0..=1])
+          - on 9: -> 3 (mask: [0..=1])
+          - on 10: -> 4 (mask: [0..=1])
+
+      Processing composition node 1: gates: {1: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {7: {3: 0..=1}}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+          - processing exception label 7
+            - considering exception step 3 with g_ex [0..=1]
+        - computed target_maps:
+          - label Some(7): target_sigs=[4], total_weight=[0..=1]
+        - Resolved transitions for node 1:
+          - on 7: -> 3 (mask: [0..=1])
+
+      Processing composition node 2: gates: {3: 0..=1, 2: 0..=1}
+        - def_groups: {0: 0..=1, 3: 0..=1}
+        - ex_groups_by_label: {}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+        - computed target_maps:
+          - label None: target_sigs=[1, 4], total_weight=[0..=1]
+        - Resolved transitions for node 2:
+          - default -> 3 (mask: [0..=1])
+
+      Processing composition node 3: gates: {4: 0..=1, 1: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {0: {5: 0..=1}, 3: {6: 0..=1}, 7: {3: 0..=1, 7: 0..=1}}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+          - processing exception label 0
+            - considering exception step 5 with g_ex [0..=1]
+          - processing exception label 3
+            - considering exception step 6 with g_ex [0..=1]
+          - processing exception label 7
+            - considering exception step 3 with g_ex [0..=1]
+            - considering exception step 7 with g_ex [0..=1]
+        - computed target_maps:
+          - label Some(0): target_sigs=[6], total_weight=[0..=1]
+          - label Some(3): target_sigs=[7], total_weight=[0..=1]
+          - label Some(7): target_sigs=[4, 8], total_weight=[0..=1]
+        - Resolved transitions for node 3:
+          - on 0: -> 5 (mask: [0..=1])
+          - on 3: -> 6 (mask: [0..=1])
+          - on 7: -> 7 (mask: [0..=1])
+
+      Processing composition node 4: gates: {5: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {5: {0: 0..=1}}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+          - processing exception label 5
+            - considering exception step 0 with g_ex [0..=1]
+        - computed target_maps:
+          - label Some(5): target_sigs=[1], total_weight=[0..=1]
+        - Resolved transitions for node 4:
+          - on 5: -> 1 (mask: [0..=1])
+
+      Processing composition node 5: gates: {6: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {-32768: {8: 0..=1}}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+          - processing exception label -32768
+            - considering exception step 8 with g_ex [0..=1]
+        - computed target_maps:
+          - label Some(-32768): target_sigs=[9], total_weight=[0..=1]
+        - Resolved transitions for node 5:
+          - on -32768: -> 8 (mask: [0..=1])
+
+      Processing composition node 6: gates: {7: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {-32765: {8: 0..=1}}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+          - processing exception label -32765
+            - considering exception step 8 with g_ex [0..=1]
+        - computed target_maps:
+          - label Some(-32765): target_sigs=[9], total_weight=[0..=1]
+        - Resolved transitions for node 6:
+          - on -32765: -> 8 (mask: [0..=1])
+
+      Processing composition node 7: gates: {8: 0..=1, 4: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {-32761: {8: 0..=1}, 0: {5: 0..=1}, 3: {6: 0..=1}, 7: {7: 0..=1}}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+          - processing exception label -32761
+            - considering exception step 8 with g_ex [0..=1]
+          - processing exception label 0
+            - considering exception step 5 with g_ex [0..=1]
+          - processing exception label 3
+            - considering exception step 6 with g_ex [0..=1]
+          - processing exception label 7
+            - considering exception step 7 with g_ex [0..=1]
+        - computed target_maps:
+          - label Some(-32761): target_sigs=[9], total_weight=[0..=1]
+          - label Some(0): target_sigs=[6], total_weight=[0..=1]
+          - label Some(3): target_sigs=[7], total_weight=[0..=1]
+          - label Some(7): target_sigs=[8], total_weight=[0..=1]
+        - Resolved transitions for node 7:
+          - on -32761: -> 8 (mask: [0..=1])
+          - on 0: -> 5 (mask: [0..=1])
+          - on 3: -> 6 (mask: [0..=1])
+          - on 7: -> 9 (mask: [0..=1])
+
+      Processing composition node 8: gates: {9: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {-32763: {9: 0..=1}}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+          - processing exception label -32763
+            - considering exception step 9 with g_ex [0..=1]
+        - computed target_maps:
+          - label Some(-32763): target_sigs=[10], total_weight=[0..=1]
+        - Resolved transitions for node 8:
+          - on -32763: -> 10 (mask: [0..=1])
+
+      Processing composition node 9: gates: {8: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {-32761: {8: 0..=1}}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+          - processing exception label -32761
+            - considering exception step 8 with g_ex [0..=1]
+        - computed target_maps:
+          - label Some(-32761): target_sigs=[9], total_weight=[0..=1]
+        - Resolved transitions for node 9:
+          - on -32761: -> 8 (mask: [0..=1])
+
+      Processing composition node 10: gates: {10: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {-32758: {10: 0..=1}}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+          - processing exception label -32758
+            - considering exception step 10 with g_ex [0..=1]
+        - computed target_maps:
+          - label Some(-32758): target_sigs=[11], total_weight=[0..=1]
+        - Resolved transitions for node 10:
+          - on -32758: -> 11 (mask: [0..=1])
+
+      Processing composition node 11: gates: {11: 0..=1}
+        - def_groups: {}
+        - ex_groups_by_label: {}
+        - def_exers_by_label: {}
+        - def_exceptions_by_label: {}
+        - computed target_maps:
+        - Resolved transitions for node 11:
+      NWA::determinize_to_dwa result DWA stats:
+      DWA Stats:
+        - States: 12
+        - Transitions: 20
+        - Final States: 11
+        - States with Default: 1
+        - Avg Exceptions/State: 1.58
+
+      NWA::determinize_to_dwa took: 1.268875ms
+
+
+      thread 'precompute4::test_weighted_automata::test_concatenate_complex_from_attachment' (17115213) panicked at src/precompute4/test_weighted_automata.rs:249:17:
+      assertion `left == right` failed: C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).
+      word: [10, 5, 7, 7, 0, neg(0), neg(5), neg(10)]
+      C(word): [0..=1]
+      Expected: []
+
+      DWA A:
+      DWA (start: 11)
+        State 0:
+          7 -> 1 (trans_weight: ALL)
+        State 1:
+          0 -> 5 (trans_weight: ALL)
+          3 -> 9 (trans_weight: ALL)
+          7 -> 10 (trans_weight: ALL)
+        State 2:
+          5 -> 0 (trans_weight: ALL)
+        State 3:
+          * -> 0 (trans_weight: ALL)
+        State 4:
+          * -> 1 (trans_weight: ALL)
+        State 5:
+          neg(0) -> 6 (trans_weight: ALL)
+        State 6:
+          neg(5) -> 7 (trans_weight: ALL)
+        State 7:
+          neg(10) -> 8 (trans_weight: [0..=1])
+        State 8:
+          final_weight: ALL
+        State 9:
+          neg(3) -> 6 (trans_weight: ALL)
+        State 10:
+          neg(7) -> 6 (trans_weight: ALL)
+        State 11:
+          5 -> 0 (trans_weight: [0..=1])
+          6 -> 3 (trans_weight: [0..=1])
+          8 -> 4 (trans_weight: [0..=1])
+          9 -> 1 (trans_weight: [0..=1])
+          10 -> 2 (trans_weight: [0..=1])
+
+
+      DWA B:
+      DWA (start: 0)
+        State 0:
+          final_weight: ALL
+
+
+      DWA C:
+      DWA (start: 0)
+        State 0:
+          5 -> 1 (trans_weight: [0..=1])
+          6 -> 2 (trans_weight: [0..=1])
+          8 -> 2 (trans_weight: [0..=1])
+          9 -> 3 (trans_weight: [0..=1])
+          10 -> 4 (trans_weight: [0..=1])
+        State 1:
+          final_weight: []
+          7 -> 3 (trans_weight: [0..=1])
+        State 2:
+          * -> 3 (trans_weight: [0..=1])
+          final_weight: []
+        State 3:
+          final_weight: []
+          0 -> 5 (trans_weight: [0..=1])
+          3 -> 6 (trans_weight: [0..=1])
+          7 -> 7 (trans_weight: [0..=1])
+        State 4:
+          final_weight: []
+          5 -> 1 (trans_weight: [0..=1])
+        State 5:
+          final_weight: []
+          neg(0) -> 8 (trans_weight: [0..=1])
+        State 6:
+          final_weight: []
+          neg(3) -> 8 (trans_weight: [0..=1])
+        State 7:
+          final_weight: []
+          neg(7) -> 8 (trans_weight: [0..=1])
+          0 -> 5 (trans_weight: [0..=1])
+          3 -> 6 (trans_weight: [0..=1])
+          7 -> 9 (trans_weight: [0..=1])
+        State 8:
+          final_weight: []
+          neg(5) -> 10 (trans_weight: [0..=1])
+        State 9:
+          final_weight: []
+          neg(7) -> 8 (trans_weight: [0..=1])
+        State 10:
+          final_weight: []
+          neg(10) -> 11 (trans_weight: [0..=1])
+        State 11:
+          final_weight: [0..=1]
+
+        left: 0..=1
+       right: 
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::test_weighted_automata::<impl sep1::precompute4::weighted_automata::dwa::DWA>::stochastic_validate_concatenate
+                   at ./src/precompute4/test_weighted_automata.rs:249:17
+         5: sep1::precompute4::test_weighted_automata::test_concatenate_complex_from_attachment
+                   at ./src/precompute4/test_weighted_automata.rs:1029:5
+         6: sep1::precompute4::test_weighted_automata::test_concatenate_complex_from_attachment::{{closure}}
+                   at ./src/precompute4/test_weighted_automata.rs:942:46
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      error: test failed, to rerun pass `-p sep1 --lib`
+      error: 1 target failed:
+          `-p sep1 --lib`
+
+      Process finished with exit code 101
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. The test failures indicate that the determinization algorithm is still producing incorrect automata for complex cases, specifically after a concatenation operation. The `LabelShapeKey` I introduced previously successfully addressed the state explosion for the hypercube example by merging states with identical future *structure*, but it appears to be too aggressive, leading to incorrect merges in other scenarios.
+
+      The core issue is that the `LabelShapeKey` does not account for differences in default transitions. Two sets of NWA states might have the same set of explicit labeled transitions but different default behaviors. Merging them into a single DWA state is incorrect, as the resulting state might apply a default transition in a context where it shouldn't exist.
+
+      The fix is to make the `LabelShapeKey` more precise by including information about the default transitions present in the set of macro-signatures it represents.
+
+      ### Step-by-step Instructions
+
+      Here are the precise edits for `src/precompute4/weighted_automata/determinization.rs`:
+
+      1.  **Modify the `LabelShapeKey` struct:** Add a new field to store a canonical representation of the default transitions. This will ensure that two states are only merged if their default transition behaviors are also identical.
+
+          In `src/precompute4/weighted_automata/determinization.rs`, find the `LabelShapeKey` struct and add the `defaults` field:
+
+          ```rust
+          #[derive(Clone, Eq, PartialEq, Hash, Debug)]
+          struct LabelShapeKey {
+              // Labels for which some explicit transition exists from this macro-signature set.
+              labels: Vec<i16>, // sorted
+              // A fingerprint (OR of fps) of union of final weights for the macro-signatures present.
+              final_fp: u64,
+              // A sorted list of (step_id, sorted_exceptions) for all default transitions
+              // present in the macro-signature set.
+              defaults: Vec<(usize, Vec<i16>)>,
+          }
+          ```
+
+      2.  **Update the `label_shape_for_keys` function:** Modify this helper function to compute and populate the new `defaults` field. It needs to iterate over the default transitions of the given macro-signatures and collect their structural information.
+
+          In `src/precompute4/weighted_automata/determinization.rs`, update the `label_shape_for_keys` function as follows:
+
+          ```rust
+          fn label_shape_for_keys(keys: &[usize], sigs: &[MacroSig]) -> LabelShapeKey {
+              let mut labels_set: BTreeSet<i16> = BTreeSet::new();
+              let mut fp = FP_ZERO;
+              let mut defaults_set: BTreeSet<(usize, Vec<i16>)> = BTreeSet::new();
+
+              for &sid in keys {
+                  if let Some(w) = &sigs[sid].final_w {
+                      fp |= w.fp;
+                  }
+                  for (&lbl, _) in &sigs[sid].ex {
+                      labels_set.insert(lbl);
+                  }
+                  for def in &sigs[sid].def {
+                      let mut exceptions: Vec<i16> = def.exceptions.iter().copied().collect();
+                      exceptions.sort_unstable();
+                      defaults_set.insert((def.step_id, exceptions));
+                  }
+              }
+              LabelShapeKey {
+                  labels: labels_set.into_iter().collect(),
+                  final_fp: fp,
+                  defaults: defaults_set.into_iter().collect(),
+              }
+          }
+          ```
+
+      These changes make the state-merging criterion stricter and more accurate, which should resolve the correctness issue highlighted by the failing test.
+
+      ### Git Diff
+
+      Here is the git diff for the changes to be applied:
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -176,27 +176,33 @@
+                   labels: Vec<i16>, // sorted
+                   // A fingerprint (OR of fps) of union of final weights for the macro-signatures present.
+                   final_fp: u64,
+      +            // A sorted list of (step_id, sorted_exceptions) for all default transitions
+      +            // present in the macro-signature set.
+      +            defaults: Vec<(usize, Vec<i16>)>,
+               }
+       
+               fn label_shape_for_keys(keys: &[usize], sigs: &[MacroSig]) -> LabelShapeKey {
+                   let mut labels_set: BTreeSet<i16> = BTreeSet::new();
+                   let mut fp = FP_ZERO;
+      +            let mut defaults_set: BTreeSet<(usize, Vec<i16>)> = BTreeSet::new();
+      +
+                   for &sid in keys {
+                       if let Some(w) = &sigs[sid].final_w {
+                           fp |= w.fp;
+                       }
+                       for (&lbl, _) in &sigs[sid].ex {
+                           labels_set.insert(lbl);
+                       }
+      -                // Note: we intentionally ignore defaults in the shape; defaults are
+      -                // handled when emitting transitions, with explicit exceptions if needed.
+      +                for def in &sigs[sid].def {
+      +                    let mut exceptions: Vec<i16> = def.exceptions.iter().copied().collect();
+      +                    exceptions.sort_unstable();
+      +                    defaults_set.insert((def.step_id, exceptions));
+      +                }
+                   }
+                   LabelShapeKey {
+                       labels: labels_set.into_iter().collect(),
+                       final_fp: fp,
+      +                defaults: defaults_set.into_iter().collect(),
+                   }
+               }
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix DWA determinization by refining LabelShapeKey
+      to include default transition structure and correctly setting start state final
+      weight."'
     metadata:
 ...
