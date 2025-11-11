@@ -462,7 +462,7 @@ impl NWA {
             exception_targets: BTreeMap::new(),
             exception_masks: BTreeMap::new(),
             gates: init_map,
-            incoming_weight_union: Weight::zeros(),
+            incoming_weight_union: Weight::all(),
         });
         let mut in_queue = vec![false; 1];
         in_queue[start_idx] = true;
