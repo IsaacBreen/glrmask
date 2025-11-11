@@ -396,10 +396,10 @@ impl NWA {
             let best_cand_idx = nodes
                 .iter()
                 .enumerate()
+                .filter(|(cand_idx, cand_node)| {
+                    merge_is_valid(cand_node)
+                })
                 .min_by_key(|(cand_idx, cand_node)| {
-                    if !merge_is_valid(cand_node) {
-                        return ((usize::MAX, usize::MAX), usize::MAX); // Invalid merge
-                    }
                     let cost = calculate_merge_cost(cand_node);
                     (cost, *cand_idx) // Tie-break with index for determinism
                 })
