@@ -1,15 +1,14 @@
-use crate::r#macro::is_debug_level_enabled;
 use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
 use super::common::Weight;
 use super::dwa::DWA;
 use super::nwa::{NWAStates, NWA};
 use crate::precompute4::weighted_automata::{NWADefaultTransition, NWAStateID};
 use crate::profiler::PROGRESS_BAR_ENABLED;
+use crate::r#macro::is_debug_level_enabled;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::time::Instant;
 
 fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
