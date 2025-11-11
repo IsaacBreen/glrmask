@@ -103,6 +103,25 @@ impl NWA {
             return DWA::new();
         }
 
+        fn unify_gates(g1: &HashMap<usize, Weight>, g2: &HashMap<usize, Weight>) -> HashMap<usize, Weight> {
+            if g1.is_empty() {
+                return g2.clone();
+            }
+            if g2.is_empty() {
+                return g1.clone();
+            }
+            let mut unified = g1.clone();
+            for (sig, w2) in g2 {
+                *unified.entry(*sig).or_default() |= w2;
+            }
+            unified
+        }
+
+        fn cost(old_gates: &HashMap<usize, Weight>, unified_gates: &HashMap<usize, Weight>) -> (usize, usize) {
+            let spec_increase = unified_gates.len() - old_gates.len();
+            (spec_increase, old_gates.len())
+        }
+
         fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
             if w.is_all_fast() {
                 return base.to_vec();
@@ -341,17 +360,6 @@ impl NWA {
                 eprintln!("  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
             }
         }
-        #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-        struct MembersKey(Vec<usize>);
-
-        struct CompositionNode {
-            final_weight: Option<Weight>,
-            default_target_idx: Option<usize>,
-            default_mask: Option<Weight>,
-            exception_targets: BTreeMap<i16, usize>,
-            exception_masks: BTreeMap<i16, Weight>,
-            gates: HashMap<usize, Weight>,
-        }
 
         fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
             for (sid, w) in compiled.iter() {
@@ -362,9 +370,20 @@ impl NWA {
             }
         }
 
+        #[derive(Clone)]
+        struct CompositionNode {
+            gates: HashMap<usize, Weight>,
+            // Transitions are stored here after they are resolved.
+            final_weight: Option<Weight>,
+            default_target_idx: Option<usize>,
+            default_mask: Option<Weight>,
+            exception_targets: BTreeMap<i16, usize>,
+            exception_masks: BTreeMap<i16, Weight>,
+        }
+
         let mut nodes: Vec<CompositionNode> = Vec::new();
-        let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
         let mut work: VecDeque<usize> = VecDeque::new();
+        let mut work_set: BTreeSet<usize> = BTreeSet::new();
 
         let pb_discover = if PROGRESS_BAR_ENABLED {
             Some(
@@ -382,28 +401,25 @@ impl NWA {
         for (t, w) in eps_cache[self.body.start_state].iter() {
             *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
         }
-        let mut init_keys: Vec<_> = init_map.keys().copied().collect();
-        init_keys.sort_unstable();
-        let init_key = MembersKey(init_keys);
         let start_idx = 0;
-        key_to_idx.insert(init_key, start_idx);
         nodes.push(CompositionNode {
+            gates: init_map,
             final_weight: None,
             default_target_idx: None,
             default_mask: None,
             exception_targets: BTreeMap::new(),
             exception_masks: BTreeMap::new(),
-            gates: init_map,
         });
-        let mut in_queue = vec![false; 1];
-        in_queue[start_idx] = true;
         work.push_back(start_idx);
+        work_set.insert(start_idx);
 
         while let Some(idx) = work.pop_front() {
-            in_queue[idx] = false;
+            work_set.remove(&idx);
             if let Some(p) = &pb_discover {
                 p.inc(1);
             }
+            // Node gates can change, so we must clone them for stable processing.
+            // The node's own transition properties will be updated at the end of the loop.
             let node_gates = nodes[idx].gates.clone();
 
             if is_debug_level_enabled(5) {
@@ -512,72 +528,84 @@ impl NWA {
                 }
             }
 
+            let final_weight = node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
+                if let Some(fw) = &sigs[*sig_id].final_w {
+                    acc |= &(gate & fw);
+                }
+                acc
+            });
+            nodes[idx].final_weight = if final_weight.is_empty() { None } else { Some(final_weight) };
+
             let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
-            for (label, map) in target_maps {
-                let mut keys: Vec<_> = map.keys().copied().collect();
-                keys.sort_unstable();
-                let key = MembersKey(keys);
-                let target_idx = *key_to_idx.entry(key).or_insert_with(|| {
-                    let new_idx = nodes.len();
+            let mut sorted_labels: Vec<_> = target_maps.keys().copied().collect();
+            sorted_labels.sort_by(|a, b| a.cmp(b));
+
+            for label in sorted_labels {
+                let succ_map = target_maps.get(&label).unwrap();
+                if succ_map.is_empty() {
+                    resolved_transitions.insert(label, (usize::MAX, Weight::zeros())); // Mark as sink
+                    continue;
+                }
+
+                let mut best_j: Option<usize> = None;
+                let mut best_cost = (usize::MAX, usize::MAX);
+
+                for j in 0..nodes.len() {
+                    let unified_gates = unify_gates(&nodes[j].gates, succ_map);
+                    let current_cost = cost(&nodes[j].gates, &unified_gates);
+                    if current_cost < best_cost || (current_cost == best_cost && Some(j) < best_j) {
+                        best_cost = current_cost;
+                        best_j = Some(j);
+                    }
+                }
+
+                let target_idx;
+                if let Some(j) = best_j {
+                    target_idx = j;
+                    let unified_gates = unify_gates(&nodes[j].gates, succ_map);
+                    if unified_gates != nodes[j].gates {
+                        nodes[j].gates = unified_gates;
+                        if !work_set.contains(&j) {
+                            work.push_back(j);
+                            work_set.insert(j);
+                        }
+                    }
+                } else {
+                    target_idx = nodes.len();
                     nodes.push(CompositionNode {
+                        gates: succ_map.clone(),
                         final_weight: None,
                         default_target_idx: None,
                         default_mask: None,
                         exception_targets: BTreeMap::new(),
                         exception_masks: BTreeMap::new(),
-                        gates: HashMap::new(),
                     });
-                    if new_idx >= in_queue.len() {
-                        in_queue.resize(new_idx + 1, false);
-                    }
-                    new_idx
-                });
-
-                let mut any_change = false;
-                for (sig_id, weight) in &map {
-                    let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = &*entry | weight;
-                    if new_w != *entry {
-                        *entry = new_w;
-                        any_change = true;
+                    if !work_set.contains(&target_idx) {
+                        work.push_back(target_idx);
+                        work_set.insert(target_idx);
                     }
                 }
-                if any_change && !in_queue[target_idx] {
-                    in_queue[target_idx] = true;
-                    work.push_back(target_idx);
-                }
-                resolved_transitions.insert(label, (target_idx, map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a })));
+                let mask = succ_map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+                resolved_transitions.insert(label, (target_idx, mask));
             }
 
             let node = &mut nodes[idx];
+            node.default_target_idx = None;
+            node.exception_targets.clear();
             if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
-                node.default_target_idx = Some(target_idx);
-                node.default_mask = Some(mask);
+                if target_idx != usize::MAX {
+                    node.default_target_idx = Some(target_idx);
+                    node.default_mask = Some(mask);
+                }
             }
             for (label, (target_idx, mask)) in resolved_transitions {
                 if let Some(lbl) = label {
-                    node.exception_targets.insert(lbl, target_idx);
-                    node.exception_masks.insert(lbl, mask);
-                }
-            }
-
-            if is_debug_level_enabled(5) {
-                eprintln!("  - Resolved transitions for node {}:", idx);
-                if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                    eprintln!("    - default -> {} (mask: {})", target, mask);
-                }
-                for (lbl, target) in &node.exception_targets {
-                    if let Some(mask) = node.exception_masks.get(lbl) {
-                        eprintln!("    - on {}: -> {} (mask: {})", lbl, target, mask);
+                    if target_idx != usize::MAX {
+                        node.exception_targets.insert(lbl, target_idx);
+                        node.exception_masks.insert(lbl, mask);
                     }
                 }
             }
-            node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
-                if let Some(fw) = &sigs[*sig_id].final_w {
-                    acc |= &(gate & fw);
-                }
-                acc
-            }));
 
             if let Some(p) = &pb_discover {
                 p.set_length(nodes.len() as u64);
@@ -590,11 +618,16 @@ impl NWA {
         let mut dwa = DWA::new();
         if nodes.is_empty() {
             return dwa;
+        } else {
+            // Ensure start state exists
+            dwa.states.add_state();
         }
-        dwa.states.0.resize(nodes.len(), Default::default());
+        while dwa.states.len() < nodes.len() {
+            dwa.add_state();
+        }
         dwa.body.start_state = start_idx;
 
-        for (i, node) in nodes.iter().enumerate() {
+        for (i, node) in nodes.into_iter().enumerate() {
             dwa.states[i].final_weight = node.final_weight.clone();
             if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
                 if !mask.is_empty() {
@@ -606,7 +639,7 @@ impl NWA {
                 let mask = node
                     .exception_masks
                     .get(lbl)
-                    .cloned()
+                    .cloned() // Always add exception to block default, even if mask is empty.
                     .unwrap_or_else(Weight::zeros);
                 dwa.add_transition(i, *lbl, target_idx, mask).unwrap();
             }
