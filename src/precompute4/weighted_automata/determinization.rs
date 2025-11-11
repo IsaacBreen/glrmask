@@ -11,6 +11,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::Hash;
 use std::time::Instant;
 
+type Composition = BTreeMap<usize, Weight>;
+type Behavior = BTreeMap<Option<i16>, Composition>;
+
 fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
     if w.is_all_fast() {
         return base.to_vec();
@@ -55,30 +58,27 @@ impl StepPool {
 #[derive(Clone)]
 struct CompiledStep {
     by_sig: Vec<(usize, Weight)>,
-    mask: Weight,
 }
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct DefSig {
     step_id: usize,
     exceptions: BTreeSet<i16>,
 }
+
 #[derive(Clone)]
 struct MacroSig {
     final_w: Option<Weight>,
-    // Each default transition is represented by the compiled "step_id" along with its exception set.
     def: Vec<DefSig>,
     ex: BTreeMap<i16, Vec<usize>>,
 }
+
 #[derive(Clone, Hash, Eq, PartialEq)]
 struct MacroSigKey {
     final_fp: u64,
-    // Store both step id and the exact exceptions (as a sorted Vec) to keep signatures precise.
     def: Vec<(usize, Vec<i16>)>,
     ex: Vec<(i16, Vec<usize>)>,
 }
-
-#[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-struct MembersKey(Vec<usize>);
 
 struct CompositionNode {
     final_weight: Option<Weight>,
@@ -86,200 +86,184 @@ struct CompositionNode {
     default_mask: Option<Weight>,
     exception_targets: BTreeMap<i16, usize>,
     exception_masks: BTreeMap<i16, Weight>,
-    gates: HashMap<usize, Weight>,
+    gates: Composition,
     incoming_weight_union: Weight,
 }
 
-fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
-    for (sid, w) in compiled.iter() {
-        let x = w & gate;
-        if !x.is_empty() {
-            *dst.entry(*sid).or_default() |= &x;
-        }
-    }
+/// The main struct for the determinization process. It holds all intermediate data structures
+/// and the memoization cache for the expensive behavior computation.
+struct Determinizer<'a> {
+    nwa: &'a NWA,
+    sigs: Vec<MacroSig>,
+    compiled_steps: Vec<CompiledStep>,
+    nodes: Vec<CompositionNode>,
+    behavior_cache: HashMap<Composition, Behavior>,
 }
 
-fn compute_target_maps_for_gates(
-    node_gates: &HashMap<usize, Weight>,
-    sigs: &[MacroSig],
-    compiled_steps: &[CompiledStep],
-) -> BTreeMap<Option<i16>, HashMap<usize, Weight>> {
-    let mut def_groups: HashMap<usize, Weight> = HashMap::new();
-    let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-    let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-    let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+impl<'a> Determinizer<'a> {
+    fn new(nwa: &'a NWA, sigs: Vec<MacroSig>, compiled_steps: Vec<CompiledStep>) -> Self {
+        Self {
+            nwa,
+            sigs,
+            compiled_steps,
+            nodes: Vec::new(),
+            behavior_cache: HashMap::new(),
+        }
+    }
 
-    for (sig_id, gate) in node_gates {
-        if gate.is_empty() {
-            continue;
-        }
-        for def in &sigs[*sig_id].def {
-            *def_groups.entry(def.step_id).or_default() |= gate;
-            // Record that this default has these labels as explicit exceptions; default must not apply on them.
-            for &lbl in &def.exceptions {
-                *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
-            }
-        }
-        for (lbl, ex_steps) in &sigs[*sig_id].ex {
-            for ex_step in ex_steps {
-                *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
-            }
-            // Default should not apply on labels that have explicit labeled transitions (for this state).
-            for def in &sigs[*sig_id].def {
-                *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
+    fn accumulate(dst: &mut Composition, compiled: &[(usize, Weight)], gate: &Weight) {
+        for (sid, w) in compiled.iter() {
+            let x = w & gate;
+            if !x.is_empty() {
+                *dst.entry(*sid).or_default() |= &x;
             }
         }
     }
 
-    let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
-    let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
-    for (def_step, g) in &def_groups {
-        accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
-    }
-    if !def_target_map.is_empty() {
-        target_maps.insert(None, def_target_map);
-    }
+    /// Computes the behavior (outgoing transitions) for a given composition of NWA states.
+    /// This is the most performance-critical function, so its results are cached.
+    fn compute_behavior(&mut self, gates: &Composition) -> Behavior {
+        if let Some(cached) = self.behavior_cache.get(gates) {
+            return cached.clone();
+        }
 
-    // Labels that need explicit exception edges are:
-    //  - any label with explicit labeled transitions
-    //  - any label that appears in a default's exception set
-    let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
-    labels_to_consider.extend(ex_groups_by_label.keys().copied());
-    labels_to_consider.extend(def_exceptions_by_label.keys().copied());
+        let mut def_groups: HashMap<usize, Weight> = HashMap::new();
+        let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+        let mut def_ex_sets_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
 
-    for lbl in labels_to_consider {
-        let mut map = HashMap::new();
-        let def_exers = def_exers_by_label.get(&lbl);
-        let def_exc = def_exceptions_by_label.get(&lbl);
-
-        for (def_step, total_g) in &def_groups {
-            // Subtract states that have explicit labeled transitions on this label
-            let g_exers = def_exers.and_then(|de| de.get(def_step));
-            // Subtract states whose default is explicitly not applicable on this label (exception set)
-            let g_exc = def_exc.and_then(|dx| dx.get(def_step));
-
-            let mut g_nonex = total_g.clone();
-            if let Some(g) = g_exers {
-                g_nonex -= g;
+        for (&sig_id, gate) in gates {
+            if gate.is_empty() {
+                continue;
             }
-            if let Some(g) = g_exc {
-                g_nonex -= g;
+            let sig = &self.sigs[sig_id];
+            for def in &sig.def {
+                *def_groups.entry(def.step_id).or_default() |= gate;
+                for &lbl in &def.exceptions {
+                    *def_ex_sets_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
+                }
             }
-            if !g_nonex.is_empty() {
-                accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
+            for (&lbl, ex_steps) in &sig.ex {
+                for &ex_step in ex_steps {
+                    *ex_groups_by_label.entry(lbl).or_default().entry(ex_step).or_default() |= gate;
+                }
             }
         }
-        if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
-            for (ex_step, g_ex) in ex_groups {
-                accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+
+        let mut behavior: Behavior = Behavior::new();
+        let mut def_target_map = Composition::new();
+        for (def_step, g) in &def_groups {
+            Self::accumulate(&mut def_target_map, &self.compiled_steps[*def_step].by_sig, g);
+        }
+
+        let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
+        labels_to_consider.extend(ex_groups_by_label.keys().copied());
+        labels_to_consider.extend(def_ex_sets_by_label.keys().copied());
+
+        for lbl in labels_to_consider {
+            let mut map = Composition::new();
+            let ex_groups = ex_groups_by_label.get(&lbl);
+            let def_ex_set = def_ex_sets_by_label.get(&lbl);
+
+            for (def_step, total_g) in &def_groups {
+                let mut g_nonex = total_g.clone();
+                if let Some(ex_gates) = ex_groups.and_then(|eg| eg.get(def_step)) {
+                    g_nonex -= ex_gates;
+                }
+                if let Some(def_ex_gates) = def_ex_set.and_then(|de| de.get(def_step)) {
+                    g_nonex -= def_ex_gates;
+                }
+                if !g_nonex.is_empty() {
+                    Self::accumulate(&mut map, &self.compiled_steps[*def_step].by_sig, &g_nonex);
+                }
+            }
+            if let Some(ex_groups) = ex_groups {
+                for (ex_step, g_ex) in ex_groups {
+                    Self::accumulate(&mut map, &self.compiled_steps[*ex_step].by_sig, g_ex);
+                }
+            }
+            if map != def_target_map {
+                behavior.insert(Some(lbl), map);
             }
         }
-        // Always insert an entry for this label (even if map is empty)
-        // so that we can emit an exception edge that blocks the default.
-        target_maps.insert(Some(lbl), map);
-    }
-    target_maps
-}
 
-/// Finds the best existing node to merge a new state composition into, or creates a new node.
-/// This function contains a heuristic to merge distinct sets of NWA states into a single DWA
-/// state if their incoming transition weights are disjoint. This can reduce the size of the
-/// resulting DWA, but is more complex than the standard subset construction.
-fn find_or_create_target_node(
-    map: &HashMap<usize, Weight>,
-    nodes: &mut Vec<CompositionNode>,
-    sigs: &[MacroSig],
-    compiled_steps: &[CompiledStep],
-) -> usize {
-    let incoming_transition_weight = map.values().fold(Weight::zeros(), |mut a, b| {
-        a |= b;
-        a
-    });
-    let key = {
-        let mut keys: Vec<_> = map.keys().copied().collect();
-        keys.sort_unstable();
-        MembersKey(keys)
-    };
-
-    let calculate_merge_cost = |candidate_node: &CompositionNode| -> (usize, usize) {
-        let current_spec = candidate_node.gates.len();
-        let mut spec_increase = 0;
-        for sig_id in &key.0 {
-            if !candidate_node.gates.contains_key(sig_id) {
-                spec_increase += 1;
-            }
+        if !def_target_map.is_empty() {
+            behavior.insert(None, def_target_map);
         }
-        (spec_increase, current_spec)
-    };
 
-    let best_cand_idx = nodes
-        .iter()
-        .enumerate()
-        .filter(|(_idx, cand_node)| {
-            let intersect = &cand_node.incoming_weight_union & &incoming_transition_weight;
-            if intersect.is_empty() {
-                return true; // Disjoint is always ok to merge
-            }
-
-            // Check for compatible behavior on the intersection
-            let cand_gates_intersect: HashMap<_, _> = cand_node
-                .gates
-                .iter()
-                .map(|(sid, w)| (*sid, w & &intersect))
-                .filter(|(_, w)| !w.is_empty())
-                .collect();
-
-            let new_gates_intersect: HashMap<_, _> = map
-                .iter()
-                .map(|(sid, w)| (*sid, w & &intersect))
-                .filter(|(_, w)| !w.is_empty())
-                .collect();
-
-            if cand_gates_intersect.is_empty() && new_gates_intersect.is_empty() {
-                return true;
-            }
-
-            let cand_transitions =
-                compute_target_maps_for_gates(&cand_gates_intersect, sigs, compiled_steps);
-            let new_transitions =
-                compute_target_maps_for_gates(&new_gates_intersect, sigs, compiled_steps);
-
-            cand_transitions == new_transitions
-        })
-        .min_by_key(|(idx, cand_node)| {
-            let cost = calculate_merge_cost(cand_node);
-            (cost, *idx) // Tie-break with index for determinism
-        })
-        .map(|(idx, _)| idx);
-
-    if let Some(merge_idx) = best_cand_idx {
-        // Found a suitable existing node to merge with.
-        // Update the node's incoming weight union.
-        nodes[merge_idx].incoming_weight_union |= &incoming_transition_weight;
-        return merge_idx;
+        self.behavior_cache.insert(gates.clone(), behavior.clone());
+        behavior
     }
 
-    // Case 3: No suitable node found for merging. Create a new one.
-    let new_idx = nodes.len();
-    nodes.push(CompositionNode {
-        final_weight: None,
-        default_target_idx: None,
-        default_mask: None,
-        exception_targets: BTreeMap::new(),
-        exception_masks: BTreeMap::new(),
-        gates: HashMap::new(), // Gates will be populated by the caller.
-        incoming_weight_union: incoming_transition_weight.clone(),
-    });
-    new_idx
+    /// Finds the best existing node to merge a new state composition into, or creates a new node.
+    /// This contains the core merging heuristic.
+    fn find_or_create_target_node(&mut self, map: Composition) -> usize {
+        let incoming_transition_weight = map.values().fold(Weight::zeros(), |mut a, b| {
+            a |= b;
+            a
+        });
+
+        let best_cand_idx = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, cand_node)| {
+                let intersect = &cand_node.incoming_weight_union & &incoming_transition_weight;
+                if intersect.is_empty() {
+                    return Some((idx, (0, cand_node.gates.len()))); // Disjoint is always ok, cost is low.
+                }
+
+                let cand_gates_intersect: Composition = cand_node
+                    .gates
+                    .iter()
+                    .map(|(sid, w)| (*sid, w & &intersect))
+                    .filter(|(_, w)| !w.is_empty())
+                    .collect();
+
+                let new_gates_intersect: Composition = map
+                    .iter()
+                    .map(|(sid, w)| (*sid, w & &intersect))
+                    .filter(|(_, w)| !w.is_empty())
+                    .collect();
+
+                if self.compute_behavior(&cand_gates_intersect) == self.compute_behavior(&new_gates_intersect) {
+                    let mut spec_increase = 0;
+                    for sig_id in map.keys() {
+                        if !cand_node.gates.contains_key(sig_id) {
+                            spec_increase += 1;
+                        }
+                    }
+                    Some((idx, (spec_increase, cand_node.gates.len())))
+                } else {
+                    None
+                }
+            })
+            .min_by_key(|&(_idx, cost)| cost)
+            .map(|(idx, _)| idx);
+
+        if let Some(merge_idx) = best_cand_idx {
+            self.nodes[merge_idx].incoming_weight_union |= &incoming_transition_weight;
+            for (sig_id, weight) in map {
+                *self.nodes[merge_idx].gates.entry(sig_id).or_default() |= &weight;
+            }
+            return merge_idx;
+        }
+
+        let new_idx = self.nodes.len();
+        self.nodes.push(CompositionNode {
+            final_weight: None,
+            default_target_idx: None,
+            default_mask: None,
+            exception_targets: BTreeMap::new(),
+            exception_masks: BTreeMap::new(),
+            gates: map,
+            incoming_weight_union: incoming_transition_weight,
+        });
+        new_idx
+    }
 }
 
 /// Faster ε-closure from a single source with masked propagation.
-
-/// Faster ε-closure from a single source with masked propagation.
-/// - scratch_w: a weight array reused across calls; entries are set to zeros() after use via 'touched'.
-/// - touched: the list of indices whose entries in scratch_w are non-zero and must be reset.
-/// Returns a sorted Vec of (state, weight).
-fn eps_closure_masked_vec_one(
+fn eps_closure_fast(
     s: NWAStateID,
     states: &NWAStates,
     fut: &[Weight],
@@ -288,37 +272,37 @@ fn eps_closure_masked_vec_one(
     touched: &mut Vec<NWAStateID>,
 ) -> Vec<(NWAStateID, Weight)> {
     let n = states.len();
-    if s >= n {
-        return Vec::new();
-    }
-    let fs = fut[s].clone();
-    if fs.is_empty() {
+    if s >= n || fut[s].is_empty() {
         return Vec::new();
     }
 
-    // Initialize
-    scratch_w[s] = fs;
+    scratch_w[s] = fut[s].clone();
     touched.push(s);
     q.push_back(s);
 
     while let Some(u) = q.pop_front() {
         let base = scratch_w[u].clone();
-        if base.is_empty() { continue; }
+        if base.is_empty() {
+            continue;
+        }
 
         for &(v, ref w_eps) in &states[u].epsilons {
-            if v >= n { continue; }
-
+            if v >= n {
+                continue;
+            }
             let mut prop = &base & w_eps;
-            if prop.is_empty() { continue; }
-
+            if prop.is_empty() {
+                continue;
+            }
             prop &= &fut[v];
-            if prop.is_empty() { continue; }
+            if prop.is_empty() {
+                continue;
+            }
 
-            let old = &scratch_w[v];
-            let new_w = old | &prop;
-            if new_w != *old {
-                let was_empty = old.is_empty();
-                scratch_w[v] = new_w;
+            let old_v_w = &scratch_w[v];
+            if !prop.is_subset_of(old_v_w) {
+                let was_empty = old_v_w.is_empty();
+                scratch_w[v] |= &prop;
                 if was_empty {
                     touched.push(v);
                 }
@@ -327,12 +311,9 @@ fn eps_closure_masked_vec_one(
         }
     }
 
-    // Collect results and reset scratch_w for touched indices
     let mut out: Vec<(NWAStateID, Weight)> = Vec::with_capacity(touched.len());
     for &i in touched.iter() {
-        if !scratch_w[i].is_empty() {
-            out.push((i, scratch_w[i].clone()));
-        }
+        out.push((i, scratch_w[i].clone()));
         scratch_w[i] = Weight::zeros();
     }
     touched.clear();
@@ -353,8 +334,8 @@ impl NWA {
         let result = nwa.det_fixpoint();
         if is_debug_level_enabled(5) {
             eprintln!("NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
-            eprintln!("NWA::determinize_to_dwa took: {:?}", now.elapsed());
         }
+        eprintln!("NWA::determinize_to_dwa took: {:?}", now.elapsed());
 
         result
     }
@@ -366,7 +347,6 @@ impl NWA {
             return DWA::new();
         }
 
-        // Precompute masked ε-closures for all states using fast scratch buffers.
         let pb_eps = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(n as u64).with_style(
                 ProgressStyle::default_bar()
@@ -381,7 +361,7 @@ impl NWA {
         let mut q: VecDeque<NWAStateID> = VecDeque::new();
         let mut touched: Vec<NWAStateID> = Vec::new();
         for s in 0..n {
-            eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
+            eps_cache[s] = eps_closure_fast(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
             if let Some(p) = &pb_eps {
                 p.inc(1);
             }
@@ -412,63 +392,34 @@ impl NWA {
             });
             let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
 
-            // Compute default steps; preserve per-default exception sets.
             let mut def_steps: Vec<DefSig> = Vec::new();
             for default in &self.states[s].default {
-                let NWADefaultTransition { target: to, weight: wdef, exceptions } = default;
-                if *to >= n {
-                    continue;
+                let pairs_def = apply_weight_to_pairs(&eps_cache[default.target], &default.weight);
+                if !pairs_def.is_empty() {
+                    def_steps.push(DefSig {
+                        step_id: step_pool.intern(pairs_def),
+                        exceptions: default.exceptions.clone(),
+                    });
                 }
-                let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
-                if pairs_def.is_empty() {
-                    continue;
-                }
-                let step_id = step_pool.intern(pairs_def);
-                def_steps.push(DefSig {
-                    step_id,
-                    exceptions: exceptions.clone(),
-                });
             }
 
-            // Compute exceptions; drop those that are empty or identical to the default step effect.
             let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
             for (lbl, targets) in self.states[s].transitions.iter() {
                 let mut step_exs: Vec<usize> = Vec::new();
                 for (to, wlbl) in targets {
-                    if *to >= n {
-                        continue;
-                    }
                     let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
-                    if pairs_ex.is_empty() {
-                        continue;
+                    if !pairs_ex.is_empty() {
+                        step_exs.push(step_pool.intern(pairs_ex));
                     }
-                    step_exs.push(step_pool.intern(pairs_ex));
                 }
-
                 if !step_exs.is_empty() {
-                    step_exs.sort_unstable();
-                    let mut sorted_def_step_ids: Vec<usize> =
-                        def_steps.iter().map(|d| d.step_id).collect();
-                    sorted_def_step_ids.sort_unstable();
-                    if step_exs == sorted_def_step_ids {
-                        continue;
-                    }
                     ex.insert(*lbl, step_exs);
                 }
             }
 
-            if is_debug_level_enabled(5) {
-                eprintln!("NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
-            }
-
-            // Build a key that includes default exceptions, to avoid merging states that differ only by exception sets.
             let mut sorted_def_steps_key: Vec<(usize, Vec<i16>)> = def_steps
                 .iter()
-                .map(|d| {
-                    let mut v: Vec<i16> = d.exceptions.iter().copied().collect();
-                    v.sort_unstable();
-                    (d.step_id, v)
-                })
+                .map(|d| (d.step_id, d.exceptions.iter().copied().collect()))
                 .collect();
             sorted_def_steps_key.sort_unstable();
             let key = MacroSigKey {
@@ -490,14 +441,6 @@ impl NWA {
             p.finish_with_message("Macro signatures done");
         }
 
-        if is_debug_level_enabled(5) {
-            eprintln!("All MacroSigs ({}):", sigs.len());
-            for (i, sig) in sigs.iter().enumerate() {
-                eprintln!("  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
-            }
-            eprintln!("state_to_sig_id: {:?}", state_to_sig_id);
-        }
-
         let pb_compile = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
                 ProgressStyle::default_bar()
@@ -509,17 +452,13 @@ impl NWA {
         };
         let mut compiled_steps: Vec<CompiledStep> = Vec::with_capacity(step_pool.raw.len());
         for pairs in &step_pool.raw {
-            let mut acc: HashMap<usize, Weight> = HashMap::new();
+            let mut acc: BTreeMap<usize, Weight> = BTreeMap::new();
             for (t, w) in pairs.iter() {
                 *acc.entry(state_to_sig_id[*t]).or_default() |= w;
             }
             let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
             by_sig.sort_by_key(|(sid, _)| *sid);
-            let mask = by_sig.iter().fold(Weight::zeros(), |mut acc, (_, w)| {
-                acc |= w;
-                acc
-            });
-            compiled_steps.push(CompiledStep { by_sig, mask });
+            compiled_steps.push(CompiledStep { by_sig });
             if let Some(p) = &pb_compile {
                 p.inc(1);
             }
@@ -528,18 +467,7 @@ impl NWA {
             p.finish_with_message("Compile steps done");
         }
 
-        if is_debug_level_enabled(5) {
-            eprintln!("Step Pool ({}):", step_pool.raw.len());
-            for (i, pairs) in step_pool.raw.iter().enumerate() {
-                eprintln!("  Step {}: {:?}", i, pairs);
-            }
-            eprintln!("Compiled Steps ({}):", compiled_steps.len());
-            for (i, step) in compiled_steps.iter().enumerate() {
-                eprintln!("  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
-            }
-        }
-
-        let mut nodes: Vec<CompositionNode> = Vec::new();
+        let mut det = Determinizer::new(self, sigs, compiled_steps);
         let mut work: VecDeque<usize> = VecDeque::new();
 
         let pb_discover = if PROGRESS_BAR_ENABLED {
@@ -554,14 +482,13 @@ impl NWA {
             None
         };
 
-        let mut init_map: HashMap<usize, Weight> = HashMap::new();
+        let mut init_map: Composition = BTreeMap::new();
         for (t, w) in eps_cache[self.body.start_state].iter() {
             *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
         }
-        let mut init_keys: Vec<_> = init_map.keys().copied().collect();
-        init_keys.sort_unstable();
-        let start_idx = 0;
-        nodes.push(CompositionNode {
+
+        let start_idx = det.nodes.len();
+        det.nodes.push(CompositionNode {
             final_weight: None,
             default_target_idx: None,
             default_mask: None,
@@ -579,60 +506,35 @@ impl NWA {
             if let Some(p) = &pb_discover {
                 p.inc(1);
             }
-            let node_gates = nodes[idx].gates.clone();
-
-            if is_debug_level_enabled(5) {
-                eprintln!("\nProcessing composition node {}: gates: {:?}", idx, node_gates);
-            }
-            let target_maps = compute_target_maps_for_gates(&node_gates, &sigs, &compiled_steps);
-
-            if is_debug_level_enabled(5) {
-                eprintln!("  - computed target_maps:");
-                for (label, map) in &target_maps {
-                    let mut keys: Vec<_> = map.keys().copied().collect();
-                    keys.sort_unstable();
-                    let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-                    eprintln!("    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
-                }
-            }
+            let node_gates = det.nodes[idx].gates.clone();
+            let behavior = det.compute_behavior(&node_gates);
 
             let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
-            for (label, map) in target_maps {
-                let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+            for (label, map) in behavior {
+                let total_weight = map.values().fold(Weight::zeros(), |mut a, b| {
+                    a |= b;
+                    a
+                });
                 if total_weight.is_empty() {
-                    if let Some(lbl) = label {
-                        // This is a transition that must block the default.
-                        // We can point it to any state (e.g., itself) with an empty weight.
-                        // A dedicated sink state would be cleaner, but this is equivalent.
+                    if label.is_some() {
                         resolved_transitions.insert(label, (idx, Weight::zeros()));
                     }
                     continue;
                 }
 
-                let target_idx = find_or_create_target_node(&map, &mut nodes, &sigs, &compiled_steps);
+                let target_idx = det.find_or_create_target_node(map);
 
-                let mut any_change = false;
-                for (sig_id, weight) in &map {
-                    let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = &*entry | weight;
-                    if new_w != *entry {
-                        *entry = new_w;
-                        any_change = true;
-                    }
+                if target_idx >= in_queue.len() {
+                    in_queue.resize(target_idx + 1, false);
                 }
-                if any_change {
-                    if target_idx >= in_queue.len() {
-                        in_queue.resize(target_idx + 1, false);
-                    }
-                    if !in_queue[target_idx] {
-                        in_queue[target_idx] = true;
-                        work.push_back(target_idx);
-                    }
+                if !in_queue[target_idx] {
+                    in_queue[target_idx] = true;
+                    work.push_back(target_idx);
                 }
                 resolved_transitions.insert(label, (target_idx, total_weight));
             }
 
-            let node = &mut nodes[idx];
+            let node = &mut det.nodes[idx];
             if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
                 node.default_target_idx = Some(target_idx);
                 node.default_mask = Some(mask);
@@ -643,41 +545,29 @@ impl NWA {
                     node.exception_masks.insert(lbl, mask);
                 }
             }
-
-            if is_debug_level_enabled(5) {
-                eprintln!("  - Resolved transitions for node {}:", idx);
-                if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                    eprintln!("    - default -> {} (mask: {})", target, mask);
-                }
-                for (lbl, target) in &node.exception_targets {
-                    if let Some(mask) = node.exception_masks.get(lbl) {
-                        eprintln!("    - on {}: -> {} (mask: {})", lbl, target, mask);
-                    }
-                }
-            }
             node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
-                if let Some(fw) = &sigs[*sig_id].final_w {
+                if let Some(fw) = &det.sigs[*sig_id].final_w {
                     acc |= &(gate & fw);
                 }
                 acc
             }));
 
             if let Some(p) = &pb_discover {
-                p.set_length(nodes.len() as u64);
+                p.set_length(det.nodes.len() as u64);
             }
         }
         if let Some(p) = pb_discover {
-            p.finish_with_message(format!("Discovered {} compositions", nodes.len()));
+            p.finish_with_message(format!("Discovered {} compositions", det.nodes.len()));
         }
 
         let mut dwa = DWA::new();
-        if nodes.is_empty() {
+        if det.nodes.is_empty() {
             return dwa;
         }
-        dwa.states.0.resize(nodes.len(), Default::default());
+        dwa.states.0.resize(det.nodes.len(), Default::default());
         dwa.body.start_state = start_idx;
 
-        for (i, node) in nodes.iter().enumerate() {
+        for (i, node) in det.nodes.iter().enumerate() {
             dwa.states[i].final_weight = node.final_weight.clone();
             if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
                 if !mask.is_empty() {
@@ -685,12 +575,7 @@ impl NWA {
                 }
             }
             for (lbl, &target_idx) in &node.exception_targets {
-                // Always add exception transitions, even with empty masks, to properly block default on those labels.
-                let mask = node
-                    .exception_masks
-                    .get(lbl)
-                    .cloned()
-                    .unwrap_or_else(Weight::zeros);
+                let mask = node.exception_masks.get(lbl).cloned().unwrap_or_else(Weight::zeros);
                 dwa.add_transition(i, *lbl, target_idx, mask).unwrap();
             }
         }
