@@ -5727,6 +5727,7 @@ local_system:
       fn eps_closure_masked_vec_one(
           s: NWAStateID,
           states: &NWAStates,
+          fut: &[Weight],
           scratch_w: &mut [Weight],
           q: &mut VecDeque<NWAStateID>,
           touched: &mut Vec<NWAStateID>,
@@ -5735,9 +5736,13 @@ local_system:
           if s >= n {
               return Vec::new();
           }
+          let fs = fut[s].clone();
+          if fs.is_empty() {
+              return Vec::new();
+          }
 
           // Initialize
-          scratch_w[s] = Weight::all();
+          scratch_w[s] = fs;
           touched.push(s);
           q.push_back(s);
 
@@ -5748,7 +5753,10 @@ local_system:
               for &(v, ref w_eps) in &states[u].epsilons {
                   if v >= n { continue; }
 
-                  let prop = &base & w_eps;
+                  let mut prop = &base & w_eps;
+                  if prop.is_empty() { continue; }
+
+                  prop &= &fut[v];
                   if prop.is_empty() { continue; }
 
                   let old = &scratch_w[v];
@@ -5797,6 +5805,7 @@ local_system:
           }
 
           fn det_fixpoint(&self) -> DWA {
+              let fut = self.compute_future_weights();
               let n = self.states.len();
               if n == 0 {
                   return DWA::new();
@@ -5917,7 +5926,7 @@ local_system:
               let mut q: VecDeque<NWAStateID> = VecDeque::new();
               let mut touched: Vec<NWAStateID> = Vec::new();
               for s in 0..n {
-                  eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &mut scratch_w, &mut q, &mut touched);
+                  eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
                   if let Some(p) = &pb_eps {
                       p.inc(1);
                   }
@@ -14676,5 +14685,331 @@ messages:
   - user: 'Changes committed with message: "Fix determinization correctness by removing
       premature weight intersection and refine state merging with structure-based
       LabelShapeKey"'
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/Efficient Weighted Automata Determinization.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/tuple_merger.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/test_determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/output1.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |+
+      NWA simplify pass 'normalize' took 4.625µs (changed: false)
+      NWA simplify pass 'dedup labeled' took 750ns (changed: false)
+      NWA simplify pass 'dedup epsilons' took 7.166µs (changed: false)
+      NWA simplify pass 'unify defaults' took 125ns (changed: false)
+      NWA simplify pass 'unify final states' took 5.542µs (changed: true)
+      NWA simplify pass 'bypass ε-chains' took 19.709µs (changed: true)
+      NWA simplify pass 'collapse SCCs' took 3.959µs (changed: false)
+      NWA simplify pass 'prune unreachable' took 1.459µs (changed: false)
+      NWA simplify pass 'prune dead ends' took 3.708µs (changed: false)
+      NWA simplify pass 'merge equivalent' took 52.542µs (changed: false)
+      NWA simplify pass 'normalize' took 1.833µs (changed: false)
+      NWA simplify pass 'normalize' took 1.334µs (changed: false)
+      NWA simplify pass 'dedup labeled' took 583ns (changed: false)
+      NWA simplify pass 'dedup epsilons' took 4.292µs (changed: false)
+      NWA simplify pass 'unify defaults' took 125ns (changed: false)
+      NWA simplify pass 'unify final states' took 917ns (changed: false)
+      NWA simplify pass 'bypass ε-chains' took 875ns (changed: false)
+      NWA simplify pass 'collapse SCCs' took 2.75µs (changed: false)
+      NWA simplify pass 'prune unreachable' took 1.666µs (changed: false)
+      NWA simplify pass 'prune dead ends' took 2.584µs (changed: false)
+      NWA simplify pass 'merge equivalent' took 38.459µs (changed: false)
+      NWA simplify pass 'normalize' took 1.75µs (changed: false)
+      NWA::simplify (6 states -> 5 states) took: 167.959µs
+      NWA after simplify:
+      NWA (start: 3)
+        State 0:
+          0 -> 4 (weight: [0])
+          1 -> 4 (weight: [1])
+        State 1:
+          0 -> 2 (weight: [1])
+        State 2:
+          1 -> 4 (weight: ALL)
+        State 3:
+          ε -> 0 (weight: ALL)
+          ε -> 1 (weight: ALL)
+        State 4:
+          final_weight: ALL
+
+      NWA state 0: final_w: None, def_steps: [], ex_steps: {0: [0], 1: [1]}
+      NWA state 1: final_w: None, def_steps: [], ex_steps: {0: [2]}
+      NWA state 2: final_w: None, def_steps: [], ex_steps: {1: [3]}
+      NWA state 3: final_w: None, def_steps: [], ex_steps: {}
+      NWA state 4: final_w: Some(SimpleBitset(ALL)), def_steps: [], ex_steps: {}
+      All MacroSigs (5):
+        Sig 0: final_w: None, def: [], ex: {0: [0], 1: [1]}
+        Sig 1: final_w: None, def: [], ex: {0: [2]}
+        Sig 2: final_w: None, def: [], ex: {1: [3]}
+        Sig 3: final_w: None, def: [], ex: {}
+        Sig 4: final_w: Some(SimpleBitset(ALL)), def: [], ex: {}
+      state_to_sig_id: [0, 1, 2, 3, 4]
+      Step Pool (4):
+        Step 0: [(4, 0..=0)]
+        Step 1: [(4, 1..=1)]
+        Step 2: [(2, 1..=1)]
+        Step 3: [(4, SimpleBitset(ALL))]
+      Compiled Steps (4):
+        Compiled 0: by_sig: [(4, 0..=0)], mask: [0]
+        Compiled 1: by_sig: [(4, 1..=1)], mask: [1]
+        Compiled 2: by_sig: [(2, 1..=1)], mask: [1]
+        Compiled 3: by_sig: [(4, SimpleBitset(ALL))], mask: ALL
+
+      Processing composition node 0: gates: {1: SimpleBitset(ALL), 0: SimpleBitset(ALL), 3: SimpleBitset(ALL)}
+        - Resolved transitions for node 0:
+          - default -> 0 (mask: [])
+          - on 0: -> 1 (mask: [0..=1])
+          - on 1: -> 2 (mask: [1])
+
+      Processing composition node 1: gates: {3: SimpleBitset(ALL), 2: 1..=1, 4: 0..=0}
+        - Resolved transitions for node 1:
+          - default -> 1 (mask: [])
+          - on 1: -> 3 (mask: [1])
+
+      Processing composition node 2: gates: {4: 1..=1, 1: SimpleBitset(ALL), 3: SimpleBitset(ALL)}
+        - Resolved transitions for node 2:
+          - default -> 2 (mask: [])
+          - on 0: -> 1 (mask: [1])
+
+      Processing composition node 3: gates: {4: 0..=1, 3: SimpleBitset(ALL)}
+        - Resolved transitions for node 3:
+          - default -> 3 (mask: [])
+
+      Processing composition node 1: gates: {3: SimpleBitset(ALL), 2: 1..=1, 4: 0..=1}
+        - Resolved transitions for node 1:
+          - default -> 1 (mask: [])
+          - on 1: -> 3 (mask: [1])
+      NWA::determinize_to_dwa result DWA stats:
+      DWA Stats:
+        - States: 4
+        - Transitions: 4
+        - Final States: 3
+        - States with Default: 0
+        - Avg Exceptions/State: 1.00
+
+      NWA::determinize_to_dwa took: 496.125µs
+
+
+      thread 'precompute4::test_weighted_automata::test_union_from_debug_log_simplified2_with_simplification_trick' (17161420) panicked at src/precompute4/test_weighted_automata.rs:222:17:
+      assertion `left == right` failed: U accepted a word with weight not equal to A∪B.
+      word: [0]
+      A(w): [0]
+      B(w): []
+      U(w): [0..=1]
+      Expected: [0]
+
+      DWA A:
+      DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: [0])
+          1 -> 1 (trans_weight: [1])
+        State 1:
+          final_weight: ALL
+
+
+      DWA B:
+      DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: [1])
+        State 1:
+          1 -> 2 (trans_weight: ALL)
+        State 2:
+          final_weight: ALL
+
+
+      DWA U:
+      DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: [0..=1])
+          1 -> 2 (trans_weight: [1])
+        State 1:
+          final_weight: [0..=1]
+          1 -> 3 (trans_weight: [1])
+        State 2:
+          final_weight: [1]
+          0 -> 1 (trans_weight: [1])
+        State 3:
+          final_weight: [0..=1]
+
+        left: 0..=1
+       right: 0..=0
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::test_weighted_automata::<impl sep1::precompute4::weighted_automata::dwa::DWA>::stochastic_validate_union
+                   at ./src/precompute4/test_weighted_automata.rs:222:17
+         5: sep1::precompute4::test_weighted_automata::test_union_from_debug_log_simplified2_with_simplification_trick
+                   at ./src/precompute4/test_weighted_automata.rs:1163:5
+         6: sep1::precompute4::test_weighted_automata::test_union_from_debug_log_simplified2_with_simplification_trick::{{closure}}
+                   at ./src/precompute4/test_weighted_automata.rs:1141:69
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - user: Still happening. Wasn't before.
+    metadata:
+  - assistant: |-
+      I understand. The regression indicates that the removal of the `fut` (future weights) calculation was a mistake. It served a critical purpose in pruning paths that could never lead to acceptance, and its absence is causing incorrect weights to be computed in union operations.
+
+      However, simply reintroducing it might bring back the state explosion issue if the state-merging logic isn't robust enough. The key is to combine the correct path pruning with the efficient state-merging strategy developed over the last few turns. The `LabelShapeKey`, which abstracts a state's structure, is the right approach for merging, while `fut` is necessary for correctness. The two are not mutually exclusive; they are both required.
+
+      I will now reintroduce the `fut` calculation and its usage. This will restore the correctness guarantees, and because we are keeping the improved `LabelShapeKey`, the state-explosion issue should remain solved.
+
+      ### Step-by-step Instructions
+
+      **File: `src/precompute4/weighted_automata/determinization.rs`**
+
+      1.  **Restore `fut` calculation:** In the `det_fixpoint` function, add back the call to `self.compute_future_weights()` at the beginning.
+
+      2.  **Update `eps_closure_masked_vec_one` signature:** Add the `fut: &[Weight]` parameter back to the function signature.
+
+      3.  **Restore `fut` logic in `eps_closure_masked_vec_one`:**
+          -   Initialize the process with the future weight of the start state, `fut[s]`, instead of `Weight::all()`.
+          -   Inside the loop, when propagating weights along epsilon edges, intersect the propagated weight with the future weight of the target state (`fut[v]`). This is the crucial pruning step.
+
+      4.  **Update the call to `eps_closure_masked_vec_one`:** In `det_fixpoint`, update the call inside the loop to pass the `fut` array.
+
+      ### Git Diff
+
+      Here is the git diff for the changes to be applied:
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -16,38 +16,40 @@
+       fn eps_closure_masked_vec_one(
+           s: NWAStateID,
+           states: &NWAStates,
+      +    fut: &[Weight],
+           scratch_w: &mut [Weight],
+           q: &mut VecDeque<NWAStateID>,
+           touched: &mut Vec<NWAStateID>,
+       ) -> Vec<(NWAStateID, Weight)> {
+           let n = states.len();
+           if s >= n {
+               return Vec::new();
+           }
+      +    let fs = fut[s].clone();
+      +    if fs.is_empty() {
+      +        return Vec::new();
+      +    }
+       
+           // Initialize
+      -    scratch_w[s] = Weight::all();
+      +    scratch_w[s] = fs;
+           touched.push(s);
+           q.push_back(s);
+       
+           while let Some(u) = q.pop_front() {
+               let base = scratch_w[u].clone();
+               if base.is_empty() { continue; }
+       
+               for &(v, ref w_eps) in &states[u].epsilons {
+                   if v >= n { continue; }
+       
+      -            let prop = &base & w_eps;
+      +            let mut prop = &base & w_eps;
+                   if prop.is_empty() { continue; }
+       
+      +            prop &= &fut[v];
+      +            if prop.is_empty() { continue; }
+      +
+                   let old = &scratch_w[v];
+                   let new_w = old | &prop;
+                   if new_w != *old {
+                       let was_empty = old.is_empty();
+      @@ -77,6 +79,7 @@
+           }
+       
+           fn det_fixpoint(&self) -> DWA {
+      +        let fut = self.compute_future_weights();
+               let n = self.states.len();
+               if n == 0 {
+                   return DWA::new();
+      @@ -209,7 +212,7 @@
+               let mut q: VecDeque<NWAStateID> = VecDeque::new();
+               let mut touched: Vec<NWAStateID> = Vec::new();
+               for s in 0..n {
+      -            eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &mut scratch_w, &mut q, &mut touched);
+      +            eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
+                   if let Some(p) = &pb_eps {
+                       p.inc(1);
+                   }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix determinization by integrating structure-based
+      state merging with correct future-weight pruning"'
     metadata:
 ...
