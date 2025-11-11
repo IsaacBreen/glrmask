@@ -202,43 +202,51 @@ impl<'a> Determinizer<'a> {
             a
         });
 
-        let best_cand_idx = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, cand_node)| {
-                let intersect = &cand_node.incoming_weight_union & &incoming_transition_weight;
-                if intersect.is_empty() {
-                    return Some((idx, (0, cand_node.gates.len()))); // Disjoint is always ok, cost is low.
+        let mut best_cand: Option<(usize, (usize, usize))> = None;
+
+        for idx in 0..self.nodes.len() {
+            let (cand_incoming_weight_union, cand_gates) = {
+                let cand_node = &self.nodes[idx];
+                (cand_node.incoming_weight_union.clone(), cand_node.gates.clone())
+            };
+
+            let intersect = &cand_incoming_weight_union & &incoming_transition_weight;
+
+            if intersect.is_empty() {
+                let cost = (0, cand_gates.len());
+                if best_cand.is_none() || cost < best_cand.as_ref().unwrap().1 {
+                    best_cand = Some((idx, cost));
                 }
+                continue;
+            }
 
-                let cand_gates_intersect: Composition = cand_node
-                    .gates
-                    .iter()
-                    .map(|(sid, w)| (*sid, w & &intersect))
-                    .filter(|(_, w)| !w.is_empty())
-                    .collect();
+            let cand_gates_intersect: Composition = cand_gates
+                .iter()
+                .map(|(sid, w)| (*sid, w & &intersect))
+                .filter(|(_, w)| !w.is_empty())
+                .collect();
 
-                let new_gates_intersect: Composition = map
-                    .iter()
-                    .map(|(sid, w)| (*sid, w & &intersect))
-                    .filter(|(_, w)| !w.is_empty())
-                    .collect();
+            let new_gates_intersect: Composition = map
+                .iter()
+                .map(|(sid, w)| (*sid, w & &intersect))
+                .filter(|(_, w)| !w.is_empty())
+                .collect();
 
-                if self.compute_behavior(&cand_gates_intersect) == self.compute_behavior(&new_gates_intersect) {
-                    let mut spec_increase = 0;
-                    for sig_id in map.keys() {
-                        if !cand_node.gates.contains_key(sig_id) {
-                            spec_increase += 1;
-                        }
+            if self.compute_behavior(&cand_gates_intersect) == self.compute_behavior(&new_gates_intersect) {
+                let mut spec_increase = 0;
+                for sig_id in map.keys() {
+                    if !cand_gates.contains_key(sig_id) {
+                        spec_increase += 1;
                     }
-                    Some((idx, (spec_increase, cand_node.gates.len())))
-                } else {
-                    None
                 }
-            })
-            .min_by_key(|&(_idx, cost)| cost)
-            .map(|(idx, _)| idx);
+                let cost = (spec_increase, cand_gates.len());
+                if best_cand.is_none() || cost < best_cand.as_ref().unwrap().1 {
+                    best_cand = Some((idx, cost));
+                }
+            }
+        }
+
+        let best_cand_idx = best_cand.map(|(idx, _)| idx);
 
         if let Some(merge_idx) = best_cand_idx {
             self.nodes[merge_idx].incoming_weight_union |= &incoming_transition_weight;
