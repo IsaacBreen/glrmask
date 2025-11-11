@@ -11,42 +11,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::Hash;
 use std::time::Instant;
 
-/*
-High-level overview of the accelerated determinization:
-
-Key idea 1 (Transfer compilation):
-- For each MacroSig s and each relevant label ℓ (including the default “None”), precompute a compact set of contributions
-  T[s][ℓ] = { (target_sig, mask) } where mask is the union of all compiled-step weights that apply when starting from states
-  represented by s and taking ℓ. This includes default steps (subject to exceptions and blocking by label-specific exceptions)
-  and label-specific exception steps. This converts the combinatorial per-node accumulation into a simple looping over T
-  with per-node gates as masks.
-
-Key idea 2 (Per-node aggregate cache with intersection restriction):
-- For each composition node N (set of MacroSig gates with weights), cache its full aggregated transitions A_N[ℓ] over all labels ℓ,
-  as vectors of (target_sig, mask_N→target(ℓ)) where mask_N→target(ℓ) = OR_{s∈gates} ( gate[s] & T[s][ℓ][target] ).
-- Behavioral compatibility over an intersection I reduces to checking that for every ℓ, A_N1[ℓ]∧I == A_N2[ℓ]∧I. This holds
-  because AND distributes over OR. Therefore, we never recompute transitions on the fly; we only mask cached vectors.
-
-Key idea 3 (One-shot new-target aggregation + behavior indexing):
-- When creating or merging a target node for a new gates map M, compute its cache A_M once.
-- Use robust fingerprints of full A_M (and a default-only fallback) to look up compatible existing nodes via indexes.
-  This removes most of the linear scans over all existing nodes, yet we still verify exact equality on intersections,
-  so merge efficacy is preserved.
-
-Key idea 4 (Lazy epsilon-closure + epsilon-only future weights):
-- Compute Fε[s] (zero-length acceptance) once via epsilon-only reverse propagation.
-- Compute epsilon-closures only on-demand for target states that actually appear in non-epsilon edges while compiling steps.
-  This replaces the O(n·E) pre-pass and can cut orders of magnitude on large graphs.
-
-Mathematical correctness sketch:
-- Final weights for determinized nodes depend only on zero-length acceptance from NWA states under epsilon paths.
-  Fε[s] = final[s] ∪ ⋃_{ε s->t}(wε ∧ Fε[t]) is the least fixpoint over epsilon edges; it equals the union over all ε-paths
-  of the path-weight∧final[t], which is exactly what the prior per-state epsilon-closure accumulation computed.
-- Aggregation and intersection laws remain unchanged. We only accelerate candidate selection; the actual merge check still
-  uses the original equal_restricted_pairs on the precise intersection mask, so we neither introduce incorrect merges nor
-  miss true merges. Therefore, the number of created states due to missed opportunities does not increase.
-*/
-
 fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
     if w.is_all_fast() {
         return base.to_vec();
@@ -124,16 +88,6 @@ struct CompositionNode {
     exception_masks: BTreeMap<i16, Weight>,
     gates: HashMap<usize, Weight>,
     incoming_weight_union: Weight,
-
-    // Cached aggregate transitions over full gate:
-    // by_label[0] is default, by_label[li] corresponds to labels.list[li-1]
-    cached_by_label: Option<NodeAggCache>,
-    cache_dirty: bool,
-
-    // Fingerprints for fast indexing (computed from cached_by_label).
-    // These are safe accelerators; we still verify equality on intersections.
-    behavior_fp: Option<u64>,
-    default_fp: Option<u64>,
 }
 
 fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
@@ -145,533 +99,181 @@ fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], ga
     }
 }
 
-/*
-Transfer compilation:
+fn compute_target_maps_for_gates(
+    node_gates: &HashMap<usize, Weight>,
+    sigs: &[MacroSig],
+    compiled_steps: &[CompiledStep],
+) -> BTreeMap<Option<i16>, HashMap<usize, Weight>> {
+    let mut def_groups: HashMap<usize, Weight> = HashMap::new();
+    let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+    let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+    let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
 
-- We compress labels i16 -> LabelIndex (usize). Index 0 is reserved for default (None).
-- For each MacroSig s:
-   def_total: union of all its default steps (step_id) compiled to by-sig pairs
-   per_label[l]: union of:
-       - (if label l allowed for default) those default steps' compiled pairs that do not have l in their exceptions
-       - exception steps compiled pairs for label l
-   block_labels: labels for which default must be blocked even if there are no explicit exception contributions
-                 (ex labels and default exception labels)
-*/
-struct Labels {
-    list: Vec<i16>,                 // Dense [0..L): labels in ascending order (Option::None handled separately)
-    index: HashMap<i16, usize>,     // i16 -> idx in list
-}
-impl Labels {
-    fn new(mut all: BTreeSet<i16>) -> Self {
-        let list: Vec<i16> = all.iter().copied().collect();
-        let mut index = HashMap::with_capacity(list.len());
-        for (i, lbl) in list.iter().enumerate() {
-            index.insert(*lbl, i);
+    for (sig_id, gate) in node_gates {
+        if gate.is_empty() {
+            continue;
         }
-        Self { list, index }
-    }
-    fn len(&self) -> usize { self.list.len() }
-    fn idx(&self, l: i16) -> Option<usize> { self.index.get(&l).copied() }
-    fn code_by_idx(&self, idx: usize) -> i16 { self.list[idx] }
-}
-
-#[derive(Clone)]
-struct PerSigTransfer {
-    // Default contributions (None label): vector of (target_sig, mask)
-    def_total: Vec<(usize, Weight)>,
-    // For concrete label indices: map label_idx -> vector (target_sig, mask)
-    per_label: HashMap<usize, Vec<(usize, Weight)>>,
-    // Labels that need explicit blocking of default even if contributions end up empty.
-    block_labels: BTreeSet<usize>,
-}
-struct Transfers {
-    labels: Labels,
-    per_sig: Vec<PerSigTransfer>,
-}
-
-fn merge_pairs_by_sig(pairs: impl Iterator<Item=(usize, Weight)>) -> Vec<(usize, Weight)> {
-    let mut tmp: HashMap<usize, Weight> = HashMap::new();
-    for (t, w) in pairs {
-        if !w.is_empty() {
-            *tmp.entry(t).or_default() |= &w;
+        for def in &sigs[*sig_id].def {
+            *def_groups.entry(def.step_id).or_default() |= gate;
+            // Record that this default has these labels as explicit exceptions; default must not apply on them.
+            for &lbl in &def.exceptions {
+                *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
+            }
         }
-    }
-    let mut v: Vec<(usize, Weight)> = tmp.into_iter().collect();
-    v.sort_by_key(|(t, _)| *t);
-    v
-}
-
-fn build_transfers(sigs: &[MacroSig], compiled_steps: &[CompiledStep]) -> Transfers {
-    // Collect all labels that appear anywhere (exceptions or explicit labeled ex)
-    let mut label_universe: BTreeSet<i16> = BTreeSet::new();
-    for sig in sigs {
-        for (lbl, _) in &sig.ex {
-            label_universe.insert(*lbl);
-        }
-        for d in &sig.def {
-            for &e in &d.exceptions {
-                label_universe.insert(e);
+        for (lbl, ex_steps) in &sigs[*sig_id].ex {
+            for ex_step in ex_steps {
+                *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
+            }
+            // Default should not apply on labels that have explicit labeled transitions (for this state).
+            for def in &sigs[*sig_id].def {
+                *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
             }
         }
     }
-    let labels = Labels::new(label_universe);
-    let mut per_sig: Vec<PerSigTransfer> = Vec::with_capacity(sigs.len());
 
-    for (sid, sig) in sigs.iter().enumerate() {
-        // def_total: union across all def steps
-        let def_total = merge_pairs_by_sig(sig.def.iter().flat_map(|d| {
-            compiled_steps[d.step_id].by_sig.iter().map(|(t, w)| (*t, w.clone()))
-        }));
-
-        // block_labels: ex labels ∪ default exception labels
-        let mut block_labels: BTreeSet<usize> = BTreeSet::new();
-        for (&lbl, _) in &sig.ex {
-            if let Some(li) = labels.idx(lbl) {
-                block_labels.insert(li);
-            }
-        }
-        for d in &sig.def {
-            for &e in &d.exceptions {
-                if let Some(li) = labels.idx(e) {
-                    block_labels.insert(li);
-                }
-            }
-        }
-
-        // per_label:
-        let mut per_label: HashMap<usize, Vec<(usize, Weight)>> = HashMap::new();
-
-        // Build for each label present in label universe
-        for li in 0..labels.len() {
-            let lbl_code = labels.code_by_idx(li);
-
-            // Default allowed on lbl?
-            let default_blocked_by_ex = sig.ex.contains_key(&lbl_code);
-            // If default is allowed, keep only those def steps that don't list this label as exception.
-            if !default_blocked_by_ex {
-                let default_contrib = merge_pairs_by_sig(sig.def.iter().filter(|d| !d.exceptions.contains(&lbl_code))
-                    .flat_map(|d| compiled_steps[d.step_id].by_sig.iter().map(|(t, w)| (*t, w.clone()))));
-                if !default_contrib.is_empty() {
-                    per_label.entry(li).or_default().extend(default_contrib);
-                }
-            }
-            // Add explicit exception (labeled) transitions
-            if let Some(ex_steps) = sig.ex.get(&lbl_code) {
-                let ex_contrib = merge_pairs_by_sig(ex_steps.iter()
-                    .flat_map(|step_id| compiled_steps[*step_id].by_sig.iter().map(|(t, w)| (*t, w.clone()))));
-                if !ex_contrib.is_empty() {
-                    per_label.entry(li).or_default().extend(ex_contrib);
-                }
-            }
-            // Normalize merged entries for this label (combine duplicates if default+ex inserted same target twice)
-            if let Some(v) = per_label.get_mut(&li) {
-                // Merge duplicates produced by separate insertions
-                let merged = merge_pairs_by_sig(v.drain(..));
-                *v = merged;
-            }
-        }
-
-        per_sig.push(PerSigTransfer {
-            def_total,
-            per_label,
-            block_labels,
-        });
+    let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
+    let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+    for (def_step, g) in &def_groups {
+        accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
+    }
+    if !def_target_map.is_empty() {
+        target_maps.insert(None, def_target_map);
     }
 
-    Transfers { labels, per_sig }
+    // Labels that need explicit exception edges are:
+    //  - any label with explicit labeled transitions
+    //  - any label that appears in a default's exception set
+    let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
+    labels_to_consider.extend(ex_groups_by_label.keys().copied());
+    labels_to_consider.extend(def_exceptions_by_label.keys().copied());
+
+    for lbl in labels_to_consider {
+        let mut map = HashMap::new();
+        let def_exers = def_exers_by_label.get(&lbl);
+        let def_exc = def_exceptions_by_label.get(&lbl);
+
+        for (def_step, total_g) in &def_groups {
+            // Subtract states that have explicit labeled transitions on this label
+            let g_exers = def_exers.and_then(|de| de.get(def_step));
+            // Subtract states whose default is explicitly not applicable on this label (exception set)
+            let g_exc = def_exc.and_then(|dx| dx.get(def_step));
+
+            let mut g_nonex = total_g.clone();
+            if let Some(g) = g_exers {
+                g_nonex -= g;
+            }
+            if let Some(g) = g_exc {
+                g_nonex -= g;
+            }
+            if !g_nonex.is_empty() {
+                accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
+            }
+        }
+        if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
+            for (ex_step, g_ex) in ex_groups {
+                accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+            }
+        }
+        // Always insert an entry for this label (even if map is empty)
+        // so that we can emit an exception edge that blocks the default.
+        target_maps.insert(Some(lbl), map);
+    }
+    target_maps
 }
 
-// Cached aggregated transitions for a given node gates.
-#[derive(Clone)]
-struct NodeAggCache {
-    // by_label[0] => default (None); by_label[li+1] => labels.list[li]
-    by_label: Vec<Vec<(usize, Weight)>>,
-    // labels_to_consider as indices into labels (not including default); sorted, deduped.
-    labels_to_consider: Vec<usize>,
-}
-
-// Aggregate for arbitrary gates using precomputed Transfers.
-fn compute_agg_for_gates(
-    gates: &HashMap<usize, Weight>,
-    transfers: &Transfers,
-) -> NodeAggCache {
-    let labels_len = transfers.labels.len();
-    let mut by_label: Vec<Vec<(usize, Weight)>> = vec![Vec::new(); labels_len + 1];
-
-    // Compute labels to consider: union of labels that either have contributions or require blocking.
-    let mut consider: BTreeSet<usize> = BTreeSet::new();
-
-    // Default aggregation
-    {
-        let mut acc: HashMap<usize, Weight> = HashMap::new();
-        for (sig_id, gate_w) in gates {
-            if gate_w.is_empty() { continue; }
-            let trs = &transfers.per_sig[*sig_id];
-            accumulate(&mut acc, &trs.def_total, gate_w);
-            // Block-label flags also imply consideration if default would be blocked on that label.
-            consider.extend(trs.block_labels.iter().copied());
-        }
-        if !acc.is_empty() {
-            let mut v: Vec<(usize, Weight)> = acc.into_iter().collect();
-            v.sort_by_key(|(t, _)| *t);
-            by_label[0] = v;
-        }
-    }
-
-    // Non-default labels aggregation
-    for li in 0..labels_len {
-        let mut acc: HashMap<usize, Weight> = HashMap::new();
-        let mut any_contrib = false;
-        for (sig_id, gate_w) in gates {
-            if gate_w.is_empty() { continue; }
-            let trs = &transfers.per_sig[*sig_id];
-            if let Some(pairs) = trs.per_label.get(&li) {
-                any_contrib = true;
-                accumulate(&mut acc, pairs, gate_w);
-            }
-            // block label also to be considered even if acc remains empty
-            if trs.block_labels.contains(&li) {
-                consider.insert(li);
-            }
-        }
-        if any_contrib && !acc.is_empty() {
-            let mut v: Vec<(usize, Weight)> = acc.into_iter().collect();
-            v.sort_by_key(|(t, _)| *t);
-            by_label[li + 1] = v;
-            consider.insert(li); // definitely needed
-        }
-    }
-
-    NodeAggCache {
-        by_label,
-        labels_to_consider: consider.into_iter().collect(),
-    }
-}
-
-fn union_weights(vals: impl Iterator<Item=Weight>) -> Weight {
-    let mut out = Weight::zeros();
-    for v in vals {
-        out |= &v;
-    }
-    out
-}
-
-// Equality of two aggregated pairs restricted to intersection I.
-// Inputs are sorted by target_sig. Entries with zero mask after &I are ignored.
-fn equal_restricted_pairs(a: &[(usize, Weight)], b: &[(usize, Weight)], i: &Weight) -> bool {
-    let mut ia = 0usize;
-    let mut ib = 0usize;
-
-    loop {
-        // advance to next non-zero after masking
-        let mut va = None;
-        while ia < a.len() {
-            let w = &a[ia].1 & i;
-            if !w.is_empty() { va = Some((a[ia].0, w)); break; }
-            ia += 1;
-        }
-        let mut vb = None;
-        while ib < b.len() {
-            let w = &b[ib].1 & i;
-            if !w.is_empty() { vb = Some((b[ib].0, w)); break; }
-            ib += 1;
-        }
-        match (va, vb) {
-            (None, None) => return true,
-            (Some(_), None) | (None, Some(_)) => return false,
-            (Some((ta, wa)), Some((tb, wb))) => {
-                if ta != tb { return false; }
-                if wa != wb { return false; }
-                ia += 1;
-                ib += 1;
-            }
-        }
-    }
-}
-
-// Robust fingerprints for behavior indexing.
-// We use masks' internal fp (already robust for large bitsets) and mix label indices and targets.
-// This is a conservative prefilter: we still perform exact equality checks after selecting candidates.
-
-fn fp_pairs_with_salt(pairs: &[(usize, Weight)], salt: u64) -> u64 {
-    pairs.iter().fold(FP_ZERO, |acc, (t, w)| {
-        // Mix target id and mask fp with salt
-        let base = mix3((*t as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2), salt);
-        mix3(acc, base, FP_K1)
-    })
-}
-
-fn behavior_fingerprint(cache: &NodeAggCache) -> u64 {
-    // Fold default then all labeled entries with their label index.
-    let mut fp = FP_ZERO;
-    // default (label index 0)
-    fp = mix3(fp, fp_pairs_with_salt(&cache.by_label[0], 0), 0xD1E57A_u64);
-    for (i, pairs) in cache.by_label.iter().enumerate().skip(1) {
-        if pairs.is_empty() { continue; }
-        let salt = (i as u64).wrapping_mul(0x9E3779B185EBCA87);
-        fp = mix3(fp, fp_pairs_with_salt(pairs, salt), 0xC6A4A7935BD1E995);
-    }
-    // labels_to_consider do not affect equality; they only force materialization of zero-weight "block default".
-    fp
-}
-
-fn default_fingerprint(cache: &NodeAggCache) -> u64 {
-    fp_pairs_with_salt(&cache.by_label[0], 0xABCD1234_5678_9ABC)
-}
-
-// Candidate index with two levels: full-behavior and default-only.
-// Safety: Index is used only as a prefilter; we recalc node cache/fps lazily and verify equality afterwards.
-struct CandidateIndex {
-    by_behavior: HashMap<u64, Vec<usize>>,
-    by_default: HashMap<u64, Vec<usize>>,
-}
-impl CandidateIndex {
-    fn new() -> Self {
-        Self { by_behavior: HashMap::new(), by_default: HashMap::new() }
-    }
-
-    fn ensure_node_indexed(nodes: &mut [CompositionNode], idx: usize) -> (u64, u64) {
-        if nodes[idx].cache_dirty || nodes[idx].cached_by_label.is_none() {
-            // Recompute cache
-            // Note: caller must ensure cache exists before calling this; here we just assert.
-            // We keep this function simple; indexing methods will trigger recomputation as needed in their flows.
-        }
-        let cache = nodes[idx].cached_by_label.as_ref().expect("cache must be present");
-        // Recompute fingerprints if missing or cache was dirtied earlier.
-        let bfp = if let Some(fp) = nodes[idx].behavior_fp { fp } else {
-            let fp = behavior_fingerprint(cache);
-            nodes[idx].behavior_fp = Some(fp);
-            fp
-        };
-        let dfp = if let Some(fp) = nodes[idx].default_fp { fp } else {
-            let fp = default_fingerprint(cache);
-            nodes[idx].default_fp = Some(fp);
-            fp
-        };
-        (bfp, dfp)
-    }
-
-    fn index_node(&mut self, nodes: &mut [CompositionNode], idx: usize) {
-        let (bfp, dfp) = Self::ensure_node_indexed(nodes, idx);
-        self.by_behavior.entry(bfp).or_default().push(idx);
-        self.by_default.entry(dfp).or_default().push(idx);
-    }
-
-    fn candidates_for_cache<'a>(&'a mut self, nodes: &mut [CompositionNode], cache: &NodeAggCache) -> Vec<usize> {
-        let bfp = behavior_fingerprint(cache);
-        if let Some(list) = self.by_behavior.get(&bfp) {
-            // Filter out stale entries if any
-            let mut out = Vec::with_capacity(list.len());
-            for &idx in list.iter() {
-                // Ensure node has a cache to compute fingerprints.
-                if nodes[idx].cached_by_label.is_none() || nodes[idx].cache_dirty {
-                    // Cannot verify until cache is recomputed by caller; include now, let caller recompute.
-                    out.push(idx);
-                } else {
-                    let (cur_bfp, _) = Self::ensure_node_indexed(nodes, idx);
-                    if cur_bfp == bfp {
-                        out.push(idx);
-                    }
-                }
-            }
-            if !out.is_empty() {
-                return out;
-            }
-        }
-        // Fallback: look by default-only fingerprint
-        let dfp = default_fingerprint(cache);
-        if let Some(list) = self.by_default.get(&dfp) {
-            let mut out = Vec::with_capacity(list.len());
-            for &idx in list.iter() {
-                if nodes[idx].cached_by_label.is_none() || nodes[idx].cache_dirty {
-                    out.push(idx);
-                } else {
-                    let (_, cur_dfp) = Self::ensure_node_indexed(nodes, idx);
-                    if cur_dfp == dfp {
-                        out.push(idx);
-                    }
-                }
-            }
-            return out;
-        }
-        Vec::new()
-    }
-}
-
-// Find or create target composition node for a given gates map.
-// Uses behavior indexes to avoid scanning all nodes; falls back to full scan if needed.
-// Preserves original merging semantics.
+/// Finds the best existing node to merge a new state composition into, or creates a new node.
+/// This function contains a heuristic to merge distinct sets of NWA states into a single DWA
+/// state if their incoming transition weights are disjoint. This can reduce the size of the
+/// resulting DWA, but is more complex than the standard subset construction.
 fn find_or_create_target_node(
     map: &HashMap<usize, Weight>,
     nodes: &mut Vec<CompositionNode>,
-    transfers: &Transfers,
-    cand_index: &mut CandidateIndex,
+    sigs: &[MacroSig],
+    compiled_steps: &[CompiledStep],
 ) -> usize {
-    // Compute incoming mask for the new map
-    let incoming_mask = union_weights(map.values().cloned());
-
-    // Precompute behavior for the new map once
-    let new_cache = compute_agg_for_gates(map, transfers);
-
-    let new_keys = {
-        let mut v: Vec<_> = map.keys().copied().collect();
-        v.sort_unstable();
-        v
+    let incoming_transition_weight = map.values().fold(Weight::zeros(), |mut a, b| {
+        a |= b;
+        a
+    });
+    let key = {
+        let mut keys: Vec<_> = map.keys().copied().collect();
+        keys.sort_unstable();
+        MembersKey(keys)
     };
 
-    let calc_cost = |cand: &CompositionNode| -> (usize, usize) {
-        let current_spec = cand.gates.len();
-        let mut inc = 0usize;
-        for &sid in &new_keys {
-            if !cand.gates.contains_key(&sid) {
-                inc += 1;
+    let calculate_merge_cost = |candidate_node: &CompositionNode| -> (usize, usize) {
+        let current_spec = candidate_node.gates.len();
+        let mut spec_increase = 0;
+        for sig_id in &key.0 {
+            if !candidate_node.gates.contains_key(sig_id) {
+                spec_increase += 1;
             }
         }
-        (inc, current_spec)
+        (spec_increase, current_spec)
     };
 
-    let mut best_idx: Option<usize> = None;
-    let mut best_cost: (usize, usize) = (usize::MAX, usize::MAX);
+    let best_cand_idx = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_idx, cand_node)| {
+            let intersect = &cand_node.incoming_weight_union & &incoming_transition_weight;
+            if intersect.is_empty() {
+                return true; // Disjoint is always ok to merge
+            }
 
-    // First pass: restrict to candidates with the same full-behavior or at least default fingerprint.
-    let mut filtered: Vec<usize> = cand_index.candidates_for_cache(nodes, &new_cache);
+            // Check for compatible behavior on the intersection
+            let cand_gates_intersect: HashMap<_, _> = cand_node
+                .gates
+                .iter()
+                .map(|(sid, w)| (*sid, w & &intersect))
+                .filter(|(_, w)| !w.is_empty())
+                .collect();
 
-    // Ensure the candidate caches are available and current, and update index if needed.
-    for &idx in filtered.iter() {
-        if nodes[idx].cache_dirty || nodes[idx].cached_by_label.is_none() {
-            let cache = compute_agg_for_gates(&nodes[idx].gates, transfers);
-            nodes[idx].cached_by_label = Some(cache);
-            nodes[idx].cache_dirty = false;
-            // Update fingerprints and index entries lazily
-            cand_index.index_node(nodes, idx);
-        }
+            let new_gates_intersect: HashMap<_, _> = map
+                .iter()
+                .map(|(sid, w)| (*sid, w & &intersect))
+                .filter(|(_, w)| !w.is_empty())
+                .collect();
+
+            if cand_gates_intersect.is_empty() && new_gates_intersect.is_empty() {
+                return true;
+            }
+
+            let cand_transitions =
+                compute_target_maps_for_gates(&cand_gates_intersect, sigs, compiled_steps);
+            let new_transitions =
+                compute_target_maps_for_gates(&new_gates_intersect, sigs, compiled_steps);
+
+            cand_transitions == new_transitions
+        })
+        .min_by_key(|(idx, cand_node)| {
+            let cost = calculate_merge_cost(cand_node);
+            (cost, *idx) // Tie-break with index for determinism
+        })
+        .map(|(idx, _)| idx);
+
+    if let Some(merge_idx) = best_cand_idx {
+        // Found a suitable existing node to merge with.
+        // Update the node's incoming weight union.
+        nodes[merge_idx].incoming_weight_union |= &incoming_transition_weight;
+        return merge_idx;
     }
 
-    // Evaluate candidates found by index
-    for &idx in filtered.iter() {
-        let cand = &nodes[idx];
-        let inter = &cand.incoming_weight_union & &incoming_mask;
-
-        if inter.is_empty() {
-            // Disjoint -> always safe to merge; keep the most specific candidate (min cost)
-            let cost = calc_cost(cand);
-            if cost < best_cost {
-                best_cost = cost;
-                best_idx = Some(idx);
-            }
-            continue;
-        }
-
-        // Non-disjoint: behaviors must be equal on inter.
-        let cc = cand.cached_by_label.as_ref().unwrap();
-
-        // Compare default (label index 0)
-        if !equal_restricted_pairs(&cc.by_label[0], &new_cache.by_label[0], &inter) {
-            continue;
-        }
-
-        // Compare non-default labels in the union of both 'labels_to_consider'
-        let mut lbls: BTreeSet<usize> = BTreeSet::new();
-        lbls.extend(cc.labels_to_consider.iter().copied());
-        lbls.extend(new_cache.labels_to_consider.iter().copied());
-
-        let mut ok = true;
-        for li in lbls {
-            let cand_pairs = &cc.by_label[li + 1];
-            let new_pairs = &new_cache.by_label[li + 1];
-            if !equal_restricted_pairs(cand_pairs, new_pairs, &inter) {
-                ok = false;
-                break;
-            }
-        }
-        if !ok { continue; }
-
-        // They are compatible on the intersection; prefer best cost
-        let cost = calc_cost(cand);
-        if cost < best_cost {
-            best_cost = cost;
-            best_idx = Some(idx);
-        }
-    }
-
-    // If no good candidate from index, fall back to scanning all nodes (original semantics).
-    if best_idx.is_none() {
-        for (idx, cand) in nodes.iter_mut().enumerate() {
-            let inter = &cand.incoming_weight_union & &incoming_mask;
-
-            if inter.is_empty() {
-                let cost = calc_cost(cand);
-                if cost < best_cost {
-                    best_cost = cost;
-                    best_idx = Some(idx);
-                }
-                continue;
-            }
-
-            // Ensure candidate cache
-            if cand.cache_dirty || cand.cached_by_label.is_none() {
-                let cache = compute_agg_for_gates(&cand.gates, transfers);
-                cand.cached_by_label = Some(cache);
-                cand.cache_dirty = false;
-                cand.behavior_fp = None;
-                cand.default_fp = None;
-            }
-            let cc = cand.cached_by_label.as_ref().unwrap();
-
-            // Compare default (label index 0)
-            if !equal_restricted_pairs(&cc.by_label[0], &new_cache.by_label[0], &inter) {
-                continue;
-            }
-
-            // Compare non-default labels in the union of both 'labels_to_consider'
-            let mut lbls: BTreeSet<usize> = BTreeSet::new();
-            lbls.extend(cc.labels_to_consider.iter().copied());
-            lbls.extend(new_cache.labels_to_consider.iter().copied());
-
-            let mut ok = true;
-            for li in lbls {
-                let cand_pairs = &cc.by_label[li + 1];
-                let new_pairs = &new_cache.by_label[li + 1];
-                if !equal_restricted_pairs(cand_pairs, new_pairs, &inter) {
-                    ok = false;
-                    break;
-                }
-            }
-            if !ok { continue; }
-
-            // They are compatible on the intersection; prefer best cost
-            let cost = calc_cost(cand);
-            if cost < best_cost {
-                best_cost = cost;
-                best_idx = Some(idx);
-            }
-        }
-    }
-
-    if let Some(idx) = best_idx {
-        // Merge into existing node: expand its incoming weight union
-        nodes[idx].incoming_weight_union |= &incoming_mask;
-        // Cache may remain valid; fingerprints might need refresh if gates change later.
-        idx
-    } else {
-        // Create a new node
-        let new_idx = nodes.len();
-        nodes.push(CompositionNode {
-            final_weight: None,
-            default_target_idx: None,
-            default_mask: None,
-            exception_targets: BTreeMap::new(),
-            exception_masks: BTreeMap::new(),
-            gates: HashMap::new(),
-            incoming_weight_union: incoming_mask.clone(),
-            cached_by_label: None,
-            cache_dirty: true,
-            behavior_fp: None,
-            default_fp: None,
-        });
-        new_idx
-    }
+    // Case 3: No suitable node found for merging. Create a new one.
+    let new_idx = nodes.len();
+    nodes.push(CompositionNode {
+        final_weight: None,
+        default_target_idx: None,
+        default_mask: None,
+        exception_targets: BTreeMap::new(),
+        exception_masks: BTreeMap::new(),
+        gates: HashMap::new(), // Gates will be populated by the caller.
+        incoming_weight_union: incoming_transition_weight.clone(),
+    });
+    new_idx
 }
+
+/// Faster ε-closure from a single source with masked propagation.
 
 /// Faster ε-closure from a single source with masked propagation.
 /// - scratch_w: a weight array reused across calls; entries are set to zeros() after use via 'touched'.
@@ -738,66 +340,6 @@ fn eps_closure_masked_vec_one(
     out
 }
 
-// Lazy epsilon-closure cache for only those states that appear as "to" in non-epsilon edges.
-struct EpsClosureCache<'a> {
-    states: &'a NWAStates,
-    fut: &'a [Weight],
-    cache: Vec<Option<Vec<(NWAStateID, Weight)>>>,
-    scratch_w: Vec<Weight>,
-    q: VecDeque<NWAStateID>,
-    touched: Vec<NWAStateID>,
-}
-impl<'a> EpsClosureCache<'a> {
-    fn new(states: &'a NWAStates, fut: &'a [Weight]) -> Self {
-        let n = states.len();
-        Self {
-            states,
-            fut,
-            cache: vec![None; n],
-            scratch_w: vec![Weight::zeros(); n],
-            q: VecDeque::new(),
-            touched: Vec::new(),
-        }
-    }
-    fn get(&mut self, s: NWAStateID) -> &Vec<(NWAStateID, Weight)> {
-        if self.cache[s].is_none() {
-            let v = eps_closure_masked_vec_one(s, self.states, self.fut, &mut self.scratch_w, &mut self.q, &mut self.touched);
-            self.cache[s] = Some(v);
-        }
-        self.cache[s].as_ref().unwrap()
-    }
-}
-
-fn update_target_node(
-    target_idx: usize,
-    map: &HashMap<usize, Weight>,
-    nodes: &mut Vec<CompositionNode>,
-    in_queue: &mut Vec<bool>,
-    work: &mut VecDeque<usize>,
-) {
-    let mut any_change = false;
-    for (sig_id, weight) in map {
-        let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-        let new_w = &*entry | weight;
-        if new_w != *entry {
-            *entry = new_w;
-            any_change = true;
-        }
-    }
-    if any_change {
-        if target_idx >= in_queue.len() {
-            in_queue.resize(target_idx + 1, false);
-        }
-        if !in_queue[target_idx] {
-            in_queue[target_idx] = true;
-            work.push_back(target_idx);
-        }
-        nodes[target_idx].cache_dirty = true;
-        nodes[target_idx].behavior_fp = None;
-        nodes[target_idx].default_fp = None;
-    }
-}
-
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
@@ -817,65 +359,41 @@ impl NWA {
         result
     }
 
-    // Zero-length (epsilon-only) future weights:
-    // Fε[s] = final[s] ∪ ⋃_{ε s->t}(wε ∧ Fε[t]).
-    // This is the exact acceptance mask available at s without consuming input.
-    fn compute_epsilon_future_weights(&self) -> Vec<Weight> {
-        let n = self.states.len();
-        let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-        let mut rev: Vec<Vec<(NWAStateID, &Weight)>> = vec![vec![]; n];
-
-        // Reverse graph only along epsilon edges.
-        for p in 0..n {
-            for &(t, ref w) in &self.states[p].epsilons {
-                if t < n {
-                    rev[t].push((p, w));
-                }
-            }
-        }
-
-        let mut q: VecDeque<NWAStateID> = VecDeque::new();
-        for s in 0..n {
-            if let Some(fw) = &self.states[s].final_weight {
-                if !fw.is_empty() {
-                    fut[s] = fw.clone();
-                    q.push_back(s);
-                }
-            }
-        }
-
-        while let Some(v) = q.pop_front() {
-            let fv = fut[v].clone();
-            if fv.is_empty() { continue; }
-            for &(p, w_pv) in &rev[v] {
-                let add = &fv & w_pv;
-                if add.is_empty() { continue; }
-                let old = &fut[p];
-                if (&add & old) != add {
-                    fut[p] |= &add;
-                    q.push_back(p);
-                }
-            }
-        }
-        fut
-    }
-
     fn det_fixpoint(&self) -> DWA {
-        // Future acceptance mask (full) is still used to gate epsilon closures for pruning.
         let fut = self.compute_future_weights();
-        let eps_future = self.compute_epsilon_future_weights();
-
         let n = self.states.len();
         if n == 0 {
             return DWA::new();
         }
 
-        // Build MacroSig signatures and pool steps with LAZY epsilon-closures.
+        // Precompute masked ε-closures for all states using fast scratch buffers.
+        let pb_eps = if PROGRESS_BAR_ENABLED {
+            Some(ProgressBar::new(n as u64).with_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
+                    .unwrap(),
+            ))
+        } else {
+            None
+        };
+        let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
+        let mut scratch_w: Vec<Weight> = vec![Weight::zeros(); n];
+        let mut q: VecDeque<NWAStateID> = VecDeque::new();
+        let mut touched: Vec<NWAStateID> = Vec::new();
+        for s in 0..n {
+            eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
+            if let Some(p) = &pb_eps {
+                p.inc(1);
+            }
+        }
+        if let Some(p) = pb_eps {
+            p.finish_with_message("ε-closures done");
+        }
+
         let mut step_pool = StepPool::new();
         let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
         let mut state_to_sig_id: Vec<usize> = vec![0; n];
         let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
-
         let pb_sigs = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(n as u64).with_style(
                 ProgressStyle::default_bar()
@@ -885,12 +403,14 @@ impl NWA {
         } else {
             None
         };
-
-        let mut eps_cache = EpsClosureCache::new(&self.states, &fut);
-
         for s in 0..n {
-            // Final zero-length acceptance uses epsilon-only future weights.
-            let final_acc = if eps_future[s].is_empty() { None } else { Some(eps_future[s].clone()) };
+            let final_acc = eps_cache[s].iter().fold(Weight::zeros(), |mut acc, (t, w)| {
+                if let Some(fw) = &self.states[*t].final_weight {
+                    acc |= &(w & fw);
+                }
+                acc
+            });
+            let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
 
             // Compute default steps; preserve per-default exception sets.
             let mut def_steps: Vec<DefSig> = Vec::new();
@@ -899,8 +419,7 @@ impl NWA {
                 if *to >= n {
                     continue;
                 }
-                let eps_pairs = eps_cache.get(*to);
-                let pairs_def = apply_weight_to_pairs(eps_pairs, wdef);
+                let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
                 if pairs_def.is_empty() {
                     continue;
                 }
@@ -919,8 +438,7 @@ impl NWA {
                     if *to >= n {
                         continue;
                     }
-                    let eps_pairs = eps_cache.get(*to);
-                    let pairs_ex = apply_weight_to_pairs(eps_pairs, wlbl);
+                    let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
                     if pairs_ex.is_empty() {
                         continue;
                     }
@@ -980,7 +498,6 @@ impl NWA {
             eprintln!("state_to_sig_id: {:?}", state_to_sig_id);
         }
 
-        // Compile steps to be grouped by target signature
         let pb_compile = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
                 ProgressStyle::default_bar()
@@ -1022,13 +539,8 @@ impl NWA {
             }
         }
 
-        // Build transfer tables
-        let transfers = build_transfers(&sigs, &compiled_steps);
-
-        // Discover composition nodes
         let mut nodes: Vec<CompositionNode> = Vec::new();
         let mut work: VecDeque<usize> = VecDeque::new();
-        let mut cand_index = CandidateIndex::new();
 
         let pb_discover = if PROGRESS_BAR_ENABLED {
             Some(
@@ -1042,13 +554,12 @@ impl NWA {
             None
         };
 
-        // Initialize start node gates
         let mut init_map: HashMap<usize, Weight> = HashMap::new();
-        // Start node gate weights are epsilon-closures of start state's successors-to-sigs:
-        for (t, w) in eps_cache.get(self.body.start_state).iter() {
-            *init_map.entry(state_to_sig_id[*t]).or_default() |= &w.clone();
+        for (t, w) in eps_cache[self.body.start_state].iter() {
+            *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
         }
-
+        let mut init_keys: Vec<_> = init_map.keys().copied().collect();
+        init_keys.sort_unstable();
         let start_idx = 0;
         nodes.push(CompositionNode {
             final_weight: None,
@@ -1058,10 +569,6 @@ impl NWA {
             exception_masks: BTreeMap::new(),
             gates: init_map,
             incoming_weight_union: Weight::all(),
-            cached_by_label: None,
-            cache_dirty: true,
-            behavior_fp: None,
-            default_fp: None,
         });
         let mut in_queue = vec![false; 1];
         in_queue[start_idx] = true;
@@ -1072,98 +579,88 @@ impl NWA {
             if let Some(p) = &pb_discover {
                 p.inc(1);
             }
-
-            // Ensure cache for this node
-            if nodes[idx].cache_dirty || nodes[idx].cached_by_label.is_none() {
-                let cache = compute_agg_for_gates(&nodes[idx].gates, &transfers);
-                nodes[idx].cached_by_label = Some(cache);
-                nodes[idx].cache_dirty = false;
-                nodes[idx].behavior_fp = None;
-                nodes[idx].default_fp = None;
-                // Newly computed cache: index this node for future matches
-                cand_index.index_node(&mut nodes, idx);
-            }
+            let node_gates = nodes[idx].gates.clone();
 
             if is_debug_level_enabled(5) {
-                eprintln!("\nProcessing composition node {}: gates: {:?}", idx, nodes[idx].gates);
+                eprintln!("\nProcessing composition node {}: gates: {:?}", idx, node_gates);
+            }
+            let target_maps = compute_target_maps_for_gates(&node_gates, &sigs, &compiled_steps);
+
+            if is_debug_level_enabled(5) {
+                eprintln!("  - computed target_maps:");
+                for (label, map) in &target_maps {
+                    let mut keys: Vec<_> = map.keys().copied().collect();
+                    keys.sort_unstable();
+                    let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+                    eprintln!("    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
+                }
             }
 
-            // Phase 1: Read from nodes[idx] and prepare updates.
-            let mut default_update_info = None;
-            let mut exception_updates_info = BTreeMap::new();
-
-            {
-                let node_cache = nodes[idx].cached_by_label.as_ref().unwrap();
-
-                // Default
-                let def_pairs = &node_cache.by_label[0];
-                let def_total = union_weights(def_pairs.iter().map(|(_, w)| w.clone()));
-                if !def_total.is_empty() {
-                    let mut map: HashMap<usize, Weight> = HashMap::new();
-                    for (ts, w) in def_pairs {
-                        *map.entry(*ts).or_default() |= w;
+            let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
+            for (label, map) in target_maps {
+                let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+                if total_weight.is_empty() {
+                    if let Some(lbl) = label {
+                        // This is a transition that must block the default.
+                        // We can point it to any state (e.g., itself) with an empty weight.
+                        // A dedicated sink state would be cleaner, but this is equivalent.
+                        resolved_transitions.insert(label, (idx, Weight::zeros()));
                     }
-                    default_update_info = Some((map, def_total));
+                    continue;
                 }
 
-                // Labels
-                for li in &node_cache.labels_to_consider {
-                    let pairs = &node_cache.by_label[*li + 1];
-                    let total = union_weights(pairs.iter().map(|(_, w)| w.clone()));
-                    let lbl_code = transfers.labels.code_by_idx(*li);
-                    if total.is_empty() {
-                        // Block default
-                        exception_updates_info.insert(lbl_code, (None, total));
-                    } else {
-                        let mut map: HashMap<usize, Weight> = HashMap::new();
-                        for (ts, w) in pairs {
-                            *map.entry(*ts).or_default() |= w;
-                        }
-                        exception_updates_info.insert(lbl_code, (Some(map), total));
+                let target_idx = find_or_create_target_node(&map, &mut nodes, &sigs, &compiled_steps);
+
+                let mut any_change = false;
+                for (sig_id, weight) in &map {
+                    let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
+                    let new_w = &*entry | weight;
+                    if new_w != *entry {
+                        *entry = new_w;
+                        any_change = true;
                     }
                 }
-            }
-
-            // Phase 2: Mutate nodes.
-            let mut resolved_default: Option<(usize, Weight)> = None;
-            if let Some((map, def_total)) = default_update_info {
-                let target_idx = find_or_create_target_node(&map, &mut nodes, &transfers, &mut cand_index);
-                update_target_node(target_idx, &map, &mut nodes, &mut in_queue, &mut work);
-                resolved_default = Some((target_idx, def_total));
-            }
-
-            let mut resolved_exceptions: BTreeMap<i16, (usize, Weight)> = BTreeMap::new();
-            for (lbl_code, (map_opt, total)) in exception_updates_info {
-                if let Some(map) = map_opt {
-                    let target_idx = find_or_create_target_node(&map, &mut nodes, &transfers, &mut cand_index);
-                    update_target_node(target_idx, &map, &mut nodes, &mut in_queue, &mut work);
-                    resolved_exceptions.insert(lbl_code, (target_idx, total));
-                } else {
-                    // Block default
-                    resolved_exceptions.insert(lbl_code, (idx, total)); // total is empty here
+                if any_change {
+                    if target_idx >= in_queue.len() {
+                        in_queue.resize(target_idx + 1, false);
+                    }
+                    if !in_queue[target_idx] {
+                        in_queue[target_idx] = true;
+                        work.push_back(target_idx);
+                    }
                 }
+                resolved_transitions.insert(label, (target_idx, total_weight));
             }
 
-            // Attach transitions to node
-            {
-                let node = &mut nodes[idx];
-                if let Some((target, mask)) = resolved_default.take() {
-                    node.default_target_idx = Some(target);
-                    node.default_mask = Some(mask);
-                }
-                for (lbl, (target_idx, mask)) in resolved_exceptions {
+            let node = &mut nodes[idx];
+            if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
+                node.default_target_idx = Some(target_idx);
+                node.default_mask = Some(mask);
+            }
+            for (label, (target_idx, mask)) in resolved_transitions {
+                if let Some(lbl) = label {
                     node.exception_targets.insert(lbl, target_idx);
                     node.exception_masks.insert(lbl, mask);
                 }
-
-                // Final weight accumulation identical to previous approach
-                node.final_weight = Into::into(node.gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
-                    if let Some(fw) = &sigs[*sig_id].final_w {
-                        acc |= &(gate & fw);
-                    }
-                    acc
-                }));
             }
+
+            if is_debug_level_enabled(5) {
+                eprintln!("  - Resolved transitions for node {}:", idx);
+                if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
+                    eprintln!("    - default -> {} (mask: {})", target, mask);
+                }
+                for (lbl, target) in &node.exception_targets {
+                    if let Some(mask) = node.exception_masks.get(lbl) {
+                        eprintln!("    - on {}: -> {} (mask: {})", lbl, target, mask);
+                    }
+                }
+            }
+            node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
+                if let Some(fw) = &sigs[*sig_id].final_w {
+                    acc |= &(gate & fw);
+                }
+                acc
+            }));
 
             if let Some(p) = &pb_discover {
                 p.set_length(nodes.len() as u64);
@@ -1173,13 +670,12 @@ impl NWA {
             p.finish_with_message(format!("Discovered {} compositions", nodes.len()));
         }
 
-        // Materialize DWA
         let mut dwa = DWA::new();
         if nodes.is_empty() {
             return dwa;
         }
         dwa.states.0.resize(nodes.len(), Default::default());
-        dwa.body.start_state = 0;
+        dwa.body.start_state = start_idx;
 
         for (i, node) in nodes.iter().enumerate() {
             dwa.states[i].final_weight = node.final_weight.clone();
@@ -1189,6 +685,7 @@ impl NWA {
                 }
             }
             for (lbl, &target_idx) in &node.exception_targets {
+                // Always add exception transitions, even with empty masks, to properly block default on those labels.
                 let mask = node
                     .exception_masks
                     .get(lbl)
