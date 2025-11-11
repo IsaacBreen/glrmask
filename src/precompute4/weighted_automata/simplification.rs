@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
+use crate::r#macro::is_debug_level_enabled;
 use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWADefaultTransition, NWAStates, NWA};
@@ -49,7 +50,7 @@ impl DWA {
         }
         let large = states.len() > LARGE_AUTOMATON_THRESHOLD;
         Self::simplify_core(states, body, large);
-        if crate::is_debug_level_enabled(3) {
+        if is_debug_level_enabled(3) {
             eprintln!("DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
         }
     }
@@ -73,7 +74,7 @@ impl DWA {
         let now = Instant::now();
         let changed = pass(states, body);
         let elapsed = now.elapsed();
-        if crate::is_debug_level_enabled(3) {
+        if is_debug_level_enabled(3) {
             eprintln!("DWA simplify pass '{}' took {:?} (changed: {})", pass_name, elapsed, changed);
         }
 
@@ -81,7 +82,7 @@ impl DWA {
             if changed {
                 let after_dwa = DWA { states: states.clone(), body: body.clone() };
                 IN_SIMPLIFY_CHECK.with(|c| c.set(true));
-                if crate::is_debug_level_enabled(1) {
+                if is_debug_level_enabled(1) {
                     eprintln!("Stochastic testing DWA after pass: {}", pass_name);
                 }
                 test_weighted_automata::stochastic_equivalence_test(before, after_dwa);
@@ -765,7 +766,7 @@ impl NWA {
         let now = Instant::now();
         let changed = pass();
         let elapsed = now.elapsed();
-        if crate::is_debug_level_enabled(3) {
+        if is_debug_level_enabled(3) {
             eprintln!("NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
         }
         if changed {
@@ -810,7 +811,7 @@ impl NWA {
             Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
         }
         if let Some(p) = &pb { p.finish_with_message(format!("Simplified to {} states", self.states.len())); }
-        if crate::is_debug_level_enabled(3) {
+        if is_debug_level_enabled(3) {
             eprintln!("NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
         }
         self.states.len() != initial_n

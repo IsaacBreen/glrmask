@@ -1,3 +1,4 @@
+use crate::r#macro::is_debug_level_enabled;
 use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
 use super::common::Weight;
 use super::dwa::DWA;
@@ -83,11 +84,11 @@ impl NWA {
         let mut nwa = self.clone();
         nwa.simplify();
 
-        if crate::is_debug_level_enabled(5) {
+        if is_debug_level_enabled(5) {
             eprintln!("NWA after simplify:\n{}", nwa);
         }
         let result = nwa.det_fixpoint();
-        if crate::is_debug_level_enabled(5) {
+        if is_debug_level_enabled(5) {
             eprintln!("NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
             eprintln!("NWA::determinize_to_dwa took: {:?}", now.elapsed());
         }
@@ -259,7 +260,7 @@ impl NWA {
                 }
             }
 
-            if crate::is_debug_level_enabled(5) {
+            if is_debug_level_enabled(5) {
                 eprintln!("NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
             }
 
@@ -292,7 +293,7 @@ impl NWA {
             p.finish_with_message("Macro signatures done");
         }
 
-        if crate::is_debug_level_enabled(5) {
+        if is_debug_level_enabled(5) {
             eprintln!("All MacroSigs ({}):", sigs.len());
             for (i, sig) in sigs.iter().enumerate() {
                 eprintln!("  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
@@ -330,7 +331,7 @@ impl NWA {
             p.finish_with_message("Compile steps done");
         }
 
-        if crate::is_debug_level_enabled(5) {
+        if is_debug_level_enabled(5) {
             eprintln!("Step Pool ({}):", step_pool.raw.len());
             for (i, pairs) in step_pool.raw.iter().enumerate() {
                 eprintln!("  Step {}: {:?}", i, pairs);
@@ -405,7 +406,7 @@ impl NWA {
             }
             let node_gates = nodes[idx].gates.clone();
 
-            if crate::is_debug_level_enabled(5) {
+            if is_debug_level_enabled(5) {
                 eprintln!("\nProcessing composition node {}: gates: {:?}", idx, node_gates);
             }
             let mut def_groups: HashMap<usize, Weight> = HashMap::new();
@@ -432,7 +433,7 @@ impl NWA {
                 }
             }
 
-            if crate::is_debug_level_enabled(5) {
+            if is_debug_level_enabled(5) {
                 eprintln!("  - def_groups: {:?}", def_groups);
                 eprintln!("  - ex_groups_by_label: {:?}", ex_groups_by_label);
                 eprintln!("  - def_exers_by_label: {:?}", def_exers_by_label);
@@ -455,7 +456,7 @@ impl NWA {
             labels_to_consider.extend(def_exceptions_by_label.keys().copied());
 
             for lbl in labels_to_consider {
-                if crate::is_debug_level_enabled(5) {
+                if is_debug_level_enabled(5) {
                     eprintln!("    - processing exception label {}", lbl);
                 }
                 let mut map = HashMap::new();
@@ -463,7 +464,7 @@ impl NWA {
                 let def_exc = def_exceptions_by_label.get(&lbl);
 
                 for (def_step, total_g) in &def_groups {
-                    if crate::is_debug_level_enabled(5) {
+                    if is_debug_level_enabled(5) {
                         eprintln!("      - considering default step {} with total_g {}", def_step, total_g);
                     }
                     // Subtract states that have explicit labeled transitions on this label
@@ -471,18 +472,18 @@ impl NWA {
                     // Subtract states whose default is explicitly not applicable on this label (exception set)
                     let g_exc = def_exc.and_then(|dx| dx.get(def_step));
 
-                    if crate::is_debug_level_enabled(5) {
+                    if is_debug_level_enabled(5) {
                         eprintln!("        - g_exers for this def_step: {:?}", g_exers);
                         eprintln!("        - g_exc for this def_step: {:?}", g_exc);
                     }
                     let mut g_nonex = total_g.clone();
                     if let Some(g) = g_exers { g_nonex -= g; }
                     if let Some(g) = g_exc { g_nonex -= g; }
-                    if crate::is_debug_level_enabled(5) {
+                    if is_debug_level_enabled(5) {
                         eprintln!("        - g_nonex (after subtractors): {}", g_nonex);
                     }
                     if !g_nonex.is_empty() {
-                        if crate::is_debug_level_enabled(5) {
+                        if is_debug_level_enabled(5) {
                             eprintln!("        - accumulating for g_nonex");
                         }
                         accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
@@ -490,7 +491,7 @@ impl NWA {
                 }
                 if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
                     for (ex_step, g_ex) in ex_groups {
-                        if crate::is_debug_level_enabled(5) {
+                        if is_debug_level_enabled(5) {
                             eprintln!("      - considering exception step {} with g_ex {}", ex_step, g_ex);
                         }
                         accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
@@ -501,7 +502,7 @@ impl NWA {
                 target_maps.insert(Some(lbl), map);
             }
 
-            if crate::is_debug_level_enabled(5) {
+            if is_debug_level_enabled(5) {
                 eprintln!("  - computed target_maps:");
                 for (label, map) in &target_maps {
                     let mut keys: Vec<_> = map.keys().copied().collect();
@@ -560,7 +561,7 @@ impl NWA {
                 }
             }
 
-            if crate::is_debug_level_enabled(5) {
+            if is_debug_level_enabled(5) {
                 eprintln!("  - Resolved transitions for node {}:", idx);
                 if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
                     eprintln!("    - default -> {} (mask: {})", target, mask);
