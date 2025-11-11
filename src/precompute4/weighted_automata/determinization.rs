@@ -19,7 +19,6 @@ use std::time::Instant;
 fn eps_closure_masked_vec_one(
     s: NWAStateID,
     states: &NWAStates,
-    fut: &[Weight],
     scratch_w: &mut [Weight],
     q: &mut VecDeque<NWAStateID>,
     touched: &mut Vec<NWAStateID>,
@@ -28,13 +27,9 @@ fn eps_closure_masked_vec_one(
     if s >= n {
         return Vec::new();
     }
-    let fs = fut[s].clone();
-    if fs.is_empty() {
-        return Vec::new();
-    }
 
     // Initialize
-    scratch_w[s] = fs;
+    scratch_w[s] = Weight::all();
     touched.push(s);
     q.push_back(s);
 
@@ -45,10 +40,7 @@ fn eps_closure_masked_vec_one(
         for &(v, ref w_eps) in &states[u].epsilons {
             if v >= n { continue; }
 
-            let mut prop = &base & w_eps;
-            if prop.is_empty() { continue; }
-
-            prop &= &fut[v];
+            let prop = &base & w_eps;
             if prop.is_empty() { continue; }
 
             let old = &scratch_w[v];
@@ -97,7 +89,6 @@ impl NWA {
     }
 
     fn det_fixpoint(&self) -> DWA {
-        let fut = self.compute_future_weights();
         let n = self.states.len();
         if n == 0 {
             return DWA::new();
@@ -218,7 +209,7 @@ impl NWA {
         let mut q: VecDeque<NWAStateID> = VecDeque::new();
         let mut touched: Vec<NWAStateID> = Vec::new();
         for s in 0..n {
-            eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
+            eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &mut scratch_w, &mut q, &mut touched);
             if let Some(p) = &pb_eps {
                 p.inc(1);
             }
