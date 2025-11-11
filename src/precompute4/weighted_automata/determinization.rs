@@ -378,6 +378,9 @@ impl<'a> Determinizer<'a> {
                 a
             });
             if mask.is_empty() {
+                if label.is_some() {
+                    resolved.insert(label, (idx, Weight::zeros()));
+                }
                 continue;
             }
             let target_idx = self.find_or_create_target_node(&map);
@@ -470,7 +473,7 @@ impl<'a> Determinizer<'a> {
                 }
             }
 
-            if !map.is_empty() && map != def_map {
+            if map != def_map {
                 target_maps.insert(Some(lbl), map);
             }
         }
@@ -589,9 +592,7 @@ impl<'a> Determinizer<'a> {
             }
             for (lbl, &t) in &n.exception_targets {
                 let m = n.exception_masks.get(lbl).cloned().unwrap_or_else(Weight::zeros);
-                if !m.is_empty() {
-                    dwa.add_transition(i, *lbl, t, m).unwrap();
-                }
+                dwa.add_transition(i, *lbl, t, m).unwrap();
             }
         }
         dwa
