@@ -369,19 +369,14 @@ impl NWA {
             nodes: &mut Vec<CompositionNode>,
             key_to_idx: &mut HashMap<MembersKey, usize>,
             in_queue: &mut Vec<bool>,
+            incoming_transition_weight: &Weight,
         ) -> usize {
             if let Some(&existing_idx) = key_to_idx.get(&key) {
                 return existing_idx;
             }
 
             let merge_is_valid = |candidate_node: &CompositionNode| -> bool {
-                for sig_id in &key.0 {
-                    if !candidate_node.gates.contains_key(sig_id) {
-                        // Candidate node lacks a required signature; cannot merge.
-                        return false;
-                    }
-                }
-                true
+                candidate_node.incoming_weight_union.is_disjoint(incoming_transition_weight)
             };
 
             // Helper to calculate the cost of merging the new key into a candidate node.
@@ -425,7 +420,7 @@ impl NWA {
                     exception_targets: BTreeMap::new(),
                     exception_masks: BTreeMap::new(),
                     gates: HashMap::new(),
-                    incoming_weight_union: Weight::zeros(),
+                    incoming_weight_union: incoming_transition_weight.clone(),
                 });
                 if new_idx >= in_queue.len() {
                     in_queue.resize(new_idx + 1, false);
@@ -602,7 +597,7 @@ impl NWA {
                 keys.sort_unstable();
                 let key = MembersKey(keys);
 
-                let target_idx = find_or_create_target_node(key, &mut nodes, &mut key_to_idx, &mut in_queue);
+                let target_idx = find_or_create_target_node(key, &mut nodes, &mut key_to_idx, &mut in_queue, &total_weight);
 
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
