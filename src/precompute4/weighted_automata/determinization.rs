@@ -1016,7 +1016,7 @@ impl NWA {
         let mut init_map: HashMap<usize, Weight> = HashMap::new();
         // Start node gate weights are epsilon-closures of start state's successors-to-sigs:
         for (t, w) in eps_cache.get(self.body.start_state).iter() {
-            *init_map.entry(state_to_sig_id[*t]).or_default() |= w.clone();
+            *init_map.entry(state_to_sig_id[*t]).or_default() |= &w.clone();
         }
 
         let start_idx = 0;
@@ -1077,7 +1077,7 @@ impl NWA {
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
                     let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = entry | weight;
+                    let new_w = &*entry | weight;
                     if new_w != *entry {
                         *entry = new_w;
                         any_change = true;
@@ -1118,7 +1118,7 @@ impl NWA {
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
                     let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = entry | weight;
+                    let new_w = &*entry | weight;
                     if new_w != *entry {
                         *entry = new_w;
                         any_change = true;
