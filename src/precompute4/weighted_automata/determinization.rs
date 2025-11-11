@@ -87,9 +87,7 @@ impl NWA {
         if is_debug_level_enabled(5) {
             eprintln!("NWA after simplify:\n{}", nwa);
         }
-        let mut result = nwa.det_fixpoint();
-        result.simplify();
-
+        let result = nwa.det_fixpoint();
         if is_debug_level_enabled(5) {
             eprintln!("NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
             eprintln!("NWA::determinize_to_dwa took: {:?}", now.elapsed());
