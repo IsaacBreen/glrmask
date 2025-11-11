@@ -100,18 +100,108 @@ fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], ga
     }
 }
 
+fn compute_target_maps_for_gates(
+    node_gates: &HashMap<usize, Weight>,
+    sigs: &[MacroSig],
+    compiled_steps: &[CompiledStep],
+) -> BTreeMap<Option<i16>, HashMap<usize, Weight>> {
+    let mut def_groups: HashMap<usize, Weight> = HashMap::new();
+    let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+    let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+    let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+
+    for (sig_id, gate) in node_gates {
+        if gate.is_empty() {
+            continue;
+        }
+        for def in &sigs[*sig_id].def {
+            *def_groups.entry(def.step_id).or_default() |= gate;
+            // Record that this default has these labels as explicit exceptions; default must not apply on them.
+            for &lbl in &def.exceptions {
+                *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
+            }
+        }
+        for (lbl, ex_steps) in &sigs[*sig_id].ex {
+            for ex_step in ex_steps {
+                *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
+            }
+            // Default should not apply on labels that have explicit labeled transitions (for this state).
+            for def in &sigs[*sig_id].def {
+                *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
+            }
+        }
+    }
+
+    let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
+    let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+    for (def_step, g) in &def_groups {
+        accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
+    }
+    if !def_target_map.is_empty() {
+        target_maps.insert(None, def_target_map);
+    }
+
+    // Labels that need explicit exception edges are:
+    //  - any label with explicit labeled transitions
+    //  - any label that appears in a default's exception set
+    let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
+    labels_to_consider.extend(ex_groups_by_label.keys().copied());
+    labels_to_consider.extend(def_exceptions_by_label.keys().copied());
+
+    for lbl in labels_to_consider {
+        let mut map = HashMap::new();
+        let def_exers = def_exers_by_label.get(&lbl);
+        let def_exc = def_exceptions_by_label.get(&lbl);
+
+        for (def_step, total_g) in &def_groups {
+            // Subtract states that have explicit labeled transitions on this label
+            let g_exers = def_exers.and_then(|de| de.get(def_step));
+            // Subtract states whose default is explicitly not applicable on this label (exception set)
+            let g_exc = def_exc.and_then(|dx| dx.get(def_step));
+
+            let mut g_nonex = total_g.clone();
+            if let Some(g) = g_exers {
+                g_nonex -= g;
+            }
+            if let Some(g) = g_exc {
+                g_nonex -= g;
+            }
+            if !g_nonex.is_empty() {
+                accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
+            }
+        }
+        if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
+            for (ex_step, g_ex) in ex_groups {
+                accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+            }
+        }
+        // Always insert an entry for this label (even if map is empty)
+        // so that we can emit an exception edge that blocks the default.
+        target_maps.insert(Some(lbl), map);
+    }
+    target_maps
+}
+
 /// Finds the best existing node to merge a new state composition into, or creates a new node.
 /// This function contains a heuristic to merge distinct sets of NWA states into a single DWA
 /// state if their incoming transition weights are disjoint. This can reduce the size of the
 /// resulting DWA, but is more complex than the standard subset construction.
 fn find_or_create_target_node(
-    key: MembersKey,
+    map: &HashMap<usize, Weight>,
     nodes: &mut Vec<CompositionNode>,
-    incoming_transition_weight: &Weight,
+    sigs: &[MacroSig],
+    compiled_steps: &[CompiledStep],
 ) -> usize {
-    // Case 2: The key is new. Try to find an existing node to merge with as a heuristic.
-    // A merge is valid if the new transition's weight is disjoint from all other weights
-    // already leading into the candidate node.
+    let incoming_transition_weight = map.values().fold(Weight::zeros(), |mut a, b| {
+        a |= b;
+        a
+    });
+    let key = {
+        let mut keys: Vec<_> = map.keys().copied().collect();
+        keys.sort_unstable();
+        MembersKey(keys)
+    };
+
     let calculate_merge_cost = |candidate_node: &CompositionNode| -> (usize, usize) {
         let current_spec = candidate_node.gates.len();
         let mut spec_increase = 0;
@@ -126,7 +216,37 @@ fn find_or_create_target_node(
     let best_cand_idx = nodes
         .iter()
         .enumerate()
-        .filter(|(_idx, cand_node)| cand_node.incoming_weight_union.is_disjoint(incoming_transition_weight))
+        .filter(|(_idx, cand_node)| {
+            let intersect = &cand_node.incoming_weight_union & &incoming_transition_weight;
+            if intersect.is_empty() {
+                return true; // Disjoint is always ok to merge
+            }
+
+            // Check for compatible behavior on the intersection
+            let cand_gates_intersect: HashMap<_, _> = cand_node
+                .gates
+                .iter()
+                .map(|(sid, w)| (*sid, w & &intersect))
+                .filter(|(_, w)| !w.is_empty())
+                .collect();
+
+            let new_gates_intersect: HashMap<_, _> = map
+                .iter()
+                .map(|(sid, w)| (*sid, w & &intersect))
+                .filter(|(_, w)| !w.is_empty())
+                .collect();
+
+            if cand_gates_intersect.is_empty() && new_gates_intersect.is_empty() {
+                return true;
+            }
+
+            let cand_transitions =
+                compute_target_maps_for_gates(&cand_gates_intersect, sigs, compiled_steps);
+            let new_transitions =
+                compute_target_maps_for_gates(&new_gates_intersect, sigs, compiled_steps);
+
+            cand_transitions == new_transitions
+        })
         .min_by_key(|(idx, cand_node)| {
             let cost = calculate_merge_cost(cand_node);
             (cost, *idx) // Tie-break with index for determinism
@@ -136,7 +256,7 @@ fn find_or_create_target_node(
     if let Some(merge_idx) = best_cand_idx {
         // Found a suitable existing node to merge with.
         // Update the node's incoming weight union.
-        nodes[merge_idx].incoming_weight_union |= incoming_transition_weight;
+        nodes[merge_idx].incoming_weight_union |= &incoming_transition_weight;
         return merge_idx;
     }
 
@@ -465,98 +585,7 @@ impl NWA {
             if is_debug_level_enabled(5) {
                 eprintln!("\nProcessing composition node {}: gates: {:?}", idx, node_gates);
             }
-            let mut def_groups: HashMap<usize, Weight> = HashMap::new();
-            let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-            let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-            let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
-
-            for (sig_id, gate) in &node_gates {
-                for def in &sigs[*sig_id].def {
-                    *def_groups.entry(def.step_id).or_default() |= gate;
-                    // Record that this default has these labels as explicit exceptions; default must not apply on them.
-                    for &lbl in &def.exceptions {
-                        *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
-                    }
-                }
-                for (lbl, ex_steps) in &sigs[*sig_id].ex {
-                    for ex_step in ex_steps {
-                        *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
-                    }
-                    // Default should not apply on labels that have explicit labeled transitions (for this state).
-                    for def in &sigs[*sig_id].def {
-                        *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
-                    }
-                }
-            }
-
-            if is_debug_level_enabled(5) {
-                eprintln!("  - def_groups: {:?}", def_groups);
-                eprintln!("  - ex_groups_by_label: {:?}", ex_groups_by_label);
-                eprintln!("  - def_exers_by_label: {:?}", def_exers_by_label);
-                eprintln!("  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
-            }
-            let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
-            let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
-            for (def_step, g) in &def_groups {
-                accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
-            }
-            if !def_target_map.is_empty() {
-                target_maps.insert(None, def_target_map);
-            }
-
-            // Labels that need explicit exception edges are:
-            //  - any label with explicit labeled transitions
-            //  - any label that appears in a default's exception set
-            let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
-            labels_to_consider.extend(ex_groups_by_label.keys().copied());
-            labels_to_consider.extend(def_exceptions_by_label.keys().copied());
-
-            for lbl in labels_to_consider {
-                if is_debug_level_enabled(5) {
-                    eprintln!("    - processing exception label {}", lbl);
-                }
-                let mut map = HashMap::new();
-                let def_exers = def_exers_by_label.get(&lbl);
-                let def_exc = def_exceptions_by_label.get(&lbl);
-
-                for (def_step, total_g) in &def_groups {
-                    if is_debug_level_enabled(5) {
-                        eprintln!("      - considering default step {} with total_g {}", def_step, total_g);
-                    }
-                    // Subtract states that have explicit labeled transitions on this label
-                    let g_exers = def_exers.and_then(|de| de.get(def_step));
-                    // Subtract states whose default is explicitly not applicable on this label (exception set)
-                    let g_exc = def_exc.and_then(|dx| dx.get(def_step));
-
-                    if is_debug_level_enabled(5) {
-                        eprintln!("        - g_exers for this def_step: {:?}", g_exers);
-                        eprintln!("        - g_exc for this def_step: {:?}", g_exc);
-                    }
-                    let mut g_nonex = total_g.clone();
-                    if let Some(g) = g_exers { g_nonex -= g; }
-                    if let Some(g) = g_exc { g_nonex -= g; }
-                    if is_debug_level_enabled(5) {
-                        eprintln!("        - g_nonex (after subtractors): {}", g_nonex);
-                    }
-                    if !g_nonex.is_empty() {
-                        if is_debug_level_enabled(5) {
-                            eprintln!("        - accumulating for g_nonex");
-                        }
-                        accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
-                    }
-                }
-                if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
-                    for (ex_step, g_ex) in ex_groups {
-                        if is_debug_level_enabled(5) {
-                            eprintln!("      - considering exception step {} with g_ex {}", ex_step, g_ex);
-                        }
-                        accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
-                    }
-                }
-                // Always insert an entry for this label (even if map is empty)
-                // so that we can emit an exception edge that blocks the default.
-                target_maps.insert(Some(lbl), map);
-            }
+            let target_maps = compute_target_maps_for_gates(&node_gates, &sigs, &compiled_steps);
 
             if is_debug_level_enabled(5) {
                 eprintln!("  - computed target_maps:");
@@ -581,11 +610,7 @@ impl NWA {
                     continue;
                 }
 
-                let mut keys: Vec<_> = map.keys().copied().collect();
-                keys.sort_unstable();
-                let key = MembersKey(keys);
-
-                let target_idx = find_or_create_target_node(key, &mut nodes, &total_weight);
+                let target_idx = find_or_create_target_node(&map, &mut nodes, &sigs, &compiled_steps);
 
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
