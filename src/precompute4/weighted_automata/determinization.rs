@@ -53,8 +53,9 @@ fn eps_closure_masked_vec_one(
             let old = &scratch_w[v];
             let new_w = old | &prop;
             if new_w != *old {
+                let was_empty = old.is_empty();
                 scratch_w[v] = new_w;
-                if old.is_empty() {
+                if was_empty {
                     touched.push(v);
                 }
                 q.push_back(v);
