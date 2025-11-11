@@ -406,13 +406,14 @@ impl NWA {
                 .map(|(idx, _)| idx);
 
             if let Some(merge_idx) = best_cand_idx {
-                // Found a home. Map the new key to the existing node's index.
-                key_to_idx.insert(key, merge_idx);
+                // Found a home.
+                let merge_node = &mut nodes[merge_idx];
+                // Update incoming weight union
+                merge_node.incoming_weight_union |= incoming_transition_weight;
                 merge_idx
             } else {
                 // No nodes exist yet. Create a new one.
                 let new_idx = nodes.len();
-                key_to_idx.insert(key, new_idx);
                 nodes.push(CompositionNode {
                     final_weight: None,
                     default_target_idx: None,
