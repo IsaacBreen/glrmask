@@ -78,31 +78,22 @@ fn eps_closure_masked_vec_one(
 }
 
 impl NWA {
-    // The det_fixpoint above constructs 'dwa'; we post-process it here by trying:
-    //  1) Single-state over-approximation (only if provably equivalent).
-    //  2) Merge pure final sinks.
-    //  3) Merge structurally-equivalent states (no defaults), unioning weights.
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
+
         let mut nwa = self.clone();
         nwa.simplify();
-        let mut dwa = nwa.det_fixpoint();
-        // Try single-state compact form if exactly equivalent
-        let candidate = dwa.build_single_state_overapprox();
-        if candidate.equivalent(&dwa) {
-            if is_debug_level_enabled(5) {
-                eprintln!("Applied single-state compact DWA (proven equivalent).");
-            }
-            return candidate;
-        }
-        // Otherwise, apply exact merges that preserve semantics
-        let merged_sinks = dwa.merge_pure_final_sinks();
-        let merged_struct = merged_sinks.merge_structurally_equivalent_states();
+
         if is_debug_level_enabled(5) {
-            eprintln!("Applied post merges. DWA stats before: {}\nAfter: {}", dwa.stats(), merged_struct.stats());
+            eprintln!("NWA after simplify:\n{}", nwa);
+        }
+        let result = nwa.det_fixpoint();
+        if is_debug_level_enabled(5) {
+            eprintln!("NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
             eprintln!("NWA::determinize_to_dwa took: {:?}", now.elapsed());
         }
-        merged_struct
+
+        result
     }
 
     fn det_fixpoint(&self) -> DWA {
