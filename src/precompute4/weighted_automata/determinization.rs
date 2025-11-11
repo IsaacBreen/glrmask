@@ -169,51 +169,6 @@ impl NWA {
             ex: Vec<(i16, Vec<usize>)>,
         }
 
-        // New: A coarse, structure-only key to merge “product states” that differ
-        // only by which macro-signatures are active, but share the same outgoing
-        // label set and final-weight fingerprint.
-        #[derive(Clone, Eq, PartialEq, Hash, Debug)]
-        struct LabelShapeKey {
-            // Labels for which some explicit transition exists from this macro-signature set.
-            // explicit labeled transitions: label -> sorted list of target step_ids
-            exceptions: Vec<(i16, Vec<usize>)>,
-            final_fp: u64,
-            // A sorted list of (step_id, sorted_exceptions) for all default transitions
-            // present in the macro-signature set.
-            defaults: Vec<(usize, Vec<i16>)>,
-        }
-
-        fn label_shape_for_keys(keys: &[usize], sigs: &[MacroSig]) -> LabelShapeKey {
-            let mut exceptions_map: BTreeMap<i16, BTreeSet<usize>> = BTreeMap::new();
-            let mut fp = FP_ZERO;
-            let mut defaults_set: BTreeSet<(usize, Vec<i16>)> = BTreeSet::new();
-
-            for &sid in keys {
-                if let Some(w) = &sigs[sid].final_w {
-                    fp |= w.fp;
-                }
-                for (&lbl, steps) in &sigs[sid].ex {
-                    exceptions_map.entry(lbl).or_default().extend(steps);
-                }
-                for def in &sigs[sid].def {
-                    let mut exceptions: Vec<i16> = def.exceptions.iter().copied().collect();
-                    exceptions.sort_unstable();
-                    defaults_set.insert((def.step_id, exceptions));
-                }
-            }
-
-            let exceptions: Vec<(i16, Vec<usize>)> = exceptions_map
-                .into_iter()
-                .map(|(lbl, steps)| (lbl, steps.into_iter().collect()))
-                .collect();
-
-            LabelShapeKey {
-                exceptions,
-                final_fp: fp,
-                defaults: defaults_set.into_iter().collect(),
-            }
-        }
-
         // Precompute masked ε-closures for all states using fast scratch buffers.
         let pb_eps = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(n as u64).with_style(
@@ -386,15 +341,15 @@ impl NWA {
                 eprintln!("  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
             }
         }
+        #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+        struct MembersKey(Vec<usize>);
 
-        // Composition over "shape" (by label-set and final-fp), not by member set.
         struct CompositionNode {
             final_weight: Option<Weight>,
             default_target_idx: Option<usize>,
             default_mask: Option<Weight>,
             exception_targets: BTreeMap<i16, usize>,
             exception_masks: BTreeMap<i16, Weight>,
-            // Accumulated union of gates (sig_id -> weight) for all paths that reach this shape.
             gates: HashMap<usize, Weight>,
         }
 
@@ -408,7 +363,7 @@ impl NWA {
         }
 
         let mut nodes: Vec<CompositionNode> = Vec::new();
-        let mut key_to_idx: HashMap<LabelShapeKey, usize> = HashMap::new();
+        let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
         let mut work: VecDeque<usize> = VecDeque::new();
 
         let pb_discover = if PROGRESS_BAR_ENABLED {
@@ -423,45 +378,26 @@ impl NWA {
             None
         };
 
-        // Initial gates (from start ε-closure), and its member keys
         let mut init_map: HashMap<usize, Weight> = HashMap::new();
         for (t, w) in eps_cache[self.body.start_state].iter() {
             *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
         }
         let mut init_keys: Vec<_> = init_map.keys().copied().collect();
         init_keys.sort_unstable();
-        let init_shape = label_shape_for_keys(&init_keys, &sigs);
-        let start_idx = *key_to_idx.entry(init_shape.clone()).or_insert_with(|| {
-            let new_idx = nodes.len();
-            nodes.push(CompositionNode {
-                final_weight: None,
-                default_target_idx: None,
-                default_mask: None,
-                exception_targets: BTreeMap::new(),
-                exception_masks: BTreeMap::new(),
-                gates: HashMap::new(),
-            });
-            new_idx
+        let init_key = MembersKey(init_keys);
+        let start_idx = 0;
+        key_to_idx.insert(init_key, start_idx);
+        nodes.push(CompositionNode {
+            final_weight: None,
+            default_target_idx: None,
+            default_mask: None,
+            exception_targets: BTreeMap::new(),
+            exception_masks: BTreeMap::new(),
+            gates: init_map,
         });
-        // Inject initial gates
-        for (sid, w) in &init_map {
-            *nodes[start_idx].gates.entry(*sid).or_default() |= w;
-        }
-
-        let mut in_queue: Vec<bool> = vec![false; nodes.len()];
+        let mut in_queue = vec![false; 1];
         in_queue[start_idx] = true;
         work.push_back(start_idx);
-
-        // Record precise start final weight computed only from initial gates, to keep empty-word exact.
-        let start_final_weight = {
-            let mut acc = Weight::zeros();
-            for (sig_id, gate) in &init_map {
-                if let Some(fw) = &sigs[*sig_id].final_w {
-                    acc |= &(gate & fw);
-                }
-            }
-            if acc.is_empty() { None } else { Some(acc) }
-        };
 
         while let Some(idx) = work.pop_front() {
             in_queue[idx] = false;
@@ -578,15 +514,10 @@ impl NWA {
 
             let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
             for (label, map) in target_maps {
-                // Compute target shape key from the target macro-signature set (ignoring weights).
-                let mut member_keys: Vec<_> = map.keys().copied().collect();
-                member_keys.sort_unstable();
-
-                // If the map is empty, target set is empty; we still need a shape key.
-                let target_shape = label_shape_for_keys(&member_keys, &sigs);
-
-                // Intern/get canonical target index by shape
-                let target_idx = *key_to_idx.entry(target_shape.clone()).or_insert_with(|| {
+                let mut keys: Vec<_> = map.keys().copied().collect();
+                keys.sort_unstable();
+                let key = MembersKey(keys);
+                let target_idx = *key_to_idx.entry(key).or_insert_with(|| {
                     let new_idx = nodes.len();
                     nodes.push(CompositionNode {
                         final_weight: None,
@@ -602,7 +533,6 @@ impl NWA {
                     new_idx
                 });
 
-                // Merge (union) the gates that lead into this shape for this transition.
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
                     let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
@@ -616,10 +546,7 @@ impl NWA {
                     in_queue[target_idx] = true;
                     work.push_back(target_idx);
                 }
-
-                // Aggregate the total weight mask for this label to be placed on the DWA edge.
-                let mask = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-                resolved_transitions.insert(label, (target_idx, mask));
+                resolved_transitions.insert(label, (target_idx, map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a })));
             }
 
             let node = &mut nodes[idx];
@@ -627,8 +554,8 @@ impl NWA {
                 node.default_target_idx = Some(target_idx);
                 node.default_mask = Some(mask);
             }
-            for (lbl, (target_idx, mask)) in resolved_transitions {
-                if let Some(lbl) = lbl {
+            for (label, (target_idx, mask)) in resolved_transitions {
+                if let Some(lbl) = label {
                     node.exception_targets.insert(lbl, target_idx);
                     node.exception_masks.insert(lbl, mask);
                 }
@@ -645,8 +572,6 @@ impl NWA {
                     }
                 }
             }
-            // Set final weight as per accumulated gates for this node,
-            // but keep the precise empty-word acceptance at the start (handled later).
             node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
                 if let Some(fw) = &sigs[*sig_id].final_w {
                     acc |= &(gate & fw);
@@ -670,15 +595,7 @@ impl NWA {
         dwa.body.start_state = start_idx;
 
         for (i, node) in nodes.iter().enumerate() {
-            // Special-case the start state's final weight to be exact on the empty word.
-            if i == start_idx {
-                if let Some(sw) = &start_final_weight {
-                    dwa.states[i].final_weight = Some(sw.clone());
-                }
-            } else {
-                dwa.states[i].final_weight = node.final_weight.clone();
-            }
-
+            dwa.states[i].final_weight = node.final_weight.clone();
             if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
                 if !mask.is_empty() {
                     dwa.set_default_transition(i, target_idx, mask.clone()).unwrap();
