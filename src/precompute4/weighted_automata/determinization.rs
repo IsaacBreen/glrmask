@@ -395,13 +395,17 @@ impl<'a> Determinizer<'a> {
             }
 
             // Resolve exceptions
-            for (lbl, ex_map) in target_maps.iter().filter_map(|(k, v)| k.map(|l| (l, v))) {
-                let ex_mask = Self::union_mask(ex_map);
+            for (lbl, ex_map_with_trap) in target_maps.iter().filter_map(|(k, v)| k.map(|l| (l, v))) {
+                const TRAP_SIG: usize = usize::MAX;
+                let mut ex_map = ex_map_with_trap.clone();
+                let trap_mask = ex_map.remove(&TRAP_SIG).unwrap_or_default();
+
+                let ex_mask = Self::union_mask(&ex_map) | &trap_mask;
                 if ex_mask.is_empty() {
                     continue;
                 }
-                let to_id = self.get_or_create_state(ex_map.clone());
-                self.nodes[idx].exception_edges.insert(lbl, (to_id, ex_mask.clone()));
+                let to_id = self.get_or_create_state(ex_map);
+                self.nodes[idx].exception_edges.insert(lbl, (to_id, ex_mask));
                 if !processed.get(to_id).copied().unwrap_or(false) {
                     q.push_back(to_id);
                 }
@@ -428,6 +432,8 @@ impl<'a> Determinizer<'a> {
 
     // Compute outgoing transitions for a set of gates, grouped by label (None = default).
     fn compute_target_maps(&self, gates: &HashMap<usize, Weight>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
+        const TRAP_SIG: usize = usize::MAX;
+
         let mut all_defaults: HashMap<usize, Weight> = HashMap::new();                 // step_id -> gate union
         let mut all_exceptions: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new(); // label -> step_id -> gate union
         let mut overridden: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new(); // label -> step_id -> gate union
@@ -479,6 +485,9 @@ impl<'a> Determinizer<'a> {
                 }
                 if let Some(x) = excepted.get(&lbl).and_then(|m| m.get(step_id)) {
                     g -= x;
+                    if !x.is_empty() {
+                        *map.entry(TRAP_SIG).or_default() |= x;
+                    }
                 }
                 if !g.is_empty() {
                     self.accumulate_step_targets(&mut map, *step_id, &g);
