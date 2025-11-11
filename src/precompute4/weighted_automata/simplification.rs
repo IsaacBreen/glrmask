@@ -16,7 +16,7 @@ use crate::precompute4::weighted_automata::NWAStateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque, hash_map::DefaultHasher};
 use std::time::Instant;
 
 /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
@@ -872,45 +872,62 @@ impl NWA {
         true
     }
 
-    fn prune_dead_ends(&mut self) -> bool {
+fn prune_dead_ends(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 { return false; }
 
-        let fut = self.compute_future_weights();
-        let live: Vec<bool> = fut.iter().map(|w| !w.is_empty()).collect();
+        // Fast liveness analysis via backward reachability from final states.
+        let mut live = vec![false; n];
+        let mut q = VecDeque::new();
+        let mut rev_adj: Vec<Vec<NWAStateID>> = vec![vec![]; n];
+
+        for p in 0..n {
+            let st = &self.states[p];
+            // An edge can only propagate liveness if its weight is not empty.
+            for &(t, ref w) in &st.epsilons {
+                if t < n && !w.is_empty() { rev_adj[t].push(p); }
+            }
+            for (_, targets) in &st.transitions {
+                for &(t, ref w) in targets {
+                    if t < n && !w.is_empty() { rev_adj[t].push(p); }
+                }
+            }
+            for def in &st.default {
+                if def.target < n && !def.weight.is_empty() {
+                    rev_adj[def.target].push(p);
+                }
+            }
+        }
+
+        for s in 0..n {
+            if self.states[s].final_weight.as_ref().map_or(false, |w| !w.is_empty()) {
+                if !live[s] {
+                    live[s] = true;
+                    q.push_back(s);
+                }
+            }
+        }
+
+        while let Some(v) = q.pop_front() {
+            for &p in &rev_adj[v] {
+                if !live[p] {
+                    live[p] = true;
+                    q.push_back(p);
+                }
+            }
+        }
 
         if self.body.start_state >= n || !live[self.body.start_state] {
             let changed = n > 0;
-            self.states.0.clear();
-            self.body.start_state = self.states.add_state();
+            if changed {
+                self.states.0.clear();
+                self.body.start_state = self.states.add_state();
+            }
             return changed;
         }
 
-        // Relax edges using future weights (sound: (w | !F[v]) & F[v] == w & F[v])
-        let not_fut: Vec<Weight> = fut.iter().map(|w| !w).collect();
-        let mut changed_weights = false;
-        for i in 0..n {
-            let st = &mut self.states[i];
-            for (v, w) in &mut st.epsilons {
-                let new_w = &*w | &not_fut[*v];
-                if new_w != *w { *w = new_w; changed_weights = true; }
-            }
-            for (_, targets) in &mut st.transitions {
-                for (v, w) in targets {
-                    let new_w = &*w | &not_fut[*v];
-                    if new_w != *w { *w = new_w; changed_weights = true; }
-                }
-            }
-            for def in &mut st.default {
-                let new_w = &def.weight | &not_fut[def.target];
-                if new_w != def.weight { def.weight = new_w; changed_weights = true; }
-            }
-        }
-
         let num_live = live.iter().filter(|&&b| b).count();
-        if num_live == n {
-            return changed_weights;
-        }
+        if num_live == n { return false; }
 
         let mut remap = vec![usize::MAX; n];
         let mut new_states_vec = Vec::with_capacity(num_live);
@@ -1285,30 +1302,44 @@ impl NWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: HashMap<
-                (
-                    Option<Weight>,
-                    Vec<(usize, Weight, BTreeSet<i16>)>,
-                    Vec<(usize, Weight)>,
-                    Vec<(i16, usize, Weight)>,
-                ),
-                usize,
-            > = HashMap::new();
+            let mut sig2pid: HashMap<(Option<Weight>, u64), usize> = HashMap::new();
 
             for i in 0..n {
                 let st = &self.states[i];
-                let mut def_sig: Vec<_> = st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect();
-                def_sig.sort_unstable();
 
-                let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
-                for (to, w) in &st.epsilons { *eps_map.entry(part[*to]).or_default() |= w; }
-                let eps_sig: Vec<(usize, Weight)> = eps_map.into_iter().collect();
+                let transitions_hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
 
-                let mut lbl_map: BTreeMap<(i16, usize), Weight> = BTreeMap::new();
-                for (lbl, targets) in &st.transitions { for (to, w) in targets { *lbl_map.entry((*lbl, part[*to])).or_default() |= w; } }
-                let lbl_sig: Vec<(i16, usize, Weight)> = lbl_map.into_iter().map(|((lbl, p), w)| (lbl, p, w)).collect();
+                    // Hash default transitions without cloning BTreeSets
+                    let mut def_sig_refs: Vec<_> = st
+                        .default
+                        .iter()
+                        .map(|def| (part[def.target], &def.weight, &def.exceptions))
+                        .collect();
+                    def_sig_refs.sort_unstable();
+                    def_sig_refs.hash(&mut hasher);
 
-                let sig = (st.final_weight.clone(), def_sig, eps_sig, lbl_sig);
+                    // Hash epsilon transitions
+                    let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
+                    for (to, w) in &st.epsilons {
+                        *eps_map.entry(part[*to]).or_default() |= w;
+                    }
+                    eps_map.hash(&mut hasher);
+
+                    // Hash labeled transitions
+                    let mut lbl_map: BTreeMap<(i16, usize), Weight> = BTreeMap::new();
+                    for (lbl, targets) in &st.transitions {
+                        for (to, w) in targets {
+                            *lbl_map.entry((*lbl, part[*to])).or_default() |= w;
+                        }
+                    }
+                    lbl_map.hash(&mut hasher);
+
+                    hasher.finish()
+                };
+
+                let sig = (st.final_weight.clone(), transitions_hash);
                 let pid_next = sig2pid.len();
                 next_part[i] = *sig2pid.entry(sig).or_insert(pid_next);
             }
