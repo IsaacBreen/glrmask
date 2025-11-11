@@ -341,8 +341,6 @@ impl NWA {
                 eprintln!("  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
             }
         }
-        #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-        struct MembersKey(Vec<usize>);
 
         struct CompositionNode {
             final_weight: Option<Weight>,
@@ -351,6 +349,7 @@ impl NWA {
             exception_targets: BTreeMap<i16, usize>,
             exception_masks: BTreeMap<i16, Weight>,
             gates: HashMap<usize, Weight>,
+            incoming_weight_mask: Weight,
         }
 
         fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
@@ -363,7 +362,7 @@ impl NWA {
         }
 
         let mut nodes: Vec<CompositionNode> = Vec::new();
-        let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
+        // REMOVED: key_to_idx: HashMap<MembersKey, usize>
         let mut work: VecDeque<usize> = VecDeque::new();
 
         let pb_discover = if PROGRESS_BAR_ENABLED {
@@ -378,15 +377,13 @@ impl NWA {
             None
         };
 
+        // Initialize the start node
         let mut init_map: HashMap<usize, Weight> = HashMap::new();
         for (t, w) in eps_cache[self.body.start_state].iter() {
             *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
         }
-        let mut init_keys: Vec<_> = init_map.keys().copied().collect();
-        init_keys.sort_unstable();
-        let init_key = MembersKey(init_keys);
+        
         let start_idx = 0;
-        key_to_idx.insert(init_key, start_idx);
         nodes.push(CompositionNode {
             final_weight: None,
             default_target_idx: None,
@@ -394,6 +391,8 @@ impl NWA {
             exception_targets: BTreeMap::new(),
             exception_masks: BTreeMap::new(),
             gates: init_map,
+            // The start node is responsible for ALL weights initially.
+            incoming_weight_mask: Weight::all(),
         });
         let mut in_queue = vec![false; 1];
         in_queue[start_idx] = true;
@@ -505,48 +504,78 @@ impl NWA {
             if is_debug_level_enabled(5) {
                 eprintln!("  - computed target_maps:");
                 for (label, map) in &target_maps {
-                    let mut keys: Vec<_> = map.keys().copied().collect();
-                    keys.sort_unstable();
                     let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-                    eprintln!("    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
+                    eprintln!("    - label {:?}: total_weight={}", label, total_weight);
                 }
             }
 
             let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
             for (label, map) in target_maps {
-                let mut keys: Vec<_> = map.keys().copied().collect();
-                keys.sort_unstable();
-                let key = MembersKey(keys);
-                let target_idx = *key_to_idx.entry(key).or_insert_with(|| {
-                    let new_idx = nodes.len();
-                    nodes.push(CompositionNode {
-                        final_weight: None,
-                        default_target_idx: None,
-                        default_mask: None,
-                        exception_targets: BTreeMap::new(),
-                        exception_masks: BTreeMap::new(),
-                        gates: HashMap::new(),
-                    });
-                    if new_idx >= in_queue.len() {
-                        in_queue.resize(new_idx + 1, false);
-                    }
-                    new_idx
-                });
+                let transition_mask = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+                if transition_mask.is_empty() && label.is_some() {
+                    // For explicit exception labels, we still need a transition to block the default,
+                    // even if the resulting weight mask is empty.
+                } else if transition_mask.is_empty() {
+                    continue;
+                }
 
-                let mut any_change = false;
-                for (sig_id, weight) in &map {
-                    let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = &*entry | weight;
-                    if new_w != *entry {
-                        *entry = new_w;
-                        any_change = true;
+                // --- FIND-OR-CREATE LOGIC ---
+                let mut found_merge_target: Option<usize> = None;
+                for (j, existing_node) in nodes.iter().enumerate() {
+                    // Eligibility check: Disjoint incoming weight masks.
+                    if existing_node.incoming_weight_mask.is_disjoint(&transition_mask) {
+                        // This is a very simple heuristic. A more advanced one would check
+                        // for structural equivalence over the intersection of weights.
+                        // For now, this is our merge condition.
+                        found_merge_target = Some(j);
+                        break;
                     }
                 }
-                if any_change && !in_queue[target_idx] {
-                    in_queue[target_idx] = true;
-                    work.push_back(target_idx);
-                }
-                resolved_transitions.insert(label, (target_idx, map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a })));
+
+                let target_idx = match found_merge_target {
+                    Some(merge_idx) => {
+                        // MERGE into existing node
+                        let node_to_merge_into = &mut nodes[merge_idx];
+                        node_to_merge_into.incoming_weight_mask |= &transition_mask;
+
+                        let mut gates_changed = false;
+                        for (sig_id, weight) in &map {
+                            let entry = node_to_merge_into.gates.entry(*sig_id).or_default();
+                            let new_w = &*entry | weight;
+                            if new_w != *entry {
+                                *entry = new_w;
+                                gates_changed = true;
+                            }
+                        }
+
+                        if gates_changed && !in_queue[merge_idx] {
+                            in_queue[merge_idx] = true;
+                            work.push_back(merge_idx);
+                        }
+                        merge_idx
+                    }
+                    None => {
+                        // CREATE a new node
+                        let new_idx = nodes.len();
+                        nodes.push(CompositionNode {
+                            final_weight: None,
+                            default_target_idx: None,
+                            default_mask: None,
+                            exception_targets: BTreeMap::new(),
+                            exception_masks: BTreeMap::new(),
+                            gates: map.clone(),
+                            incoming_weight_mask: transition_mask.clone(),
+                        });
+                        if new_idx >= in_queue.len() {
+                            in_queue.resize(new_idx + 1, false);
+                        }
+                        in_queue[new_idx] = true;
+                        work.push_back(new_idx);
+                        new_idx
+                    }
+                };
+                
+                resolved_transitions.insert(label, (target_idx, transition_mask));
             }
 
             let node = &mut nodes[idx];
