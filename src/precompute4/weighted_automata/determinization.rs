@@ -107,16 +107,8 @@ fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], ga
 fn find_or_create_target_node(
     key: MembersKey,
     nodes: &mut Vec<CompositionNode>,
-    key_to_idx: &mut HashMap<MembersKey, usize>,
     incoming_transition_weight: &Weight,
 ) -> usize {
-    // Case 1: This exact set of NWA states (the key) has been seen before.
-    if let Some(&existing_idx) = key_to_idx.get(&key) {
-        // Update the incoming weight union for the existing node and return its index.
-        nodes[existing_idx].incoming_weight_union |= incoming_transition_weight;
-        return existing_idx;
-    }
-
     // Case 2: The key is new. Try to find an existing node to merge with as a heuristic.
     // A merge is valid if the new transition's weight is disjoint from all other weights
     // already leading into the candidate node.
@@ -143,8 +135,6 @@ fn find_or_create_target_node(
 
     if let Some(merge_idx) = best_cand_idx {
         // Found a suitable existing node to merge with.
-        // Map the new key to this existing node's index.
-        key_to_idx.insert(key, merge_idx);
         // Update the node's incoming weight union.
         nodes[merge_idx].incoming_weight_union |= incoming_transition_weight;
         return merge_idx;
@@ -161,7 +151,6 @@ fn find_or_create_target_node(
         gates: HashMap::new(), // Gates will be populated by the caller.
         incoming_weight_union: incoming_transition_weight.clone(),
     });
-    key_to_idx.insert(key, new_idx);
     new_idx
 }
 
@@ -432,7 +421,6 @@ impl NWA {
         }
 
         let mut nodes: Vec<CompositionNode> = Vec::new();
-        let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
         let mut work: VecDeque<usize> = VecDeque::new();
 
         let pb_discover = if PROGRESS_BAR_ENABLED {
@@ -453,9 +441,7 @@ impl NWA {
         }
         let mut init_keys: Vec<_> = init_map.keys().copied().collect();
         init_keys.sort_unstable();
-        let init_key = MembersKey(init_keys);
         let start_idx = 0;
-        key_to_idx.insert(init_key, start_idx);
         nodes.push(CompositionNode {
             final_weight: None,
             default_target_idx: None,
@@ -599,7 +585,7 @@ impl NWA {
                 keys.sort_unstable();
                 let key = MembersKey(keys);
 
-                let target_idx = find_or_create_target_node(key, &mut nodes, &mut key_to_idx, &total_weight);
+                let target_idx = find_or_create_target_node(key, &mut nodes, &total_weight);
 
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
