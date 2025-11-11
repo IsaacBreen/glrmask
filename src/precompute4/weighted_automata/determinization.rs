@@ -175,38 +175,49 @@ impl NWA {
         #[derive(Clone, Eq, PartialEq, Hash, Debug)]
         struct LabelShapeKey {
             // Labels for which some explicit transition exists from this macro-signature set.
-            exceptions: Vec<i16>,
+            // explicit labeled transitions: label -> sorted list of target step_ids
+            exceptions: Vec<(i16, Vec<usize>)>,
+            final_fp: u64,
             // A sorted list of (step_id, sorted_exceptions) for all default transitions
             // present in the macro-signature set.
-            defaults: Vec<Vec<i16>>,
+            defaults: Vec<(usize, Vec<i16>)>,
         }
 
         fn label_shape_for_keys(keys: &[usize], sigs: &[MacroSig]) -> LabelShapeKey {
-            let mut exceptions_set: BTreeSet<i16> = BTreeSet::new();
-            let mut defaults_set: BTreeSet<Vec<i16>> = BTreeSet::new();
+            let mut exceptions_map: BTreeMap<i16, BTreeSet<usize>> = BTreeMap::new();
+            let mut fp = FP_ZERO;
+            let mut defaults_set: BTreeSet<(usize, Vec<i16>)> = BTreeSet::new();
 
             for &sid in keys {
-                // The key only considers the structure of transitions, not final weights or step IDs.
-                // Final weights are handled by the DWA state itself.
-                for &lbl in sigs[sid].ex.keys() {
-                    exceptions_set.insert(lbl);
+                if let Some(w) = &sigs[sid].final_w {
+                    fp |= w.fp;
+                }
+                for (&lbl, steps) in &sigs[sid].ex {
+                    exceptions_map.entry(lbl).or_default().extend(steps);
                 }
                 for def in &sigs[sid].def {
                     let mut exceptions: Vec<i16> = def.exceptions.iter().copied().collect();
                     exceptions.sort_unstable();
-                    defaults_set.insert(exceptions);
+                    defaults_set.insert((def.step_id, exceptions));
                 }
             }
 
+            let exceptions: Vec<(i16, Vec<usize>)> = exceptions_map
+                .into_iter()
+                .map(|(lbl, steps)| (lbl, steps.into_iter().collect()))
+                .collect();
+
             LabelShapeKey {
-                exceptions: exceptions_set.into_iter().collect(),
+                exceptions,
+                final_fp: fp,
                 defaults: defaults_set.into_iter().collect(),
             }
         }
 
         // Precompute masked ε-closures for all states using fast scratch buffers.
         let pb_eps = if PROGRESS_BAR_ENABLED {
-            Some(ProgressBar::new(n as u64).with_style(ProgressStyle::default_bar()
+            Some(ProgressBar::new(n as u64).with_style(
+                ProgressStyle::default_bar()
                     .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
                     .unwrap(),
             ))
@@ -232,7 +243,8 @@ impl NWA {
         let mut state_to_sig_id: Vec<usize> = vec![0; n];
         let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
         let pb_sigs = if PROGRESS_BAR_ENABLED {
-            Some(ProgressBar::new(n as u64).with_style(ProgressStyle::default_bar()
+            Some(ProgressBar::new(n as u64).with_style(
+                ProgressStyle::default_bar()
                     .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Macro signatures)")
                     .unwrap(),
             ))
@@ -335,7 +347,8 @@ impl NWA {
         }
 
         let pb_compile = if PROGRESS_BAR_ENABLED {
-            Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(ProgressStyle::default_bar()
+            Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
+                ProgressStyle::default_bar()
                     .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Compile steps)")
                     .unwrap(),
             ))
@@ -399,7 +412,9 @@ impl NWA {
         let mut work: VecDeque<usize> = VecDeque::new();
 
         let pb_discover = if PROGRESS_BAR_ENABLED {
-            Some(ProgressBar::new(0).with_style(ProgressStyle::default_bar()
+            Some(
+                ProgressBar::new(0).with_style(
+                    ProgressStyle::default_bar()
                         .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Discovering states)")
                         .unwrap(),
                 ),
@@ -458,82 +473,113 @@ impl NWA {
             if is_debug_level_enabled(5) {
                 eprintln!("\nProcessing composition node {}: gates: {:?}", idx, node_gates);
             }
+            let mut def_groups: HashMap<usize, Weight> = HashMap::new();
+            let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+            let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+            let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
 
-            let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
-            let mut target_maps_def: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
-            let mut target_maps_weight: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
-
-            // 1. Compute the outcome for a generic "default" symbol.
-            let mut def_map_def = HashMap::new();
-            let mut def_map_weight = HashMap::new();
             for (sig_id, gate) in &node_gates {
-                let mut has_def = false;
                 for def in &sigs[*sig_id].def {
-                    has_def = true;
-                    accumulate(&mut def_map_def, &compiled_steps[def.step_id].by_sig, gate);
-                    accumulate(&mut def_map_weight, &compiled_steps[def.step_id].by_sig, gate);
+                    *def_groups.entry(def.step_id).or_default() |= gate;
+                    // Record that this default has these labels as explicit exceptions; default must not apply on them.
+                    for &lbl in &def.exceptions {
+                        *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
+                    }
                 }
-                if !has_def {
-                    // Implicit self-loop for state definition, does not contribute to weight.
-                    *def_map_def.entry(*sig_id).or_default() |= gate;
+                for (lbl, ex_steps) in &sigs[*sig_id].ex {
+                    for ex_step in ex_steps {
+                        *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
+                    }
+                    // Default should not apply on labels that have explicit labeled transitions (for this state).
+                    for def in &sigs[*sig_id].def {
+                        *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
+                    }
                 }
             }
-            target_maps_def.insert(None, def_map_def);
-            target_maps_weight.insert(None, def_map_weight);
 
-            // 2. For each explicit label, compute its specific outcome, overriding the default.
-            let mut labels_to_consider = BTreeSet::new();
-            for (sig_id, _) in &node_gates {
-                labels_to_consider.extend(sigs[*sig_id].ex.keys());
-                for def in &sigs[*sig_id].def {
-                    labels_to_consider.extend(&def.exceptions);
-                }
+            if is_debug_level_enabled(5) {
+                eprintln!("  - def_groups: {:?}", def_groups);
+                eprintln!("  - ex_groups_by_label: {:?}", ex_groups_by_label);
+                eprintln!("  - def_exers_by_label: {:?}", def_exers_by_label);
+                eprintln!("  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
             }
+            let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
+            let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+            for (def_step, g) in &def_groups {
+                accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
+            }
+            if !def_target_map.is_empty() {
+                target_maps.insert(None, def_target_map);
+            }
+
+            // Labels that need explicit exception edges are:
+            //  - any label with explicit labeled transitions
+            //  - any label that appears in a default's exception set
+            let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
+            labels_to_consider.extend(ex_groups_by_label.keys().copied());
+            labels_to_consider.extend(def_exceptions_by_label.keys().copied());
 
             for lbl in labels_to_consider {
-                let mut map_def = HashMap::new();
-                let mut map_weight = HashMap::new();
-                for (sig_id, gate) in &node_gates {
-                    let mut handled = false;
-                    // Check for explicit transition, which overrides any default.
-                    if let Some(steps) = sigs[*sig_id].ex.get(&lbl) {
-                        handled = true;
-                        for &step in steps {
-                            accumulate(&mut map_def, &compiled_steps[step].by_sig, gate);
-                            accumulate(&mut map_weight, &compiled_steps[step].by_sig, gate);
-                        }
-                    } else {
-                        // If no explicit transition, check if any default applies.
-                        let mut def_applies = false;
-                        for def in &sigs[*sig_id].def {
-                            if !def.exceptions.contains(&lbl) {
-                                def_applies = true;
-                                accumulate(&mut map_def, &compiled_steps[def.step_id].by_sig, gate);
-                                accumulate(&mut map_weight, &compiled_steps[def.step_id].by_sig, gate);
-                            }
-                        }
-                        if def_applies {
-                            handled = true;
-                        }
-                    }
+                if is_debug_level_enabled(5) {
+                    eprintln!("    - processing exception label {}", lbl);
+                }
+                let mut map = HashMap::new();
+                let def_exers = def_exers_by_label.get(&lbl);
+                let def_exc = def_exceptions_by_label.get(&lbl);
 
-                    if !handled {
-                        // No transition found for this sig on this label, so it implicitly self-loops.
-                        *map_def.entry(*sig_id).or_default() |= gate;
+                for (def_step, total_g) in &def_groups {
+                    if is_debug_level_enabled(5) {
+                        eprintln!("      - considering default step {} with total_g {}", def_step, total_g);
+                    }
+                    // Subtract states that have explicit labeled transitions on this label
+                    let g_exers = def_exers.and_then(|de| de.get(def_step));
+                    // Subtract states whose default is explicitly not applicable on this label (exception set)
+                    let g_exc = def_exc.and_then(|dx| dx.get(def_step));
+
+                    if is_debug_level_enabled(5) {
+                        eprintln!("        - g_exers for this def_step: {:?}", g_exers);
+                        eprintln!("        - g_exc for this def_step: {:?}", g_exc);
+                    }
+                    let mut g_nonex = total_g.clone();
+                    if let Some(g) = g_exers { g_nonex -= g; }
+                    if let Some(g) = g_exc { g_nonex -= g; }
+                    if is_debug_level_enabled(5) {
+                        eprintln!("        - g_nonex (after subtractors): {}", g_nonex);
+                    }
+                    if !g_nonex.is_empty() {
+                        if is_debug_level_enabled(5) {
+                            eprintln!("        - accumulating for g_nonex");
+                        }
+                        accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
                     }
                 }
-                target_maps_def.insert(Some(lbl), map_def);
-                target_maps_weight.insert(Some(lbl), map_weight);
+                if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
+                    for (ex_step, g_ex) in ex_groups {
+                        if is_debug_level_enabled(5) {
+                            eprintln!("      - considering exception step {} with g_ex {}", ex_step, g_ex);
+                        }
+                        accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+                    }
+                }
+                // Always insert an entry for this label (even if map is empty)
+                // so that we can emit an exception edge that blocks the default.
+                target_maps.insert(Some(lbl), map);
             }
 
-            // 3. Resolve all transitions into DWA states and edge weights.
-            let mut labels: Vec<_> = target_maps_def.keys().copied().collect();
-            for label in labels {
-                let map_def = target_maps_def.get(&label).unwrap();
-                let map_weight = target_maps_weight.get(&label).unwrap();
+            if is_debug_level_enabled(5) {
+                eprintln!("  - computed target_maps:");
+                for (label, map) in &target_maps {
+                    let mut keys: Vec<_> = map.keys().copied().collect();
+                    keys.sort_unstable();
+                    let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+                    eprintln!("    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
+                }
+            }
 
+            let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
+            for (label, map) in target_maps {
                 // Compute target shape key from the target macro-signature set (ignoring weights).
-                let mut member_keys: Vec<_> = map_def.keys().copied().collect();
+                let mut member_keys: Vec<_> = map.keys().copied().collect();
                 member_keys.sort_unstable();
 
                 // If the map is empty, target set is empty; we still need a shape key.
@@ -558,7 +604,7 @@ impl NWA {
 
                 // Merge (union) the gates that lead into this shape for this transition.
                 let mut any_change = false;
-                for (sig_id, weight) in map_def {
+                for (sig_id, weight) in &map {
                     let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
                     let new_w = &*entry | weight;
                     if new_w != *entry {
@@ -572,8 +618,8 @@ impl NWA {
                 }
 
                 // Aggregate the total weight mask for this label to be placed on the DWA edge.
-                let mask = map_weight.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-                resolved_transitions.insert(label.clone(), (target_idx, mask));
+                let mask = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+                resolved_transitions.insert(label, (target_idx, mask));
             }
 
             let node = &mut nodes[idx];
@@ -581,8 +627,8 @@ impl NWA {
                 node.default_target_idx = Some(target_idx);
                 node.default_mask = Some(mask);
             }
-            for (lbl_opt, (target_idx, mask)) in resolved_transitions {
-                if let Some(lbl) = lbl_opt {
+            for (lbl, (target_idx, mask)) in resolved_transitions {
+                if let Some(lbl) = lbl {
                     node.exception_targets.insert(lbl, target_idx);
                     node.exception_masks.insert(lbl, mask);
                 }
