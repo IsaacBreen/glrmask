@@ -151,7 +151,9 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
             // If this epsilon is new or stronger, it can propagate existing searches.
             if *eps_weight != old_eps_w {
                 // Any search that has reached `a` can now cross this new epsilon to `target`.
-                for (&(a_prime, c_prime), w_a_prime_a) in &queries[a] {
+                // To avoid borrow checker issues, clone the queries at state `a`.
+                let queries_at_a = queries[a].clone();
+                for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
                     let prop_w = w_a_prime_a & &*eps_weight;
                     if prop_w.is_empty() { continue; }
 
