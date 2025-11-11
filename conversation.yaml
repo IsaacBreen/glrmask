@@ -986,24 +986,24 @@ local_system:
           pub fn compute_future_weights(&self) -> Vec<Weight> {
               let n = self.states.len();
               let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-              let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
+              let mut rev: Vec<Vec<(NWAStateID, &Weight)>> = vec![vec![]; n];
 
               // Build reverse adjacency aggregating all edge types with their weights.
               for p in 0..n {
                   // Epsilon
                   for &(t, ref w) in &self.states[p].epsilons {
-                      if t < n { rev[t].push((p, w.clone())); }
+                      if t < n { rev[t].push((p, w)); }
                   }
                   // Labeled
                   for (_, targets) in &self.states[p].transitions {
                       for (t, w) in targets {
-                          if *t < n { rev[*t].push((p, w.clone())); }
+                          if *t < n { rev[*t].push((p, w)); }
                       }
                   }
                   // Default
                   for def in &self.states[p].default {
                       if def.target < n {
-                          rev[def.target].push((p, def.weight.clone()));
+                          rev[def.target].push((p, &def.weight));
                       }
                   }
               }
@@ -1023,7 +1023,7 @@ local_system:
               while let Some(v) = q.pop_front() {
                   let fv = fut[v].clone();
                   if fv.is_empty() { continue; }
-                  for &(p, ref w_pv) in &rev[v] {
+                  for &(p, w_pv) in &rev[v] {
                       let add = &fv & w_pv;
                       if add.is_empty() { continue; }
                       let old = &fut[p];
@@ -2190,30 +2190,22 @@ local_system:
           fn dedup_labeled_edges(&mut self) -> bool {
               let mut changed = false;
               for st in &mut self.states.0 {
-                  let mut new_map: BTreeMap<i16, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
-                  for (lbl, targets) in &st.transitions {
-                      let entry = new_map.entry(*lbl).or_insert_with(BTreeMap::new);
-                      for (to, w) in targets {
-                          let e = entry.entry(*to).or_insert_with(Weight::zeros);
-                          let old = e.clone();
-                          *e |= w;
-                          if *e != old {
-                              changed = true;
-                          }
+                  for targets in st.transitions.values_mut() {
+                      if targets.len() <= 1 {
+                          continue;
                       }
-                  }
-                  if !new_map.is_empty() {
-                      let mut new_trans = BTreeMap::new();
-                      for (lbl, inner) in new_map {
-                          let vecv: Vec<(NWAStateID, Weight)> = inner.into_iter().collect();
-                          if let Some(old_vec) = st.transitions.get(&lbl) {
-                              if vecv != *old_vec {
-                                  changed = true;
-                              }
-                          }
-                          new_trans.insert(lbl, vecv);
+                      let old_targets = targets.clone();
+
+                      let mut acc: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+                      for (to, w) in targets.iter() {
+                          *acc.entry(*to).or_insert_with(Weight::zeros) |= w;
                       }
-                      st.transitions = new_trans;
+
+                      let new_targets: Vec<_> = acc.into_iter().collect();
+                      if new_targets != old_targets {
+                          *targets = new_targets;
+                          changed = true;
+                      }
                   }
               }
               changed
@@ -2428,35 +2420,39 @@ local_system:
                   rounds += 1;
                   changed = false;
                   let mut next_part: Vec<usize> = vec![0; n];
-                  let mut sig2pid: BTreeMap<
+                  let mut sig2pid: HashMap<
                       (
                           Option<Weight>,
-                          BTreeSet<(usize, Weight, BTreeSet<i16>)>,
-                          BTreeMap<usize, Weight>,
-                          BTreeMap<i16, BTreeSet<(usize, Weight)>>,
+                          Vec<(usize, Weight, BTreeSet<i16>)>,
+                          Vec<(usize, Weight)>,
+                          Vec<(i16, Vec<(usize, Weight)>)>,
                       ),
                       usize,
-                  > = BTreeMap::new();
+                  > = HashMap::new();
 
                   for i in 0..n {
                       let st = &self.states[i];
-                      let def_sig =
-                          st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect::<BTreeSet<_>>();
+                      let mut def_sig = st.default.iter()
+                          .map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone()))
+                          .collect::<Vec<_>>();
+                      def_sig.sort_unstable();
 
-                      let eps_sig = st.epsilons.iter()
-                          .fold(BTreeMap::new(), |mut acc, (to, w)| {
-                              *acc.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
-                              acc
-                          });
+                      let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
+                      st.epsilons.iter().for_each(|(to, w)| {
+                          *eps_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
+                      });
+                      let eps_sig: Vec<(usize, Weight)> = eps_map.into_iter().collect();
 
-                      let lbl_sig = st.transitions.iter()
-                          .map(|(lbl, targets)| {
-                              let target_sigs = targets.iter()
-                                  .map(|(to, w)| (part[*to], w.clone()))
-                                  .collect::<BTreeSet<_>>();
-                              (*lbl, target_sigs)
-                          })
-                          .collect::<BTreeMap<_,_>>();
+                      let mut lbl_map: BTreeMap<i16, BTreeMap<usize, Weight>> = BTreeMap::new();
+                      for (lbl, targets) in &st.transitions {
+                          let inner_map = lbl_map.entry(*lbl).or_default();
+                          for (to, w) in targets {
+                              *inner_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
+                          }
+                      }
+                      let lbl_sig: Vec<(i16, Vec<(usize, Weight)>)> = lbl_map.into_iter()
+                          .map(|(lbl, inner)| (lbl, inner.into_iter().collect()))
+                          .collect();
 
                       let sig = (st.final_weight.clone(), def_sig, eps_sig, lbl_sig);
                       let pid_next = sig2pid.len();
@@ -4752,7 +4748,7 @@ local_system:
 
                       let mut acc: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
                       for (to, w) in targets.iter() {
-                          acc.entry(*to).or_insert_with(Weight::zeros) |= w;
+                          *acc.entry(*to).or_insert_with(Weight::zeros) |= w;
                       }
 
                       let new_targets: Vec<_> = acc.into_iter().collect();
@@ -4979,34 +4975,23 @@ local_system:
                           Option<Weight>,
                           Vec<(usize, Weight, BTreeSet<i16>)>,
                           Vec<(usize, Weight)>,
-                          Vec<(i16, Vec<(usize, Weight)>)>,
+                          Vec<(i16, usize, Weight)>,
                       ),
                       usize,
                   > = HashMap::new();
 
                   for i in 0..n {
                       let st = &self.states[i];
-                      let mut def_sig = st.default.iter()
-                          .map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone()))
-                          .collect::<Vec<_>>();
+                      let mut def_sig: Vec<_> = st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect();
                       def_sig.sort_unstable();
 
                       let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
-                      st.epsilons.iter().for_each(|(to, w)| {
-                          *eps_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
-                      });
+                      for (to, w) in &st.epsilons { *eps_map.entry(part[*to]).or_default() |= w; }
                       let eps_sig: Vec<(usize, Weight)> = eps_map.into_iter().collect();
 
-                      let mut lbl_map: BTreeMap<i16, BTreeMap<usize, Weight>> = BTreeMap::new();
-                      for (lbl, targets) in &st.transitions {
-                          let inner_map = lbl_map.entry(*lbl).or_default();
-                          for (to, w) in targets {
-                              *inner_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
-                          }
-                      }
-                      let lbl_sig: Vec<(i16, Vec<(usize, Weight)>)> = lbl_map.into_iter()
-                          .map(|(lbl, inner)| (lbl, inner.into_iter().collect()))
-                          .collect();
+                      let mut lbl_map: BTreeMap<(i16, usize), Weight> = BTreeMap::new();
+                      for (lbl, targets) in &st.transitions { for (to, w) in targets { *lbl_map.entry((*lbl, part[*to])).or_default() |= w; } }
+                      let lbl_sig: Vec<(i16, usize, Weight)> = lbl_map.into_iter().map(|((lbl, p), w)| (lbl, p, w)).collect();
 
                       let sig = (st.final_weight.clone(), def_sig, eps_sig, lbl_sig);
                       let pid_next = sig2pid.len();
@@ -5123,7 +5108,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - gf
   commit_message_model:
@@ -6152,24 +6137,24 @@ messages:
           pub fn compute_future_weights(&self) -> Vec<Weight> {
               let n = self.states.len();
               let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-              let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
+              let mut rev: Vec<Vec<(NWAStateID, &Weight)>> = vec![vec![]; n];
 
               // Build reverse adjacency aggregating all edge types with their weights.
               for p in 0..n {
                   // Epsilon
                   for &(t, ref w) in &self.states[p].epsilons {
-                      if t < n { rev[t].push((p, w.clone())); }
+                      if t < n { rev[t].push((p, w)); }
                   }
                   // Labeled
                   for (_, targets) in &self.states[p].transitions {
                       for (t, w) in targets {
-                          if *t < n { rev[*t].push((p, w.clone())); }
+                          if *t < n { rev[*t].push((p, w)); }
                       }
                   }
                   // Default
                   for def in &self.states[p].default {
                       if def.target < n {
-                          rev[def.target].push((p, def.weight.clone()));
+                          rev[def.target].push((p, &def.weight));
                       }
                   }
               }
@@ -6189,7 +6174,7 @@ messages:
               while let Some(v) = q.pop_front() {
                   let fv = fut[v].clone();
                   if fv.is_empty() { continue; }
-                  for &(p, ref w_pv) in &rev[v] {
+                  for &(p, w_pv) in &rev[v] {
                       let add = &fv & w_pv;
                       if add.is_empty() { continue; }
                       let old = &fut[p];
@@ -7361,30 +7346,22 @@ messages:
           fn dedup_labeled_edges(&mut self) -> bool {
               let mut changed = false;
               for st in &mut self.states.0 {
-                  let mut new_map: BTreeMap<i16, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
-                  for (lbl, targets) in &st.transitions {
-                      let entry = new_map.entry(*lbl).or_insert_with(BTreeMap::new);
-                      for (to, w) in targets {
-                          let e = entry.entry(*to).or_insert_with(Weight::zeros);
-                          let old = e.clone();
-                          *e |= w;
-                          if *e != old {
-                              changed = true;
-                          }
+                  for targets in st.transitions.values_mut() {
+                      if targets.len() <= 1 {
+                          continue;
                       }
-                  }
-                  if !new_map.is_empty() {
-                      let mut new_trans = BTreeMap::new();
-                      for (lbl, inner) in new_map {
-                          let vecv: Vec<(NWAStateID, Weight)> = inner.into_iter().collect();
-                          if let Some(old_vec) = st.transitions.get(&lbl) {
-                              if vecv != *old_vec {
-                                  changed = true;
-                              }
-                          }
-                          new_trans.insert(lbl, vecv);
+                      let old_targets = targets.clone();
+
+                      let mut acc: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+                      for (to, w) in targets.iter() {
+                          *acc.entry(*to).or_insert_with(Weight::zeros) |= w;
                       }
-                      st.transitions = new_trans;
+
+                      let new_targets: Vec<_> = acc.into_iter().collect();
+                      if new_targets != old_targets {
+                          *targets = new_targets;
+                          changed = true;
+                      }
                   }
               }
               changed
@@ -7599,35 +7576,39 @@ messages:
                   rounds += 1;
                   changed = false;
                   let mut next_part: Vec<usize> = vec![0; n];
-                  let mut sig2pid: BTreeMap<
+                  let mut sig2pid: HashMap<
                       (
                           Option<Weight>,
-                          BTreeSet<(usize, Weight, BTreeSet<i16>)>,
-                          BTreeMap<usize, Weight>,
-                          BTreeMap<i16, BTreeSet<(usize, Weight)>>,
+                          Vec<(usize, Weight, BTreeSet<i16>)>,
+                          Vec<(usize, Weight)>,
+                          Vec<(i16, Vec<(usize, Weight)>)>,
                       ),
                       usize,
-                  > = BTreeMap::new();
+                  > = HashMap::new();
 
                   for i in 0..n {
                       let st = &self.states[i];
-                      let def_sig =
-                          st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect::<BTreeSet<_>>();
+                      let mut def_sig = st.default.iter()
+                          .map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone()))
+                          .collect::<Vec<_>>();
+                      def_sig.sort_unstable();
 
-                      let eps_sig = st.epsilons.iter()
-                          .fold(BTreeMap::new(), |mut acc, (to, w)| {
-                              *acc.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
-                              acc
-                          });
+                      let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
+                      st.epsilons.iter().for_each(|(to, w)| {
+                          *eps_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
+                      });
+                      let eps_sig: Vec<(usize, Weight)> = eps_map.into_iter().collect();
 
-                      let lbl_sig = st.transitions.iter()
-                          .map(|(lbl, targets)| {
-                              let target_sigs = targets.iter()
-                                  .map(|(to, w)| (part[*to], w.clone()))
-                                  .collect::<BTreeSet<_>>();
-                              (*lbl, target_sigs)
-                          })
-                          .collect::<BTreeMap<_,_>>();
+                      let mut lbl_map: BTreeMap<i16, BTreeMap<usize, Weight>> = BTreeMap::new();
+                      for (lbl, targets) in &st.transitions {
+                          let inner_map = lbl_map.entry(*lbl).or_default();
+                          for (to, w) in targets {
+                              *inner_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
+                          }
+                      }
+                      let lbl_sig: Vec<(i16, Vec<(usize, Weight)>)> = lbl_map.into_iter()
+                          .map(|(lbl, inner)| (lbl, inner.into_iter().collect()))
+                          .collect();
 
                       let sig = (st.final_weight.clone(), def_sig, eps_sig, lbl_sig);
                       let pid_next = sig2pid.len();
@@ -7739,41 +7720,44 @@ messages:
       filename: src/precompute4/weighted_automata/simplification.rs
   - user: |-
       ```
-      [DEBUG] 4] src/precompute4/full_dwa.rs:348: Reversed trie traversal (special_map_grouped) took: 1.11809975s
-      1/12 passes (normalize) NWA simplify pass 'normalize' took 255.26675ms (changed: false)
-      1/12 passes (dedup labeled) NWA simplify pass 'dedup labeled' took 1.123419042s (changed: true)
-      1/12 passes (dedup epsilons) NWA simplify pass 'dedup epsilons' took 4.901208ms (changed: false)
-      1/12 passes (unify defaults) NWA simplify pass 'unify defaults' took 1.80725ms (changed: false)
-      1/12 passes (unify final states) NWA simplify pass 'unify final states' took 1.822333ms (changed: false)
-      1/12 passes (bypass ε-chains) NWA simplify pass 'bypass ε-chains' took 2.69975ms (changed: false)
-      1/12 passes (collapse SCCs) NWA simplify pass 'collapse SCCs' took 35.809959ms (changed: false)
-      1/12 passes (prune unreachable) NWA simplify pass 'prune unreachable' took 274.705875ms (changed: false)
-      1/12 passes (prune dead ends) NWA simplify pass 'prune dead ends' took 2.114381125s (changed: true)
-      1/12 passes (merge equivalent) NWA simplify pass 'merge equivalent' took 45.459545459s (changed: true)
-      1/12 passes (normalize) NWA simplify pass 'normalize' took 27.465709ms (changed: false)
-      2/12 passes (normalize) NWA simplify pass 'normalize' took 26.843125ms (changed: false)
-      2/12 passes (dedup labeled) NWA simplify pass 'dedup labeled' took 457.184625ms (changed: true)
-      2/12 passes (dedup epsilons) NWA simplify pass 'dedup epsilons' took 1.962541ms (changed: false)
-      2/12 passes (unify defaults) NWA simplify pass 'unify defaults' took 1.18075ms (changed: false)
-      2/12 passes (unify final states) NWA simplify pass 'unify final states' took 1.221625ms (changed: false)
-      2/12 passes (bypass ε-chains) NWA simplify pass 'bypass ε-chains' took 270.432709ms (changed: true)
-      2/12 passes (collapse SCCs) NWA simplify pass 'collapse SCCs' took 12.3885ms (changed: false)
-      2/12 passes (prune unreachable) NWA simplify pass 'prune unreachable' took 12.723458ms (changed: false)
-      2/12 passes (prune dead ends) NWA simplify pass 'prune dead ends' took 1.214381792s (changed: false)
-      2/12 passes (merge equivalent) NWA simplify pass 'merge equivalent' took 44.28304975s (changed: false)
-      2/12 passes (normalize) NWA simplify pass 'normalize' took 141.425333ms (changed: false)
-      3/12 passes (normalize) NWA simplify pass 'normalize' took 8.304958ms (changed: false)
-      3/12 passes (dedup labeled) NWA simplify pass 'dedup labeled' took 606.423042ms (changed: true)
-      3/12 passes (dedup epsilons) NWA simplify pass 'dedup epsilons' took 2.303209ms (changed: false)
-      3/12 passes (unify defaults) NWA simplify pass 'unify defaults' took 1.188833ms (changed: false)
-      3/12 passes (unify final states) NWA simplify pass 'unify final states' took 1.231375ms (changed: false)
-      3/12 passes (bypass ε-chains) NWA simplify pass 'bypass ε-chains' took 1.623958ms (changed: false)
-      3/12 passes (collapse SCCs) NWA simplify pass 'collapse SCCs' took 17.9045ms (changed: false)
-      3/12 passes (prune unreachable) NWA simplify pass 'prune unreachable' took 122.847ms (changed: false)
-      3/12 passes (prune dead ends) NWA simplify pass 'prune dead ends' took 1.605748292s (changed: false)
-      3/12 passes (merge equivalent)
+      [DEBUG] 4] src/precompute4/full_dwa.rs:348: Reversed trie traversal (special_map_grouped) took: 1.035306041s
+      1/12 passes (normalize) NWA simplify pass 'normalize' took 85.675ms (changed: false)
+      1/12 passes (dedup labeled) NWA simplify pass 'dedup labeled' took 13.184833ms (changed: false)
+      1/12 passes (dedup epsilons) NWA simplify pass 'dedup epsilons' took 2.375583ms (changed: false)
+      1/12 passes (unify defaults) NWA simplify pass 'unify defaults' took 1.65075ms (changed: false)
+      1/12 passes (unify final states) NWA simplify pass 'unify final states' took 1.811333ms (changed: false)
+      1/12 passes (bypass ε-chains) NWA simplify pass 'bypass ε-chains' took 2.156042ms (changed: false)
+      1/12 passes (collapse SCCs) NWA simplify pass 'collapse SCCs' took 20.872083ms (changed: false)
+      1/12 passes (prune unreachable) NWA simplify pass 'prune unreachable' took 37.668458ms (changed: false)
+      1/12 passes (prune dead ends) NWA simplify pass 'prune dead ends' took 1.373627208s (changed: true)
+      1/12 passes (merge equivalent) NWA simplify pass 'merge equivalent' took 26.5975225s (changed: true)
+      1/12 passes (normalize) NWA simplify pass 'normalize' took 26.552334ms (changed: false)
+      2/12 passes (normalize) NWA simplify pass 'normalize' took 25.934834ms (changed: false)
+      2/12 passes (dedup labeled) NWA simplify pass 'dedup labeled' took 9.59825ms (changed: false)
+      2/12 passes (dedup epsilons) NWA simplify pass 'dedup epsilons' took 1.872334ms (changed: false)
+      2/12 passes (unify defaults) NWA simplify pass 'unify defaults' took 1.050291ms (changed: false)
+      2/12 passes (unify final states) NWA simplify pass 'unify final states' took 1.140292ms (changed: false)
+      2/12 passes (bypass ε-chains) NWA simplify pass 'bypass ε-chains' took 301.568625ms (changed: true)
+      2/12 passes (collapse SCCs) NWA simplify pass 'collapse SCCs' took 11.899917ms (changed: false)
+      2/12 passes (prune unreachable) NWA simplify pass 'prune unreachable' took 12.831834ms (changed: false)
+      2/12 passes (prune dead ends) NWA simplify pass 'prune dead ends' took 1.292793s (changed: false)
+      2/12 passes (merge equivalent) NWA simplify pass 'merge equivalent' took 19.77176075s (changed: false)
+      2/12 passes (normalize) NWA simplify pass 'normalize' took 13.227ms (changed: false)
+      3/12 passes (normalize) NWA simplify pass 'normalize' took 11.0475ms (changed: false)
+      3/12 passes (dedup labeled) NWA simplify pass 'dedup labeled' took 7.511416ms (changed: false)
+      3/12 passes (dedup epsilons) NWA simplify pass 'dedup epsilons' took 2.460041ms (changed: false)
+      3/12 passes (unify defaults) NWA simplify pass 'unify defaults' took 1.023542ms (changed: false)
+      3/12 passes (unify final states) NWA simplify pass 'unify final states' took 1.092334ms (changed: false)
+      3/12 passes (bypass ε-chains) NWA simplify pass 'bypass ε-chains' took 1.152167ms (changed: false)
+      3/12 passes (collapse SCCs) NWA simplify pass 'collapse SCCs' took 11.17975ms (changed: false)
+      3/12 passes (prune unreachable) NWA simplify pass 'prune unreachable' took 12.254041ms (changed: false)
+      3/12 passes (prune dead ends) NWA simplify pass 'prune dead ends' took 1.031902833s (changed: false)
+      3/12 passes (merge equivalent) NWA simplify pass 'merge equivalent' took 19.115461208s (changed: false)
+      3/12 passes (normalize) NWA simplify pass 'normalize' took 10.910083ms (changed: false)
+      12/12 passes (Simplified to 300836 states) NWA::simplify (453481 states -> 300836 states) took: 69.814856625s
       ```
-
+    metadata:
+  - user: |
       This is far too slow.
       Make simplification much faster and more efficient, and at least as effective too.
       Generally, minimizing the number of states is a good thing.
@@ -7800,235 +7784,86 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on my analysis of the performance logs, the simplification process for Non-deterministic Weighted Automata (NWA) is bottlenecked by three key functions: `dedup_labeled_edges`, `prune_dead_ends` (specifically its call to `compute_future_weights`), and most significantly, `merge_equivalent_states_partition`. My hypotheses for optimization are as follows:
+      Of course. Dealing with performance bottlenecks in complex algorithms like automata simplification is crucial. The primary issue appears to be the excessive time spent in the `merge_equivalent_states_partition` function, specifically due to an inefficient method of computing state signatures for the partition refinement process.
 
-      1.  **`compute_future_weights` is slow due to excessive cloning of `Weight` objects.** By building the reverse graph with references (`&Weight`) instead of owned, cloned `Weight`s, we can significantly reduce memory allocations and improve speed. This is sound because the weights are owned by the automaton `self` which outlives the reverse graph created within the function.
+      My hypothesis is that the nested data structures used to represent transition signatures are slow to build, hash, and compare, leading to the observed multi-second execution times for this pass. By flattening the signature for labeled transitions, we can significantly reduce this overhead.
 
-      2.  **`dedup_labeled_edges` can be optimized by avoiding reconstruction of the entire transitions map.** The original implementation rebuilt the main `BTreeMap` of transitions for each state. A more efficient approach is to modify the `Vec` of targets for each label in-place (or with a temporary `BTreeMap` scoped to just that `Vec`), reducing allocations.
-
-      3.  **`merge_equivalent_states_partition` is extremely slow due to its choice of data structures for state signatures.** The use of nested `BTreeMap` and `BTreeSet` for signatures leads to slow comparisons (for `BTreeMap` keys) and heavy allocations. By switching to `HashMap` and representing signatures with sorted `Vec`s, we can leverage faster hashing and reduce overhead. Furthermore, the original signature logic for labeled transitions was subtly incorrect; it did not union weights of edges going to the same partition class, which is required by NWA semantics. The new implementation corrects this, leading to potentially better minimization.
-
-      I will now provide the step-by-step instructions and corresponding git diffs to implement these optimizations.
+      Here are the step-by-step instructions to apply the optimization, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Optimize `compute_future_weights` in `src/precompute4/weighted_automata/ops.rs`**:
-          *   Navigate to the function `compute_future_weights` within `impl NWA`.
-          *   Change the type of the `rev` variable from `Vec<Vec<(NWAStateID, Weight)>>` to `Vec<Vec<(NWAStateID, &Weight)>>`.
-          *   Update the loops that populate `rev` to push references to weights instead of cloning them. For example, `rev[t].push((p, w.clone()))` becomes `rev[t].push((p, w))`.
+      1.  Open the file `src/precompute4/weighted_automata/simplification.rs`.
+      2.  Navigate to the `merge_equivalent_states_partition` method within the `impl NWA`.
+      3.  Locate the definition of the `sig2pid` `HashMap`. You will modify the type of its key to use a flatter, more efficient structure for representing labeled transitions.
+          -   Change the fourth element of the key tuple from `Vec<(i16, Vec<(usize, Weight)>)>` to `Vec<(i16, usize, Weight)>`.
+      4.  Next, update the logic that constructs this signature inside the main `for i in 0..n` loop.
+          -   The computation for `def_sig` and `eps_sig` can be slightly streamlined for clarity.
+          -   The main change is to replace the entire block for computing `lbl_sig`. The old code builds a nested `BTreeMap`. You will replace it with code that builds a single `BTreeMap` with a `(i16, usize)` tuple as the key, which is much more efficient. This map will then be converted into the new flattened `Vec` structure for the signature.
 
-      2.  **Optimize `dedup_labeled_edges` in `src/precompute4/weighted_automata/simplification.rs`**:
-          *   Navigate to the function `dedup_labeled_edges` within `impl NWA`.
-          *   Replace the entire body of the function. The new implementation will iterate through each transition's target list, use a temporary `BTreeMap` to merge duplicate targets by unioning their weights, and then update the target list if it has changed. This is much more efficient than the original approach which rebuilt large parts of the automaton's state.
+      This change preserves the correctness of the minimization algorithm while drastically improving the performance of its most expensive step.
 
-      3.  **Optimize `merge_equivalent_states_partition` in `src/precompute4/weighted_automata/simplification.rs`**:
-          *   Navigate to the function `merge_equivalent_states_partition` within `impl NWA`.
-          *   Change the `sig2pid` variable from a `BTreeMap` to a `HashMap`. You will need to add `use std::collections::HashMap;`.
-          *   Update the type of the signature used as the key for `sig2pid`. Replace the nested `BTreeMap` and `BTreeSet` structures with `Vec`s.
-          -   The new signature type will be: `(Option<Weight>, Vec<(usize, Weight, BTreeSet<i16>)>, Vec<(usize, Weight)>, Vec<(i16, Vec<(usize, Weight)>)>)`.
-          *   Replace the signature construction logic inside the main loop. The new logic will:
-              *   Create a sorted `Vec` for default transitions (`def_sig`).
-              *   Use a temporary `BTreeMap` to correctly union weights for epsilon transitions going to the same partition class, then collect into a sorted `Vec` (`eps_sig`).
-              *   Use nested `BTreeMap`s to do the same for labeled transitions (`lbl_sig`), ensuring weights are unioned correctly.
-          *   The logic for inserting into `sig2pid` and for rebuilding the automaton after partitioning remains conceptually the same but will now operate on the faster `HashMap` and `Vec`-based signatures.
+      ### Git Diff
 
-      ### Git Diffs
-
-      Here are the git diffs to apply these changes:
+      Here is the git diff to apply these changes.
 
       ```diff
-      diff --git a/src/precompute4/weighted_automata/ops.rs b/src/precompute4/weighted_automata/ops.rs
-      --- a/src/precompute4/weighted_automata/ops.rs
-      +++ b/src/precompute4/weighted_automata/ops.rs
-      @@ -130,22 +130,22 @@
-           /// This is a standard monotone least fixpoint computed by reverse propagation.
-           pub fn compute_future_weights(&self) -> Vec<Weight> {
-               let n = self.states.len();
-               let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-      -        let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
-      +        let mut rev: Vec<Vec<(NWAStateID, &Weight)>> = vec![vec![]; n];
-       
-               // Build reverse adjacency aggregating all edge types with their weights.
-               for p in 0..n {
-                   // Epsilon
-                   for &(t, ref w) in &self.states[p].epsilons {
-      -                if t < n { rev[t].push((p, w.clone())); }
-      +                if t < n { rev[t].push((p, w)); }
-                   }
-                   // Labeled
-                   for (_, targets) in &self.states[p].transitions {
-                       for (t, w) in targets {
-      -                    if *t < n { rev[*t].push((p, w.clone())); }
-      +                    if *t < n { rev[*t].push((p, w)); }
-                       }
-                   }
-                   // Default
-                   for def in &self.states[p].default {
-                       if def.target < n {
-      -                    rev[def.target].push((p, def.weight.clone()));
-      +                    rev[def.target].push((p, &def.weight));
-                       }
-                   }
-               }
-      @@ -164,7 +164,7 @@
-               while let Some(v) = q.pop_front() {
-                   let fv = fut[v].clone();
-                   if fv.is_empty() { continue; }
-      -            for &(p, ref w_pv) in &rev[v] {
-      +            for &(p, w_pv) in &rev[v] {
-                       let add = &fv & w_pv;
-                       if add.is_empty() { continue; }
-                       let old = &fut[p];
-
-      ```
-
-      ```diff
-      diff --git a/src/precompute4/weighted_automata/simplification.rs b/src/precompute4/weighted_automata/simplification.rs
       --- a/src/precompute4/weighted_automata/simplification.rs
       +++ b/src/precompute4/weighted_automata/simplification.rs
-      @@ -1111,41 +1111,26 @@
-       
-           /// New: Merge duplicate labeled edges by unioning weights per (label, target).
-           fn dedup_labeled_edges(&mut self) -> bool {
-      -        let mut changed = false;
-      -        for st in &mut self.states.0 {
-      -            let mut new_map: BTreeMap<i16, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
-      -            for (lbl, targets) in &st.transitions {
-      -                let entry = new_map.entry(*lbl).or_insert_with(BTreeMap::new);
-      -                for (to, w) in targets {
-      -                    let e = entry.entry(*to).or_insert_with(Weight::zeros);
-      -                    let old = e.clone();
-      -                    *e |= w;
-      -                    if *e != old {
-      -                        changed = true;
-      -                    }
-      -                }
-      -            }
-      -            if !new_map.is_empty() {
-      -                let mut new_trans = BTreeMap::new();
-      -                for (lbl, inner) in new_map {
-      -                    let vecv: Vec<(NWAStateID, Weight)> = inner.into_iter().collect();
-      -                    if let Some(old_vec) = st.transitions.get(&lbl) {
-      -                        if vecv != *old_vec {
-      -                            changed = true;
-      -                        }
-      -                    }
-      -                    new_trans.insert(lbl, vecv);
-      -                }
-      -                st.transitions = new_trans;
-      -            }
-      -        }
-      -        changed
-      +        let mut changed = false;
-      +        for st in &mut self.states.0 {
-      +            for targets in st.transitions.values_mut() {
-      +                if targets.len() <= 1 {
-      +                    continue;
-      +                }
-      +                let old_targets = targets.clone();
-      +
-      +                let mut acc: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
-      +                for (to, w) in targets.iter() {
-      +                    acc.entry(*to).or_insert_with(Weight::zeros) |= w;
-      +                }
-      +
-      +                let new_targets: Vec<_> = acc.into_iter().collect();
-      +                if new_targets != old_targets {
-      +                    *targets = new_targets;
-      +                    changed = true;
-      +                }
-      +            }
-      +        }
-      +        changed
-           }
-       
-           /// New: Merge multiple default transitions with identical (target, weight) by intersecting their exception sets.
-      @@ -1401,44 +1386,46 @@
-                   rounds += 1;
-                   changed = false;
-                   let mut next_part: Vec<usize> = vec![0; n];
-      -            let mut sig2pid: BTreeMap<
-      +            let mut sig2pid: HashMap<
+      @@ -1218,27 +1218,21 @@
                        (
                            Option<Weight>,
-      -                    BTreeSet<(usize, Weight, BTreeSet<i16>)>,
-      -                    BTreeMap<usize, Weight>,
-      -                    BTreeMap<i16, BTreeSet<(usize, Weight)>>,
-      +                    Vec<(usize, Weight, BTreeSet<i16>)>,
-      +                    Vec<(usize, Weight)>,
-      +                    Vec<(i16, Vec<(usize, Weight)>)>,
+                           Vec<(usize, Weight, BTreeSet<i16>)>,
+                           Vec<(usize, Weight)>,
+      -                    Vec<(i16, Vec<(usize, Weight)>)>,
+      +                    Vec<(i16, usize, Weight)>,
                        ),
                        usize,
-      -            > = BTreeMap::new();
-      +            > = HashMap::new();
+                   > = HashMap::new();
        
                    for i in 0..n {
                        let st = &self.states[i];
-      -                let def_sig =
-      -                    st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect::<BTreeSet<_>>();
-      -
-      -                let eps_sig = st.epsilons.iter()
-      -                    .fold(BTreeMap::new(), |mut acc, (to, w)| {
-      -                        *acc.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
-      -                        acc
-      -                    });
-      -
-      -                let lbl_sig = st.transitions.iter()
-      -                    .map(|(lbl, targets)| {
-      -                        let target_sigs = targets.iter()
-      -                            .map(|(to, w)| (part[*to], w.clone()))
-      -                            .collect::<BTreeSet<_>>();
-      -                        (*lbl, target_sigs)
-      -                    })
-      -                    .collect::<BTreeMap<_,_>>();
-      +                let mut def_sig = st.default.iter()
-      +                    .map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone()))
-      +                    .collect::<Vec<_>>();
-      +                def_sig.sort_unstable();
-      +
-      +                let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
-      +                st.epsilons.iter().for_each(|(to, w)| {
-      +                    *eps_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
-      +                });
-      +                let eps_sig: Vec<(usize, Weight)> = eps_map.into_iter().collect();
-      +
-      +                let mut lbl_map: BTreeMap<i16, BTreeMap<usize, Weight>> = BTreeMap::new();
-      +                for (lbl, targets) in &st.transitions {
-      +                    let inner_map = lbl_map.entry(*lbl).or_default();
-      +                    for (to, w) in targets {
-      +                        *inner_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
-      +                    }
-      +                }
-      +                let lbl_sig: Vec<(i16, Vec<(usize, Weight)>)> = lbl_map.into_iter()
-      +                    .map(|(lbl, inner)| (lbl, inner.into_iter().collect()))
-      +                    .collect();
+      -                let mut def_sig = st.default.iter()
+      -                    .map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone()))
+      -                    .collect::<Vec<_>>();
+      +                let mut def_sig: Vec<_> = st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect();
+                       def_sig.sort_unstable();
+       
+                       let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
+      -                st.epsilons.iter().for_each(|(to, w)| {
+      -                    *eps_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
+      -                });
+      +                for (to, w) in &st.epsilons { *eps_map.entry(part[*to]).or_default() |= w; }
+                       let eps_sig: Vec<(usize, Weight)> = eps_map.into_iter().collect();
+       
+      -                let mut lbl_map: BTreeMap<i16, BTreeMap<usize, Weight>> = BTreeMap::new();
+      -                for (lbl, targets) in &st.transitions {
+      -                    let inner_map = lbl_map.entry(*lbl).or_default();
+      -                    for (to, w) in targets {
+      -                        *inner_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
+      -                    }
+      -                }
+      -                let lbl_sig: Vec<(i16, Vec<(usize, Weight)>)> = lbl_map.into_iter()
+      -                    .map(|(lbl, inner)| (lbl, inner.into_iter().collect()))
+      -                    .collect();
+      +                let mut lbl_map: BTreeMap<(i16, usize), Weight> = BTreeMap::new();
+      +                for (lbl, targets) in &st.transitions { for (to, w) in targets { *lbl_map.entry((*lbl, part[*to])).or_default() |= w; } }
+      +                let lbl_sig: Vec<(i16, usize, Weight)> = lbl_map.into_iter().map(|((lbl, p), w)| (lbl, p, w)).collect();
        
                        let sig = (st.final_weight.clone(), def_sig, eps_sig, lbl_sig);
                        let pid_next = sig2pid.len();
-      -                next_part[i] = *sig2pid.entry(sig).or_insert(pid_next);
-      +                next_part[i] = *sig2pid.entry(sig).or_insert(pid_next);
-                   }
-                   if next_part != part {
-                       part = next_part;
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/weighted_automata/ops.rs
-      Applying patch to 'src/precompute4/weighted_automata/ops.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/ops.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/precompute4/weighted_automata/simplification.rs
       Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
     metadata:
-  - user: 'Changes committed with message: "Perf: Optimize NWA simplification by avoiding
-      weight clones in reverse propagation and using faster structures for state signatures
-      in partition refinement."'
+  - user: 'Changes committed with message: "Simplify NWA state signature for merge_equivalent_states
+      by flattening labeled transitions"'
     metadata:
 ...

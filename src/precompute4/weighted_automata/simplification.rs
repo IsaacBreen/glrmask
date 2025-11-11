@@ -1249,34 +1249,23 @@ impl NWA {
                     Option<Weight>,
                     Vec<(usize, Weight, BTreeSet<i16>)>,
                     Vec<(usize, Weight)>,
-                    Vec<(i16, Vec<(usize, Weight)>)>,
+                    Vec<(i16, usize, Weight)>,
                 ),
                 usize,
             > = HashMap::new();
 
             for i in 0..n {
                 let st = &self.states[i];
-                let mut def_sig = st.default.iter()
-                    .map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone()))
-                    .collect::<Vec<_>>();
+                let mut def_sig: Vec<_> = st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect();
                 def_sig.sort_unstable();
 
                 let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
-                st.epsilons.iter().for_each(|(to, w)| {
-                    *eps_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
-                });
+                for (to, w) in &st.epsilons { *eps_map.entry(part[*to]).or_default() |= w; }
                 let eps_sig: Vec<(usize, Weight)> = eps_map.into_iter().collect();
 
-                let mut lbl_map: BTreeMap<i16, BTreeMap<usize, Weight>> = BTreeMap::new();
-                for (lbl, targets) in &st.transitions {
-                    let inner_map = lbl_map.entry(*lbl).or_default();
-                    for (to, w) in targets {
-                        *inner_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
-                    }
-                }
-                let lbl_sig: Vec<(i16, Vec<(usize, Weight)>)> = lbl_map.into_iter()
-                    .map(|(lbl, inner)| (lbl, inner.into_iter().collect()))
-                    .collect();
+                let mut lbl_map: BTreeMap<(i16, usize), Weight> = BTreeMap::new();
+                for (lbl, targets) in &st.transitions { for (to, w) in targets { *lbl_map.entry((*lbl, part[*to])).or_default() |= w; } }
+                let lbl_sig: Vec<(i16, usize, Weight)> = lbl_map.into_iter().map(|((lbl, p), w)| (lbl, p, w)).collect();
 
                 let sig = (st.final_weight.clone(), def_sig, eps_sig, lbl_sig);
                 let pid_next = sig2pid.len();
