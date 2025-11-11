@@ -115,6 +115,42 @@ fn eps_closure_multi(
     out
 }
 
+/// Helper to find an existing representative or create a new one.
+/// This implements the core merging logic.
+fn find_or_create(
+    sig: DWAStateSignature,
+    representatives: &mut Vec<DWAStateSignature>,
+    dwa: &mut DWA,
+    worklist: &mut VecDeque<DWAStateID>,
+) -> Option<DWAStateID> {
+    if sig.key.is_empty() {
+        return None;
+    }
+
+    let mut best_candidate: Option<(DWAStateID, usize)> = None;
+    let sig_key_set: HashSet<_> = sig.key.iter().collect();
+
+    for (i, rep_sig) in representatives.iter().enumerate() {
+        // A representative is compatible if its key is a superset of the signal's key.
+        if sig.key.len() <= rep_sig.key.len() && sig_key_set.is_subset(&rep_sig.key.iter().collect()) {
+            let cost = rep_sig.key.len(); // Prefer the tightest-fitting (smallest) superset.
+            if best_candidate.map_or(true, |(_, best_cost)| cost < best_cost) {
+                best_candidate = Some((i, cost));
+            }
+        }
+    }
+
+    if let Some((id, _)) = best_candidate {
+        Some(id)
+    } else {
+        let new_id = representatives.len();
+        representatives.push(sig);
+        dwa.add_state();
+        worklist.push_back(new_id);
+        Some(new_id)
+    }
+}
+
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
@@ -206,38 +242,10 @@ impl NWA {
                 DWAStateSignature::from_powerstate(closed)
             };
 
-            // Helper to find an existing representative or create a new one.
-            // This implements the core merging logic.
-            let mut find_or_create = |sig: DWAStateSignature| -> Option<DWAStateID> {
-                if sig.key.is_empty() { return None; }
-
-                let mut best_candidate: Option<(DWAStateID, usize)> = None;
-                let sig_key_set: HashSet<_> = sig.key.iter().collect();
-
-                for (i, rep_sig) in representatives.iter().enumerate() {
-                    // A representative is compatible if its key is a superset of the signal's key.
-                    if sig.key.len() <= rep_sig.key.len() && sig_key_set.is_subset(&rep_sig.key.iter().collect()) {
-                        let cost = rep_sig.key.len(); // Prefer the tightest-fitting (smallest) superset.
-                        if best_candidate.map_or(true, |(_, best_cost)| cost < best_cost) {
-                            best_candidate = Some((i, cost));
-                        }
-                    }
-                }
-
-                if let Some((id, _)) = best_candidate {
-                    Some(id)
-                } else {
-                    let new_id = representatives.len();
-                    representatives.push(sig);
-                    dwa.add_state();
-                    worklist.push_back(new_id);
-                    Some(new_id)
-                }
-            };
-
             // --- Compute and Set Transitions for the DWA State ---
             let default_sig = calculate_successor(None);
-            let default_target_id = find_or_create(default_sig.clone());
+            let default_target_id =
+                find_or_create(default_sig.clone(), &mut representatives, &mut dwa, &mut worklist);
             let default_weight = default_sig.powerstate.iter().fold(Weight::zeros(), |mut acc, (_, w)| { acc |= w; acc });
 
             if let Some(target_id) = default_target_id {
@@ -248,7 +256,8 @@ impl NWA {
 
             for &symbol in &alphabet_of_interest {
                 let ex_sig = calculate_successor(Some(symbol));
-                let ex_target_id = find_or_create(ex_sig.clone());
+                let ex_target_id =
+                    find_or_create(ex_sig.clone(), &mut representatives, &mut dwa, &mut worklist);
                 let ex_weight = ex_sig.powerstate.iter().fold(Weight::zeros(), |mut acc, (_, w)| { acc |= w; acc });
 
                 if ex_target_id != default_target_id || ex_weight != default_weight {
