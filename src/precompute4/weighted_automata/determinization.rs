@@ -12,6 +12,113 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
+fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
+    if w.is_all_fast() {
+        return base.to_vec();
+    }
+    base.iter()
+        .map(|(sid, wt)| (*sid, wt & w))
+        .filter(|(_, x)| !x.is_empty())
+        .collect()
+}
+
+struct StepPool {
+    raw: Vec<Vec<(NWAStateID, Weight)>>,
+    map: HashMap<u64, Vec<usize>>,
+}
+
+impl StepPool {
+    fn new() -> Self {
+        Self { raw: Vec::new(), map: HashMap::new() }
+    }
+    fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
+        pairs
+            .iter()
+            .fold(FP_ZERO, |fp, (sid, w)| mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2)))
+    }
+    fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
+        pairs.retain(|(_, w)| !w.is_empty());
+        let fp = Self::fingerprint(&pairs);
+        if let Some(cands) = self.map.get(&fp) {
+            for &id in cands {
+                if self.raw[id] == pairs {
+                    return id;
+                }
+            }
+        }
+        let id = self.raw.len();
+        self.raw.push(pairs);
+        self.map.entry(fp).or_default().push(id);
+        id
+    }
+}
+
+#[derive(Clone)]
+struct CompiledStep {
+    by_sig: Vec<(usize, Weight)>,
+    mask: Weight,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct DefSig {
+    step_id: usize,
+    exceptions: BTreeSet<i16>,
+}
+#[derive(Clone)]
+struct MacroSig {
+    final_w: Option<Weight>,
+    // Each default transition is represented by the compiled "step_id" along with its exception set.
+    def: Vec<DefSig>,
+    ex: BTreeMap<i16, Vec<usize>>,
+}
+#[derive(Clone, Hash, Eq, PartialEq)]
+struct MacroSigKey {
+    final_fp: u64,
+    // Store both step id and the exact exceptions (as a sorted Vec) to keep signatures precise.
+    def: Vec<(usize, Vec<i16>)>,
+    ex: Vec<(i16, Vec<usize>)>,
+}
+
+#[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+struct MembersKey(Vec<usize>);
+
+struct CompositionNode {
+    final_weight: Option<Weight>,
+    default_target_idx: Option<usize>,
+    default_mask: Option<Weight>,
+    exception_targets: BTreeMap<i16, usize>,
+    exception_masks: BTreeMap<i16, Weight>,
+    gates: HashMap<usize, Weight>,
+}
+
+fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
+    for (sid, w) in compiled.iter() {
+        let x = w & gate;
+        if !x.is_empty() {
+            *dst.entry(*sid).or_default() |= &x;
+        }
+    }
+}
+
+/// Finds or creates a composition node for a given key.
+fn find_or_create_target_node(
+    key: MembersKey,
+    nodes: &mut Vec<CompositionNode>,
+    key_to_idx: &mut HashMap<MembersKey, usize>,
+) -> usize {
+    *key_to_idx.entry(key).or_insert_with(|| {
+        let new_idx = nodes.len();
+        nodes.push(CompositionNode {
+            final_weight: None,
+            default_target_idx: None,
+            default_mask: None,
+            exception_targets: BTreeMap::new(),
+            exception_masks: BTreeMap::new(),
+            gates: HashMap::new(),
+        });
+        new_idx
+    })
+}
+
 /// Faster ε-closure from a single source with masked propagation.
 /// - scratch_w: a weight array reused across calls; entries are set to zeros() after use via 'touched'.
 /// - touched: the list of indices whose entries in scratch_w are non-zero and must be reset.
@@ -101,72 +208,6 @@ impl NWA {
         let n = self.states.len();
         if n == 0 {
             return DWA::new();
-        }
-
-        fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
-            if w.is_all_fast() {
-                return base.to_vec();
-            }
-            base.iter()
-                .map(|(sid, wt)| (*sid, wt & w))
-                .filter(|(_, x)| !x.is_empty())
-                .collect()
-        }
-
-        struct StepPool {
-            raw: Vec<Vec<(NWAStateID, Weight)>>,
-            map: HashMap<u64, Vec<usize>>,
-        }
-
-        impl StepPool {
-            fn new() -> Self {
-                Self { raw: Vec::new(), map: HashMap::new() }
-            }
-            fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
-                pairs
-                    .iter()
-                    .fold(FP_ZERO, |fp, (sid, w)| mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2)))
-            }
-            fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
-                pairs.retain(|(_, w)| !w.is_empty());
-                let fp = Self::fingerprint(&pairs);
-                if let Some(cands) = self.map.get(&fp) {
-                    for &id in cands {
-                        if self.raw[id] == pairs {
-                            return id;
-                        }
-                    }
-                }
-                let id = self.raw.len();
-                self.raw.push(pairs);
-                self.map.entry(fp).or_default().push(id);
-                id
-            }
-        }
-
-        #[derive(Clone)]
-        struct CompiledStep {
-            by_sig: Vec<(usize, Weight)>,
-            mask: Weight,
-        }
-        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-        struct DefSig {
-            step_id: usize,
-            exceptions: BTreeSet<i16>,
-        }
-        #[derive(Clone)]
-        struct MacroSig {
-            final_w: Option<Weight>,
-            // Each default transition is represented by the compiled "step_id" along with its exception set.
-            def: Vec<DefSig>,
-            ex: BTreeMap<i16, Vec<usize>>,
-        }
-        #[derive(Clone, Hash, Eq, PartialEq)]
-        struct MacroSigKey {
-            final_fp: u64,
-            // Store both step id and the exact exceptions (as a sorted Vec) to keep signatures precise.
-            def: Vec<(usize, Vec<i16>)>,
-            ex: Vec<(i16, Vec<usize>)>,
         }
 
         // Precompute masked ε-closures for all states using fast scratch buffers.
@@ -341,94 +382,6 @@ impl NWA {
                 eprintln!("  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
             }
         }
-        #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-        struct MembersKey(Vec<usize>);
-
-        struct CompositionNode {
-            final_weight: Option<Weight>,
-            default_target_idx: Option<usize>,
-            default_mask: Option<Weight>,
-            exception_targets: BTreeMap<i16, usize>,
-            exception_masks: BTreeMap<i16, Weight>,
-            gates: HashMap<usize, Weight>,
-            incoming_weight_union: Weight,
-        }
-
-        fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
-            for (sid, w) in compiled.iter() {
-                let x = w & gate;
-                if !x.is_empty() {
-                    *dst.entry(*sid).or_default() |= &x;
-                }
-            }
-        }
-
-        /// Finds the best existing node to merge a new state composition into, or creates a new node.
-        fn find_or_create_target_node(
-            key: MembersKey,
-            nodes: &mut Vec<CompositionNode>,
-            key_to_idx: &mut HashMap<MembersKey, usize>,
-            in_queue: &mut Vec<bool>,
-            incoming_transition_weight: &Weight,
-        ) -> usize {
-            if let Some(&existing_idx) = key_to_idx.get(&key) {
-                return existing_idx;
-            }
-
-            let merge_is_valid = |candidate_node: &CompositionNode| -> bool {
-                candidate_node.incoming_weight_union.is_disjoint(incoming_transition_weight)
-            };
-
-            // Helper to calculate the cost of merging the new key into a candidate node.
-            // Cost is (specificity_increase, current_specificity). Lower is better.
-            let calculate_merge_cost = |candidate_node: &CompositionNode| -> (usize, usize) {
-                let current_spec = candidate_node.gates.len();
-                let mut spec_increase = 0;
-                for sig_id in &key.0 {
-                    if !candidate_node.gates.contains_key(sig_id) {
-                        spec_increase += 1;
-                    }
-                }
-                (spec_increase, current_spec)
-            };
-
-            // Find the best existing node to merge into by minimizing the cost.
-            let best_cand_idx = nodes
-                .iter()
-                .enumerate()
-                .filter(|(cand_idx, cand_node)| {
-                    merge_is_valid(cand_node)
-                })
-                .min_by_key(|(cand_idx, cand_node)| {
-                    let cost = calculate_merge_cost(cand_node);
-                    (cost, *cand_idx) // Tie-break with index for determinism
-                })
-                .map(|(idx, _)| idx);
-
-            if let Some(merge_idx) = best_cand_idx {
-                // Found a home.
-                let merge_node = &mut nodes[merge_idx];
-                // Update incoming weight union
-                merge_node.incoming_weight_union |= incoming_transition_weight;
-                merge_idx
-            } else {
-                // No nodes exist yet. Create a new one.
-                let new_idx = nodes.len();
-                nodes.push(CompositionNode {
-                    final_weight: None,
-                    default_target_idx: None,
-                    default_mask: None,
-                    exception_targets: BTreeMap::new(),
-                    exception_masks: BTreeMap::new(),
-                    gates: HashMap::new(),
-                    incoming_weight_union: incoming_transition_weight.clone(),
-                });
-                if new_idx >= in_queue.len() {
-                    in_queue.resize(new_idx + 1, false);
-                }
-                new_idx
-            }
-        }
 
         let mut nodes: Vec<CompositionNode> = Vec::new();
         let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
@@ -462,7 +415,6 @@ impl NWA {
             exception_targets: BTreeMap::new(),
             exception_masks: BTreeMap::new(),
             gates: init_map,
-            incoming_weight_union: Weight::all(),
         });
         let mut in_queue = vec![false; 1];
         in_queue[start_idx] = true;
@@ -598,7 +550,7 @@ impl NWA {
                 keys.sort_unstable();
                 let key = MembersKey(keys);
 
-                let target_idx = find_or_create_target_node(key, &mut nodes, &mut key_to_idx, &mut in_queue, &total_weight);
+                let target_idx = find_or_create_target_node(key, &mut nodes, &mut key_to_idx);
 
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
@@ -609,9 +561,14 @@ impl NWA {
                         any_change = true;
                     }
                 }
-                if any_change && !in_queue[target_idx] {
-                    in_queue[target_idx] = true;
-                    work.push_back(target_idx);
+                if any_change {
+                    if target_idx >= in_queue.len() {
+                        in_queue.resize(target_idx + 1, false);
+                    }
+                    if !in_queue[target_idx] {
+                        in_queue[target_idx] = true;
+                        work.push_back(target_idx);
+                    }
                 }
                 resolved_transitions.insert(label, (target_idx, total_weight));
             }
@@ -652,25 +609,6 @@ impl NWA {
         }
         if let Some(p) = pb_discover {
             p.finish_with_message(format!("Discovered {} compositions", nodes.len()));
-        }
-
-        let mut incoming_unions = vec![Weight::zeros(); nodes.len()];
-        for source_node in &nodes {
-            if let (Some(target_idx), Some(mask)) = (source_node.default_target_idx, &source_node.default_mask) {
-                if target_idx < incoming_unions.len() {
-                    incoming_unions[target_idx] |= mask;
-                }
-            }
-            for (lbl, &target_idx) in &source_node.exception_targets {
-                if let Some(mask) = source_node.exception_masks.get(lbl) {
-                    if target_idx < incoming_unions.len() {
-                        incoming_unions[target_idx] |= mask;
-                    }
-                }
-            }
-        }
-        for (i, node) in nodes.iter_mut().enumerate() {
-            node.incoming_weight_union = incoming_unions[i].clone();
         }
 
         let mut dwa = DWA::new();
