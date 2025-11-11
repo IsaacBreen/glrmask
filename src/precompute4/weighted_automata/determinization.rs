@@ -45,7 +45,7 @@ struct StepPool {
 
 #[derive(Clone)]
 struct CompiledStep {
-    by_sig: Vec<(usize, Weight)>,
+    by_sig: Vec<(usize, Weight)>, // macro_signature_id -> weight
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -58,7 +58,7 @@ struct DefSig {
 struct MacroSig {
     final_weight: Option<Weight>,
     default_transitions: Vec<DefSig>,
-    exception_transitions: BTreeMap<Label, Vec<usize>>,
+    exception_transitions: BTreeMap<Label, Vec<usize>>, // label -> step_ids
 }
 
 #[derive(Clone, Hash, Eq, PartialEq)]
@@ -68,28 +68,36 @@ struct MacroSigKey {
     exception_transitions: Vec<(Label, Vec<usize>)>,
 }
 
-// A DWA state builder: a composition of macro signatures reachable under gate weights.
-struct DWAStateBuilder {
-    final_weight: Option<Weight>,
-    default_target_idx: Option<usize>,
-    default_mask: Option<Weight>,
-    exception_targets: BTreeMap<Label, usize>,
-    exception_masks: BTreeMap<Label, Weight>,
-    gates: HashMap<usize, Weight>,         // macro_sig_id -> gate weight
-    incoming_weight_union: Weight,         // union of incoming masks (for merge heuristic)
-}
-
 struct Determinizer<'a> {
     nwa: &'a NWA,
+    // Precomputations
     future_weights: Vec<Weight>,
-    eps_cache: Vec<Vec<(NWAStateID, Weight)>>,
+    eps_cache: Vec<Vec<(NWAStateID, Weight)>>, // ε-closure masked by future weights
     step_pool: StepPool,
-    signatures: Vec<MacroSig>,
-    state_to_sig_id: Vec<usize>,
-    compiled_steps: Vec<CompiledStep>,
-    nodes: Vec<DWAStateBuilder>,
-    work_queue: VecDeque<usize>,
-    in_queue: Vec<bool>,
+    signatures: Vec<MacroSig>,      // per NWA state -> macro signature
+    state_to_sig_id: Vec<usize>,    // NWA state -> macro signature id
+    compiled_steps: Vec<CompiledStep>, // interned step -> macro-signature space
+
+    // Canonical subset-construction: unique-table of determinized states
+    // Key: fingerprint -> collision bucket of canonical gate maps
+    // Canonical gate map is a Vec<(macro_sig_id, Weight)> sorted by macro_sig_id
+    state_cache: HashMap<u64, Vec<(Vec<(usize, Weight)>, usize)>>,
+
+    // Discovered states (in order of id)
+    nodes: Vec<NodeData>,
+}
+
+#[derive(Clone, Default)]
+struct NodeData {
+    // Canonical "gate map" defining this determinized state
+    gates: HashMap<usize, Weight>, // macro_sig_id -> weight
+
+    // Outgoing edges
+    default_edge: Option<(usize, Weight)>,                 // (to_id, mask)
+    exception_edges: BTreeMap<Label, (usize, Weight)>,     // label -> (to_id, mask)
+
+    // Final weight
+    final_weight: Option<Weight>,
 }
 
 impl<'a> Determinizer<'a> {
@@ -103,9 +111,8 @@ impl<'a> Determinizer<'a> {
             signatures: Vec::with_capacity(n),
             state_to_sig_id: vec![0; n],
             compiled_steps: Vec::new(),
+            state_cache: HashMap::new(),
             nodes: Vec::new(),
-            work_queue: VecDeque::new(),
-            in_queue: Vec::new(),
         }
     }
 
@@ -114,7 +121,7 @@ impl<'a> Determinizer<'a> {
         self.precompute_eps_closures();
         self.build_macro_signatures();
         self.compile_steps();
-        self.discover_composition_nodes();
+        self.discover_states_bfs();
         self.build_dwa()
     }
 
@@ -326,7 +333,7 @@ impl<'a> Determinizer<'a> {
         self.compiled_steps = Vec::with_capacity(m);
 
         for pairs in &self.step_pool.raw {
-            let mut acc: HashMap<usize, Weight> = HashMap::new();
+            let mut acc: HashMap<usize, Weight> = HashMap::new(); // macro_sig_id -> weight
             for (t, w) in pairs.iter() {
                 *acc.entry(self.state_to_sig_id[*t]).or_default() |= w;
             }
@@ -342,78 +349,89 @@ impl<'a> Determinizer<'a> {
         }
     }
 
-    // Step 5: subset construction over macro signatures (with merge heuristics).
-    fn discover_composition_nodes(&mut self) {
-        let pb = Self::progress_bar(0, "Discovering states");
-
-        let mut init: HashMap<usize, Weight> = HashMap::new();
+    // Step 5: canonical subset construction via BFS with gate-map interning.
+    fn discover_states_bfs(&mut self) {
+        // Initial gate map from ε-closure of NWA start.
+        let mut init: HashMap<usize, Weight> = HashMap::new(); // macro_sig_id -> weight
         for (t, w) in &self.eps_cache[self.nwa.body.start_state] {
             *init.entry(self.state_to_sig_id[*t]).or_default() |= w;
         }
-        self.add_dwa_state_builder(init, Weight::all());
 
-        while let Some(idx) = self.work_queue.pop_front() {
-            self.in_queue[idx] = false;
+        let pb = Self::progress_bar(0, "Discovering states (subset-construction)");
+
+        let start_id = self.get_or_create_state(init);
+        let mut q = VecDeque::new();
+        q.push_back(start_id);
+
+        let mut processed = Vec::<bool>::new();
+        processed.resize(self.nodes.len(), false);
+
+        while let Some(idx) = q.pop_front() {
+            if idx >= processed.len() {
+                processed.resize(idx + 1, false);
+            }
+            if processed[idx] {
+                continue;
+            }
+
             if let Some(p) = &pb {
                 p.inc(1);
-            }
-            self.process_state(idx);
-            if let Some(p) = &pb {
                 p.set_length(self.nodes.len() as u64);
             }
+
+            // Compute outgoing transitions from current gate map.
+            let target_maps = self.compute_target_maps(&self.nodes[idx].gates);
+
+            // Resolve default
+            if let Some(def_map) = target_maps.get(&None) {
+                let def_mask = Self::union_mask(def_map);
+                if !def_mask.is_empty() {
+                    let to_id = self.get_or_create_state(def_map.clone());
+                    self.nodes[idx].default_edge = Some((to_id, def_mask.clone()));
+                    if !processed.get(to_id).copied().unwrap_or(false) {
+                        q.push_back(to_id);
+                    }
+                }
+            }
+
+            // Resolve exceptions
+            for (lbl, ex_map) in target_maps.iter().filter_map(|(k, v)| k.map(|l| (l, v))) {
+                let ex_mask = Self::union_mask(ex_map);
+                if ex_mask.is_empty() {
+                    continue;
+                }
+                let to_id = self.get_or_create_state(ex_map.clone());
+                self.nodes[idx].exception_edges.insert(lbl, (to_id, ex_mask.clone()));
+                if !processed.get(to_id).copied().unwrap_or(false) {
+                    q.push_back(to_id);
+                }
+            }
+
+            // Compute final weight for this node
+            let mut final_w = Weight::zeros();
+            for (sig_id, gate) in &self.nodes[idx].gates {
+                if let Some(fw) = &self.signatures[*sig_id].final_weight {
+                    final_w |= &(gate & fw);
+                }
+            }
+            if !final_w.is_empty() {
+                self.nodes[idx].final_weight = Some(final_w);
+            }
+
+            processed[idx] = true;
         }
+
         if let Some(p) = pb {
             p.finish_with_message(format!("Discovered {} DWA states", self.nodes.len()));
         }
     }
 
-    fn process_state(&mut self, idx: usize) {
-        let gates = self.nodes[idx].gates.clone();
-        let target_maps = self.compute_target_maps(&gates);
-
-        let mut resolved = BTreeMap::new();
-        for (label, map) in target_maps {
-            let mask = map.values().fold(Weight::zeros(), |mut a, b| {
-                a |= b;
-                a
-            });
-            if mask.is_empty() {
-                if label.is_some() {
-                    resolved.insert(label, (idx, Weight::zeros()));
-                }
-                continue;
-            }
-            let target_idx = self.find_or_create_target_node(&map);
-            if self.propagate_weights_to_node(target_idx, &map) {
-                self.enqueue_node(target_idx);
-            }
-            resolved.insert(label, (target_idx, mask));
-        }
-
-        let node = &mut self.nodes[idx];
-        if let Some((t, m)) = resolved.get(&None).cloned() {
-            node.default_target_idx = Some(t);
-            node.default_mask = Some(m);
-        }
-        for (lbl, (t, m)) in resolved.into_iter().filter_map(|(k, v)| k.map(|l| (l, v))) {
-            node.exception_targets.insert(lbl, t);
-            node.exception_masks.insert(lbl, m);
-        }
-
-        node.final_weight = Some(gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
-            if let Some(fw) = &self.signatures[*sig_id].final_weight {
-                acc |= &(gate & fw);
-            }
-            acc
-        }));
-    }
-
     // Compute outgoing transitions for a set of gates, grouped by label (None = default).
     fn compute_target_maps(&self, gates: &HashMap<usize, Weight>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
-        let mut all_defaults: HashMap<usize, Weight> = HashMap::new();
-        let mut all_exceptions: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
-        let mut overridden: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
-        let mut excepted: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
+        let mut all_defaults: HashMap<usize, Weight> = HashMap::new();                 // step_id -> gate union
+        let mut all_exceptions: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new(); // label -> step_id -> gate union
+        let mut overridden: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new(); // label -> step_id -> gate union
+        let mut excepted: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();   // label -> step_id -> gate union
 
         for (&sig_id, gate) in gates {
             if gate.is_empty() {
@@ -441,7 +459,7 @@ impl<'a> Determinizer<'a> {
         let mut target_maps = BTreeMap::new();
 
         // Default map = union of all default steps.
-        let mut def_map = HashMap::new();
+        let mut def_map: HashMap<usize, Weight> = HashMap::new(); // macro_sig_id -> weight
         for (step_id, gate) in &all_defaults {
             self.accumulate_step_targets(&mut def_map, *step_id, gate);
         }
@@ -481,98 +499,6 @@ impl<'a> Determinizer<'a> {
         target_maps
     }
 
-    // Merge heuristic: prefer reusing a node if consistent on overlaps.
-    fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize {
-        let incoming = map.values().fold(Weight::zeros(), |mut a, b| {
-            a |= b;
-            a
-        });
-
-        let cost = |cand: &DWAStateBuilder| -> (usize, usize) {
-            let inc = map.keys().filter(|k| !cand.gates.contains_key(k)).count();
-            (inc, cand.gates.len())
-        };
-
-        let best = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| self.mergeable(c, map, &incoming))
-            .min_by_key(|(_, c)| cost(c))
-            .map(|(i, _)| i);
-
-        if let Some(i) = best {
-            self.nodes[i].incoming_weight_union |= &incoming;
-            return i;
-        }
-        self.add_dwa_state_builder(HashMap::new(), incoming)
-    }
-
-    fn mergeable(
-        &self,
-        cand: &DWAStateBuilder,
-        new_gates: &HashMap<usize, Weight>,
-        incoming: &Weight,
-    ) -> bool {
-        let inter = &cand.incoming_weight_union & incoming;
-        if inter.is_empty() {
-            return true;
-        }
-
-        let filt = |gates: &HashMap<usize, Weight>, w: &Weight| -> HashMap<usize, Weight> {
-            gates
-                .iter()
-                .map(|(s, g)| (*s, g & w))
-                .filter(|(_, g)| !g.is_empty())
-                .collect()
-        };
-
-        let cand_i = filt(&cand.gates, &inter);
-        let new_i = filt(new_gates, &inter);
-        if cand_i.is_empty() && new_i.is_empty() {
-            return true;
-        }
-
-        self.compute_target_maps(&cand_i) == self.compute_target_maps(&new_i)
-    }
-
-    fn add_dwa_state_builder(&mut self, gates: HashMap<usize, Weight>, incoming_weight_union: Weight) -> usize {
-        let idx = self.nodes.len();
-        self.nodes.push(DWAStateBuilder {
-            final_weight: None,
-            default_target_idx: None,
-            default_mask: None,
-            exception_targets: BTreeMap::new(),
-            exception_masks: BTreeMap::new(),
-            gates,
-            incoming_weight_union,
-        });
-        self.enqueue_node(idx);
-        idx
-    }
-
-    fn enqueue_node(&mut self, idx: usize) {
-        if idx >= self.in_queue.len() {
-            self.in_queue.resize(idx + 1, false);
-        }
-        if !self.in_queue[idx] {
-            self.in_queue[idx] = true;
-            self.work_queue.push_back(idx);
-        }
-    }
-
-    fn propagate_weights_to_node(&mut self, node_idx: usize, weights: &HashMap<usize, Weight>) -> bool {
-        let mut changed = false;
-        for (sig_id, w) in weights {
-            let entry = self.nodes[node_idx].gates.entry(*sig_id).or_default();
-            if !w.is_subset_of(entry) {
-                *entry |= w;
-                changed = true;
-            }
-        }
-        changed
-    }
-
     // Final assembly.
     fn build_dwa(&self) -> DWA {
         let mut dwa = DWA::new();
@@ -585,14 +511,15 @@ impl<'a> Determinizer<'a> {
         for (i, n) in self.nodes.iter().enumerate() {
             dwa.states[i].final_weight = n.final_weight.clone();
 
-            if let (Some(t), Some(m)) = (n.default_target_idx, &n.default_mask) {
+            if let Some((t, m)) = &n.default_edge {
                 if !m.is_empty() {
-                    dwa.set_default_transition(i, t, m.clone()).unwrap();
+                    dwa.set_default_transition(i, *t, m.clone()).unwrap();
                 }
             }
-            for (lbl, &t) in &n.exception_targets {
-                let m = n.exception_masks.get(lbl).cloned().unwrap_or_else(Weight::zeros);
-                dwa.add_transition(i, *lbl, t, m).unwrap();
+            for (lbl, (t, m)) in &n.exception_edges {
+                if !m.is_empty() {
+                    dwa.add_transition(i, *lbl, *t, m.clone()).unwrap();
+                }
             }
         }
         dwa
@@ -635,6 +562,67 @@ impl<'a> Determinizer<'a> {
                 *dst.entry(*sid).or_default() |= &x;
             }
         }
+    }
+
+    fn union_mask(map: &HashMap<usize, Weight>) -> Weight {
+        map.values().fold(Weight::zeros(), |mut a, b| {
+            a |= b;
+            a
+        })
+    }
+
+    // Unique-table for determinized states (gate maps).
+    // Returns existing id or creates a new one, interning the canonical gate map.
+    fn get_or_create_state(&mut self, gates: HashMap<usize, Weight>) -> usize {
+        let pairs = Self::canonicalize_gates(&gates);
+        let fp = Self::fingerprint_pairs(&pairs);
+
+        if let Some(bucket) = self.state_cache.get(&fp) {
+            for (existing_pairs, id) in bucket {
+                if Self::pairs_equal(existing_pairs, &pairs) {
+                    return *id;
+                }
+            }
+        }
+
+        let id = self.nodes.len();
+        let node = NodeData {
+            gates,
+            default_edge: None,
+            exception_edges: BTreeMap::new(),
+            final_weight: None,
+        };
+        self.nodes.push(node);
+
+        self.state_cache.entry(fp).or_default().push((pairs, id));
+        id
+    }
+
+    fn canonicalize_gates(gates: &HashMap<usize, Weight>) -> Vec<(usize, Weight)> {
+        let mut v: Vec<(usize, Weight)> = gates
+            .iter()
+            .filter_map(|(k, w)| if w.is_empty() { None } else { Some((*k, w.clone())) })
+            .collect();
+        v.sort_by_key(|(k, _)| *k);
+        v
+    }
+
+    fn fingerprint_pairs(pairs: &[(usize, Weight)]) -> u64 {
+        pairs.iter().fold(FP_ZERO, |fp, (sid, w)| {
+            mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2))
+        })
+    }
+
+    fn pairs_equal(a: &[(usize, Weight)], b: &[(usize, Weight)]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        for ((sa, wa), (sb, wb)) in a.iter().zip(b.iter()) {
+            if sa != sb || wa != wb {
+                return false;
+            }
+        }
+        true
     }
 
     fn progress_bar(len: u64, label: &str) -> Option<ProgressBar> {
