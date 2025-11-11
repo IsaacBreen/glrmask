@@ -259,7 +259,7 @@ impl NWA {
                 }
             }
 
-            crate::debug!(5, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
+            crate::debug!(7, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
 
             // Build a key that includes default exceptions, to avoid merging states that differ only by exception sets.
             let mut sorted_def_steps_key: Vec<(usize, Vec<i16>)> = def_steps
@@ -290,11 +290,11 @@ impl NWA {
             p.finish_with_message("Macro signatures done");
         }
 
-        crate::debug!(5, "All MacroSigs ({}):", sigs.len());
+        crate::debug!(7, "All MacroSigs ({}):", sigs.len());
         for (i, sig) in sigs.iter().enumerate() {
-            crate::debug!(5, "  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
+            crate::debug!(7, "  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
         }
-        crate::debug!(5, "state_to_sig_id: {:?}", state_to_sig_id);
+        crate::debug!(7, "state_to_sig_id: {:?}", state_to_sig_id);
 
         let pb_compile = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
@@ -326,13 +326,13 @@ impl NWA {
             p.finish_with_message("Compile steps done");
         }
 
-        crate::debug!(5, "Step Pool ({}):", step_pool.raw.len());
+        crate::debug!(7, "Step Pool ({}):", step_pool.raw.len());
         for (i, pairs) in step_pool.raw.iter().enumerate() {
-            crate::debug!(5, "  Step {}: {:?}", i, pairs);
+            crate::debug!(7, "  Step {}: {:?}", i, pairs);
         }
-        crate::debug!(5, "Compiled Steps ({}):", compiled_steps.len());
+        crate::debug!(7, "Compiled Steps ({}):", compiled_steps.len());
         for (i, step) in compiled_steps.iter().enumerate() {
-            crate::debug!(5, "  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
+            crate::debug!(7, "  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
         }
 
         #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -400,7 +400,7 @@ impl NWA {
             }
             let node_gates = nodes[idx].gates.clone();
 
-            crate::debug!(5, "\nProcessing composition node {}: gates: {:?}", idx, node_gates);
+            crate::debug!(7, "\nProcessing composition node {}: gates: {:?}", idx, node_gates);
 
             let mut def_groups: HashMap<usize, Weight> = HashMap::new();
             let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
@@ -426,10 +426,10 @@ impl NWA {
                 }
             }
 
-            crate::debug!(5, "  - def_groups: {:?}", def_groups);
-            crate::debug!(5, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
-            crate::debug!(5, "  - def_exers_by_label: {:?}", def_exers_by_label);
-            crate::debug!(5, "  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
+            crate::debug!(7, "  - def_groups: {:?}", def_groups);
+            crate::debug!(7, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
+            crate::debug!(7, "  - def_exers_by_label: {:?}", def_exers_by_label);
+            crate::debug!(7, "  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
 
             let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
             let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
@@ -448,32 +448,32 @@ impl NWA {
             labels_to_consider.extend(def_exceptions_by_label.keys().copied());
 
             for lbl in labels_to_consider {
-                crate::debug!(5, "    - processing exception label {}", lbl);
+                crate::debug!(7, "    - processing exception label {}", lbl);
                 let mut map = HashMap::new();
                 let def_exers = def_exers_by_label.get(&lbl);
                 let def_exc = def_exceptions_by_label.get(&lbl);
 
                 for (def_step, total_g) in &def_groups {
-                    crate::debug!(5, "      - considering default step {} with total_g {}", def_step, total_g);
+                    crate::debug!(7, "      - considering default step {} with total_g {}", def_step, total_g);
                     // Subtract states that have explicit labeled transitions on this label
                     let g_exers = def_exers.and_then(|de| de.get(def_step));
                     // Subtract states whose default is explicitly not applicable on this label (exception set)
                     let g_exc = def_exc.and_then(|dx| dx.get(def_step));
 
-                    crate::debug!(5, "        - g_exers for this def_step: {:?}", g_exers);
-                    crate::debug!(5, "        - g_exc for this def_step: {:?}", g_exc);
+                    crate::debug!(7, "        - g_exers for this def_step: {:?}", g_exers);
+                    crate::debug!(7, "        - g_exc for this def_step: {:?}", g_exc);
                     let mut g_nonex = total_g.clone();
                     if let Some(g) = g_exers { g_nonex -= g; }
                     if let Some(g) = g_exc { g_nonex -= g; }
-                    crate::debug!(5, "        - g_nonex (after subtractors): {}", g_nonex);
+                    crate::debug!(7, "        - g_nonex (after subtractors): {}", g_nonex);
                     if !g_nonex.is_empty() {
-                        crate::debug!(5, "        - accumulating for g_nonex");
+                        crate::debug!(7, "        - accumulating for g_nonex");
                         accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
                     }
                 }
                 if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
                     for (ex_step, g_ex) in ex_groups {
-                        crate::debug!(5, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
+                        crate::debug!(7, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
                         accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
                     }
                 }
@@ -482,12 +482,12 @@ impl NWA {
                 target_maps.insert(Some(lbl), map);
             }
 
-            crate::debug!(5, "  - computed target_maps:");
+            crate::debug!(7, "  - computed target_maps:");
             for (label, map) in &target_maps {
                 let mut keys: Vec<_> = map.keys().copied().collect();
                 keys.sort_unstable();
                 let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-                crate::debug!(5, "    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
+                crate::debug!(7, "    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
             }
 
             let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
@@ -539,13 +539,13 @@ impl NWA {
                 }
             }
 
-            crate::debug!(5, "  - Resolved transitions for node {}:", idx);
+            crate::debug!(7, "  - Resolved transitions for node {}:", idx);
             if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                crate::debug!(5, "    - default -> {} (mask: {})", target, mask);
+                crate::debug!(7, "    - default -> {} (mask: {})", target, mask);
             }
             for (lbl, target) in &node.exception_targets {
                 if let Some(mask) = node.exception_masks.get(lbl) {
-                    crate::debug!(5, "    - on {}: -> {} (mask: {})", lbl, target, mask);
+                    crate::debug!(7, "    - on {}: -> {} (mask: {})", lbl, target, mask);
                 }
             }
 
