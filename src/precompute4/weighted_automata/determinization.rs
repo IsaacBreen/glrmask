@@ -156,12 +156,14 @@ impl NWA {
         }
         #[derive(Clone)]
         struct MacroSig {
+            final_w: Option<Weight>,
             // Each default transition is represented by the compiled "step_id" along with its exception set.
             def: Vec<DefSig>,
             ex: BTreeMap<i16, Vec<usize>>,
         }
         #[derive(Clone, Hash, Eq, PartialEq)]
         struct MacroSigKey {
+            final_fp: u64,
             // Store both step id and the exact exceptions (as a sorted Vec) to keep signatures precise.
             def: Vec<(usize, Vec<i16>)>,
             ex: Vec<(i16, Vec<usize>)>,
@@ -195,7 +197,6 @@ impl NWA {
         let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
         let mut state_to_sig_id: Vec<usize> = vec![0; n];
         let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
-        let mut sig_final_weights: Vec<Option<Weight>> = Vec::new();
         let pb_sigs = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(n as u64).with_style(
                 ProgressStyle::default_bar()
@@ -274,29 +275,15 @@ impl NWA {
                 .collect();
             sorted_def_steps_key.sort_unstable();
             let key = MacroSigKey {
+                final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
                 def: sorted_def_steps_key,
                 ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
             };
-            let sig_id = match sig_intern.entry(key) {
-                Entry::Occupied(o) => {
-                    let id = *o.get();
-                    if let Some(acc) = final_acc {
-                        if let Some(fw) = &mut sig_final_weights[id] {
-                            *fw |= &acc;
-                        } else {
-                            sig_final_weights[id] = Some(acc);
-                        }
-                    }
-                    id
-                }
-                Entry::Vacant(v) => {
-                    let id = sigs.len();
-                    sigs.push(MacroSig { def: def_steps, ex });
-                    sig_final_weights.push(final_acc);
-                    v.insert(id);
-                    id
-                }
-            };
+            let sig_id = *sig_intern.entry(key).or_insert_with(|| {
+                let id = sigs.len();
+                sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
+                id
+            });
             state_to_sig_id[s] = sig_id;
             if let Some(p) = &pb_sigs {
                 p.inc(1);
@@ -309,7 +296,7 @@ impl NWA {
         if is_debug_level_enabled(5) {
             eprintln!("All MacroSigs ({}):", sigs.len());
             for (i, sig) in sigs.iter().enumerate() {
-                eprintln!("  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig_final_weights[i], sig.def, sig.ex);
+                eprintln!("  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
             }
             eprintln!("state_to_sig_id: {:?}", state_to_sig_id);
         }
@@ -586,7 +573,7 @@ impl NWA {
                 }
             }
             node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
-                if let Some(fw) = &sig_final_weights[*sig_id] {
+                if let Some(fw) = &sigs[*sig_id].final_w {
                     acc |= &(gate & fw);
                 }
                 acc
