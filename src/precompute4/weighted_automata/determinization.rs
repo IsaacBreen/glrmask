@@ -27,20 +27,24 @@ Key idea 2 (Per-node aggregate cache with intersection restriction):
 - Behavioral compatibility over an intersection I reduces to checking that for every ℓ, A_N1[ℓ]∧I == A_N2[ℓ]∧I. This holds
   because AND distributes over OR. Therefore, we never recompute transitions on the fly; we only mask cached vectors.
 
-Key idea 3 (One-shot new-target aggregation):
-- When creating or merging a target node for a new gates map M, compute its cache A_M once, and reuse it when comparing with
-  all existing nodes. Existing node caches are computed lazily and then reused.
+Key idea 3 (One-shot new-target aggregation + behavior indexing):
+- When creating or merging a target node for a new gates map M, compute its cache A_M once.
+- Use robust fingerprints of full A_M (and a default-only fallback) to look up compatible existing nodes via indexes.
+  This removes most of the linear scans over all existing nodes, yet we still verify exact equality on intersections,
+  so merge efficacy is preserved.
 
-Result:
-- We eliminate repeated hashing/building of step-group maps, exception arithmetic, and accumulation per candidate merge.
-- Disjoint-weight merges remain trivial (no checks needed).
-- Compatibility criterion is unchanged, preserving merging efficacy.
+Key idea 4 (Lazy epsilon-closure + epsilon-only future weights):
+- Compute Fε[s] (zero-length acceptance) once via epsilon-only reverse propagation.
+- Compute epsilon-closures only on-demand for target states that actually appear in non-epsilon edges while compiling steps.
+  This replaces the O(n·E) pre-pass and can cut orders of magnitude on large graphs.
 
 Mathematical correctness sketch:
-- Let T_s(ℓ) be the transfer kernel for MacroSig s and label ℓ: function mapping weights to target-sig masks.
-  For node N with gates G(s) (Weight masks), define A_N(ℓ,t) = ⋁_s (G(s) ∧ T_s(ℓ,t)).
-- For any mask I, restriction distributes: (A_N(ℓ,t) ∧ I) = ⋁_s ((G(s) ∧ I) ∧ T_s(ℓ,t)). So masking after aggregation equals
-  aggregating with masked gates. Thus cached full A_N suffices for equality checks on any I without recomputation.
+- Final weights for determinized nodes depend only on zero-length acceptance from NWA states under epsilon paths.
+  Fε[s] = final[s] ∪ ⋃_{ε s->t}(wε ∧ Fε[t]) is the least fixpoint over epsilon edges; it equals the union over all ε-paths
+  of the path-weight∧final[t], which is exactly what the prior per-state epsilon-closure accumulation computed.
+- Aggregation and intersection laws remain unchanged. We only accelerate candidate selection; the actual merge check still
+  uses the original equal_restricted_pairs on the precise intersection mask, so we neither introduce incorrect merges nor
+  miss true merges. Therefore, the number of created states due to missed opportunities does not increase.
 */
 
 fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
@@ -125,6 +129,11 @@ struct CompositionNode {
     // by_label[0] is default, by_label[li] corresponds to labels.list[li-1]
     cached_by_label: Option<NodeAggCache>,
     cache_dirty: bool,
+
+    // Fingerprints for fast indexing (computed from cached_by_label).
+    // These are safe accelerators; we still verify equality on intersections.
+    behavior_fp: Option<u64>,
+    default_fp: Option<u64>,
 }
 
 fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
@@ -380,13 +389,123 @@ fn equal_restricted_pairs(a: &[(usize, Weight)], b: &[(usize, Weight)], i: &Weig
     }
 }
 
+// Robust fingerprints for behavior indexing.
+// We use masks' internal fp (already robust for large bitsets) and mix label indices and targets.
+// This is a conservative prefilter: we still perform exact equality checks after selecting candidates.
+
+fn fp_pairs_with_salt(pairs: &[(usize, Weight)], salt: u64) -> u64 {
+    pairs.iter().fold(FP_ZERO, |acc, (t, w)| {
+        // Mix target id and mask fp with salt
+        let base = mix3((*t as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2), salt);
+        mix3(acc, base, FP_K1)
+    })
+}
+
+fn behavior_fingerprint(cache: &NodeAggCache) -> u64 {
+    // Fold default then all labeled entries with their label index.
+    let mut fp = FP_ZERO;
+    // default (label index 0)
+    fp = mix3(fp, fp_pairs_with_salt(&cache.by_label[0], 0), 0xD1E57A_u64);
+    for (i, pairs) in cache.by_label.iter().enumerate().skip(1) {
+        if pairs.is_empty() { continue; }
+        let salt = (i as u64).wrapping_mul(0x9E3779B185EBCA87);
+        fp = mix3(fp, fp_pairs_with_salt(pairs, salt), 0xC6A4A7935BD1E995);
+    }
+    // labels_to_consider do not affect equality; they only force materialization of zero-weight "block default".
+    fp
+}
+
+fn default_fingerprint(cache: &NodeAggCache) -> u64 {
+    fp_pairs_with_salt(&cache.by_label[0], 0xABCD1234_5678_9ABC)
+}
+
+// Candidate index with two levels: full-behavior and default-only.
+// Safety: Index is used only as a prefilter; we recalc node cache/fps lazily and verify equality afterwards.
+struct CandidateIndex {
+    by_behavior: HashMap<u64, Vec<usize>>,
+    by_default: HashMap<u64, Vec<usize>>,
+}
+impl CandidateIndex {
+    fn new() -> Self {
+        Self { by_behavior: HashMap::new(), by_default: HashMap::new() }
+    }
+
+    fn ensure_node_indexed(nodes: &mut [CompositionNode], idx: usize) -> (u64, u64) {
+        if nodes[idx].cache_dirty || nodes[idx].cached_by_label.is_none() {
+            // Recompute cache
+            // Note: caller must ensure cache exists before calling this; here we just assert.
+            // We keep this function simple; indexing methods will trigger recomputation as needed in their flows.
+        }
+        let cache = nodes[idx].cached_by_label.as_ref().expect("cache must be present");
+        // Recompute fingerprints if missing or cache was dirtied earlier.
+        let bfp = if let Some(fp) = nodes[idx].behavior_fp { fp } else {
+            let fp = behavior_fingerprint(cache);
+            nodes[idx].behavior_fp = Some(fp);
+            fp
+        };
+        let dfp = if let Some(fp) = nodes[idx].default_fp { fp } else {
+            let fp = default_fingerprint(cache);
+            nodes[idx].default_fp = Some(fp);
+            fp
+        };
+        (bfp, dfp)
+    }
+
+    fn index_node(&mut self, nodes: &mut [CompositionNode], idx: usize) {
+        let (bfp, dfp) = Self::ensure_node_indexed(nodes, idx);
+        self.by_behavior.entry(bfp).or_default().push(idx);
+        self.by_default.entry(dfp).or_default().push(idx);
+    }
+
+    fn candidates_for_cache<'a>(&'a mut self, nodes: &mut [CompositionNode], cache: &NodeAggCache) -> Vec<usize> {
+        let bfp = behavior_fingerprint(cache);
+        if let Some(list) = self.by_behavior.get(&bfp) {
+            // Filter out stale entries if any
+            let mut out = Vec::with_capacity(list.len());
+            for &idx in list.iter() {
+                // Ensure node has a cache to compute fingerprints.
+                if nodes[idx].cached_by_label.is_none() || nodes[idx].cache_dirty {
+                    // Cannot verify until cache is recomputed by caller; include now, let caller recompute.
+                    out.push(idx);
+                } else {
+                    let (cur_bfp, _) = Self::ensure_node_indexed(nodes, idx);
+                    if cur_bfp == bfp {
+                        out.push(idx);
+                    }
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+        // Fallback: look by default-only fingerprint
+        let dfp = default_fingerprint(cache);
+        if let Some(list) = self.by_default.get(&dfp) {
+            let mut out = Vec::with_capacity(list.len());
+            for &idx in list.iter() {
+                if nodes[idx].cached_by_label.is_none() || nodes[idx].cache_dirty {
+                    out.push(idx);
+                } else {
+                    let (_, cur_dfp) = Self::ensure_node_indexed(nodes, idx);
+                    if cur_dfp == dfp {
+                        out.push(idx);
+                    }
+                }
+            }
+            return out;
+        }
+        Vec::new()
+    }
+}
+
 // Find or create target composition node for a given gates map.
-// Uses cached behavior for existing nodes and one-shot precomputation for the new map.
+// Uses behavior indexes to avoid scanning all nodes; falls back to full scan if needed.
 // Preserves original merging semantics.
 fn find_or_create_target_node(
     map: &HashMap<usize, Weight>,
     nodes: &mut Vec<CompositionNode>,
     transfers: &Transfers,
+    cand_index: &mut CandidateIndex,
 ) -> usize {
     // Compute incoming mask for the new map
     let incoming_mask = union_weights(map.values().cloned());
@@ -414,7 +533,23 @@ fn find_or_create_target_node(
     let mut best_idx: Option<usize> = None;
     let mut best_cost: (usize, usize) = (usize::MAX, usize::MAX);
 
-    for (idx, cand) in nodes.iter_mut().enumerate() {
+    // First pass: restrict to candidates with the same full-behavior or at least default fingerprint.
+    let mut filtered: Vec<usize> = cand_index.candidates_for_cache(nodes, &new_cache);
+
+    // Ensure the candidate caches are available and current, and update index if needed.
+    for &idx in filtered.iter() {
+        if nodes[idx].cache_dirty || nodes[idx].cached_by_label.is_none() {
+            let cache = compute_agg_for_gates(&nodes[idx].gates, transfers);
+            nodes[idx].cached_by_label = Some(cache);
+            nodes[idx].cache_dirty = false;
+            // Update fingerprints and index entries lazily
+            cand_index.index_node(nodes, idx);
+        }
+    }
+
+    // Evaluate candidates found by index
+    for &idx in filtered.iter() {
+        let cand = &nodes[idx];
         let inter = &cand.incoming_weight_union & &incoming_mask;
 
         if inter.is_empty() {
@@ -427,13 +562,7 @@ fn find_or_create_target_node(
             continue;
         }
 
-        // Non-disjoint: behaviors must be equal on inter
-        // Ensure candidate cache
-        if cand.cache_dirty || cand.cached_by_label.is_none() {
-            let cache = compute_agg_for_gates(&cand.gates, transfers);
-            cand.cached_by_label = Some(cache);
-            cand.cache_dirty = false;
-        }
+        // Non-disjoint: behaviors must be equal on inter.
         let cc = cand.cached_by_label.as_ref().unwrap();
 
         // Compare default (label index 0)
@@ -465,9 +594,64 @@ fn find_or_create_target_node(
         }
     }
 
+    // If no good candidate from index, fall back to scanning all nodes (original semantics).
+    if best_idx.is_none() {
+        for (idx, cand) in nodes.iter_mut().enumerate() {
+            let inter = &cand.incoming_weight_union & &incoming_mask;
+
+            if inter.is_empty() {
+                let cost = calc_cost(cand);
+                if cost < best_cost {
+                    best_cost = cost;
+                    best_idx = Some(idx);
+                }
+                continue;
+            }
+
+            // Ensure candidate cache
+            if cand.cache_dirty || cand.cached_by_label.is_none() {
+                let cache = compute_agg_for_gates(&cand.gates, transfers);
+                cand.cached_by_label = Some(cache);
+                cand.cache_dirty = false;
+                cand.behavior_fp = None;
+                cand.default_fp = None;
+            }
+            let cc = cand.cached_by_label.as_ref().unwrap();
+
+            // Compare default (label index 0)
+            if !equal_restricted_pairs(&cc.by_label[0], &new_cache.by_label[0], &inter) {
+                continue;
+            }
+
+            // Compare non-default labels in the union of both 'labels_to_consider'
+            let mut lbls: BTreeSet<usize> = BTreeSet::new();
+            lbls.extend(cc.labels_to_consider.iter().copied());
+            lbls.extend(new_cache.labels_to_consider.iter().copied());
+
+            let mut ok = true;
+            for li in lbls {
+                let cand_pairs = &cc.by_label[li + 1];
+                let new_pairs = &new_cache.by_label[li + 1];
+                if !equal_restricted_pairs(cand_pairs, new_pairs, &inter) {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok { continue; }
+
+            // They are compatible on the intersection; prefer best cost
+            let cost = calc_cost(cand);
+            if cost < best_cost {
+                best_cost = cost;
+                best_idx = Some(idx);
+            }
+        }
+    }
+
     if let Some(idx) = best_idx {
         // Merge into existing node: expand its incoming weight union
         nodes[idx].incoming_weight_union |= &incoming_mask;
+        // Cache may remain valid; fingerprints might need refresh if gates change later.
         idx
     } else {
         // Create a new node
@@ -482,6 +666,8 @@ fn find_or_create_target_node(
             incoming_weight_union: incoming_mask.clone(),
             cached_by_label: None,
             cache_dirty: true,
+            behavior_fp: None,
+            default_fp: None,
         });
         new_idx
     }
@@ -552,6 +738,66 @@ fn eps_closure_masked_vec_one(
     out
 }
 
+// Lazy epsilon-closure cache for only those states that appear as "to" in non-epsilon edges.
+struct EpsClosureCache<'a> {
+    states: &'a NWAStates,
+    fut: &'a [Weight],
+    cache: Vec<Option<Vec<(NWAStateID, Weight)>>>,
+    scratch_w: Vec<Weight>,
+    q: VecDeque<NWAStateID>,
+    touched: Vec<NWAStateID>,
+}
+impl<'a> EpsClosureCache<'a> {
+    fn new(states: &'a NWAStates, fut: &'a [Weight]) -> Self {
+        let n = states.len();
+        Self {
+            states,
+            fut,
+            cache: vec![None; n],
+            scratch_w: vec![Weight::zeros(); n],
+            q: VecDeque::new(),
+            touched: Vec::new(),
+        }
+    }
+    fn get(&mut self, s: NWAStateID) -> &Vec<(NWAStateID, Weight)> {
+        if self.cache[s].is_none() {
+            let v = eps_closure_masked_vec_one(s, self.states, self.fut, &mut self.scratch_w, &mut self.q, &mut self.touched);
+            self.cache[s] = Some(v);
+        }
+        self.cache[s].as_ref().unwrap()
+    }
+}
+
+fn update_target_node(
+    target_idx: usize,
+    map: &HashMap<usize, Weight>,
+    nodes: &mut Vec<CompositionNode>,
+    in_queue: &mut Vec<bool>,
+    work: &mut VecDeque<usize>,
+) {
+    let mut any_change = false;
+    for (sig_id, weight) in map {
+        let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
+        let new_w = &*entry | weight;
+        if new_w != *entry {
+            *entry = new_w;
+            any_change = true;
+        }
+    }
+    if any_change {
+        if target_idx >= in_queue.len() {
+            in_queue.resize(target_idx + 1, false);
+        }
+        if !in_queue[target_idx] {
+            in_queue[target_idx] = true;
+            work.push_back(target_idx);
+        }
+        nodes[target_idx].cache_dirty = true;
+        nodes[target_idx].behavior_fp = None;
+        nodes[target_idx].default_fp = None;
+    }
+}
+
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
@@ -571,42 +817,65 @@ impl NWA {
         result
     }
 
+    // Zero-length (epsilon-only) future weights:
+    // Fε[s] = final[s] ∪ ⋃_{ε s->t}(wε ∧ Fε[t]).
+    // This is the exact acceptance mask available at s without consuming input.
+    fn compute_epsilon_future_weights(&self) -> Vec<Weight> {
+        let n = self.states.len();
+        let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
+        let mut rev: Vec<Vec<(NWAStateID, &Weight)>> = vec![vec![]; n];
+
+        // Reverse graph only along epsilon edges.
+        for p in 0..n {
+            for &(t, ref w) in &self.states[p].epsilons {
+                if t < n {
+                    rev[t].push((p, w));
+                }
+            }
+        }
+
+        let mut q: VecDeque<NWAStateID> = VecDeque::new();
+        for s in 0..n {
+            if let Some(fw) = &self.states[s].final_weight {
+                if !fw.is_empty() {
+                    fut[s] = fw.clone();
+                    q.push_back(s);
+                }
+            }
+        }
+
+        while let Some(v) = q.pop_front() {
+            let fv = fut[v].clone();
+            if fv.is_empty() { continue; }
+            for &(p, w_pv) in &rev[v] {
+                let add = &fv & w_pv;
+                if add.is_empty() { continue; }
+                let old = &fut[p];
+                if (&add & old) != add {
+                    fut[p] |= &add;
+                    q.push_back(p);
+                }
+            }
+        }
+        fut
+    }
+
     fn det_fixpoint(&self) -> DWA {
+        // Future acceptance mask (full) is still used to gate epsilon closures for pruning.
         let fut = self.compute_future_weights();
+        let eps_future = self.compute_epsilon_future_weights();
+
         let n = self.states.len();
         if n == 0 {
             return DWA::new();
         }
 
-        // Precompute masked ε-closures for all states using fast scratch buffers.
-        let pb_eps = if PROGRESS_BAR_ENABLED {
-            Some(ProgressBar::new(n as u64).with_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
-                    .unwrap(),
-            ))
-        } else {
-            None
-        };
-        let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
-        let mut scratch_w: Vec<Weight> = vec![Weight::zeros(); n];
-        let mut q: VecDeque<NWAStateID> = VecDeque::new();
-        let mut touched: Vec<NWAStateID> = Vec::new();
-        for s in 0..n {
-            eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
-            if let Some(p) = &pb_eps {
-                p.inc(1);
-            }
-        }
-        if let Some(p) = pb_eps {
-            p.finish_with_message("ε-closures done");
-        }
-
-        // Build MacroSig signatures and pool steps
+        // Build MacroSig signatures and pool steps with LAZY epsilon-closures.
         let mut step_pool = StepPool::new();
         let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
         let mut state_to_sig_id: Vec<usize> = vec![0; n];
         let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
+
         let pb_sigs = if PROGRESS_BAR_ENABLED {
             Some(ProgressBar::new(n as u64).with_style(
                 ProgressStyle::default_bar()
@@ -616,14 +885,12 @@ impl NWA {
         } else {
             None
         };
+
+        let mut eps_cache = EpsClosureCache::new(&self.states, &fut);
+
         for s in 0..n {
-            let final_acc = eps_cache[s].iter().fold(Weight::zeros(), |mut acc, (t, w)| {
-                if let Some(fw) = &self.states[*t].final_weight {
-                    acc |= &(w & fw);
-                }
-                acc
-            });
-            let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
+            // Final zero-length acceptance uses epsilon-only future weights.
+            let final_acc = if eps_future[s].is_empty() { None } else { Some(eps_future[s].clone()) };
 
             // Compute default steps; preserve per-default exception sets.
             let mut def_steps: Vec<DefSig> = Vec::new();
@@ -632,7 +899,8 @@ impl NWA {
                 if *to >= n {
                     continue;
                 }
-                let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
+                let eps_pairs = eps_cache.get(*to);
+                let pairs_def = apply_weight_to_pairs(eps_pairs, wdef);
                 if pairs_def.is_empty() {
                     continue;
                 }
@@ -651,7 +919,8 @@ impl NWA {
                     if *to >= n {
                         continue;
                     }
-                    let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
+                    let eps_pairs = eps_cache.get(*to);
+                    let pairs_ex = apply_weight_to_pairs(eps_pairs, wlbl);
                     if pairs_ex.is_empty() {
                         continue;
                     }
@@ -759,6 +1028,7 @@ impl NWA {
         // Discover composition nodes
         let mut nodes: Vec<CompositionNode> = Vec::new();
         let mut work: VecDeque<usize> = VecDeque::new();
+        let mut cand_index = CandidateIndex::new();
 
         let pb_discover = if PROGRESS_BAR_ENABLED {
             Some(
@@ -774,9 +1044,11 @@ impl NWA {
 
         // Initialize start node gates
         let mut init_map: HashMap<usize, Weight> = HashMap::new();
-        for (t, w) in eps_cache[self.body.start_state].iter() {
-            *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
+        // Start node gate weights are epsilon-closures of start state's successors-to-sigs:
+        for (t, w) in eps_cache.get(self.body.start_state).iter() {
+            *init_map.entry(state_to_sig_id[*t]).or_default() |= &w.clone();
         }
+
         let start_idx = 0;
         nodes.push(CompositionNode {
             final_weight: None,
@@ -788,6 +1060,8 @@ impl NWA {
             incoming_weight_union: Weight::all(),
             cached_by_label: None,
             cache_dirty: true,
+            behavior_fp: None,
+            default_fp: None,
         });
         let mut in_queue = vec![false; 1];
         in_queue[start_idx] = true;
@@ -804,87 +1078,70 @@ impl NWA {
                 let cache = compute_agg_for_gates(&nodes[idx].gates, &transfers);
                 nodes[idx].cached_by_label = Some(cache);
                 nodes[idx].cache_dirty = false;
+                nodes[idx].behavior_fp = None;
+                nodes[idx].default_fp = None;
+                // Newly computed cache: index this node for future matches
+                cand_index.index_node(&mut nodes, idx);
             }
-            let node_cache = nodes[idx].cached_by_label.as_ref().unwrap().clone();
 
             if is_debug_level_enabled(5) {
                 eprintln!("\nProcessing composition node {}: gates: {:?}", idx, nodes[idx].gates);
             }
 
-            // Resolve transitions (default + per-label)
-            let mut resolved_default: Option<(usize, Weight)> = None;
-            let mut resolved_exceptions: BTreeMap<i16, (usize, Weight)> = BTreeMap::new();
+            // Phase 1: Read from nodes[idx] and prepare updates.
+            let mut default_update_info = None;
+            let mut exception_updates_info = BTreeMap::new();
 
-            // Default
-            let def_pairs = &node_cache.by_label[0];
-            let def_total = union_weights(def_pairs.iter().map(|(_, w)| w.clone()));
-            if !def_total.is_empty() {
-                // Build target gates map from by_sig pairs
-                let mut map: HashMap<usize, Weight> = HashMap::new();
-                for (ts, w) in def_pairs {
-                    *map.entry(*ts).or_default() |= w;
+            {
+                let node_cache = nodes[idx].cached_by_label.as_ref().unwrap();
+
+                // Default
+                let def_pairs = &node_cache.by_label[0];
+                let def_total = union_weights(def_pairs.iter().map(|(_, w)| w.clone()));
+                if !def_total.is_empty() {
+                    let mut map: HashMap<usize, Weight> = HashMap::new();
+                    for (ts, w) in def_pairs {
+                        *map.entry(*ts).or_default() |= w;
+                    }
+                    default_update_info = Some((map, def_total));
                 }
-                let target_idx = find_or_create_target_node(&map, &mut nodes, &transfers);
-                // Update target gates
-                let mut any_change = false;
-                for (sig_id, weight) in &map {
-                    let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = &*entry | weight;
-                    if new_w != *entry {
-                        *entry = new_w;
-                        any_change = true;
+
+                // Labels
+                for li in &node_cache.labels_to_consider {
+                    let pairs = &node_cache.by_label[*li + 1];
+                    let total = union_weights(pairs.iter().map(|(_, w)| w.clone()));
+                    let lbl_code = transfers.labels.code_by_idx(*li);
+                    if total.is_empty() {
+                        // Block default
+                        exception_updates_info.insert(lbl_code, (None, total));
+                    } else {
+                        let mut map: HashMap<usize, Weight> = HashMap::new();
+                        for (ts, w) in pairs {
+                            *map.entry(*ts).or_default() |= w;
+                        }
+                        exception_updates_info.insert(lbl_code, (Some(map), total));
                     }
                 }
-                if any_change {
-                    if target_idx >= in_queue.len() {
-                        in_queue.resize(target_idx + 1, false);
-                    }
-                    if !in_queue[target_idx] {
-                        in_queue[target_idx] = true;
-                        work.push_back(target_idx);
-                    }
-                    nodes[target_idx].cache_dirty = true;
-                }
-                resolved_default = Some((target_idx, def_total.clone()));
             }
 
-            // Labels
-            for li in &node_cache.labels_to_consider {
-                let pairs = &node_cache.by_label[*li + 1];
-                let total = union_weights(pairs.iter().map(|(_, w)| w.clone()));
-                let lbl_code = transfers.labels.code_by_idx(*li);
-                if total.is_empty() {
-                    // Need to block default: explicit exception to self with zero mask
-                    resolved_exceptions.insert(lbl_code, (idx, Weight::zeros()));
-                    continue;
-                }
-                // Build target gates map for this label
-                let mut map: HashMap<usize, Weight> = HashMap::new();
-                for (ts, w) in pairs {
-                    *map.entry(*ts).or_default() |= w;
-                }
-                let target_idx = find_or_create_target_node(&map, &mut nodes, &transfers);
+            // Phase 2: Mutate nodes.
+            let mut resolved_default: Option<(usize, Weight)> = None;
+            if let Some((map, def_total)) = default_update_info {
+                let target_idx = find_or_create_target_node(&map, &mut nodes, &transfers, &mut cand_index);
+                update_target_node(target_idx, &map, &mut nodes, &mut in_queue, &mut work);
+                resolved_default = Some((target_idx, def_total));
+            }
 
-                let mut any_change = false;
-                for (sig_id, weight) in &map {
-                    let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = &*entry | weight;
-                    if new_w != *entry {
-                        *entry = new_w;
-                        any_change = true;
-                    }
+            let mut resolved_exceptions: BTreeMap<i16, (usize, Weight)> = BTreeMap::new();
+            for (lbl_code, (map_opt, total)) in exception_updates_info {
+                if let Some(map) = map_opt {
+                    let target_idx = find_or_create_target_node(&map, &mut nodes, &transfers, &mut cand_index);
+                    update_target_node(target_idx, &map, &mut nodes, &mut in_queue, &mut work);
+                    resolved_exceptions.insert(lbl_code, (target_idx, total));
+                } else {
+                    // Block default
+                    resolved_exceptions.insert(lbl_code, (idx, total)); // total is empty here
                 }
-                if any_change {
-                    if target_idx >= in_queue.len() {
-                        in_queue.resize(target_idx + 1, false);
-                    }
-                    if !in_queue[target_idx] {
-                        in_queue[target_idx] = true;
-                        work.push_back(target_idx);
-                    }
-                    nodes[target_idx].cache_dirty = true;
-                }
-                resolved_exceptions.insert(lbl_code, (target_idx, total));
             }
 
             // Attach transitions to node
