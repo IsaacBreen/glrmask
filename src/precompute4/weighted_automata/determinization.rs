@@ -175,8 +175,8 @@ impl NWA {
         #[derive(Clone, Eq, PartialEq, Hash, Debug)]
         struct LabelShapeKey {
             // Labels for which some explicit transition exists from this macro-signature set.
-            labels: Vec<i16>, // sorted
-            // A fingerprint (OR of fps) of union of final weights for the macro-signatures present.
+            // explicit labeled transitions: label -> sorted list of target step_ids
+            exceptions: Vec<(i16, Vec<usize>)>,
             final_fp: u64,
             // A sorted list of (step_id, sorted_exceptions) for all default transitions
             // present in the macro-signature set.
@@ -184,7 +184,7 @@ impl NWA {
         }
 
         fn label_shape_for_keys(keys: &[usize], sigs: &[MacroSig]) -> LabelShapeKey {
-            let mut labels_set: BTreeSet<i16> = BTreeSet::new();
+            let mut exceptions_map: BTreeMap<i16, BTreeSet<usize>> = BTreeMap::new();
             let mut fp = FP_ZERO;
             let mut defaults_set: BTreeSet<(usize, Vec<i16>)> = BTreeSet::new();
 
@@ -192,8 +192,8 @@ impl NWA {
                 if let Some(w) = &sigs[sid].final_w {
                     fp |= w.fp;
                 }
-                for (&lbl, _) in &sigs[sid].ex {
-                    labels_set.insert(lbl);
+                for (&lbl, steps) in &sigs[sid].ex {
+                    exceptions_map.entry(lbl).or_default().extend(steps);
                 }
                 for def in &sigs[sid].def {
                     let mut exceptions: Vec<i16> = def.exceptions.iter().copied().collect();
@@ -201,8 +201,14 @@ impl NWA {
                     defaults_set.insert((def.step_id, exceptions));
                 }
             }
+
+            let exceptions: Vec<(i16, Vec<usize>)> = exceptions_map
+                .into_iter()
+                .map(|(lbl, steps)| (lbl, steps.into_iter().collect()))
+                .collect();
+
             LabelShapeKey {
-                labels: labels_set.into_iter().collect(),
+                exceptions,
                 final_fp: fp,
                 defaults: defaults_set.into_iter().collect(),
             }
