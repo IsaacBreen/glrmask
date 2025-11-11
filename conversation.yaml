@@ -6,8 +6,8 @@ local_system:
     - src/precompute4/weighted_automata/common.rs
     - src/precompute4/weighted_automata/ops.rs
     - src/precompute4/weighted_automata/simplification.rs
-    - src/precompute4/resolve_negatives.rs
-  conversation_file: conversation.yaml
+    - src/precompute4/weighted_automata/determinization.rs
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/precompute4/weighted_automata/mod.rs: |
@@ -2620,281 +2620,595 @@ local_system:
               true
           }
       }
-    src/precompute4/resolve_negatives.rs: |
-      use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
+    src/precompute4/weighted_automata/determinization.rs: |
+      use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
+      use super::common::Weight;
+      use super::dwa::DWA;
+      use super::nwa::{NWAStates, NWA};
+      use crate::precompute4::weighted_automata::{NWADefaultTransition, NWAStateID};
       use crate::profiler::PROGRESS_BAR_ENABLED;
       use indicatif::{ProgressBar, ProgressStyle};
-      use std::collections::{HashMap, VecDeque};
+
+      use std::collections::hash_map::Entry;
+      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+      use std::hash::{Hash, Hasher};
       use std::time::Instant;
 
-      pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-          let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(3);
-              p.set_style(
-                  ProgressStyle::default_bar()
-                      .template("{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
-                      .expect("progress-bar"),
-              );
-              Some(p)
-          } else {
-              None
-          };
-
-          if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(1); }
-          let epsilons_to_add = compute_cancellations(&nwa.states);
-          crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
-
-          if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(2); }
-          let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
-
-          if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(3); }
-          // Add new epsilons
-          for (from, to, w) in epsilons_to_add {
-              nwa.states.add_epsilon(from, to, w);
-          }
-          // Add propagated final weights
-          for sid in 0..nwa.states.len() {
-              if !final_fix[sid].is_empty() {
-                  let st = &mut nwa.states.0[sid];
-                  if let Some(fw) = &mut st.final_weight {
-                      *fw |= &final_fix[sid];
-                  } else {
-                      st.final_weight = Some(final_fix[sid].clone());
-                  }
-              }
-          }
-          // Remove all negative transitions
-          for st in &mut nwa.states.0 {
-              st.transitions.retain(|k, _| *k >= 0);
-          }
-          crate::debug!(4, "Applied changes to NWA.");
-
-          if let Some(p) = &pb { p.finish_with_message("Done"); }
-      }
-
-      /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
-      /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
-      /// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
-      /// correctly represents the language defined by these complex interactions.
-      ///
-      /// The process is as follows:
-      /// 1.  **Convert to NWA**: The DWA is first converted to an NWA to allow for flexible graph manipulations,
-      ///     such as adding epsilon transitions.
-      /// 2.  **Resolve Cancellations**: The algorithm identifies all `A --neg(c)--> B --c--> C` sequences.
-      ///     Each such "cancellation" is resolved by adding a new epsilon transition `A --eps--> C`, which acts as a shortcut.
-      ///     The weights are combined along the path.
-      /// 3.  **Propagate Finality**: Finality is propagated backward across all `neg(c)` and epsilon transitions (both
-      ///     original and newly created ones). If a state `A` can reach a final state `F` through a path of such
-      ///     transitions, `A` inherits finality from `F`. This is computed using a standard least fixpoint algorithm.
-      /// 4.  **Apply Changes & Cleanup**: The newly computed final weights are applied to the NWA states. Then, all
-      ///     negative-code transitions are removed from the graph, as their semantic effects have been fully resolved.
-      /// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
-      ///     DWA, which is the final result.
-      pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          let now = Instant::now();
-          crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
-
-          let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(4);
-              p.set_style(
-                  ProgressStyle::default_bar()
-                      .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
-                      .expect("progress-bar"),
-              );
-              Some(p)
-          } else {
-              None
-          };
-
-          if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
-          let mut nwa = NWA::from_dwa(dwa);
-          crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
-
-          if let Some(p) = &pb { p.set_message("Resolve negatives in NWA"); p.set_position(2); }
-          resolve_negative_codes_in_nwa(&mut nwa);
-          crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
-
-          if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(3); }
-          let mut result = nwa.determinize_to_dwa();
-          if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(4); }
-          result.simplify();
-          *dwa = result;
-          crate::debug!(4, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
-
-          if let Some(p) = &pb { p.finish_with_message("Done"); }
-          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-      }
-
-      /// Helper to compute the weighted epsilon closure of a state.
-      fn compute_eps_closure(
+      /// Faster ε-closure from a single source with masked propagation.
+      /// - scratch_w: a weight array reused across calls; entries are set to zeros() after use via 'touched'.
+      /// - touched: the list of indices whose entries in scratch_w are non-zero and must be reset.
+      /// Returns a sorted Vec of (state, weight).
+      fn eps_closure_masked_vec_one(
+          s: NWAStateID,
           states: &NWAStates,
-          start_node: NWAStateID,
-          extra_epsilons: &HashMap<NWAStateID, Vec<(NWAStateID, Weight)>>,
-      ) -> HashMap<NWAStateID, Weight> {
-          let mut closure: HashMap<NWAStateID, Weight> = HashMap::new();
-          let mut q = VecDeque::new();
+          fut: &[Weight],
+          scratch_w: &mut [Weight],
+          q: &mut VecDeque<NWAStateID>,
+          touched: &mut Vec<NWAStateID>,
+      ) -> Vec<(NWAStateID, Weight)> {
+          let n = states.len();
+          if s >= n {
+              return Vec::new();
+          }
+          let fs = fut[s].clone();
+          if fs.is_empty() {
+              return Vec::new();
+          }
 
-          closure.insert(start_node, Weight::all());
-          q.push_back(start_node);
+          // Initialize
+          scratch_w[s] = fs;
+          touched.push(s);
+          q.push_back(s);
 
           while let Some(u) = q.pop_front() {
-              let u_w = closure.get(&u).unwrap().clone();
+              let base = scratch_w[u].clone();
+              if base.is_empty() { continue; }
 
-              // Original epsilons
-              for (v, w) in &states[u].epsilons {
-                  let new_w = &u_w & w;
-                  if new_w.is_empty() { continue; }
-                  let entry = closure.entry(*v).or_insert_with(Weight::zeros);
-                  let old_w = entry.clone();
-                  *entry |= &new_w;
-                  if *entry != old_w {
-                      q.push_back(*v);
-                  }
-              }
-              // Extra epsilons found during cancellation fixpoint
-              if let Some(edges) = extra_epsilons.get(&u) {
-                  for (v, w) in edges {
-                      let new_w = &u_w & w;
-                      if new_w.is_empty() { continue; }
-                      let entry = closure.entry(*v).or_insert_with(Weight::zeros);
-                      let old_w = entry.clone();
-                      *entry |= &new_w;
-                      if *entry != old_w {
-                          q.push_back(*v);
+              for &(v, ref w_eps) in &states[u].epsilons {
+                  if v >= n { continue; }
+
+                  let mut prop = &base & w_eps;
+                  if prop.is_empty() { continue; }
+
+                  prop &= &fut[v];
+                  if prop.is_empty() { continue; }
+
+                  let old = &scratch_w[v];
+                  let new_w = old | &prop;
+                  if new_w != *old {
+                      let was_empty = old.is_empty();
+                      scratch_w[v] = new_w;
+                      if was_empty {
+                          touched.push(v);
                       }
+                      q.push_back(v);
                   }
               }
           }
-          closure
+
+          // Collect results and reset scratch_w for touched indices
+          let mut out: Vec<(NWAStateID, Weight)> = Vec::with_capacity(touched.len());
+          for &i in touched.iter() {
+              if !scratch_w[i].is_empty() {
+                  out.push((i, scratch_w[i].clone()));
+              }
+              scratch_w[i] = Weight::zeros();
+          }
+          touched.clear();
+          out.sort_by_key(|(sid, _)| *sid);
+          out
       }
 
-      /// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
-      /// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
-      fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-          let mut all_new_epsilons: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
-          loop {
-              let mut changed_in_pass = false;
-              let mut pass_epsilons = Vec::new();
+      impl NWA {
+          pub fn determinize_to_dwa(&self) -> DWA {
+              let now = Instant::now();
 
-              for a in 0..states.len() {
-                  let state_a = &states[a];
-                  for (neg_label, targets) in &state_a.transitions {
-                      if *neg_label >= 0 { continue; }
-                      let c = neg_label.wrapping_sub(i16::MIN);
+              let mut nwa = self.clone();
+              nwa.simplify();
 
-                      for (b, w_ab) in targets {
-                          if *b >= states.len() { continue; }
+              crate::debug!(5, "NWA after simplify:\n{}", nwa);
+              let result = nwa.det_fixpoint();
+              crate::debug!(5, "NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
+              crate::debug!(5, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
 
-                          let eps_closure_of_b = compute_eps_closure(states, *b, &all_new_epsilons);
+              result
+          }
 
-                          for (b_reachable, w_b_br) in eps_closure_of_b {
-                              if b_reachable >= states.len() { continue; }
-                              let state_br = &states[b_reachable];
+          fn det_fixpoint(&self) -> DWA {
+              let fut = self.compute_future_weights();
+              let n = self.states.len();
+              if n == 0 {
+                  return DWA::new();
+              }
 
-                              // Labeled transitions
-                              if let Some(targets) = state_br.transitions.get(&c) {
-                                  for (c_target, w_br_c) in targets {
-                                      let new_w = w_ab & &w_b_br & w_br_c;
-                                      if !new_w.is_empty() {
-                                          pass_epsilons.push((a, *c_target, new_w));
-                                      }
-                                  }
-                              }
+              fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
+                  if w.is_all_fast() {
+                      return base.to_vec();
+                  }
+                  base.iter()
+                      .map(|(sid, wt)| (*sid, wt & w))
+                      .filter(|(_, x)| !x.is_empty())
+                      .collect()
+              }
 
-                              // Default transitions
-                              for def in &state_br.default {
-                                  if !def.exceptions.contains(&c) {
-                                      let new_w = w_ab & &w_b_br & &def.weight;
-                                      if !new_w.is_empty() {
-                                          pass_epsilons.push((a, def.target, new_w));
-                                      }
-                                  }
+              struct StepPool {
+                  raw: Vec<Vec<(NWAStateID, Weight)>>,
+                  map: HashMap<u64, Vec<usize>>,
+              }
+
+              impl StepPool {
+                  fn new() -> Self {
+                      Self { raw: Vec::new(), map: HashMap::new() }
+                  }
+                  fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
+                      pairs
+                          .iter()
+                          .fold(FP_ZERO, |fp, (sid, w)| mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2)))
+                  }
+                  fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
+                      pairs.retain(|(_, w)| !w.is_empty());
+                      let fp = Self::fingerprint(&pairs);
+                      if let Some(cands) = self.map.get(&fp) {
+                          for &id in cands {
+                              if self.raw[id] == pairs {
+                                  return id;
                               }
                           }
                       }
+                      let id = self.raw.len();
+                      self.raw.push(pairs);
+                      self.map.entry(fp).or_default().push(id);
+                      id
                   }
               }
 
-              for (from, to, w) in pass_epsilons {
-                  let edges = all_new_epsilons.entry(from).or_default();
-                  if let Some((_, existing_w)) = edges.iter_mut().find(|(t, _)| *t == to) {
-                      let old_w = existing_w.clone();
-                      *existing_w |= &w;
-                      if *existing_w != old_w {
-                          changed_in_pass = true;
+              #[derive(Clone)]
+              struct CompiledStep {
+                  by_sig: Vec<(usize, Weight)>,
+                  mask: Weight,
+              }
+              #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+              struct DefSig {
+                  step_id: usize,
+                  exceptions: BTreeSet<i16>,
+              }
+              #[derive(Clone)]
+              struct MacroSig {
+                  final_w: Option<Weight>,
+                  // Each default transition is represented by the compiled "step_id" along with its exception set.
+                  def: Vec<DefSig>,
+                  ex: BTreeMap<i16, Vec<usize>>,
+              }
+              #[derive(Clone, Hash, Eq, PartialEq)]
+              struct MacroSigKey {
+                  final_fp: u64,
+                  // Store both step id and the exact exceptions (as a sorted Vec) to keep signatures precise.
+                  def: Vec<(usize, Vec<i16>)>,
+                  ex: Vec<(i16, Vec<usize>)>,
+              }
+
+              // Precompute masked ε-closures for all states using fast scratch buffers.
+              let pb_eps = if PROGRESS_BAR_ENABLED {
+                  Some(ProgressBar::new(n as u64).with_style(
+                      ProgressStyle::default_bar()
+                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
+                          .unwrap(),
+                  ))
+              } else {
+                  None
+              };
+              let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
+              let mut scratch_w: Vec<Weight> = vec![Weight::zeros(); n];
+              let mut q: VecDeque<NWAStateID> = VecDeque::new();
+              let mut touched: Vec<NWAStateID> = Vec::new();
+              for s in 0..n {
+                  eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
+                  if let Some(p) = &pb_eps {
+                      p.inc(1);
+                  }
+              }
+              if let Some(p) = pb_eps {
+                  p.finish_with_message("ε-closures done");
+              }
+
+              let mut step_pool = StepPool::new();
+              let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
+              let mut state_to_sig_id: Vec<usize> = vec![0; n];
+              let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
+              let pb_sigs = if PROGRESS_BAR_ENABLED {
+                  Some(ProgressBar::new(n as u64).with_style(
+                      ProgressStyle::default_bar()
+                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Macro signatures)")
+                          .unwrap(),
+                  ))
+              } else {
+                  None
+              };
+              for s in 0..n {
+                  let final_acc = eps_cache[s].iter().fold(Weight::zeros(), |mut acc, (t, w)| {
+                      if let Some(fw) = &self.states[*t].final_weight {
+                          acc |= &(w & fw);
                       }
-                  } else {
-                      edges.push((to, w));
-                      changed_in_pass = true;
+                      acc
+                  });
+                  let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
+
+                  // Compute default steps; preserve per-default exception sets.
+                  let mut def_steps: Vec<DefSig> = Vec::new();
+                  for default in &self.states[s].default {
+                      let NWADefaultTransition { target: to, weight: wdef, exceptions } = default;
+                      if *to >= n {
+                          continue;
+                      }
+                      let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
+                      if pairs_def.is_empty() {
+                          continue;
+                      }
+                      let step_id = step_pool.intern(pairs_def);
+                      def_steps.push(DefSig {
+                          step_id,
+                          exceptions: exceptions.clone(),
+                      });
+                  }
+
+                  // Compute exceptions; drop those that are empty or identical to the default step effect.
+                  let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+                  for (lbl, targets) in self.states[s].transitions.iter() {
+                      let mut step_exs: Vec<usize> = Vec::new();
+                      for (to, wlbl) in targets {
+                          if *to >= n {
+                              continue;
+                          }
+                          let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
+                          if pairs_ex.is_empty() {
+                              continue;
+                          }
+                          step_exs.push(step_pool.intern(pairs_ex));
+                      }
+
+                      if !step_exs.is_empty() {
+                          step_exs.sort_unstable();
+                          let mut sorted_def_step_ids: Vec<usize> =
+                              def_steps.iter().map(|d| d.step_id).collect();
+                          sorted_def_step_ids.sort_unstable();
+                          if step_exs == sorted_def_step_ids {
+                              continue;
+                          }
+                          ex.insert(*lbl, step_exs);
+                      }
+                  }
+
+                  crate::debug!(5, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
+
+                  // Build a key that includes default exceptions, to avoid merging states that differ only by exception sets.
+                  let mut sorted_def_steps_key: Vec<(usize, Vec<i16>)> = def_steps
+                      .iter()
+                      .map(|d| {
+                          let mut v: Vec<i16> = d.exceptions.iter().copied().collect();
+                          v.sort_unstable();
+                          (d.step_id, v)
+                      })
+                      .collect();
+                  sorted_def_steps_key.sort_unstable();
+                  let key = MacroSigKey {
+                      final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
+                      def: sorted_def_steps_key,
+                      ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
+                  };
+                  let sig_id = *sig_intern.entry(key).or_insert_with(|| {
+                      let id = sigs.len();
+                      sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
+                      id
+                  });
+                  state_to_sig_id[s] = sig_id;
+                  if let Some(p) = &pb_sigs {
+                      p.inc(1);
                   }
               }
-
-              if !changed_in_pass {
-                  break;
+              if let Some(p) = pb_sigs {
+                  p.finish_with_message("Macro signatures done");
               }
-          }
 
-          all_new_epsilons
-              .into_iter()
-              .flat_map(|(from, edges)| {
-                  edges.into_iter().map(move |(to, w)| (from, to, w))
-              })
-              .collect()
-      }
-
-      /// Compute the least fixpoint of final weights propagated backward along all epsilon edges
-      /// (original and new) and all negative-labeled edges.
-      fn compute_final_fixpoint(states: &NWAStates, new_epsilons: &[(NWAStateID, NWAStateID, Weight)]) -> Vec<Weight> {
-          let n = states.len();
-          let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
-
-          // Build reverse graph for propagation
-          for u in 0..n {
-              // Original epsilons
-              for &(v, ref w) in &states[u].epsilons {
-                  if v < n { rev[v].push((u, w.clone())); }
+              crate::debug!(5, "All MacroSigs ({}):", sigs.len());
+              for (i, sig) in sigs.iter().enumerate() {
+                  crate::debug!(5, "  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
               }
-              // Negative edges
-              for (label, targets) in &states[u].transitions {
-                  if *label < 0 {
-                      for (v, w) in targets {
-                          if *v < n { rev[*v].push((u, w.clone())); }
+              crate::debug!(5, "state_to_sig_id: {:?}", state_to_sig_id);
+
+              let pb_compile = if PROGRESS_BAR_ENABLED {
+                  Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
+                      ProgressStyle::default_bar()
+                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Compile steps)")
+                          .unwrap(),
+                  ))
+              } else {
+                  None
+              };
+              let mut compiled_steps: Vec<CompiledStep> = Vec::with_capacity(step_pool.raw.len());
+              for pairs in &step_pool.raw {
+                  let mut acc: HashMap<usize, Weight> = HashMap::new();
+                  for (t, w) in pairs.iter() {
+                      *acc.entry(state_to_sig_id[*t]).or_default() |= w;
+                  }
+                  let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
+                  by_sig.sort_by_key(|(sid, _)| *sid);
+                  let mask = by_sig.iter().fold(Weight::zeros(), |mut acc, (_, w)| {
+                      acc |= w;
+                      acc
+                  });
+                  compiled_steps.push(CompiledStep { by_sig, mask });
+                  if let Some(p) = &pb_compile {
+                      p.inc(1);
+                  }
+              }
+              if let Some(p) = pb_compile {
+                  p.finish_with_message("Compile steps done");
+              }
+
+              crate::debug!(5, "Step Pool ({}):", step_pool.raw.len());
+              for (i, pairs) in step_pool.raw.iter().enumerate() {
+                  crate::debug!(5, "  Step {}: {:?}", i, pairs);
+              }
+              crate::debug!(5, "Compiled Steps ({}):", compiled_steps.len());
+              for (i, step) in compiled_steps.iter().enumerate() {
+                  crate::debug!(5, "  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
+              }
+
+              #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+              struct MembersKey(Vec<usize>);
+
+              struct CompositionNode {
+                  final_weight: Option<Weight>,
+                  default_target_idx: Option<usize>,
+                  default_mask: Option<Weight>,
+                  exception_targets: BTreeMap<i16, usize>,
+                  exception_masks: BTreeMap<i16, Weight>,
+                  gates: HashMap<usize, Weight>,
+              }
+
+              fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
+                  for (sid, w) in compiled.iter() {
+                      let x = w & gate;
+                      if !x.is_empty() {
+                          *dst.entry(*sid).or_default() |= &x;
                       }
                   }
               }
-          }
-          // New epsilons from cancellations
-          for (u, v, w) in new_epsilons {
-              if *v < n { rev[*v].push((*u, w.clone())); }
-          }
 
-          let mut q: VecDeque<NWAStateID> = VecDeque::new();
-          for s in 0..n {
-              if let Some(ref fw) = states[s].final_weight {
-                  if !fw.is_empty() {
-                      fut[s] = fw.clone();
-                      q.push_back(s);
+              let mut nodes: Vec<CompositionNode> = Vec::new();
+              let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
+              let mut work: VecDeque<usize> = VecDeque::new();
+
+              let pb_discover = if PROGRESS_BAR_ENABLED {
+                  Some(
+                      ProgressBar::new(0).with_style(
+                          ProgressStyle::default_bar()
+                              .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Discovering states)")
+                              .unwrap(),
+                      ),
+                  )
+              } else {
+                  None
+              };
+
+              let mut init_map: HashMap<usize, Weight> = HashMap::new();
+              for (t, w) in eps_cache[self.body.start_state].iter() {
+                  *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
+              }
+              let mut init_keys: Vec<_> = init_map.keys().copied().collect();
+              init_keys.sort_unstable();
+              let init_key = MembersKey(init_keys);
+              let start_idx = 0;
+              key_to_idx.insert(init_key, start_idx);
+              nodes.push(CompositionNode {
+                  final_weight: None,
+                  default_target_idx: None,
+                  default_mask: None,
+                  exception_targets: BTreeMap::new(),
+                  exception_masks: BTreeMap::new(),
+                  gates: init_map,
+              });
+              let mut in_queue = vec![false; 1];
+              in_queue[start_idx] = true;
+              work.push_back(start_idx);
+
+              while let Some(idx) = work.pop_front() {
+                  in_queue[idx] = false;
+                  if let Some(p) = &pb_discover {
+                      p.inc(1);
+                  }
+                  let node_gates = nodes[idx].gates.clone();
+
+                  crate::debug!(5, "\nProcessing composition node {}: gates: {:?}", idx, node_gates);
+
+                  let mut def_groups: HashMap<usize, Weight> = HashMap::new();
+                  let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+                  let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+                  let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+
+                  for (sig_id, gate) in &node_gates {
+                      for def in &sigs[*sig_id].def {
+                          *def_groups.entry(def.step_id).or_default() |= gate;
+                          // Record that this default has these labels as explicit exceptions; default must not apply on them.
+                          for &lbl in &def.exceptions {
+                              *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
+                          }
+                      }
+                      for (lbl, ex_steps) in &sigs[*sig_id].ex {
+                          for ex_step in ex_steps {
+                              *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
+                          }
+                          // Default should not apply on labels that have explicit labeled transitions (for this state).
+                          for def in &sigs[*sig_id].def {
+                              *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
+                          }
+                      }
+                  }
+
+                  crate::debug!(5, "  - def_groups: {:?}", def_groups);
+                  crate::debug!(5, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
+                  crate::debug!(5, "  - def_exers_by_label: {:?}", def_exers_by_label);
+                  crate::debug!(5, "  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
+
+                  let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
+                  let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+                  for (def_step, g) in &def_groups {
+                      accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
+                  }
+                  if !def_target_map.is_empty() {
+                      target_maps.insert(None, def_target_map);
+                  }
+
+                  // Labels that need explicit exception edges are:
+                  //  - any label with explicit labeled transitions
+                  //  - any label that appears in a default's exception set
+                  let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
+                  labels_to_consider.extend(ex_groups_by_label.keys().copied());
+                  labels_to_consider.extend(def_exceptions_by_label.keys().copied());
+
+                  for lbl in labels_to_consider {
+                      crate::debug!(5, "    - processing exception label {}", lbl);
+                      let mut map = HashMap::new();
+                      let def_exers = def_exers_by_label.get(&lbl);
+                      let def_exc = def_exceptions_by_label.get(&lbl);
+
+                      for (def_step, total_g) in &def_groups {
+                          crate::debug!(5, "      - considering default step {} with total_g {}", def_step, total_g);
+                          // Subtract states that have explicit labeled transitions on this label
+                          let g_exers = def_exers.and_then(|de| de.get(def_step));
+                          // Subtract states whose default is explicitly not applicable on this label (exception set)
+                          let g_exc = def_exc.and_then(|dx| dx.get(def_step));
+
+                          crate::debug!(5, "        - g_exers for this def_step: {:?}", g_exers);
+                          crate::debug!(5, "        - g_exc for this def_step: {:?}", g_exc);
+                          let mut g_nonex = total_g.clone();
+                          if let Some(g) = g_exers { g_nonex -= g; }
+                          if let Some(g) = g_exc { g_nonex -= g; }
+                          crate::debug!(5, "        - g_nonex (after subtractors): {}", g_nonex);
+                          if !g_nonex.is_empty() {
+                              crate::debug!(5, "        - accumulating for g_nonex");
+                              accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
+                          }
+                      }
+                      if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
+                          for (ex_step, g_ex) in ex_groups {
+                              crate::debug!(5, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
+                              accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+                          }
+                      }
+                      // Always insert an entry for this label (even if map is empty)
+                      // so that we can emit an exception edge that blocks the default.
+                      target_maps.insert(Some(lbl), map);
+                  }
+
+                  crate::debug!(5, "  - computed target_maps:");
+                  for (label, map) in &target_maps {
+                      let mut keys: Vec<_> = map.keys().copied().collect();
+                      keys.sort_unstable();
+                      let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+                      crate::debug!(5, "    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
+                  }
+
+                  let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
+                  for (label, map) in target_maps {
+                      let mut keys: Vec<_> = map.keys().copied().collect();
+                      keys.sort_unstable();
+                      let key = MembersKey(keys);
+                      let target_idx = *key_to_idx.entry(key).or_insert_with(|| {
+                          let new_idx = nodes.len();
+                          nodes.push(CompositionNode {
+                              final_weight: None,
+                              default_target_idx: None,
+                              default_mask: None,
+                              exception_targets: BTreeMap::new(),
+                              exception_masks: BTreeMap::new(),
+                              gates: HashMap::new(),
+                          });
+                          if new_idx >= in_queue.len() {
+                              in_queue.resize(new_idx + 1, false);
+                          }
+                          new_idx
+                      });
+
+                      let mut any_change = false;
+                      for (sig_id, weight) in &map {
+                          let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
+                          let new_w = &*entry | weight;
+                          if new_w != *entry {
+                              *entry = new_w;
+                              any_change = true;
+                          }
+                      }
+                      if any_change && !in_queue[target_idx] {
+                          in_queue[target_idx] = true;
+                          work.push_back(target_idx);
+                      }
+                      resolved_transitions.insert(label, (target_idx, map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a })));
+                  }
+
+                  let node = &mut nodes[idx];
+                  if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
+                      node.default_target_idx = Some(target_idx);
+                      node.default_mask = Some(mask);
+                  }
+                  for (label, (target_idx, mask)) in resolved_transitions {
+                      if let Some(lbl) = label {
+                          node.exception_targets.insert(lbl, target_idx);
+                          node.exception_masks.insert(lbl, mask);
+                      }
+                  }
+
+                  crate::debug!(5, "  - Resolved transitions for node {}:", idx);
+                  if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
+                      crate::debug!(5, "    - default -> {} (mask: {})", target, mask);
+                  }
+                  for (lbl, target) in &node.exception_targets {
+                      if let Some(mask) = node.exception_masks.get(lbl) {
+                          crate::debug!(5, "    - on {}: -> {} (mask: {})", lbl, target, mask);
+                      }
+                  }
+
+                  node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
+                      if let Some(fw) = &sigs[*sig_id].final_w {
+                          acc |= &(gate & fw);
+                      }
+                      acc
+                  }));
+
+                  if let Some(p) = &pb_discover {
+                      p.set_length(nodes.len() as u64);
                   }
               }
-          }
+              if let Some(p) = pb_discover {
+                  p.finish_with_message(format!("Discovered {} compositions", nodes.len()));
+              }
 
-          while let Some(v) = q.pop_front() {
-              let fv = fut[v].clone();
-              if fv.is_empty() { continue; }
-              for &(u, ref w_uv) in &rev[v] {
-                  let add = &fv & w_uv;
-                  if add.is_empty() { continue; }
-                  let old = &fut[u];
-                  if (&add & old) != add {
-                      fut[u] |= &add;
-                      q.push_back(u);
+              let mut dwa = DWA::new();
+              if nodes.is_empty() {
+                  return dwa;
+              }
+              dwa.states.0.resize(nodes.len(), Default::default());
+              dwa.body.start_state = start_idx;
+
+              for (i, node) in nodes.iter().enumerate() {
+                  dwa.states[i].final_weight = node.final_weight.clone();
+                  if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
+                      if !mask.is_empty() {
+                          dwa.set_default_transition(i, target_idx, mask.clone()).unwrap();
+                      }
+                  }
+                  for (lbl, &target_idx) in &node.exception_targets {
+                      // Always add exception transitions, even with empty masks, to properly block default on those labels.
+                      let mask = node
+                          .exception_masks
+                          .get(lbl)
+                          .cloned()
+                          .unwrap_or_else(Weight::zeros);
+                      dwa.add_transition(i, *lbl, target_idx, mask).unwrap();
                   }
               }
+              dwa
           }
-          fut
       }
   prev_file_contents:
     src/precompute4/weighted_automata/mod.rs: |
@@ -4113,7 +4427,9 @@ local_system:
               }
               let large = states.len() > LARGE_AUTOMATON_THRESHOLD;
               Self::simplify_core(states, body, large);
-              crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+              if crate::is_debug_level_enabled(3) {
+                  eprintln!("DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+              }
           }
 
           fn run_pass_with_test<F>(
@@ -4135,13 +4451,17 @@ local_system:
               let now = Instant::now();
               let changed = pass(states, body);
               let elapsed = now.elapsed();
-              crate::debug!(3, "DWA simplify pass '{}' took {:?} (changed: {})", pass_name, elapsed, changed);
+              if crate::is_debug_level_enabled(3) {
+                  eprintln!("DWA simplify pass '{}' took {:?} (changed: {})", pass_name, elapsed, changed);
+              }
 
               if let Some(before) = before_dwa {
                   if changed {
                       let after_dwa = DWA { states: states.clone(), body: body.clone() };
                       IN_SIMPLIFY_CHECK.with(|c| c.set(true));
-                      crate::debug!(1, "Stochastic testing DWA after pass: {}", pass_name);
+                      if crate::is_debug_level_enabled(1) {
+                          eprintln!("Stochastic testing DWA after pass: {}", pass_name);
+                      }
                       test_weighted_automata::stochastic_equivalence_test(before, after_dwa);
                       IN_SIMPLIFY_CHECK.with(|c| c.set(false));
                   }
@@ -4823,7 +5143,9 @@ local_system:
               let now = Instant::now();
               let changed = pass();
               let elapsed = now.elapsed();
-              crate::debug!(3, "NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
+              if crate::is_debug_level_enabled(3) {
+                  eprintln!("NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
+              }
               if changed {
                   *changed_any = true;
               }
@@ -4866,7 +5188,9 @@ local_system:
                   Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
               }
               if let Some(p) = &pb { p.finish_with_message(format!("Simplified to {} states", self.states.len())); }
-              crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
+              if crate::is_debug_level_enabled(3) {
+                  eprintln!("NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
+              }
               self.states.len() != initial_n
           }
 
@@ -5507,261 +5831,621 @@ local_system:
               true
           }
       }
-    src/precompute4/resolve_negatives.rs: |
-      use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
+    src/precompute4/weighted_automata/determinization.rs: |
+      use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
+      use super::common::Weight;
+      use super::dwa::DWA;
+      use super::nwa::{NWAStates, NWA};
+      use crate::precompute4::weighted_automata::{NWADefaultTransition, NWAStateID};
       use crate::profiler::PROGRESS_BAR_ENABLED;
       use indicatif::{ProgressBar, ProgressStyle};
-      use std::collections::{HashMap, VecDeque};
+
+      use std::collections::hash_map::Entry;
+      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+      use std::hash::{Hash, Hasher};
       use std::time::Instant;
 
-      pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-          let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(3);
-              p.set_style(
-                  ProgressStyle::default_bar()
-                      .template("{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
-                      .expect("progress-bar"),
-              );
-              Some(p)
-          } else {
-              None
-          };
-
-          if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(1); }
-          let epsilons_to_add = compute_cancellations(&nwa.states);
-          crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
-
-          if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(2); }
-          let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
-
-          if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(3); }
-          // Add new epsilons
-          for (from, to, w) in epsilons_to_add {
-              nwa.states.add_epsilon(from, to, w);
-          }
-          // Add propagated final weights
-          for sid in 0..nwa.states.len() {
-              if !final_fix[sid].is_empty() {
-                  let st = &mut nwa.states.0[sid];
-                  if let Some(fw) = &mut st.final_weight {
-                      *fw |= &final_fix[sid];
-                  } else {
-                      st.final_weight = Some(final_fix[sid].clone());
-                  }
-              }
-          }
-          // Remove all negative transitions
-          for st in &mut nwa.states.0 {
-              st.transitions.retain(|k, _| *k >= 0);
-          }
-          crate::debug!(4, "Applied changes to NWA.");
-
-          if let Some(p) = &pb { p.finish_with_message("Done"); }
-      }
-
-      /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
-      /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
-      /// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
-      /// correctly represents the language defined by these complex interactions.
-      ///
-      /// The process is as follows:
-      /// 1.  **Convert to NWA**: The DWA is first converted to an NWA to allow for flexible graph manipulations,
-      ///     such as adding epsilon transitions.
-      /// 2.  **Resolve Cancellations**: The algorithm identifies all `A --neg(c)--> B --c--> C` sequences.
-      ///     Each such "cancellation" is resolved by adding a new epsilon transition `A --eps--> C`, which acts as a shortcut.
-      ///     The weights are combined along the path.
-      /// 3.  **Propagate Finality**: Finality is propagated backward across all `neg(c)` and epsilon transitions (both
-      ///     original and newly created ones). If a state `A` can reach a final state `F` through a path of such
-      ///     transitions, `A` inherits finality from `F`. This is computed using a standard least fixpoint algorithm.
-      /// 4.  **Apply Changes & Cleanup**: The newly computed final weights are applied to the NWA states. Then, all
-      ///     negative-code transitions are removed from the graph, as their semantic effects have been fully resolved.
-      /// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
-      ///     DWA, which is the final result.
-      pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          let now = Instant::now();
-          crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
-
-          let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(4);
-              p.set_style(
-                  ProgressStyle::default_bar()
-                      .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
-                      .expect("progress-bar"),
-              );
-              Some(p)
-          } else {
-              None
-          };
-
-          if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
-          let mut nwa = NWA::from_dwa(dwa);
-          crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
-
-          if let Some(p) = &pb { p.set_message("Resolve negatives in NWA"); p.set_position(2); }
-          resolve_negative_codes_in_nwa(&mut nwa);
-          crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
-
-          if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(3); }
-          let mut result = nwa.determinize_to_dwa();
-          if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(4); }
-          result.simplify();
-          *dwa = result;
-          crate::debug!(4, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
-
-          if let Some(p) = &pb { p.finish_with_message("Done"); }
-          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-      }
-
-      /// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
-      /// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
-      fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
+      /// Faster ε-closure from a single source with masked propagation.
+      /// - scratch_w: a weight array reused across calls; entries are set to zeros() after use via 'touched'.
+      /// - touched: the list of indices whose entries in scratch_w are non-zero and must be reset.
+      /// Returns a sorted Vec of (state, weight).
+      fn eps_closure_masked_vec_one(
+          s: NWAStateID,
+          states: &NWAStates,
+          fut: &[Weight],
+          scratch_w: &mut [Weight],
+          q: &mut VecDeque<NWAStateID>,
+          touched: &mut Vec<NWAStateID>,
+      ) -> Vec<(NWAStateID, Weight)> {
           let n = states.len();
-          // `queries[s]` stores cancellation "searches" that have reached state `s`.
-          // A search is identified by its origin state `a` and the positive code `c` it's looking for.
-          // The map stores the accumulated weight of the path `a --neg(c)--> ... --eps*--> s`.
-          let mut queries: Vec<HashMap<(NWAStateID, i16), Weight>> = vec![HashMap::new(); n];
-          let mut worklist: VecDeque<(NWAStateID, NWAStateID, i16, Weight)> = VecDeque::new();
-          let mut new_epsilons: HashMap<(NWAStateID, NWAStateID), Weight> = HashMap::new();
+          if s >= n {
+              return Vec::new();
+          }
+          let fs = fut[s].clone();
+          if fs.is_empty() {
+              return Vec::new();
+          }
 
-          // 1. Initialize worklist with all negative transitions.
-          // Each `a --neg(c)--> b` starts a search at `b` for a matching `c`.
-          for a in 0..n {
-              for (label, targets) in &states[a].transitions {
-                  if *label < 0 {
-                      let c = label.wrapping_sub(i16::MIN);
-                      for (b, w_ab) in targets {
-                          if *b >= n { continue; }
-                          let query_key = (a, c);
-                          let query_weight = queries[*b].entry(query_key).or_default();
-                          let old_w = query_weight.clone();
-                          *query_weight |= w_ab;
-                          if *query_weight != old_w {
-                              worklist.push_back((*b, a, c, query_weight.clone()));
-                          }
+          // Initialize
+          scratch_w[s] = fs;
+          touched.push(s);
+          q.push_back(s);
+
+          while let Some(u) = q.pop_front() {
+              let base = scratch_w[u].clone();
+              if base.is_empty() { continue; }
+
+              for &(v, ref w_eps) in &states[u].epsilons {
+                  if v >= n { continue; }
+
+                  let mut prop = &base & w_eps;
+                  if prop.is_empty() { continue; }
+
+                  prop &= &fut[v];
+                  if prop.is_empty() { continue; }
+
+                  let old = &scratch_w[v];
+                  let new_w = old | &prop;
+                  if new_w != *old {
+                      let was_empty = old.is_empty();
+                      scratch_w[v] = new_w;
+                      if was_empty {
+                          touched.push(v);
                       }
+                      q.push_back(v);
                   }
               }
           }
 
-          // 2. Main fixpoint loop: propagate searches and generate new epsilon shortcuts.
-          while let Some((s, a, c, w_as)) = worklist.pop_front() {
-              // 2a. Check for cancellations at the current state `s`.
-              // A cancellation occurs if `s` has an outgoing transition on `c`.
-              let mut check_cancellations = |target: NWAStateID, w_st: &Weight, worklist: &mut VecDeque<_>| {
-                  let new_eps_w = &w_as & w_st;
-                  if new_eps_w.is_empty() { return; }
+          // Collect results and reset scratch_w for touched indices
+          let mut out: Vec<(NWAStateID, Weight)> = Vec::with_capacity(touched.len());
+          for &i in touched.iter() {
+              if !scratch_w[i].is_empty() {
+                  out.push((i, scratch_w[i].clone()));
+              }
+              scratch_w[i] = Weight::zeros();
+          }
+          touched.clear();
+          out.sort_by_key(|(sid, _)| *sid);
+          out
+      }
 
-                  let eps_key = (a, target);
-                  let eps_weight = new_epsilons.entry(eps_key).or_default();
-                  let old_eps_w = eps_weight.clone();
-                  *eps_weight |= &new_eps_w;
+      impl NWA {
+          pub fn determinize_to_dwa(&self) -> DWA {
+              let now = Instant::now();
 
-                  // If this epsilon is new or stronger, it can propagate existing searches.
-                  if *eps_weight != old_eps_w {
-                      // Any search that has reached `a` can now cross this new epsilon to `target`.
-                      // To avoid borrow checker issues, clone the queries at state `a`.
-                      let queries_at_a = queries[a].clone();
-                      for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
-                          let prop_w = w_a_prime_a & &*eps_weight;
-                          if prop_w.is_empty() { continue; }
+              let mut nwa = self.clone();
+              nwa.simplify();
 
-                          let query_key = (a_prime, c_prime);
-                          let query_weight = queries[target].entry(query_key).or_default();
-                          let old_qw = query_weight.clone();
-                          *query_weight |= &prop_w;
-                          if *query_weight != old_qw {
-                              worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
+              if crate::is_debug_level_enabled(5) {
+                  eprintln!("NWA after simplify:\n{}", nwa);
+              }
+              let result = nwa.det_fixpoint();
+              if crate::is_debug_level_enabled(5) {
+                  eprintln!("NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
+                  eprintln!("NWA::determinize_to_dwa took: {:?}", now.elapsed());
+              }
+
+              result
+          }
+
+          fn det_fixpoint(&self) -> DWA {
+              let fut = self.compute_future_weights();
+              let n = self.states.len();
+              if n == 0 {
+                  return DWA::new();
+              }
+
+              fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
+                  if w.is_all_fast() {
+                      return base.to_vec();
+                  }
+                  base.iter()
+                      .map(|(sid, wt)| (*sid, wt & w))
+                      .filter(|(_, x)| !x.is_empty())
+                      .collect()
+              }
+
+              struct StepPool {
+                  raw: Vec<Vec<(NWAStateID, Weight)>>,
+                  map: HashMap<u64, Vec<usize>>,
+              }
+
+              impl StepPool {
+                  fn new() -> Self {
+                      Self { raw: Vec::new(), map: HashMap::new() }
+                  }
+                  fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
+                      pairs
+                          .iter()
+                          .fold(FP_ZERO, |fp, (sid, w)| mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2)))
+                  }
+                  fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
+                      pairs.retain(|(_, w)| !w.is_empty());
+                      let fp = Self::fingerprint(&pairs);
+                      if let Some(cands) = self.map.get(&fp) {
+                          for &id in cands {
+                              if self.raw[id] == pairs {
+                                  return id;
+                              }
                           }
                       }
+                      let id = self.raw.len();
+                      self.raw.push(pairs);
+                      self.map.entry(fp).or_default().push(id);
+                      id
                   }
+              }
+
+              #[derive(Clone)]
+              struct CompiledStep {
+                  by_sig: Vec<(usize, Weight)>,
+                  mask: Weight,
+              }
+              #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+              struct DefSig {
+                  step_id: usize,
+                  exceptions: BTreeSet<i16>,
+              }
+              #[derive(Clone)]
+              struct MacroSig {
+                  final_w: Option<Weight>,
+                  // Each default transition is represented by the compiled "step_id" along with its exception set.
+                  def: Vec<DefSig>,
+                  ex: BTreeMap<i16, Vec<usize>>,
+              }
+              #[derive(Clone, Hash, Eq, PartialEq)]
+              struct MacroSigKey {
+                  final_fp: u64,
+                  // Store both step id and the exact exceptions (as a sorted Vec) to keep signatures precise.
+                  def: Vec<(usize, Vec<i16>)>,
+                  ex: Vec<(i16, Vec<usize>)>,
+              }
+
+              // Precompute masked ε-closures for all states using fast scratch buffers.
+              let pb_eps = if PROGRESS_BAR_ENABLED {
+                  Some(ProgressBar::new(n as u64).with_style(
+                      ProgressStyle::default_bar()
+                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
+                          .unwrap(),
+                  ))
+              } else {
+                  None
+              };
+              let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
+              let mut scratch_w: Vec<Weight> = vec![Weight::zeros(); n];
+              let mut q: VecDeque<NWAStateID> = VecDeque::new();
+              let mut touched: Vec<NWAStateID> = Vec::new();
+              for s in 0..n {
+                  eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
+                  if let Some(p) = &pb_eps {
+                      p.inc(1);
+                  }
+              }
+              if let Some(p) = pb_eps {
+                  p.finish_with_message("ε-closures done");
+              }
+
+              let mut step_pool = StepPool::new();
+              let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
+              let mut state_to_sig_id: Vec<usize> = vec![0; n];
+              let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
+              let pb_sigs = if PROGRESS_BAR_ENABLED {
+                  Some(ProgressBar::new(n as u64).with_style(
+                      ProgressStyle::default_bar()
+                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Macro signatures)")
+                          .unwrap(),
+                  ))
+              } else {
+                  None
+              };
+              for s in 0..n {
+                  let final_acc = eps_cache[s].iter().fold(Weight::zeros(), |mut acc, (t, w)| {
+                      if let Some(fw) = &self.states[*t].final_weight {
+                          acc |= &(w & fw);
+                      }
+                      acc
+                  });
+                  let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
+
+                  // Compute default steps; preserve per-default exception sets.
+                  let mut def_steps: Vec<DefSig> = Vec::new();
+                  for default in &self.states[s].default {
+                      let NWADefaultTransition { target: to, weight: wdef, exceptions } = default;
+                      if *to >= n {
+                          continue;
+                      }
+                      let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
+                      if pairs_def.is_empty() {
+                          continue;
+                      }
+                      let step_id = step_pool.intern(pairs_def);
+                      def_steps.push(DefSig {
+                          step_id,
+                          exceptions: exceptions.clone(),
+                      });
+                  }
+
+                  // Compute exceptions; drop those that are empty or identical to the default step effect.
+                  let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+                  for (lbl, targets) in self.states[s].transitions.iter() {
+                      let mut step_exs: Vec<usize> = Vec::new();
+                      for (to, wlbl) in targets {
+                          if *to >= n {
+                              continue;
+                          }
+                          let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
+                          if pairs_ex.is_empty() {
+                              continue;
+                          }
+                          step_exs.push(step_pool.intern(pairs_ex));
+                      }
+
+                      if !step_exs.is_empty() {
+                          step_exs.sort_unstable();
+                          let mut sorted_def_step_ids: Vec<usize> =
+                              def_steps.iter().map(|d| d.step_id).collect();
+                          sorted_def_step_ids.sort_unstable();
+                          if step_exs == sorted_def_step_ids {
+                              continue;
+                          }
+                          ex.insert(*lbl, step_exs);
+                      }
+                  }
+
+                  if crate::is_debug_level_enabled(5) {
+                      eprintln!("NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
+                  }
+
+                  // Build a key that includes default exceptions, to avoid merging states that differ only by exception sets.
+                  let mut sorted_def_steps_key: Vec<(usize, Vec<i16>)> = def_steps
+                      .iter()
+                      .map(|d| {
+                          let mut v: Vec<i16> = d.exceptions.iter().copied().collect();
+                          v.sort_unstable();
+                          (d.step_id, v)
+                      })
+                      .collect();
+                  sorted_def_steps_key.sort_unstable();
+                  let key = MacroSigKey {
+                      final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
+                      def: sorted_def_steps_key,
+                      ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
+                  };
+                  let sig_id = *sig_intern.entry(key).or_insert_with(|| {
+                      let id = sigs.len();
+                      sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
+                      id
+                  });
+                  state_to_sig_id[s] = sig_id;
+                  if let Some(p) = &pb_sigs {
+                      p.inc(1);
+                  }
+              }
+              if let Some(p) = pb_sigs {
+                  p.finish_with_message("Macro signatures done");
+              }
+
+              if crate::is_debug_level_enabled(5) {
+                  eprintln!("All MacroSigs ({}):", sigs.len());
+                  for (i, sig) in sigs.iter().enumerate() {
+                      eprintln!("  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
+                  }
+                  eprintln!("state_to_sig_id: {:?}", state_to_sig_id);
+              }
+
+              let pb_compile = if PROGRESS_BAR_ENABLED {
+                  Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
+                      ProgressStyle::default_bar()
+                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Compile steps)")
+                          .unwrap(),
+                  ))
+              } else {
+                  None
+              };
+              let mut compiled_steps: Vec<CompiledStep> = Vec::with_capacity(step_pool.raw.len());
+              for pairs in &step_pool.raw {
+                  let mut acc: HashMap<usize, Weight> = HashMap::new();
+                  for (t, w) in pairs.iter() {
+                      *acc.entry(state_to_sig_id[*t]).or_default() |= w;
+                  }
+                  let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
+                  by_sig.sort_by_key(|(sid, _)| *sid);
+                  let mask = by_sig.iter().fold(Weight::zeros(), |mut acc, (_, w)| {
+                      acc |= w;
+                      acc
+                  });
+                  compiled_steps.push(CompiledStep { by_sig, mask });
+                  if let Some(p) = &pb_compile {
+                      p.inc(1);
+                  }
+              }
+              if let Some(p) = pb_compile {
+                  p.finish_with_message("Compile steps done");
+              }
+
+              if crate::is_debug_level_enabled(5) {
+                  eprintln!("Step Pool ({}):", step_pool.raw.len());
+                  for (i, pairs) in step_pool.raw.iter().enumerate() {
+                      eprintln!("  Step {}: {:?}", i, pairs);
+                  }
+                  eprintln!("Compiled Steps ({}):", compiled_steps.len());
+                  for (i, step) in compiled_steps.iter().enumerate() {
+                      eprintln!("  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
+                  }
+              }
+              #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+              struct MembersKey(Vec<usize>);
+
+              struct CompositionNode {
+                  final_weight: Option<Weight>,
+                  default_target_idx: Option<usize>,
+                  default_mask: Option<Weight>,
+                  exception_targets: BTreeMap<i16, usize>,
+                  exception_masks: BTreeMap<i16, Weight>,
+                  gates: HashMap<usize, Weight>,
+              }
+
+              fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
+                  for (sid, w) in compiled.iter() {
+                      let x = w & gate;
+                      if !x.is_empty() {
+                          *dst.entry(*sid).or_default() |= &x;
+                      }
+                  }
+              }
+
+              let mut nodes: Vec<CompositionNode> = Vec::new();
+              let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
+              let mut work: VecDeque<usize> = VecDeque::new();
+
+              let pb_discover = if PROGRESS_BAR_ENABLED {
+                  Some(
+                      ProgressBar::new(0).with_style(
+                          ProgressStyle::default_bar()
+                              .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Discovering states)")
+                              .unwrap(),
+                      ),
+                  )
+              } else {
+                  None
               };
 
-              if let Some(pos_targets) = states[s].transitions.get(&c) {
-                  for (t, w_st) in pos_targets {
-                      if *t < n { check_cancellations(*t, w_st, &mut worklist); }
+              let mut init_map: HashMap<usize, Weight> = HashMap::new();
+              for (t, w) in eps_cache[self.body.start_state].iter() {
+                  *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
+              }
+              let mut init_keys: Vec<_> = init_map.keys().copied().collect();
+              init_keys.sort_unstable();
+              let init_key = MembersKey(init_keys);
+              let start_idx = 0;
+              key_to_idx.insert(init_key, start_idx);
+              nodes.push(CompositionNode {
+                  final_weight: None,
+                  default_target_idx: None,
+                  default_mask: None,
+                  exception_targets: BTreeMap::new(),
+                  exception_masks: BTreeMap::new(),
+                  gates: init_map,
+              });
+              let mut in_queue = vec![false; 1];
+              in_queue[start_idx] = true;
+              work.push_back(start_idx);
+
+              while let Some(idx) = work.pop_front() {
+                  in_queue[idx] = false;
+                  if let Some(p) = &pb_discover {
+                      p.inc(1);
                   }
-              }
-              for def in &states[s].default {
-                  if !def.exceptions.contains(&c) && def.target < n {
-                      check_cancellations(def.target, &def.weight, &mut worklist);
+                  let node_gates = nodes[idx].gates.clone();
+
+                  if crate::is_debug_level_enabled(5) {
+                      eprintln!("\nProcessing composition node {}: gates: {:?}", idx, node_gates);
                   }
-              }
+                  let mut def_groups: HashMap<usize, Weight> = HashMap::new();
+                  let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+                  let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+                  let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
 
-              // 2b. Propagate the current search forward over original epsilon edges.
-              for (t, w_st) in &states[s].epsilons {
-                  if *t >= n { continue; }
-                  let prop_w = &w_as & w_st;
-                  if prop_w.is_empty() { continue; }
-
-                  let query_key = (a, c);
-                  let query_weight = queries[*t].entry(query_key).or_default();
-                  let old_qw = query_weight.clone();
-                  *query_weight |= &prop_w;
-                  if *query_weight != old_qw {
-                      worklist.push_back((*t, a, c, query_weight.clone()));
-                  }
-              }
-          }
-
-          new_epsilons
-              .into_iter()
-              .map(|((from, to), w)| (from, to, w))
-              .collect()
-      }
-
-      /// Compute the least fixpoint of final weights propagated backward along all epsilon edges
-      /// (original and new) and all negative-labeled edges.
-      fn compute_final_fixpoint(states: &NWAStates, new_epsilons: &[(NWAStateID, NWAStateID, Weight)]) -> Vec<Weight> {
-          let n = states.len();
-          let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
-
-          // Build reverse graph for propagation
-          for u in 0..n {
-              // Original epsilons
-              for &(v, ref w) in &states[u].epsilons {
-                  if v < n { rev[v].push((u, w.clone())); }
-              }
-              // Negative edges
-              for (label, targets) in &states[u].transitions {
-                  if *label < 0 {
-                      for (v, w) in targets {
-                          if *v < n { rev[*v].push((u, w.clone())); }
+                  for (sig_id, gate) in &node_gates {
+                      for def in &sigs[*sig_id].def {
+                          *def_groups.entry(def.step_id).or_default() |= gate;
+                          // Record that this default has these labels as explicit exceptions; default must not apply on them.
+                          for &lbl in &def.exceptions {
+                              *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
+                          }
+                      }
+                      for (lbl, ex_steps) in &sigs[*sig_id].ex {
+                          for ex_step in ex_steps {
+                              *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
+                          }
+                          // Default should not apply on labels that have explicit labeled transitions (for this state).
+                          for def in &sigs[*sig_id].def {
+                              *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
+                          }
                       }
                   }
-              }
-          }
-          // New epsilons from cancellations
-          for (u, v, w) in new_epsilons {
-              if *v < n { rev[*v].push((*u, w.clone())); }
-          }
 
-          let mut q: VecDeque<NWAStateID> = VecDeque::new();
-          for s in 0..n {
-              if let Some(ref fw) = states[s].final_weight {
-                  if !fw.is_empty() {
-                      fut[s] = fw.clone();
-                      q.push_back(s);
+                  if crate::is_debug_level_enabled(5) {
+                      eprintln!("  - def_groups: {:?}", def_groups);
+                      eprintln!("  - ex_groups_by_label: {:?}", ex_groups_by_label);
+                      eprintln!("  - def_exers_by_label: {:?}", def_exers_by_label);
+                      eprintln!("  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
+                  }
+                  let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
+                  let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+                  for (def_step, g) in &def_groups {
+                      accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
+                  }
+                  if !def_target_map.is_empty() {
+                      target_maps.insert(None, def_target_map);
+                  }
+
+                  // Labels that need explicit exception edges are:
+                  //  - any label with explicit labeled transitions
+                  //  - any label that appears in a default's exception set
+                  let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
+                  labels_to_consider.extend(ex_groups_by_label.keys().copied());
+                  labels_to_consider.extend(def_exceptions_by_label.keys().copied());
+
+                  for lbl in labels_to_consider {
+                      if crate::is_debug_level_enabled(5) {
+                          eprintln!("    - processing exception label {}", lbl);
+                      }
+                      let mut map = HashMap::new();
+                      let def_exers = def_exers_by_label.get(&lbl);
+                      let def_exc = def_exceptions_by_label.get(&lbl);
+
+                      for (def_step, total_g) in &def_groups {
+                          if crate::is_debug_level_enabled(5) {
+                              eprintln!("      - considering default step {} with total_g {}", def_step, total_g);
+                          }
+                          // Subtract states that have explicit labeled transitions on this label
+                          let g_exers = def_exers.and_then(|de| de.get(def_step));
+                          // Subtract states whose default is explicitly not applicable on this label (exception set)
+                          let g_exc = def_exc.and_then(|dx| dx.get(def_step));
+
+                          if crate::is_debug_level_enabled(5) {
+                              eprintln!("        - g_exers for this def_step: {:?}", g_exers);
+                              eprintln!("        - g_exc for this def_step: {:?}", g_exc);
+                          }
+                          let mut g_nonex = total_g.clone();
+                          if let Some(g) = g_exers { g_nonex -= g; }
+                          if let Some(g) = g_exc { g_nonex -= g; }
+                          if crate::is_debug_level_enabled(5) {
+                              eprintln!("        - g_nonex (after subtractors): {}", g_nonex);
+                          }
+                          if !g_nonex.is_empty() {
+                              if crate::is_debug_level_enabled(5) {
+                                  eprintln!("        - accumulating for g_nonex");
+                              }
+                              accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
+                          }
+                      }
+                      if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
+                          for (ex_step, g_ex) in ex_groups {
+                              if crate::is_debug_level_enabled(5) {
+                                  eprintln!("      - considering exception step {} with g_ex {}", ex_step, g_ex);
+                              }
+                              accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+                          }
+                      }
+                      // Always insert an entry for this label (even if map is empty)
+                      // so that we can emit an exception edge that blocks the default.
+                      target_maps.insert(Some(lbl), map);
+                  }
+
+                  if crate::is_debug_level_enabled(5) {
+                      eprintln!("  - computed target_maps:");
+                      for (label, map) in &target_maps {
+                          let mut keys: Vec<_> = map.keys().copied().collect();
+                          keys.sort_unstable();
+                          let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+                          eprintln!("    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
+                      }
+                  }
+
+                  let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
+                  for (label, map) in target_maps {
+                      let mut keys: Vec<_> = map.keys().copied().collect();
+                      keys.sort_unstable();
+                      let key = MembersKey(keys);
+                      let target_idx = *key_to_idx.entry(key).or_insert_with(|| {
+                          let new_idx = nodes.len();
+                          nodes.push(CompositionNode {
+                              final_weight: None,
+                              default_target_idx: None,
+                              default_mask: None,
+                              exception_targets: BTreeMap::new(),
+                              exception_masks: BTreeMap::new(),
+                              gates: HashMap::new(),
+                          });
+                          if new_idx >= in_queue.len() {
+                              in_queue.resize(new_idx + 1, false);
+                          }
+                          new_idx
+                      });
+
+                      let mut any_change = false;
+                      for (sig_id, weight) in &map {
+                          let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
+                          let new_w = &*entry | weight;
+                          if new_w != *entry {
+                              *entry = new_w;
+                              any_change = true;
+                          }
+                      }
+                      if any_change && !in_queue[target_idx] {
+                          in_queue[target_idx] = true;
+                          work.push_back(target_idx);
+                      }
+                      resolved_transitions.insert(label, (target_idx, map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a })));
+                  }
+
+                  let node = &mut nodes[idx];
+                  if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
+                      node.default_target_idx = Some(target_idx);
+                      node.default_mask = Some(mask);
+                  }
+                  for (label, (target_idx, mask)) in resolved_transitions {
+                      if let Some(lbl) = label {
+                          node.exception_targets.insert(lbl, target_idx);
+                          node.exception_masks.insert(lbl, mask);
+                      }
+                  }
+
+                  if crate::is_debug_level_enabled(5) {
+                      eprintln!("  - Resolved transitions for node {}:", idx);
+                      if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
+                          eprintln!("    - default -> {} (mask: {})", target, mask);
+                      }
+                      for (lbl, target) in &node.exception_targets {
+                          if let Some(mask) = node.exception_masks.get(lbl) {
+                              eprintln!("    - on {}: -> {} (mask: {})", lbl, target, mask);
+                          }
+                      }
+                  }
+                  node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
+                      if let Some(fw) = &sigs[*sig_id].final_w {
+                          acc |= &(gate & fw);
+                      }
+                      acc
+                  }));
+
+                  if let Some(p) = &pb_discover {
+                      p.set_length(nodes.len() as u64);
                   }
               }
-          }
+              if let Some(p) = pb_discover {
+                  p.finish_with_message(format!("Discovered {} compositions", nodes.len()));
+              }
 
-          while let Some(v) = q.pop_front() {
-              let fv = fut[v].clone();
-              if fv.is_empty() { continue; }
-              for &(u, ref w_uv) in &rev[v] {
-                  let add = &fv & w_uv;
-                  if add.is_empty() { continue; }
-                  let old = &fut[u];
-                  if (&add & old) != add {
-                      fut[u] |= &add;
-                      q.push_back(u);
+              let mut dwa = DWA::new();
+              if nodes.is_empty() {
+                  return dwa;
+              }
+              dwa.states.0.resize(nodes.len(), Default::default());
+              dwa.body.start_state = start_idx;
+
+              for (i, node) in nodes.iter().enumerate() {
+                  dwa.states[i].final_weight = node.final_weight.clone();
+                  if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
+                      if !mask.is_empty() {
+                          dwa.set_default_transition(i, target_idx, mask.clone()).unwrap();
+                      }
+                  }
+                  for (lbl, &target_idx) in &node.exception_targets {
+                      // Always add exception transitions, even with empty masks, to properly block default on those labels.
+                      let mask = node
+                          .exception_masks
+                          .get(lbl)
+                          .cloned()
+                          .unwrap_or_else(Weight::zeros);
+                      dwa.add_transition(i, *lbl, target_idx, mask).unwrap();
                   }
               }
+              dwa
           }
-          fut
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -5774,7 +6458,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - gf
   commit_message_model:
@@ -8446,293 +9130,602 @@ messages:
     metadata:
       filename: src/precompute4/weighted_automata/simplification.rs
   - user: |-
-      ```rust "src/precompute4/resolve_negatives.rs"
-      use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
+      ```rust "src/precompute4/weighted_automata/determinization.rs"
+      use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
+      use super::common::Weight;
+      use super::dwa::DWA;
+      use super::nwa::{NWAStates, NWA};
+      use crate::precompute4::weighted_automata::{NWADefaultTransition, NWAStateID};
       use crate::profiler::PROGRESS_BAR_ENABLED;
       use indicatif::{ProgressBar, ProgressStyle};
-      use std::collections::{HashMap, VecDeque};
+
+      use std::collections::hash_map::Entry;
+      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+      use std::hash::{Hash, Hasher};
       use std::time::Instant;
 
-      pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-          let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(3);
-              p.set_style(
-                  ProgressStyle::default_bar()
-                      .template("{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
-                      .expect("progress-bar"),
-              );
-              Some(p)
-          } else {
-              None
-          };
-
-          if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(1); }
-          let epsilons_to_add = compute_cancellations(&nwa.states);
-          crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
-
-          if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(2); }
-          let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
-
-          if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(3); }
-          // Add new epsilons
-          for (from, to, w) in epsilons_to_add {
-              nwa.states.add_epsilon(from, to, w);
-          }
-          // Add propagated final weights
-          for sid in 0..nwa.states.len() {
-              if !final_fix[sid].is_empty() {
-                  let st = &mut nwa.states.0[sid];
-                  if let Some(fw) = &mut st.final_weight {
-                      *fw |= &final_fix[sid];
-                  } else {
-                      st.final_weight = Some(final_fix[sid].clone());
-                  }
-              }
-          }
-          // Remove all negative transitions
-          for st in &mut nwa.states.0 {
-              st.transitions.retain(|k, _| *k >= 0);
-          }
-          crate::debug!(4, "Applied changes to NWA.");
-
-          if let Some(p) = &pb { p.finish_with_message("Done"); }
-      }
-
-      /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
-      /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
-      /// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
-      /// correctly represents the language defined by these complex interactions.
-      ///
-      /// The process is as follows:
-      /// 1.  **Convert to NWA**: The DWA is first converted to an NWA to allow for flexible graph manipulations,
-      ///     such as adding epsilon transitions.
-      /// 2.  **Resolve Cancellations**: The algorithm identifies all `A --neg(c)--> B --c--> C` sequences.
-      ///     Each such "cancellation" is resolved by adding a new epsilon transition `A --eps--> C`, which acts as a shortcut.
-      ///     The weights are combined along the path.
-      /// 3.  **Propagate Finality**: Finality is propagated backward across all `neg(c)` and epsilon transitions (both
-      ///     original and newly created ones). If a state `A` can reach a final state `F` through a path of such
-      ///     transitions, `A` inherits finality from `F`. This is computed using a standard least fixpoint algorithm.
-      /// 4.  **Apply Changes & Cleanup**: The newly computed final weights are applied to the NWA states. Then, all
-      ///     negative-code transitions are removed from the graph, as their semantic effects have been fully resolved.
-      /// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
-      ///     DWA, which is the final result.
-      pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          let now = Instant::now();
-          crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
-
-          let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(4);
-              p.set_style(
-                  ProgressStyle::default_bar()
-                      .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
-                      .expect("progress-bar"),
-              );
-              Some(p)
-          } else {
-              None
-          };
-
-          if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
-          let mut nwa = NWA::from_dwa(dwa);
-          crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
-
-          if let Some(p) = &pb { p.set_message("Resolve negatives in NWA"); p.set_position(2); }
-          resolve_negative_codes_in_nwa(&mut nwa);
-          crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
-
-          if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(3); }
-          let mut result = nwa.determinize_to_dwa();
-          if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(4); }
-          result.simplify();
-          *dwa = result;
-          crate::debug!(4, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
-
-          if let Some(p) = &pb { p.finish_with_message("Done"); }
-          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-      }
-
-      /// Helper to compute the weighted epsilon closure of a state.
-      fn compute_eps_closure(
+      /// Faster ε-closure from a single source with masked propagation.
+      /// - scratch_w: a weight array reused across calls; entries are set to zeros() after use via 'touched'.
+      /// - touched: the list of indices whose entries in scratch_w are non-zero and must be reset.
+      /// Returns a sorted Vec of (state, weight).
+      fn eps_closure_masked_vec_one(
+          s: NWAStateID,
           states: &NWAStates,
-          start_node: NWAStateID,
-          extra_epsilons: &HashMap<NWAStateID, Vec<(NWAStateID, Weight)>>,
-      ) -> HashMap<NWAStateID, Weight> {
-          let mut closure: HashMap<NWAStateID, Weight> = HashMap::new();
-          let mut q = VecDeque::new();
+          fut: &[Weight],
+          scratch_w: &mut [Weight],
+          q: &mut VecDeque<NWAStateID>,
+          touched: &mut Vec<NWAStateID>,
+      ) -> Vec<(NWAStateID, Weight)> {
+          let n = states.len();
+          if s >= n {
+              return Vec::new();
+          }
+          let fs = fut[s].clone();
+          if fs.is_empty() {
+              return Vec::new();
+          }
 
-          closure.insert(start_node, Weight::all());
-          q.push_back(start_node);
+          // Initialize
+          scratch_w[s] = fs;
+          touched.push(s);
+          q.push_back(s);
 
           while let Some(u) = q.pop_front() {
-              let u_w = closure.get(&u).unwrap().clone();
+              let base = scratch_w[u].clone();
+              if base.is_empty() { continue; }
 
-              // Original epsilons
-              for (v, w) in &states[u].epsilons {
-                  let new_w = &u_w & w;
-                  if new_w.is_empty() { continue; }
-                  let entry = closure.entry(*v).or_insert_with(Weight::zeros);
-                  let old_w = entry.clone();
-                  *entry |= &new_w;
-                  if *entry != old_w {
-                      q.push_back(*v);
-                  }
-              }
-              // Extra epsilons found during cancellation fixpoint
-              if let Some(edges) = extra_epsilons.get(&u) {
-                  for (v, w) in edges {
-                      let new_w = &u_w & w;
-                      if new_w.is_empty() { continue; }
-                      let entry = closure.entry(*v).or_insert_with(Weight::zeros);
-                      let old_w = entry.clone();
-                      *entry |= &new_w;
-                      if *entry != old_w {
-                          q.push_back(*v);
+              for &(v, ref w_eps) in &states[u].epsilons {
+                  if v >= n { continue; }
+
+                  let mut prop = &base & w_eps;
+                  if prop.is_empty() { continue; }
+
+                  prop &= &fut[v];
+                  if prop.is_empty() { continue; }
+
+                  let old = &scratch_w[v];
+                  let new_w = old | &prop;
+                  if new_w != *old {
+                      let was_empty = old.is_empty();
+                      scratch_w[v] = new_w;
+                      if was_empty {
+                          touched.push(v);
                       }
+                      q.push_back(v);
                   }
               }
           }
-          closure
+
+          // Collect results and reset scratch_w for touched indices
+          let mut out: Vec<(NWAStateID, Weight)> = Vec::with_capacity(touched.len());
+          for &i in touched.iter() {
+              if !scratch_w[i].is_empty() {
+                  out.push((i, scratch_w[i].clone()));
+              }
+              scratch_w[i] = Weight::zeros();
+          }
+          touched.clear();
+          out.sort_by_key(|(sid, _)| *sid);
+          out
       }
 
-      /// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
-      /// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
-      fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-          let mut all_new_epsilons: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
-          loop {
-              let mut changed_in_pass = false;
-              let mut pass_epsilons = Vec::new();
+      impl NWA {
+          pub fn determinize_to_dwa(&self) -> DWA {
+              let now = Instant::now();
 
-              for a in 0..states.len() {
-                  let state_a = &states[a];
-                  for (neg_label, targets) in &state_a.transitions {
-                      if *neg_label >= 0 { continue; }
-                      let c = neg_label.wrapping_sub(i16::MIN);
+              let mut nwa = self.clone();
+              nwa.simplify();
 
-                      for (b, w_ab) in targets {
-                          if *b >= states.len() { continue; }
+              crate::debug!(5, "NWA after simplify:\n{}", nwa);
+              let result = nwa.det_fixpoint();
+              crate::debug!(5, "NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
+              crate::debug!(5, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
 
-                          let eps_closure_of_b = compute_eps_closure(states, *b, &all_new_epsilons);
+              result
+          }
 
-                          for (b_reachable, w_b_br) in eps_closure_of_b {
-                              if b_reachable >= states.len() { continue; }
-                              let state_br = &states[b_reachable];
+          fn det_fixpoint(&self) -> DWA {
+              let fut = self.compute_future_weights();
+              let n = self.states.len();
+              if n == 0 {
+                  return DWA::new();
+              }
 
-                              // Labeled transitions
-                              if let Some(targets) = state_br.transitions.get(&c) {
-                                  for (c_target, w_br_c) in targets {
-                                      let new_w = w_ab & &w_b_br & w_br_c;
-                                      if !new_w.is_empty() {
-                                          pass_epsilons.push((a, *c_target, new_w));
-                                      }
-                                  }
-                              }
+              fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
+                  if w.is_all_fast() {
+                      return base.to_vec();
+                  }
+                  base.iter()
+                      .map(|(sid, wt)| (*sid, wt & w))
+                      .filter(|(_, x)| !x.is_empty())
+                      .collect()
+              }
 
-                              // Default transitions
-                              for def in &state_br.default {
-                                  if !def.exceptions.contains(&c) {
-                                      let new_w = w_ab & &w_b_br & &def.weight;
-                                      if !new_w.is_empty() {
-                                          pass_epsilons.push((a, def.target, new_w));
-                                      }
-                                  }
+              struct StepPool {
+                  raw: Vec<Vec<(NWAStateID, Weight)>>,
+                  map: HashMap<u64, Vec<usize>>,
+              }
+
+              impl StepPool {
+                  fn new() -> Self {
+                      Self { raw: Vec::new(), map: HashMap::new() }
+                  }
+                  fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
+                      pairs
+                          .iter()
+                          .fold(FP_ZERO, |fp, (sid, w)| mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2)))
+                  }
+                  fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
+                      pairs.retain(|(_, w)| !w.is_empty());
+                      let fp = Self::fingerprint(&pairs);
+                      if let Some(cands) = self.map.get(&fp) {
+                          for &id in cands {
+                              if self.raw[id] == pairs {
+                                  return id;
                               }
                           }
                       }
+                      let id = self.raw.len();
+                      self.raw.push(pairs);
+                      self.map.entry(fp).or_default().push(id);
+                      id
                   }
               }
 
-              for (from, to, w) in pass_epsilons {
-                  let edges = all_new_epsilons.entry(from).or_default();
-                  if let Some((_, existing_w)) = edges.iter_mut().find(|(t, _)| *t == to) {
-                      let old_w = existing_w.clone();
-                      *existing_w |= &w;
-                      if *existing_w != old_w {
-                          changed_in_pass = true;
+              #[derive(Clone)]
+              struct CompiledStep {
+                  by_sig: Vec<(usize, Weight)>,
+                  mask: Weight,
+              }
+              #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+              struct DefSig {
+                  step_id: usize,
+                  exceptions: BTreeSet<i16>,
+              }
+              #[derive(Clone)]
+              struct MacroSig {
+                  final_w: Option<Weight>,
+                  // Each default transition is represented by the compiled "step_id" along with its exception set.
+                  def: Vec<DefSig>,
+                  ex: BTreeMap<i16, Vec<usize>>,
+              }
+              #[derive(Clone, Hash, Eq, PartialEq)]
+              struct MacroSigKey {
+                  final_fp: u64,
+                  // Store both step id and the exact exceptions (as a sorted Vec) to keep signatures precise.
+                  def: Vec<(usize, Vec<i16>)>,
+                  ex: Vec<(i16, Vec<usize>)>,
+              }
+
+              // Precompute masked ε-closures for all states using fast scratch buffers.
+              let pb_eps = if PROGRESS_BAR_ENABLED {
+                  Some(ProgressBar::new(n as u64).with_style(
+                      ProgressStyle::default_bar()
+                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
+                          .unwrap(),
+                  ))
+              } else {
+                  None
+              };
+              let mut eps_cache: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
+              let mut scratch_w: Vec<Weight> = vec![Weight::zeros(); n];
+              let mut q: VecDeque<NWAStateID> = VecDeque::new();
+              let mut touched: Vec<NWAStateID> = Vec::new();
+              for s in 0..n {
+                  eps_cache[s] = eps_closure_masked_vec_one(s, &self.states, &fut, &mut scratch_w, &mut q, &mut touched);
+                  if let Some(p) = &pb_eps {
+                      p.inc(1);
+                  }
+              }
+              if let Some(p) = pb_eps {
+                  p.finish_with_message("ε-closures done");
+              }
+
+              let mut step_pool = StepPool::new();
+              let mut sigs: Vec<MacroSig> = Vec::with_capacity(n);
+              let mut state_to_sig_id: Vec<usize> = vec![0; n];
+              let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
+              let pb_sigs = if PROGRESS_BAR_ENABLED {
+                  Some(ProgressBar::new(n as u64).with_style(
+                      ProgressStyle::default_bar()
+                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Macro signatures)")
+                          .unwrap(),
+                  ))
+              } else {
+                  None
+              };
+              for s in 0..n {
+                  let final_acc = eps_cache[s].iter().fold(Weight::zeros(), |mut acc, (t, w)| {
+                      if let Some(fw) = &self.states[*t].final_weight {
+                          acc |= &(w & fw);
                       }
-                  } else {
-                      edges.push((to, w));
-                      changed_in_pass = true;
+                      acc
+                  });
+                  let final_acc = if final_acc.is_empty() { None } else { Some(final_acc) };
+
+                  // Compute default steps; preserve per-default exception sets.
+                  let mut def_steps: Vec<DefSig> = Vec::new();
+                  for default in &self.states[s].default {
+                      let NWADefaultTransition { target: to, weight: wdef, exceptions } = default;
+                      if *to >= n {
+                          continue;
+                      }
+                      let pairs_def = apply_weight_to_pairs(&eps_cache[*to], wdef);
+                      if pairs_def.is_empty() {
+                          continue;
+                      }
+                      let step_id = step_pool.intern(pairs_def);
+                      def_steps.push(DefSig {
+                          step_id,
+                          exceptions: exceptions.clone(),
+                      });
+                  }
+
+                  // Compute exceptions; drop those that are empty or identical to the default step effect.
+                  let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+                  for (lbl, targets) in self.states[s].transitions.iter() {
+                      let mut step_exs: Vec<usize> = Vec::new();
+                      for (to, wlbl) in targets {
+                          if *to >= n {
+                              continue;
+                          }
+                          let pairs_ex = apply_weight_to_pairs(&eps_cache[*to], wlbl);
+                          if pairs_ex.is_empty() {
+                              continue;
+                          }
+                          step_exs.push(step_pool.intern(pairs_ex));
+                      }
+
+                      if !step_exs.is_empty() {
+                          step_exs.sort_unstable();
+                          let mut sorted_def_step_ids: Vec<usize> =
+                              def_steps.iter().map(|d| d.step_id).collect();
+                          sorted_def_step_ids.sort_unstable();
+                          if step_exs == sorted_def_step_ids {
+                              continue;
+                          }
+                          ex.insert(*lbl, step_exs);
+                      }
+                  }
+
+                  crate::debug!(5, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
+
+                  // Build a key that includes default exceptions, to avoid merging states that differ only by exception sets.
+                  let mut sorted_def_steps_key: Vec<(usize, Vec<i16>)> = def_steps
+                      .iter()
+                      .map(|d| {
+                          let mut v: Vec<i16> = d.exceptions.iter().copied().collect();
+                          v.sort_unstable();
+                          (d.step_id, v)
+                      })
+                      .collect();
+                  sorted_def_steps_key.sort_unstable();
+                  let key = MacroSigKey {
+                      final_fp: final_acc.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
+                      def: sorted_def_steps_key,
+                      ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
+                  };
+                  let sig_id = *sig_intern.entry(key).or_insert_with(|| {
+                      let id = sigs.len();
+                      sigs.push(MacroSig { final_w: final_acc, def: def_steps, ex });
+                      id
+                  });
+                  state_to_sig_id[s] = sig_id;
+                  if let Some(p) = &pb_sigs {
+                      p.inc(1);
                   }
               }
-
-              if !changed_in_pass {
-                  break;
+              if let Some(p) = pb_sigs {
+                  p.finish_with_message("Macro signatures done");
               }
-          }
 
-          all_new_epsilons
-              .into_iter()
-              .flat_map(|(from, edges)| {
-                  edges.into_iter().map(move |(to, w)| (from, to, w))
-              })
-              .collect()
-      }
-
-      /// Compute the least fixpoint of final weights propagated backward along all epsilon edges
-      /// (original and new) and all negative-labeled edges.
-      fn compute_final_fixpoint(states: &NWAStates, new_epsilons: &[(NWAStateID, NWAStateID, Weight)]) -> Vec<Weight> {
-          let n = states.len();
-          let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
-
-          // Build reverse graph for propagation
-          for u in 0..n {
-              // Original epsilons
-              for &(v, ref w) in &states[u].epsilons {
-                  if v < n { rev[v].push((u, w.clone())); }
+              crate::debug!(5, "All MacroSigs ({}):", sigs.len());
+              for (i, sig) in sigs.iter().enumerate() {
+                  crate::debug!(5, "  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
               }
-              // Negative edges
-              for (label, targets) in &states[u].transitions {
-                  if *label < 0 {
-                      for (v, w) in targets {
-                          if *v < n { rev[*v].push((u, w.clone())); }
+              crate::debug!(5, "state_to_sig_id: {:?}", state_to_sig_id);
+
+              let pb_compile = if PROGRESS_BAR_ENABLED {
+                  Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
+                      ProgressStyle::default_bar()
+                          .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Compile steps)")
+                          .unwrap(),
+                  ))
+              } else {
+                  None
+              };
+              let mut compiled_steps: Vec<CompiledStep> = Vec::with_capacity(step_pool.raw.len());
+              for pairs in &step_pool.raw {
+                  let mut acc: HashMap<usize, Weight> = HashMap::new();
+                  for (t, w) in pairs.iter() {
+                      *acc.entry(state_to_sig_id[*t]).or_default() |= w;
+                  }
+                  let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
+                  by_sig.sort_by_key(|(sid, _)| *sid);
+                  let mask = by_sig.iter().fold(Weight::zeros(), |mut acc, (_, w)| {
+                      acc |= w;
+                      acc
+                  });
+                  compiled_steps.push(CompiledStep { by_sig, mask });
+                  if let Some(p) = &pb_compile {
+                      p.inc(1);
+                  }
+              }
+              if let Some(p) = pb_compile {
+                  p.finish_with_message("Compile steps done");
+              }
+
+              crate::debug!(5, "Step Pool ({}):", step_pool.raw.len());
+              for (i, pairs) in step_pool.raw.iter().enumerate() {
+                  crate::debug!(5, "  Step {}: {:?}", i, pairs);
+              }
+              crate::debug!(5, "Compiled Steps ({}):", compiled_steps.len());
+              for (i, step) in compiled_steps.iter().enumerate() {
+                  crate::debug!(5, "  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
+              }
+
+              #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+              struct MembersKey(Vec<usize>);
+
+              struct CompositionNode {
+                  final_weight: Option<Weight>,
+                  default_target_idx: Option<usize>,
+                  default_mask: Option<Weight>,
+                  exception_targets: BTreeMap<i16, usize>,
+                  exception_masks: BTreeMap<i16, Weight>,
+                  gates: HashMap<usize, Weight>,
+              }
+
+              fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
+                  for (sid, w) in compiled.iter() {
+                      let x = w & gate;
+                      if !x.is_empty() {
+                          *dst.entry(*sid).or_default() |= &x;
                       }
                   }
               }
-          }
-          // New epsilons from cancellations
-          for (u, v, w) in new_epsilons {
-              if *v < n { rev[*v].push((*u, w.clone())); }
-          }
 
-          let mut q: VecDeque<NWAStateID> = VecDeque::new();
-          for s in 0..n {
-              if let Some(ref fw) = states[s].final_weight {
-                  if !fw.is_empty() {
-                      fut[s] = fw.clone();
-                      q.push_back(s);
+              let mut nodes: Vec<CompositionNode> = Vec::new();
+              let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
+              let mut work: VecDeque<usize> = VecDeque::new();
+
+              let pb_discover = if PROGRESS_BAR_ENABLED {
+                  Some(
+                      ProgressBar::new(0).with_style(
+                          ProgressStyle::default_bar()
+                              .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Discovering states)")
+                              .unwrap(),
+                      ),
+                  )
+              } else {
+                  None
+              };
+
+              let mut init_map: HashMap<usize, Weight> = HashMap::new();
+              for (t, w) in eps_cache[self.body.start_state].iter() {
+                  *init_map.entry(state_to_sig_id[*t]).or_default() |= w;
+              }
+              let mut init_keys: Vec<_> = init_map.keys().copied().collect();
+              init_keys.sort_unstable();
+              let init_key = MembersKey(init_keys);
+              let start_idx = 0;
+              key_to_idx.insert(init_key, start_idx);
+              nodes.push(CompositionNode {
+                  final_weight: None,
+                  default_target_idx: None,
+                  default_mask: None,
+                  exception_targets: BTreeMap::new(),
+                  exception_masks: BTreeMap::new(),
+                  gates: init_map,
+              });
+              let mut in_queue = vec![false; 1];
+              in_queue[start_idx] = true;
+              work.push_back(start_idx);
+
+              while let Some(idx) = work.pop_front() {
+                  in_queue[idx] = false;
+                  if let Some(p) = &pb_discover {
+                      p.inc(1);
+                  }
+                  let node_gates = nodes[idx].gates.clone();
+
+                  crate::debug!(5, "\nProcessing composition node {}: gates: {:?}", idx, node_gates);
+
+                  let mut def_groups: HashMap<usize, Weight> = HashMap::new();
+                  let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+                  let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+                  let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+
+                  for (sig_id, gate) in &node_gates {
+                      for def in &sigs[*sig_id].def {
+                          *def_groups.entry(def.step_id).or_default() |= gate;
+                          // Record that this default has these labels as explicit exceptions; default must not apply on them.
+                          for &lbl in &def.exceptions {
+                              *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
+                          }
+                      }
+                      for (lbl, ex_steps) in &sigs[*sig_id].ex {
+                          for ex_step in ex_steps {
+                              *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
+                          }
+                          // Default should not apply on labels that have explicit labeled transitions (for this state).
+                          for def in &sigs[*sig_id].def {
+                              *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
+                          }
+                      }
+                  }
+
+                  crate::debug!(5, "  - def_groups: {:?}", def_groups);
+                  crate::debug!(5, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
+                  crate::debug!(5, "  - def_exers_by_label: {:?}", def_exers_by_label);
+                  crate::debug!(5, "  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
+
+                  let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
+                  let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+                  for (def_step, g) in &def_groups {
+                      accumulate(&mut def_target_map, &compiled_steps[*def_step].by_sig, g);
+                  }
+                  if !def_target_map.is_empty() {
+                      target_maps.insert(None, def_target_map);
+                  }
+
+                  // Labels that need explicit exception edges are:
+                  //  - any label with explicit labeled transitions
+                  //  - any label that appears in a default's exception set
+                  let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
+                  labels_to_consider.extend(ex_groups_by_label.keys().copied());
+                  labels_to_consider.extend(def_exceptions_by_label.keys().copied());
+
+                  for lbl in labels_to_consider {
+                      crate::debug!(5, "    - processing exception label {}", lbl);
+                      let mut map = HashMap::new();
+                      let def_exers = def_exers_by_label.get(&lbl);
+                      let def_exc = def_exceptions_by_label.get(&lbl);
+
+                      for (def_step, total_g) in &def_groups {
+                          crate::debug!(5, "      - considering default step {} with total_g {}", def_step, total_g);
+                          // Subtract states that have explicit labeled transitions on this label
+                          let g_exers = def_exers.and_then(|de| de.get(def_step));
+                          // Subtract states whose default is explicitly not applicable on this label (exception set)
+                          let g_exc = def_exc.and_then(|dx| dx.get(def_step));
+
+                          crate::debug!(5, "        - g_exers for this def_step: {:?}", g_exers);
+                          crate::debug!(5, "        - g_exc for this def_step: {:?}", g_exc);
+                          let mut g_nonex = total_g.clone();
+                          if let Some(g) = g_exers { g_nonex -= g; }
+                          if let Some(g) = g_exc { g_nonex -= g; }
+                          crate::debug!(5, "        - g_nonex (after subtractors): {}", g_nonex);
+                          if !g_nonex.is_empty() {
+                              crate::debug!(5, "        - accumulating for g_nonex");
+                              accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
+                          }
+                      }
+                      if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
+                          for (ex_step, g_ex) in ex_groups {
+                              crate::debug!(5, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
+                              accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+                          }
+                      }
+                      // Always insert an entry for this label (even if map is empty)
+                      // so that we can emit an exception edge that blocks the default.
+                      target_maps.insert(Some(lbl), map);
+                  }
+
+                  crate::debug!(5, "  - computed target_maps:");
+                  for (label, map) in &target_maps {
+                      let mut keys: Vec<_> = map.keys().copied().collect();
+                      keys.sort_unstable();
+                      let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+                      crate::debug!(5, "    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
+                  }
+
+                  let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
+                  for (label, map) in target_maps {
+                      let mut keys: Vec<_> = map.keys().copied().collect();
+                      keys.sort_unstable();
+                      let key = MembersKey(keys);
+                      let target_idx = *key_to_idx.entry(key).or_insert_with(|| {
+                          let new_idx = nodes.len();
+                          nodes.push(CompositionNode {
+                              final_weight: None,
+                              default_target_idx: None,
+                              default_mask: None,
+                              exception_targets: BTreeMap::new(),
+                              exception_masks: BTreeMap::new(),
+                              gates: HashMap::new(),
+                          });
+                          if new_idx >= in_queue.len() {
+                              in_queue.resize(new_idx + 1, false);
+                          }
+                          new_idx
+                      });
+
+                      let mut any_change = false;
+                      for (sig_id, weight) in &map {
+                          let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
+                          let new_w = &*entry | weight;
+                          if new_w != *entry {
+                              *entry = new_w;
+                              any_change = true;
+                          }
+                      }
+                      if any_change && !in_queue[target_idx] {
+                          in_queue[target_idx] = true;
+                          work.push_back(target_idx);
+                      }
+                      resolved_transitions.insert(label, (target_idx, map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a })));
+                  }
+
+                  let node = &mut nodes[idx];
+                  if let Some((target_idx, mask)) = resolved_transitions.remove(&None) {
+                      node.default_target_idx = Some(target_idx);
+                      node.default_mask = Some(mask);
+                  }
+                  for (label, (target_idx, mask)) in resolved_transitions {
+                      if let Some(lbl) = label {
+                          node.exception_targets.insert(lbl, target_idx);
+                          node.exception_masks.insert(lbl, mask);
+                      }
+                  }
+
+                  crate::debug!(5, "  - Resolved transitions for node {}:", idx);
+                  if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
+                      crate::debug!(5, "    - default -> {} (mask: {})", target, mask);
+                  }
+                  for (lbl, target) in &node.exception_targets {
+                      if let Some(mask) = node.exception_masks.get(lbl) {
+                          crate::debug!(5, "    - on {}: -> {} (mask: {})", lbl, target, mask);
+                      }
+                  }
+
+                  node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
+                      if let Some(fw) = &sigs[*sig_id].final_w {
+                          acc |= &(gate & fw);
+                      }
+                      acc
+                  }));
+
+                  if let Some(p) = &pb_discover {
+                      p.set_length(nodes.len() as u64);
                   }
               }
-          }
+              if let Some(p) = pb_discover {
+                  p.finish_with_message(format!("Discovered {} compositions", nodes.len()));
+              }
 
-          while let Some(v) = q.pop_front() {
-              let fv = fut[v].clone();
-              if fv.is_empty() { continue; }
-              for &(u, ref w_uv) in &rev[v] {
-                  let add = &fv & w_uv;
-                  if add.is_empty() { continue; }
-                  let old = &fut[u];
-                  if (&add & old) != add {
-                      fut[u] |= &add;
-                      q.push_back(u);
+              let mut dwa = DWA::new();
+              if nodes.is_empty() {
+                  return dwa;
+              }
+              dwa.states.0.resize(nodes.len(), Default::default());
+              dwa.body.start_state = start_idx;
+
+              for (i, node) in nodes.iter().enumerate() {
+                  dwa.states[i].final_weight = node.final_weight.clone();
+                  if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
+                      if !mask.is_empty() {
+                          dwa.set_default_transition(i, target_idx, mask.clone()).unwrap();
+                      }
+                  }
+                  for (lbl, &target_idx) in &node.exception_targets {
+                      // Always add exception transitions, even with empty masks, to properly block default on those labels.
+                      let mask = node
+                          .exception_masks
+                          .get(lbl)
+                          .cloned()
+                          .unwrap_or_else(Weight::zeros);
+                      dwa.add_transition(i, *lbl, target_idx, mask).unwrap();
                   }
               }
+              dwa
           }
-          fut
       }
 
       ```
     metadata:
-      filename: src/precompute4/resolve_negatives.rs
-  - user: |-
-      "Compute cancellations" takes way too long. Like 2 minutes. It should take 100 ms. Make it much faster.
-      It should be at least as effective, too.
-      But be careful to ensure it's still correct. Functionally equivalent.
-      It should take under 10 ms.
-
-      Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your output.
+      filename: src/precompute4/weighted_automata/determinization.rs
+  - user: 'The output here is quite polluted by line prefixes like "[DEBUG] 3] src/precompute4/weighted_automata/simplification.rs:762:
+      ". Clean it up. e.g. for blocks of code we can use `is_debug_level_enabled`.'
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8752,483 +9745,320 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with performance bottlenecks in complex algorithms is crucial. The original implementation of `compute_cancellations` was correct but inefficient due to repeated epsilon-closure computations within a fixpoint loop.
-
-      Here is a step-by-step guide to applying a much faster, functionally equivalent algorithm, followed by the corresponding git diff.
+      Of course. Dealing with noisy debug logs can be distracting. Here are the step-by-step instructions to clean up the logging output by replacing the custom `debug!` macro with guarded calls to `eprintln!`, which will remove the verbose prefixes and prevent expensive formatting when debugging is disabled.
 
       ### Step-by-step Instructions
 
-      The key idea is to replace the slow, multi-pass `compute_cancellations` function with a single, more efficient worklist-based algorithm. This new approach avoids recomputing graph traversals by propagating "search queries" for cancellations across the automaton and immediately handling the consequences of any new epsilon shortcuts that are discovered.
+      I will apply changes to two files: `src/precompute4/weighted_automata/simplification.rs` and `src/precompute4/weighted_automata/determinization.rs`.
 
-      1.  **Navigate to `src/precompute4/resolve_negatives.rs`**.
-      2.  **Delete the `compute_eps_closure` function**. It is no longer needed by the new algorithm.
-      3.  **Replace the entire `compute_cancellations` function** with the new, optimized implementation provided below.
+      #### 1. File: `src/precompute4/weighted_automata/simplification.rs`
 
-      Here is the new code for `compute_cancellations`:
+      I'll replace all instances of `crate::debug!(...)` with `if crate::is_debug_level_enabled(...) { eprintln!(...); }`.
 
-      ```rust
-      /// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
-      /// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
-      fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-          let n = states.len();
-          // `queries[s]` stores cancellation "searches" that have reached state `s`.
-          // A search is identified by its origin state `a` and the positive code `c` it's looking for.
-          // The map stores the accumulated weight of the path `a --neg(c)--> ... --eps*--> s`.
-          let mut queries: Vec<HashMap<(NWAStateID, i16), Weight>> = vec![HashMap::new(); n];
-          let mut worklist: VecDeque<(NWAStateID, NWAStateID, i16, Weight)> = VecDeque::new();
-          let mut new_epsilons: HashMap<(NWAStateID, NWAStateID), Weight> = HashMap::new();
+      -   In `DWA::simplify_components`, update the final log message.
+      -   In `DWA::run_pass_with_test`, update the two logging calls.
+      -   In `NWA::run_pass`, update the logging call.
+      -   In `NWA::simplify`, update the final log message.
 
-          // 1. Initialize worklist with all negative transitions.
-          // Each `a --neg(c)--> b` starts a search at `b` for a matching `c`.
-          for a in 0..n {
-              for (label, targets) in &states[a].transitions {
-                  if *label < 0 {
-                      let c = label.wrapping_sub(i16::MIN);
-                      for (b, w_ab) in targets {
-                          if *b >= n { continue; }
-                          let query_key = (a, c);
-                          let query_weight = queries[*b].entry(query_key).or_default();
-                          let old_w = query_weight.clone();
-                          *query_weight |= w_ab;
-                          if *query_weight != old_w {
-                              worklist.push_back((*b, a, c, query_weight.clone()));
-                          }
-                      }
-                  }
-              }
-          }
+      #### 2. File: `src/precompute4/weighted_automata/determinization.rs`
 
-          // 2. Main fixpoint loop: propagate searches and generate new epsilon shortcuts.
-          while let Some((s, a, c, w_as)) = worklist.pop_front() {
-              // 2a. Check for cancellations at the current state `s`.
-              // A cancellation occurs if `s` has an outgoing transition on `c`.
-              let check_cancellations = |target: NWAStateID, w_st: &Weight, worklist: &mut VecDeque<_>| {
-                  let new_eps_w = &w_as & w_st;
-                  if new_eps_w.is_empty() { return; }
+      Similarly, I'll replace every `crate::debug!(...)` call with a corresponding `if crate::is_debug_level_enabled(...) { eprintln!(...); }` block. This will apply to:
 
-                  let eps_key = (a, target);
-                  let eps_weight = new_epsilons.entry(eps_key).or_default();
-                  let old_eps_w = eps_weight.clone();
-                  *eps_weight |= &new_eps_w;
+      -   The three logging calls in `NWA::determinize_to_dwa`.
+      -   All logging calls within `NWA::det_fixpoint`, including those inside loops and conditional blocks. This will make the verbose determinization trace cleaner and more performant.
 
-                  // If this epsilon is new or stronger, it can propagate existing searches.
-                  if *eps_weight != old_eps_w {
-                      // Any search that has reached `a` can now cross this new epsilon to `target`.
-                      for (&(a_prime, c_prime), w_a_prime_a) in &queries[a] {
-                          let prop_w = w_a_prime_a & eps_weight;
-                          if prop_w.is_empty() { continue; }
+      ### Git Diffs
 
-                          let query_key = (a_prime, c_prime);
-                          let query_weight = queries[target].entry(query_key).or_default();
-                          let old_qw = query_weight.clone();
-                          *query_weight |= &prop_w;
-                          if *query_weight != old_qw {
-                              worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-                          }
-                      }
-                  }
-              };
+      Here are the git diffs for the changes.
 
-              if let Some(pos_targets) = states[s].transitions.get(&c) {
-                  for (t, w_st) in pos_targets {
-                      if *t < n { check_cancellations(*t, w_st, &mut worklist); }
-                  }
-              }
-              for def in &states[s].default {
-                  if !def.exceptions.contains(&c) && def.target < n {
-                      check_cancellations(def.target, &def.weight, &mut worklist);
-                  }
-              }
+      ```diff "src/precompute4/weighted_automata/simplification.rs"
+      --- a/src/precompute4/weighted_automata/simplification.rs
+      +++ b/src/precompute4/weighted_automata/simplification.rs
+      @@ -30,7 +30,9 @@
+               }
+               let large = states.len() > LARGE_AUTOMATON_THRESHOLD;
+               Self::simplify_core(states, body, large);
+      -        crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+      +        if crate::is_debug_level_enabled(3) {
+      +            eprintln!("DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+      +        }
+           }
+       
+           fn run_pass_with_test<F>(
+      @@ -49,13 +51,17 @@
+               let now = Instant::now();
+               let changed = pass(states, body);
+               let elapsed = now.elapsed();
+      -        crate::debug!(3, "DWA simplify pass '{}' took {:?} (changed: {})", pass_name, elapsed, changed);
+      +        if crate::is_debug_level_enabled(3) {
+      +            eprintln!("DWA simplify pass '{}' took {:?} (changed: {})", pass_name, elapsed, changed);
+      +        }
+       
+               if let Some(before) = before_dwa {
+                   if changed {
+                       let after_dwa = DWA { states: states.clone(), body: body.clone() };
+                       IN_SIMPLIFY_CHECK.with(|c| c.set(true));
+      -                crate::debug!(1, "Stochastic testing DWA after pass: {}", pass_name);
+      +                if crate::is_debug_level_enabled(1) {
+      +                    eprintln!("Stochastic testing DWA after pass: {}", pass_name);
+      +                }
+                       test_weighted_automata::stochastic_equivalence_test(before, after_dwa);
+                       IN_SIMPLIFY_CHECK.with(|c| c.set(false));
+                   }
+      @@ -1012,7 +1018,9 @@
+               let now = Instant::now();
+               let changed = pass();
+               let elapsed = now.elapsed();
+      -        crate::debug!(3, "NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
+      +        if crate::is_debug_level_enabled(3) {
+      +            eprintln!("NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
+      +        }
+               if changed {
+                   *changed_any = true;
+               }
+      @@ -1049,7 +1057,9 @@
+                   Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
+               }
+               if let Some(p) = &pb { p.finish_with_message(format!("Simplified to {} states", self.states.len())); }
+      -        crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
+      +        if crate::is_debug_level_enabled(3) {
+      +            eprintln!("NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
+      +        }
+               self.states.len() != initial_n
+           }
+       
 
-              // 2b. Propagate the current search forward over original epsilon edges.
-              for (t, w_st) in &states[s].epsilons {
-                  if *t >= n { continue; }
-                  let prop_w = &w_as & w_st;
-                  if prop_w.is_empty() { continue; }
-
-                  let query_key = (a, c);
-                  let query_weight = queries[*t].entry(query_key).or_default();
-                  let old_qw = query_weight.clone();
-                  *query_weight |= &prop_w;
-                  if *query_weight != old_qw {
-                      worklist.push_back((*t, a, c, query_weight.clone()));
-                  }
-              }
-          }
-
-          new_epsilons
-              .into_iter()
-              .map(|((from, to), w)| (from, to, w))
-              .collect()
-      }
       ```
 
-      ### Git Diff
-
-      Here is the git diff to apply these changes directly.
-
-      ```diff
-      --- a/src/precompute4/resolve_negatives.rs
-      +++ b/src/precompute4/resolve_negatives.rs
-      @@ -100,101 +100,91 @@
-           crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-       }
+      ```diff "src/precompute4/weighted_automata/determinization.rs"
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -80,10 +80,14 @@
+               let mut nwa = self.clone();
+               nwa.simplify();
        
-      -/// Helper to compute the weighted epsilon closure of a state.
-      -fn compute_eps_closure(
-      -    states: &NWAStates,
-      -    start_node: NWAStateID,
-      -    extra_epsilons: &HashMap<NWAStateID, Vec<(NWAStateID, Weight)>>,
-      -) -> HashMap<NWAStateID, Weight> {
-      -    let mut closure: HashMap<NWAStateID, Weight> = HashMap::new();
-      -    let mut q = VecDeque::new();
-      -
-      -    closure.insert(start_node, Weight::all());
-      -    q.push_back(start_node);
-      -
-      -    while let Some(u) = q.pop_front() {
-      -        let u_w = closure.get(&u).unwrap().clone();
-      -
-      -        // Original epsilons
-      -        for (v, w) in &states[u].epsilons {
-      -            let new_w = &u_w & w;
-      -            if new_w.is_empty() { continue; }
-      -            let entry = closure.entry(*v).or_insert_with(Weight::zeros);
-      -            let old_w = entry.clone();
-      -            *entry |= &new_w;
-      -            if *entry != old_w {
-      -                q.push_back(*v);
-      -            }
+      -        crate::debug!(5, "NWA after simplify:\n{}", nwa);
+      +        if crate::is_debug_level_enabled(5) {
+      +            eprintln!("NWA after simplify:\n{}", nwa);
+      +        }
+               let result = nwa.det_fixpoint();
+      -        crate::debug!(5, "NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
+      -        crate::debug!(5, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
+      +        if crate::is_debug_level_enabled(5) {
+      +            eprintln!("NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
+      +            eprintln!("NWA::determinize_to_dwa took: {:?}", now.elapsed());
+      +        }
+       
+               result
+           }
+      @@ -248,7 +252,9 @@
+                       }
+                   }
+       
+      -            crate::debug!(5, "NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
+      +            if crate::is_debug_level_enabled(5) {
+      +                eprintln!("NWA state {}: final_w: {:?}, def_steps: {:?}, ex_steps: {:?}", s, final_acc, def_steps, ex);
+      +            }
+       
+                   // Build a key that includes default exceptions, to avoid merging states that differ only by exception sets.
+                   let mut sorted_def_steps_key: Vec<(usize, Vec<i16>)> = def_steps
+      @@ -277,12 +283,14 @@
+                   p.finish_with_message("Macro signatures done");
+               }
+       
+      -        crate::debug!(5, "All MacroSigs ({}):", sigs.len());
+      -        for (i, sig) in sigs.iter().enumerate() {
+      -            crate::debug!(5, "  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
       -        }
-      -        // Extra epsilons found during cancellation fixpoint
-      -        if let Some(edges) = extra_epsilons.get(&u) {
-      -            for (v, w) in edges {
-      -                let new_w = &u_w & w;
-      -                if new_w.is_empty() { continue; }
-      -                let entry = closure.entry(*v).or_insert_with(Weight::zeros);
-      -                let old_w = entry.clone();
-      -                *entry |= &new_w;
-      -                if *entry != old_w {
-      -                    q.push_back(*v);
-      -                }
-      -            }
-      -        }
-      -    }
-      -    closure
-      -}
+      -        crate::debug!(5, "state_to_sig_id: {:?}", state_to_sig_id);
       -
-       /// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
-       /// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
-       fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-      -    let mut all_new_epsilons: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
-      -    loop {
-      -        let mut changed_in_pass = false;
-      -        let mut pass_epsilons = Vec::new();
-      -
-      -        for a in 0..states.len() {
-      -            let state_a = &states[a];
-      -            for (neg_label, targets) in &state_a.transitions {
-      -                if *neg_label >= 0 { continue; }
-      -                let c = neg_label.wrapping_sub(i16::MIN);
-      -
-      -                for (b, w_ab) in targets {
-      -                    if *b >= states.len() { continue; }
-      -
-      -                    let eps_closure_of_b = compute_eps_closure(states, *b, &all_new_epsilons);
-      -
-      -                    for (b_reachable, w_b_br) in eps_closure_of_b {
-      -                        if b_reachable >= states.len() { continue; }
-      -                        let state_br = &states[b_reachable];
-      -
-      -                        // Labeled transitions
-      -                        if let Some(targets) = state_br.transitions.get(&c) {
-      -                            for (c_target, w_br_c) in targets {
-      -                                let new_w = w_ab & &w_b_br & w_br_c;
-      -                                if !new_w.is_empty() {
-      -                                    pass_epsilons.push((a, *c_target, new_w));
-      -                                }
-      -                            }
-      -                        }
-      -
-      -                        // Default transitions
-      -                        for def in &state_br.default {
-      -                            if !def.exceptions.contains(&c) {
-      -                                let new_w = w_ab & &w_b_br & &def.weight;
-      -                                if !new_w.is_empty() {
-      -                                    pass_epsilons.push((a, def.target, new_w));
-      -                                }
-      -                            }
-      -                        }
-      -                    }
-      -                }
-      -            }
-      -        }
-      -
-      -        for (from, to, w) in pass_epsilons {
-      -            let edges = all_new_epsilons.entry(from).or_default();
-      -            if let Some((_, existing_w)) = edges.iter_mut().find(|(t, _)| *t == to) {
-      -                let old_w = existing_w.clone();
-      -                *existing_w |= &w;
-      -                if *existing_w != old_w {
-      -                    changed_in_pass = true;
-      -                }
-      -            } else {
-      -                edges.push((to, w));
-      -                changed_in_pass = true;
-      -            }
-      -        }
-      -
-      -        if !changed_in_pass {
-      -            break;
-      -        }
-      -    }
-      -
-      -    all_new_epsilons
-      +    let n = states.len();
-      +    // `queries[s]` stores cancellation "searches" that have reached state `s`.
-      +    // A search is identified by its origin state `a` and the positive code `c` it's looking for.
-      +    // The map stores the accumulated weight of the path `a --neg(c)--> ... --eps*--> s`.
-      +    let mut queries: Vec<HashMap<(NWAStateID, i16), Weight>> = vec![HashMap::new(); n];
-      +    let mut worklist: VecDeque<(NWAStateID, NWAStateID, i16, Weight)> = VecDeque::new();
-      +    let mut new_epsilons: HashMap<(NWAStateID, NWAStateID), Weight> = HashMap::new();
+      +        if crate::is_debug_level_enabled(5) {
+      +            eprintln!("All MacroSigs ({}):", sigs.len());
+      +            for (i, sig) in sigs.iter().enumerate() {
+      +                eprintln!("  Sig {}: final_w: {:?}, def: {:?}, ex: {:?}", i, sig.final_w, sig.def, sig.ex);
+      +            }
+      +            eprintln!("state_to_sig_id: {:?}", state_to_sig_id);
+      +        }
       +
-      +    // 1. Initialize worklist with all negative transitions.
-      +    // Each `a --neg(c)--> b` starts a search at `b` for a matching `c`.
-      +    for a in 0..n {
-      +        for (label, targets) in &states[a].transitions {
-      +            if *label < 0 {
-      +                let c = label.wrapping_sub(i16::MIN);
-      +                for (b, w_ab) in targets {
-      +                    if *b >= n { continue; }
-      +                    let query_key = (a, c);
-      +                    let query_weight = queries[*b].entry(query_key).or_default();
-      +                    let old_w = query_weight.clone();
-      +                    *query_weight |= w_ab;
-      +                    if *query_weight != old_w {
-      +                        worklist.push_back((*b, a, c, query_weight.clone()));
+               let pb_compile = if PROGRESS_BAR_ENABLED {
+                   Some(ProgressBar::new(step_pool.raw.len() as u64).with_style(
+                       ProgressStyle::default_bar()
+      @@ -310,16 +318,18 @@
+                   p.finish_with_message("Compile steps done");
+               }
+       
+      -        crate::debug!(5, "Step Pool ({}):", step_pool.raw.len());
+      -        for (i, pairs) in step_pool.raw.iter().enumerate() {
+      -            crate::debug!(5, "  Step {}: {:?}", i, pairs);
+      -        }
+      -        crate::debug!(5, "Compiled Steps ({}):", compiled_steps.len());
+      -        for (i, step) in compiled_steps.iter().enumerate() {
+      -            crate::debug!(5, "  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
+      -        }
+      -
+      +        if crate::is_debug_level_enabled(5) {
+      +            eprintln!("Step Pool ({}):", step_pool.raw.len());
+      +            for (i, pairs) in step_pool.raw.iter().enumerate() {
+      +                eprintln!("  Step {}: {:?}", i, pairs);
+      +            }
+      +            eprintln!("Compiled Steps ({}):", compiled_steps.len());
+      +            for (i, step) in compiled_steps.iter().enumerate() {
+      +                eprintln!("  Compiled {}: by_sig: {:?}, mask: {}", i, step.by_sig, step.mask);
+      +            }
+      +        }
+               #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+               struct MembersKey(Vec<usize>);
+       
+      @@ -380,8 +390,9 @@
+                   }
+                   let node_gates = nodes[idx].gates.clone();
+       
+      -            crate::debug!(5, "\nProcessing composition node {}: gates: {:?}", idx, node_gates);
+      -
+      +            if crate::is_debug_level_enabled(5) {
+      +                eprintln!("\nProcessing composition node {}: gates: {:?}", idx, node_gates);
+      +            }
+                   let mut def_groups: HashMap<usize, Weight> = HashMap::new();
+                   let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+                   let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
+      @@ -405,12 +416,13 @@
+                       }
+                   }
+       
+      -            crate::debug!(5, "  - def_groups: {:?}", def_groups);
+      -            crate::debug!(5, "  - ex_groups_by_label: {:?}", ex_groups_by_label);
+      -            crate::debug!(5, "  - def_exers_by_label: {:?}", def_exers_by_label);
+      -            crate::debug!(5, "  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
+      -
+      +            if crate::is_debug_level_enabled(5) {
+      +                eprintln!("  - def_groups: {:?}", def_groups);
+      +                eprintln!("  - ex_groups_by_label: {:?}", ex_groups_by_label);
+      +                eprintln!("  - def_exers_by_label: {:?}", def_exers_by_label);
+      +                eprintln!("  - def_exceptions_by_label: {:?}", def_exceptions_by_label);
+      +            }
+                   let mut target_maps: BTreeMap<Option<i16>, HashMap<usize, Weight>> = BTreeMap::new();
+                   let mut def_target_map: HashMap<usize, Weight> = HashMap::new();
+                   for (def_step, g) in &def_groups {
+      @@ -426,38 +438,46 @@
+                   labels_to_consider.extend(def_exceptions_by_label.keys().copied());
+       
+                   for lbl in labels_to_consider {
+      -                crate::debug!(5, "    - processing exception label {}", lbl);
+      +                if crate::is_debug_level_enabled(5) {
+      +                    eprintln!("    - processing exception label {}", lbl);
+      +                }
+                       let mut map = HashMap::new();
+                       let def_exers = def_exers_by_label.get(&lbl);
+                       let def_exc = def_exceptions_by_label.get(&lbl);
+       
+                       for (def_step, total_g) in &def_groups {
+      -                    crate::debug!(5, "      - considering default step {} with total_g {}", def_step, total_g);
+      +                    if crate::is_debug_level_enabled(5) {
+      +                        eprintln!("      - considering default step {} with total_g {}", def_step, total_g);
+      +                    }
+                           // Subtract states that have explicit labeled transitions on this label
+                           let g_exers = def_exers.and_then(|de| de.get(def_step));
+                           // Subtract states whose default is explicitly not applicable on this label (exception set)
+                           let g_exc = def_exc.and_then(|dx| dx.get(def_step));
+       
+      -                    crate::debug!(5, "        - g_exers for this def_step: {:?}", g_exers);
+      -                    crate::debug!(5, "        - g_exc for this def_step: {:?}", g_exc);
+      +                    if crate::is_debug_level_enabled(5) {
+      +                        eprintln!("        - g_exers for this def_step: {:?}", g_exers);
+      +                        eprintln!("        - g_exc for this def_step: {:?}", g_exc);
+      +                    }
+                           let mut g_nonex = total_g.clone();
+                           if let Some(g) = g_exers { g_nonex -= g; }
+                           if let Some(g) = g_exc { g_nonex -= g; }
+      -                    crate::debug!(5, "        - g_nonex (after subtractors): {}", g_nonex);
+      +                    if crate::is_debug_level_enabled(5) {
+      +                        eprintln!("        - g_nonex (after subtractors): {}", g_nonex);
+      +                    }
+                           if !g_nonex.is_empty() {
+      -                        crate::debug!(5, "        - accumulating for g_nonex");
+      +                        if crate::is_debug_level_enabled(5) {
+      +                            eprintln!("        - accumulating for g_nonex");
+      +                        }
+                               accumulate(&mut map, &compiled_steps[*def_step].by_sig, &g_nonex);
+                           }
+                       }
+                       if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
+                           for (ex_step, g_ex) in ex_groups {
+      -                        crate::debug!(5, "      - considering exception step {} with g_ex {}", ex_step, g_ex);
+      +                        if crate::is_debug_level_enabled(5) {
+      +                            eprintln!("      - considering exception step {} with g_ex {}", ex_step, g_ex);
+      +                        }
+                               accumulate(&mut map, &compiled_steps[*ex_step].by_sig, g_ex);
+                           }
+                       }
+                       // Always insert an entry for this label (even if map is empty)
+                       // so that we can emit an exception edge that blocks the default.
+                       target_maps.insert(Some(lbl), map);
+                   }
+       
+      -            crate::debug!(5, "  - computed target_maps:");
+      -            for (label, map) in &target_maps {
+      -                let mut keys: Vec<_> = map.keys().copied().collect();
+      -                keys.sort_unstable();
+      -                let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+      -                crate::debug!(5, "    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
+      +            if crate::is_debug_level_enabled(5) {
+      +                eprintln!("  - computed target_maps:");
+      +                for (label, map) in &target_maps {
+      +                    let mut keys: Vec<_> = map.keys().copied().collect();
+      +                    keys.sort_unstable();
+      +                    let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+      +                    eprintln!("    - label {:?}: target_sigs={:?}, total_weight={}", label, keys, total_weight);
+      +                }
+                   }
+       
+                   let mut resolved_transitions: BTreeMap<Option<i16>, (usize, Weight)> = BTreeMap::new();
+      @@ -502,15 +522,17 @@
+                       }
+                   }
+       
+      -            crate::debug!(5, "  - Resolved transitions for node {}:", idx);
+      -            if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
+      -                crate::debug!(5, "    - default -> {} (mask: {})", target, mask);
+      -            }
+      -            for (lbl, target) in &node.exception_targets {
+      -                if let Some(mask) = node.exception_masks.get(lbl) {
+      -                    crate::debug!(5, "    - on {}: -> {} (mask: {})", lbl, target, mask);
+      -                }
+      -            }
+      -
+      +            if crate::is_debug_level_enabled(5) {
+      +                eprintln!("  - Resolved transitions for node {}:", idx);
+      +                if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
+      +                    eprintln!("    - default -> {} (mask: {})", target, mask);
+      +                }
+      +                for (lbl, target) in &node.exception_targets {
+      +                    if let Some(mask) = node.exception_masks.get(lbl) {
+      +                        eprintln!("    - on {}: -> {} (mask: {})", lbl, target, mask);
       +                    }
       +                }
       +            }
-      +        }
-      +    }
-      +
-      +    // 2. Main fixpoint loop: propagate searches and generate new epsilon shortcuts.
-      +    while let Some((s, a, c, w_as)) = worklist.pop_front() {
-      +        // 2a. Check for cancellations at the current state `s`.
-      +        // A cancellation occurs if `s` has an outgoing transition on `c`.
-      +        let check_cancellations = |target: NWAStateID, w_st: &Weight, worklist: &mut VecDeque<_>| {
-      +            let new_eps_w = &w_as & w_st;
-      +            if new_eps_w.is_empty() { return; }
-      +
-      +            let eps_key = (a, target);
-      +            let eps_weight = new_epsilons.entry(eps_key).or_default();
-      +            let old_eps_w = eps_weight.clone();
-      +            *eps_weight |= &new_eps_w;
-      +
-      +            // If this epsilon is new or stronger, it can propagate existing searches.
-      +            if *eps_weight != old_eps_w {
-      +                // Any search that has reached `a` can now cross this new epsilon to `target`.
-      +                for (&(a_prime, c_prime), w_a_prime_a) in &queries[a] {
-      +                    let prop_w = w_a_prime_a & eps_weight;
-      +                    if prop_w.is_empty() { continue; }
-      +
-      +                    let query_key = (a_prime, c_prime);
-      +                    let query_weight = queries[target].entry(query_key).or_default();
-      +                    let old_qw = query_weight.clone();
-      +                    *query_weight |= &prop_w;
-      +                    if *query_weight != old_qw {
-      +                        worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-      +                    }
-      +                }
-      +            }
-      +        };
-      +
-      +        if let Some(pos_targets) = states[s].transitions.get(&c) {
-      +            for (t, w_st) in pos_targets {
-      +                if *t < n { check_cancellations(*t, w_st, &mut worklist); }
-      +            }
-      +        }
-      +        for def in &states[s].default {
-      +            if !def.exceptions.contains(&c) && def.target < n {
-      +                check_cancellations(def.target, &def.weight, &mut worklist);
-      +            }
-      +        }
-      +
-      +        // 2b. Propagate the current search forward over original epsilon edges.
-      +        for (t, w_st) in &states[s].epsilons {
-      +            if *t >= n { continue; }
-      +            let prop_w = &w_as & w_st;
-      +            if prop_w.is_empty() { continue; }
-      +
-      +            let query_key = (a, c);
-      +            let query_weight = queries[*t].entry(query_key).or_default();
-      +            let old_qw = query_weight.clone();
-      +            *query_weight |= &prop_w;
-      +            if *query_weight != old_qw {
-      +                worklist.push_back((*t, a, c, query_weight.clone()));
-      +            }
-      +        }
-      +    }
-      +
-      +    new_epsilons
-               .into_iter()
-      -        .flat_map(|(from, edges)| {
-      -            edges.into_iter().map(move |(to, w)| (from, to, w))
-      -        })
-      +        .map(|((from, to), w)| (from, to, w))
-               .collect()
-       }
-       
+                   node.final_weight = Into::into(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
+                       if let Some(fw) = &sigs[*sig_id].final_w {
+                           acc |= &(gate & fw);
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/resolve_negatives.rs
-      Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
+      Identified target file: src/precompute4/weighted_automata/simplification.rs
+      Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
     metadata:
-  - user: 'Changes committed with message: "Perf: Optimize `compute_cancellations`
-      with a worklist-based search to resolve negative codes much faster."'
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/resolve_negatives.rs since previous turn:
-      ```diff
-      --- original version of src/precompute4/resolve_negatives.rs
-      +++ current version of src/precompute4/resolve_negatives.rs
-      @@ -139,7 +139,7 @@
-           while let Some((s, a, c, w_as)) = worklist.pop_front() {
-               // 2a. Check for cancellations at the current state `s`.
-               // A cancellation occurs if `s` has an outgoing transition on `c`.
-      -        let check_cancellations = |target: NWAStateID, w_st: &Weight, worklist: &mut VecDeque<_>| {
-      +        let mut check_cancellations = |target: NWAStateID, w_st: &Weight, worklist: &mut VecDeque<_>| {
-                   let new_eps_w = &w_as & w_st;
-                   if new_eps_w.is_empty() { return; }
-       
-      @@ -152,7 +152,7 @@
-                   if *eps_weight != old_eps_w {
-                       // Any search that has reached `a` can now cross this new epsilon to `target`.
-                       for (&(a_prime, c_prime), w_a_prime_a) in &queries[a] {
-      -                    let prop_w = w_a_prime_a & eps_weight;
-      +                    let prop_w = w_a_prime_a & &*eps_weight;
-                           if prop_w.is_empty() { continue; }
-       
-                           let query_key = (a_prime, c_prime);
-
-      ```
-    metadata:
-  - user: |+
-      error[E0502]: cannot borrow `queries` as mutable because it is also borrowed as immutable
-         --> src/precompute4/resolve_negatives.rs:159:40
-          |
-      154 |                 for (&(a_prime, c_prime), w_a_prime_a) in &queries[a] {
-          |                                                           -----------
-          |                                                           ||
-          |                                                           |immutable borrow occurs here
-          |                                                           immutable borrow later used here
-      ...
-      159 |                     let query_weight = queries[target].entry(query_key).or_default();
-          |                                        ^^^^^^^ mutable borrow occurs here
-          |
-          = help: use `.split_at_mut(position)` to obtain two mutable non-overlapping sub-slices
-
-    metadata:
-  - assistant: |-
-      You've encountered a classic Rust borrow checker error. The compiler is correctly preventing a situation where you might be reading from and writing to the same data structure (`queries`) simultaneously, which could lead to data corruption.
-
-      The error occurs because inside the `check_cancellations` closure, the loop `for ... in &queries[a]` creates an immutable borrow on the `queries` vector. Inside that loop, the line `queries[target].entry(...)` attempts to create a mutable borrow on the same `queries` vector. The borrow checker cannot prove that `a` and `target` are always different, so it prohibits this combination of borrows.
-
-      The fix is to release the immutable borrow before the mutable one is needed. We can do this by cloning the small `HashMap` of queries at state `a` and iterating over the clone. This resolves the conflict while having a negligible performance impact.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file `src/precompute4/resolve_negatives.rs`**.
-      2.  **Locate the `compute_cancellations` function**.
-      3.  Inside the `check_cancellations` closure, find this `for` loop:
-          ```rust
-          for (&(a_prime, c_prime), w_a_prime_a) in &queries[a] {
-          ```
-      4.  **Insert a new line just before this loop** to clone the map of queries:
-          ```rust
-          let queries_at_a = queries[a].clone();
-          ```
-      5.  **Modify the `for` loop** to iterate over this new `queries_at_a` variable instead of `&queries[a]`:
-          ```rust
-          for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
-          ```
-
-      This change ensures that the immutable borrow of `queries` ends before the loop begins, allowing the mutable borrow inside the loop to proceed safely.
-
-      ### Git Diff
-
-      Here is the git diff to apply the fix.
-
-      ```diff
-      --- a/src/precompute4/resolve_negatives.rs
-      +++ b/src/precompute4/resolve_negatives.rs
-      @@ -152,7 +152,9 @@
-                   // If this epsilon is new or stronger, it can propagate existing searches.
-                   if *eps_weight != old_eps_w {
-                       // Any search that has reached `a` can now cross this new epsilon to `target`.
-      -                for (&(a_prime, c_prime), w_a_prime_a) in &queries[a] {
-      +                // To avoid borrow checker issues, clone the queries at state `a`.
-      +                let queries_at_a = queries[a].clone();
-      +                for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
-                           let prop_w = w_a_prime_a & &*eps_weight;
-                           if prop_w.is_empty() { continue; }
-       
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/resolve_negatives.rs
-      Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
-    metadata:
-  - user: 'Changes committed with message: "Perf: Optimize `compute_cancellations`
-      with a worklist-based search and fix borrow checker issue in propagation"'
+  - user: 'Changes committed with message: "Refactor: Replace custom debug! macro
+      with guarded eprintln! calls in simplification and determinization"'
     metadata:
 ...

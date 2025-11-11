@@ -49,7 +49,9 @@ impl DWA {
         }
         let large = states.len() > LARGE_AUTOMATON_THRESHOLD;
         Self::simplify_core(states, body, large);
-        crate::debug!(3, "DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+        if crate::is_debug_level_enabled(3) {
+            eprintln!("DWA::simplify_components ({} states -> {} states) took: {:?}", initial_len, states.len(), now.elapsed());
+        }
     }
 
     fn run_pass_with_test<F>(
@@ -71,13 +73,17 @@ impl DWA {
         let now = Instant::now();
         let changed = pass(states, body);
         let elapsed = now.elapsed();
-        crate::debug!(3, "DWA simplify pass '{}' took {:?} (changed: {})", pass_name, elapsed, changed);
+        if crate::is_debug_level_enabled(3) {
+            eprintln!("DWA simplify pass '{}' took {:?} (changed: {})", pass_name, elapsed, changed);
+        }
 
         if let Some(before) = before_dwa {
             if changed {
                 let after_dwa = DWA { states: states.clone(), body: body.clone() };
                 IN_SIMPLIFY_CHECK.with(|c| c.set(true));
-                crate::debug!(1, "Stochastic testing DWA after pass: {}", pass_name);
+                if crate::is_debug_level_enabled(1) {
+                    eprintln!("Stochastic testing DWA after pass: {}", pass_name);
+                }
                 test_weighted_automata::stochastic_equivalence_test(before, after_dwa);
                 IN_SIMPLIFY_CHECK.with(|c| c.set(false));
             }
@@ -759,7 +765,9 @@ impl NWA {
         let now = Instant::now();
         let changed = pass();
         let elapsed = now.elapsed();
-        crate::debug!(3, "NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
+        if crate::is_debug_level_enabled(3) {
+            eprintln!("NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
+        }
         if changed {
             *changed_any = true;
         }
@@ -802,7 +810,9 @@ impl NWA {
             Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
         }
         if let Some(p) = &pb { p.finish_with_message(format!("Simplified to {} states", self.states.len())); }
-        crate::debug!(3, "NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
+        if crate::is_debug_level_enabled(3) {
+            eprintln!("NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
+        }
         self.states.len() != initial_n
     }
 
