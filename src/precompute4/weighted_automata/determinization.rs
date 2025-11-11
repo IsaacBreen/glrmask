@@ -80,18 +80,14 @@ impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
 
-        crate::debug!(4, "NWA before simplify:\n{}", self);
         let mut nwa = self.clone();
         nwa.simplify();
 
-        crate::debug!(4, "NWA::determinize_to_dwa stats after simplify:\n{}", nwa.stats());
-        crate::debug!(4, "NWA after simplify:\n{}", nwa);
-
+        crate::debug!(5, "NWA after simplify:\n{}", nwa);
         let result = nwa.det_fixpoint();
+        crate::debug!(5, "NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
+        crate::debug!(5, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
 
-        crate::debug!(4, "NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
-
-        crate::debug!(4, "NWA::determinize_to_dwa took: {:?}", now.elapsed());
         result
     }
 
