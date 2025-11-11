@@ -118,8 +118,8 @@ impl DWA {
         let _ = Self::run_pass_with_test(states, body, "initial prune_unreachable", |s, b| {
             Self::prune_unreachable(s, b)
         });
-        let _ = Self::run_pass_with_test(states, body, "initial constrain finals", |s, b| {
-            Self::propagate_and_constrain_weights(s, b)
+        let _ = Self::run_pass_with_test(states, body, "initial constrain and absorb", |s, b| {
+            Self::constrain_and_absorb_sinks_fixpoint(s, b)
         });
 
         let mut changed_any = true;
@@ -134,11 +134,10 @@ impl DWA {
                 Self::normalize_edges_inplace(s)
             });
 
-            if let Some(p) = &pb { p.set_message("absorb sink finals".to_string()); }
-            changed_any |=
-                Self::run_pass_with_test(states, body, "absorb_sink_finals_into_incoming", |s, _b| {
-                    Self::absorb_sink_finals_into_incoming(s)
-                });
+            if let Some(p) = &pb { p.set_message("constrain/absorb".to_string()); }
+            changed_any |= Self::run_pass_with_test(states, body, "constrain_and_absorb_sinks_fixpoint", |s, b| {
+                Self::constrain_and_absorb_sinks_fixpoint(s, b)
+            });
 
             // Relax edges locally (cheap) to unlock structure equality.
             if let Some(p) = &pb { p.set_message("relax local future".to_string()); }
@@ -154,17 +153,6 @@ impl DWA {
                         Self::minimize_partition_refinement(s, b)
                     });
             }
-
-            if let Some(p) = &pb { p.set_message("normalize".to_string()); }
-            changed_any |= Self::run_pass_with_test(states, body, "normalize_edges_inplace", |s, _b| {
-                Self::normalize_edges_inplace(s)
-            });
-
-            // Constrain finals again with updated reachability (cheap, helps prune/minimize)
-            if let Some(p) = &pb { p.set_message("constrain finals".to_string()); }
-            changed_any |= Self::run_pass_with_test(states, body, "propagate_and_constrain_weights", |s, b| {
-                Self::propagate_and_constrain_weights(s, b)
-            });
 
             if let Some(p) = &pb { p.set_message("prune dead".to_string()); }
             changed_any |= Self::run_pass_with_test(states, body, "prune_dead_ends", |s, _b| {
@@ -182,62 +170,136 @@ impl DWA {
         }
     }
 
-    pub fn propagate_and_constrain_weights(states: &mut DWAStates, body: &mut DWABody) -> bool {
-        let n = states.len();
-        if n == 0 {
-            return false;
-        }
-
-        let mut reachable_weights = vec![Weight::zeros(); n];
-        let mut worklist = VecDeque::new();
-
-        if body.start_state >= n {
-            return false;
-        }
-        reachable_weights[body.start_state] = Weight::all();
-        worklist.push_back(body.start_state);
-
-        while let Some(u) = worklist.pop_front() {
-            let u_rw = reachable_weights[u].clone();
-            if u_rw.is_empty() {
-                continue;
+    pub fn constrain_and_absorb_sinks_fixpoint(states: &mut DWAStates, body: &mut DWABody) -> bool {
+        let mut changed_overall = false;
+        // This loop computes the fixpoint of reachability constraints and sink absorption.
+        // A small iteration limit is a safeguard against unforeseen non-termination.
+        for _ in 0..5 {
+            // Part 1: propagate_and_constrain_weights logic
+            let n = states.len();
+            if n == 0 {
+                return changed_overall;
             }
-            let u_state = &states[u];
 
-            // State entry weight gates outgoing paths too
-            let gated_u_rw = if let Some(sw) = &u_state.state_weight {
-                &u_rw & sw
-            } else {
-                u_rw
-            };
+            let mut reachable_weights = vec![Weight::zeros(); n];
+            let mut worklist = VecDeque::new();
 
-            for (_lbl, v, edge_w) in u_state.iter_edges() {
-                if v >= n { continue; }
-                let new_v_rw = &gated_u_rw & edge_w;
-                let old_v_rw = &reachable_weights[v];
+            if body.start_state >= n {
+                return changed_overall;
+            }
+            reachable_weights[body.start_state] = Weight::all();
+            worklist.push_back(body.start_state);
 
-                if !new_v_rw.is_subset_of(old_v_rw) {
-                    reachable_weights[v] |= &new_v_rw;
-                    worklist.push_back(v);
+            while let Some(u) = worklist.pop_front() {
+                let u_rw = reachable_weights[u].clone();
+                if u_rw.is_empty() {
+                    continue;
+                }
+                let u_state = &states[u];
+                let gated_u_rw = if let Some(sw) = &u_state.state_weight { &u_rw & sw } else { u_rw };
+                for (_lbl, v, edge_w) in u_state.iter_edges() {
+                    if v >= n {
+                        continue;
+                    }
+                    let new_v_rw = &gated_u_rw & edge_w;
+                    if !new_v_rw.is_subset_of(&reachable_weights[v]) {
+                        reachable_weights[v] |= &new_v_rw;
+                        worklist.push_back(v);
+                    }
                 }
             }
-        }
 
-        // Now apply constraints
-        let mut changed = false;
-        for i in 0..n {
-            let old_fw = states[i].final_weight.clone();
-            if let Some(fw) = states[i].final_weight.as_mut() {
-                *fw &= &reachable_weights[i];
-                if fw.is_empty() {
-                    states[i].final_weight = None;
+            let mut changed_this_iteration = false;
+            for i in 0..n {
+                let old_fw = states[i].final_weight.clone();
+                if let Some(fw) = states[i].final_weight.as_mut() {
+                    *fw &= &reachable_weights[i];
+                    if fw.is_empty() {
+                        states[i].final_weight = None;
+                    }
+                }
+                if states[i].final_weight != old_fw {
+                    changed_this_iteration = true;
                 }
             }
-            if states[i].final_weight != old_fw {
-                changed = true;
+
+            // Part 2: absorb_sink_finals_into_incoming logic
+            let mut def_preds: Vec<Vec<StateID>> = vec![Vec::new(); n];
+            let mut ex_preds: Vec<Vec<(StateID, i16)>> = vec![Vec::new(); n];
+            for p in 0..n {
+                if let Some(d) = states[p].transitions.default {
+                    if d < n {
+                        def_preds[d].push(p);
+                    }
+                }
+                for (ch, &tgt) in states[p].transitions.exceptions.iter() {
+                    if tgt < n {
+                        ex_preds[tgt].push((p, *ch));
+                    }
+                }
+            }
+
+            for v in 0..n {
+                if states[v].transitions.default.is_some() || !states[v].transitions.exceptions.is_empty() {
+                    continue;
+                }
+
+                let mut effective_weight = Weight::all();
+                let mut has_restriction = false;
+                if let Some(fw) = &states[v].final_weight {
+                    if !fw.is_all_fast() {
+                        effective_weight &= fw;
+                        has_restriction = true;
+                    }
+                }
+                if let Some(sw) = &states[v].state_weight {
+                    if !sw.is_all_fast() {
+                        effective_weight &= sw;
+                        has_restriction = true;
+                    }
+                }
+                if !has_restriction {
+                    continue;
+                }
+                if def_preds[v].is_empty() && ex_preds[v].is_empty() {
+                    continue;
+                }
+
+                for &p in &def_preds[v] {
+                    if let Some(w) = states[p].trans_weight_default.as_mut() {
+                        let old_w = w.clone();
+                        *w &= &effective_weight;
+                        if *w != old_w {
+                            changed_this_iteration = true;
+                        }
+                    }
+                }
+                for &(p, ch) in &ex_preds[v] {
+                    if let Some(w) = states[p].trans_weights_exceptions.get_mut(&ch) {
+                        let old_w = w.clone();
+                        *w &= &effective_weight;
+                        if *w != old_w {
+                            changed_this_iteration = true;
+                        }
+                    }
+                }
+
+                if states[v].final_weight.as_ref().map_or(false, |w| !w.is_all_fast()) {
+                    states[v].final_weight = Some(Weight::all());
+                    changed_this_iteration = true;
+                }
+                if states[v].state_weight.is_some() {
+                    states[v].state_weight = None;
+                    changed_this_iteration = true;
+                }
+            }
+
+            changed_overall |= changed_this_iteration;
+            if !changed_this_iteration {
+                break;
             }
         }
-        changed
+        changed_overall
     }
 
     pub fn propagate_future_weights(states: &mut DWAStates) -> bool {
@@ -386,99 +448,6 @@ impl DWA {
             }
         }
         any_weight_changed
-    }
-
-    /// Absorb final weights of sink states (no outgoing edges) into incoming edges.
-    /// For each sink v with final_weight F (non-empty, not ALL):
-    ///   - For every incoming edge e: u -> v, set weight(e) := weight(e) ∧ F.
-    ///   - Set final_weight[v] := ALL.
-    /// This preserves semantics (any accepted word ending in v has its weight gated by F either way)
-    /// and enables merging of multiple structurally identical sinks that previously differed only by final_weight.
-    pub fn absorb_sink_finals_into_incoming(states: &mut DWAStates) -> bool {
-        let n = states.len();
-        if n == 0 {
-            return false;
-        }
-        // Build reverse adjacency: for each target v, collect predecessors
-        let mut def_preds: Vec<Vec<StateID>> = vec![Vec::new(); n];
-        let mut ex_preds: Vec<Vec<(StateID, i16)>> = vec![Vec::new(); n];
-        for p in 0..n {
-            if let Some(d) = states[p].transitions.default {
-                if d < n {
-                    def_preds[d].push(p);
-                }
-            }
-            for (ch, &tgt) in states[p].transitions.exceptions.iter() {
-                if tgt < n {
-                    ex_preds[tgt].push((p, *ch));
-                }
-            }
-        }
-
-        let mut changed = false;
-        for v in 0..n {
-            // Sink = no outgoing edges (no default and no exceptions)
-            if states[v].transitions.default.is_some() || !states[v].transitions.exceptions.is_empty() {
-                continue;
-            }
-
-            // The effective weight is the intersection of final_weight and state_weight.
-            let mut effective_weight = Weight::all();
-            let mut has_restriction = false;
-
-            if let Some(fw) = &states[v].final_weight {
-                if !fw.is_all_fast() {
-                    effective_weight &= fw;
-                    has_restriction = true;
-                }
-            }
-            if let Some(sw) = &states[v].state_weight {
-                if !sw.is_all_fast() {
-                    effective_weight &= sw;
-                    has_restriction = true;
-                }
-            }
-
-            if !has_restriction {
-                continue;
-            }
-
-            // This transformation is only valid if there are incoming edges to absorb the weight.
-            if def_preds[v].is_empty() && ex_preds[v].is_empty() {
-                continue;
-            }
-
-            // Intersect incoming default edges
-            for &p in &def_preds[v] {
-                if let Some(w) = states[p].trans_weight_default.as_mut() {
-                    let old_w = w.clone();
-                    *w &= &effective_weight;
-                    if *w != old_w {
-                        changed = true;
-                    }
-                }
-            }
-            // Intersect incoming exception edges
-            for &(p, ch) in &ex_preds[v] {
-                if let Some(w) = states[p].trans_weights_exceptions.get_mut(&ch) {
-                    let old_w = w.clone();
-                    *w &= &effective_weight;
-                    if *w != old_w {
-                        changed = true;
-                    }
-                }
-            }
-            // Make the sink final weight ALL and clear state weight to enable merging
-            if states[v].final_weight.as_ref().map_or(false, |w| !w.is_all_fast()) {
-                states[v].final_weight = Some(Weight::all());
-                changed = true;
-            }
-            if states[v].state_weight.is_some() {
-                states[v].state_weight = None;
-                changed = true;
-            }
-        }
-        changed
     }
 
     pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
