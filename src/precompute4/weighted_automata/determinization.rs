@@ -103,6 +103,31 @@ impl NWA {
             return DWA::new();
         }
 
+        fn final_weight_from_gates(
+            gates: &HashMap<usize, Weight>,
+            sigs: &[MacroSig],
+        ) -> Weight {
+            gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
+                if let Some(fw) = &sigs[*sig_id].final_w {
+                    acc |= &(gate & fw);
+                }
+                acc
+            })
+        }
+
+        fn cost(
+            old_gates: &HashMap<usize, Weight>,
+            unified_gates: &HashMap<usize, Weight>,
+            sigs: &[MacroSig],
+        ) -> (usize, usize, usize) {
+            let fw_old = final_weight_from_gates(old_gates, sigs);
+            let fw_unified = final_weight_from_gates(unified_gates, sigs);
+            let finality_change = if fw_unified != fw_old { 1 } else { 0 };
+
+            let spec_increase = unified_gates.len() - old_gates.len();
+            (finality_change, spec_increase, old_gates.len())
+        }
+
         fn unify_gates(g1: &HashMap<usize, Weight>, g2: &HashMap<usize, Weight>) -> HashMap<usize, Weight> {
             if g1.is_empty() {
                 return g2.clone();
@@ -115,11 +140,6 @@ impl NWA {
                 *unified.entry(*sig).or_default() |= w2;
             }
             unified
-        }
-
-        fn cost(old_gates: &HashMap<usize, Weight>, unified_gates: &HashMap<usize, Weight>) -> (usize, usize) {
-            let spec_increase = unified_gates.len() - old_gates.len();
-            (spec_increase, old_gates.len())
         }
 
         fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
@@ -548,22 +568,27 @@ impl NWA {
                 }
 
                 let mut best_j: Option<usize> = None;
-                let mut best_cost = (usize::MAX, usize::MAX);
+                let mut best_cost = (usize::MAX, usize::MAX, usize::MAX);
 
                 for j in 0..nodes.len() {
                     let unified_gates = unify_gates(&nodes[j].gates, succ_map);
-                    let current_cost = cost(&nodes[j].gates, &unified_gates);
+                    let current_cost = cost(&nodes[j].gates, &unified_gates, &sigs);
                     if current_cost < best_cost || (current_cost == best_cost && Some(j) < best_j) {
                         best_cost = current_cost;
                         best_j = Some(j);
                     }
                 }
 
+                let create_new = best_j.is_none() || best_cost.0 > 0;
+
                 let target_idx;
-                if let Some(j) = best_j {
+                if !create_new {
+                    let j = best_j.unwrap();
                     target_idx = j;
                     let unified_gates = unify_gates(&nodes[j].gates, succ_map);
                     if unified_gates != nodes[j].gates {
+                        let new_fw = final_weight_from_gates(&unified_gates, &sigs);
+                        nodes[j].final_weight = if new_fw.is_empty() { None } else { Some(new_fw) };
                         nodes[j].gates = unified_gates;
                         if !work_set.contains(&j) {
                             work.push_back(j);
@@ -571,10 +596,12 @@ impl NWA {
                         }
                     }
                 } else {
+                    // No compatible representative found or best one changes finality. Create a new one.
                     target_idx = nodes.len();
+                    let fw = final_weight_from_gates(succ_map, &sigs);
                     nodes.push(CompositionNode {
                         gates: succ_map.clone(),
-                        final_weight: None,
+                        final_weight: if fw.is_empty() { None } else { Some(fw) },
                         default_target_idx: None,
                         default_mask: None,
                         exception_targets: BTreeMap::new(),
@@ -625,9 +652,8 @@ impl NWA {
         while dwa.states.len() < nodes.len() {
             dwa.add_state();
         }
-        dwa.body.start_state = start_idx;
 
-        for (i, node) in nodes.into_iter().enumerate() {
+        for (i, node) in nodes.iter().enumerate() {
             dwa.states[i].final_weight = node.final_weight.clone();
             if let (Some(target_idx), Some(mask)) = (node.default_target_idx, &node.default_mask) {
                 if !mask.is_empty() {
@@ -639,7 +665,7 @@ impl NWA {
                 let mask = node
                     .exception_masks
                     .get(lbl)
-                    .cloned() // Always add exception to block default, even if mask is empty.
+                    .cloned()
                     .unwrap_or_else(Weight::zeros);
                 dwa.add_transition(i, *lbl, target_idx, mask).unwrap();
             }
