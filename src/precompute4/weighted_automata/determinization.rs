@@ -479,8 +479,10 @@ impl NWA {
                 keys.sort_unstable();
                 let key = MembersKey(keys);
 
+
                 if image.contains_key(&key) { continue; }
 
+                // New successor key. Find a home for it.
                 let mut best_j: Option<usize> = None;
                 let mut best_cost = (usize::MAX, usize::MAX);
                 let target_keys: BTreeSet<usize> = target_map.keys().copied().collect();
@@ -497,14 +499,20 @@ impl NWA {
                     }
                 }
 
-                let j = best_j.unwrap();
-                image.insert(key, j);
-
-                if reps[j].unify(&target_map) {
-                    if !in_work_queue.contains(&j) {
+                if let Some(j) = best_j {
+                    // Merge into existing representative j
+                    image.insert(key, j);
+                    if reps[j].unify(&target_map) && !in_work_queue.contains(&j) {
                         work.push_back(j);
                         in_work_queue.insert(j);
                     }
+                } else {
+                    // This branch is only taken if reps is empty, which happens only for the first successor.
+                    let new_idx = reps.len();
+                    reps.push(Representative { gates: target_map });
+                    image.insert(key, new_idx);
+                    work.push_back(new_idx);
+                    in_work_queue.insert(new_idx);
                 }
             }
             if let Some(p) = &pb_discover { p.set_length(reps.len() as u64); }
