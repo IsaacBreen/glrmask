@@ -351,6 +351,7 @@ impl NWA {
             exception_targets: BTreeMap<i16, usize>,
             exception_masks: BTreeMap<i16, Weight>,
             gates: HashMap<usize, Weight>,
+            incoming_weight_union: Weight,
         }
 
         fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
@@ -424,6 +425,7 @@ impl NWA {
                     exception_targets: BTreeMap::new(),
                     exception_masks: BTreeMap::new(),
                     gates: HashMap::new(),
+                    incoming_weight_union: Weight::zeros(),
                 });
                 if new_idx >= in_queue.len() {
                     in_queue.resize(new_idx + 1, false);
@@ -464,6 +466,7 @@ impl NWA {
             exception_targets: BTreeMap::new(),
             exception_masks: BTreeMap::new(),
             gates: init_map,
+            incoming_weight_union: Weight::zeros(),
         });
         let mut in_queue = vec![false; 1];
         in_queue[start_idx] = true;
@@ -653,6 +656,25 @@ impl NWA {
         }
         if let Some(p) = pb_discover {
             p.finish_with_message(format!("Discovered {} compositions", nodes.len()));
+        }
+
+        let mut incoming_unions = vec![Weight::zeros(); nodes.len()];
+        for source_node in &nodes {
+            if let (Some(target_idx), Some(mask)) = (source_node.default_target_idx, &source_node.default_mask) {
+                if target_idx < incoming_unions.len() {
+                    incoming_unions[target_idx] |= mask;
+                }
+            }
+            for (lbl, &target_idx) in &source_node.exception_targets {
+                if let Some(mask) = source_node.exception_masks.get(lbl) {
+                    if target_idx < incoming_unions.len() {
+                        incoming_unions[target_idx] |= mask;
+                    }
+                }
+            }
+        }
+        for (i, node) in nodes.iter_mut().enumerate() {
+            node.incoming_weight_union = incoming_unions[i].clone();
         }
 
         let mut dwa = DWA::new();
