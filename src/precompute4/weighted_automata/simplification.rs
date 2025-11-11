@@ -18,6 +18,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque, hash_map::DefaultHasher};
+use std::ops::BitOrAssign;
 use std::time::Instant;
 
 /// For very large DWAs, we skip heavy fixpoint/minimization passes to guarantee fast simplification.
@@ -476,7 +477,7 @@ impl DWA {
         changed
     }
 
-    /// Partition-refinement minimization (structure-only), aggregating weights by union.
+    /// Partition-refinement minimization (structural), aggregating weights by union.
     pub fn minimize_partition_refinement(states: &mut DWAStates, body: &mut DWABody) -> bool {
         let n = states.0.len();
         if n <= 1 {
@@ -499,23 +500,28 @@ impl DWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
+            // The signature is now purely structural for transitions.
             let mut sig2pid: HashMap<(
                 Option<Weight>,
                 Option<Weight>,
-                Option<(usize, Weight)>,
-                Vec<(i16, (usize, Weight))>,
+                Option<usize>,       // Default target partition
+                Vec<(i16, usize)>,   // Exception (label, target_partition)
             ), usize> = HashMap::new();
 
             for i in 0..n {
                 let st = &states[i];
-                let def_sig = st.transitions.default.map(|d| {
-                    (part[d], st.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all))
-                });
-                // Keep only exceptions that structurally differ from default (dest or weight).
-                let ex_sig: Vec<_> = st.transitions.exceptions.iter()
-                    .map(|(ch, &tgt)| (*ch, (part[tgt], st.trans_weights_exceptions.get(ch).cloned().unwrap_or_else(Weight::all))))
-                    .filter(|(_, (cls, w))| def_sig.as_ref().map_or(true, |(dc, dw)| *dc != *cls || dw != w))
+                let def_sig = st.transitions.default.map(|d| part[d]);
+
+                let mut ex_sig: Vec<_> = st.transitions.exceptions.iter()
+                    .map(|(ch, &tgt)| (*ch, part[tgt]))
                     .collect();
+                ex_sig.sort_unstable();
+
+                // Filter out exceptions that are structurally redundant with the default transition.
+                if let Some(def_part_id) = def_sig {
+                    ex_sig.retain(|(_, ex_part_id)| *ex_part_id != def_part_id);
+                }
+
                 let sig = (st.state_weight.clone(), st.final_weight.clone(), def_sig, ex_sig);
                 let next_pid = sig2pid.len();
                 next_part[i] = *sig2pid.entry(sig).or_insert(next_pid);
@@ -545,29 +551,51 @@ impl DWA {
             pid_to_new.insert(*pid, new_id);
         }
 
-        // Rebuild states by copying representative weights and remapping targets by partition.
+        // Rebuild states by unioning weights and remapping targets by partition.
         for (pid, members) in &groups {
             let rep = members[0];
             let rep_state = &states[rep];
             let new_id = *pid_to_new.get(pid).unwrap();
 
             let mut st = DWAState::default();
-            st.state_weight = rep_state.state_weight.clone();
-            st.final_weight = rep_state.final_weight.clone();
 
-            // Default
+            // Union state_weight and final_weight from all members in the partition.
+            for &member_id in members {
+                if let Some(sw) = &states[member_id].state_weight {
+                    st.state_weight.get_or_insert_with(Weight::zeros).bitor_assign(sw);
+                }
+                if let Some(fw) = &states[member_id].final_weight {
+                    st.final_weight.get_or_insert_with(Weight::zeros).bitor_assign(fw);
+                }
+            }
+
+            // Default transition: structure is the same for all members. Union weights.
             if let Some(d) = rep_state.transitions.default {
                 let cls = part[d];
                 st.transitions.default = Some(*pid_to_new.get(&cls).unwrap());
-                st.trans_weight_default = rep_state.trans_weight_default.clone();
+                let mut unioned_weight = Weight::zeros();
+                for &member_id in members {
+                    if let Some(w) = &states[member_id].trans_weight_default {
+                        unioned_weight |= w;
+                    }
+                }
+                if !unioned_weight.is_empty() {
+                    st.trans_weight_default = Some(unioned_weight);
+                }
             }
 
-            // Exceptions (copy rep structure; members have the same by construction)
+            // Exceptions: structure is the same. Union weights.
             for (ch, tgt) in &rep_state.transitions.exceptions {
                 let cls = part[*tgt];
                 st.transitions.exceptions.insert(*ch, *pid_to_new.get(&cls).unwrap());
-                if let Some(w) = rep_state.trans_weights_exceptions.get(ch) {
-                    st.trans_weights_exceptions.insert(*ch, w.clone());
+                let mut unioned_weight = Weight::zeros();
+                for &member_id in members {
+                    if let Some(w) = states[member_id].trans_weights_exceptions.get(ch) {
+                        unioned_weight |= w;
+                    }
+                }
+                if !unioned_weight.is_empty() {
+                    st.trans_weights_exceptions.insert(*ch, unioned_weight);
                 }
             }
 
@@ -576,8 +604,17 @@ impl DWA {
 
         states.0 = new_states;
         let _ = Self::normalize_edges_inplace(states);
-        let start_pid = part[body.start_state];
-        body.start_state = *pid_to_new.get(&start_pid).unwrap();
+        if body.start_state < n {
+            let start_pid = part[body.start_state];
+            body.start_state = *pid_to_new.get(&start_pid).unwrap();
+        } else {
+            // Handle case where start state was invalid, though prune_unreachable should prevent this.
+            if !states.0.is_empty() {
+                body.start_state = 0;
+            } else {
+                body.start_state = states.add_state();
+            }
+        }
 
         true
     }
