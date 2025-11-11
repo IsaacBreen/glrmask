@@ -805,7 +805,7 @@ impl NWA {
                 nodes[idx].cached_by_label = Some(cache);
                 nodes[idx].cache_dirty = false;
             }
-            let node_cache = nodes[idx].cached_by_label.as_ref().unwrap();
+            let node_cache = nodes[idx].cached_by_label.as_ref().unwrap().clone();
 
             if is_debug_level_enabled(5) {
                 eprintln!("\nProcessing composition node {}: gates: {:?}", idx, nodes[idx].gates);
@@ -829,7 +829,7 @@ impl NWA {
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
                     let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = entry | weight;
+                    let new_w = &*entry | weight;
                     if new_w != *entry {
                         *entry = new_w;
                         any_change = true;
@@ -868,7 +868,7 @@ impl NWA {
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
                     let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = entry | weight;
+                    let new_w = &*entry | weight;
                     if new_w != *entry {
                         *entry = new_w;
                         any_change = true;
