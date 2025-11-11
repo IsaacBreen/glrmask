@@ -373,6 +373,16 @@ impl NWA {
                 return existing_idx;
             }
 
+            let merge_is_valid = |candidate_node: &CompositionNode| -> bool {
+                for sig_id in &key.0 {
+                    if !candidate_node.gates.contains_key(sig_id) {
+                        // Candidate node lacks a required signature; cannot merge.
+                        return false;
+                    }
+                }
+                true
+            };
+
             // Helper to calculate the cost of merging the new key into a candidate node.
             // Cost is (specificity_increase, current_specificity). Lower is better.
             let calculate_merge_cost = |candidate_node: &CompositionNode| -> (usize, usize) {
@@ -391,8 +401,11 @@ impl NWA {
                 .iter()
                 .enumerate()
                 .min_by_key(|(cand_idx, cand_node)| {
+                    if !merge_is_valid(cand_node) {
+                        return ((usize::MAX, usize::MAX), usize::MAX); // Invalid merge
+                    }
                     let cost = calculate_merge_cost(cand_node);
-                    (cost.0, cost.1, *cand_idx) // Tie-break with index for determinism
+                    (cost, *cand_idx) // Tie-break with index for determinism
                 })
                 .map(|(idx, _)| idx);
 
