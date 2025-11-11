@@ -15,23 +15,21 @@ type DWAStateID = usize;
 /// This is the "powerstate" in subset construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DWAStateSignature {
-    /// The structural key for merging. A sorted, unique vector of NWA state IDs.
-    key: Vec<NWAStateID>,
+    /// The structural key for merging. A sorted, unique vector of (NWA state ID, future_weight_fingerprint).
+    /// This key is more precise than just the state ID, preventing incorrect merges.
+    key: Vec<(NWAStateID, u64)>,
     /// The full powerstate: a list of (NWA state, accumulated weight) pairs.
-    /// This is kept canonical (sorted by ID, merged weights) for stability.
+    /// This is kept canonical (sorted by ID) for stability.
     powerstate: Vec<(NWAStateID, Weight)>,
 }
 
 impl DWAStateSignature {
     /// Creates a canonical signature from a raw vector of powerstate entries.
-    /// Canonicalization involves sorting, merging weights for identical states,
-    /// and removing entries with empty weights.
-    fn from_powerstate(mut powerstate: Vec<(NWAStateID, Weight)>) -> Self {
+    fn from_powerstate(mut powerstate: Vec<(NWAStateID, Weight)>, fut: &[Weight]) -> Self {
         if powerstate.is_empty() {
             return Self { key: vec![], powerstate: vec![] };
         }
 
-        // Sort by NWA state ID to enable efficient merging.
         powerstate.sort_by_key(|(id, _)| *id);
 
         let mut merged: Vec<(NWAStateID, Weight)> = Vec::with_capacity(powerstate.len());
@@ -41,18 +39,19 @@ impl DWAStateSignature {
             }
             if let Some(last) = merged.last_mut() {
                 if last.0 == id {
-                    last.1 |= &weight; // Merge weights for the same NWA state.
+                    last.1 |= &weight;
                     continue;
                 }
             }
             merged.push((id, weight));
         }
 
-        let key = merged.iter().map(|(id, _)| *id).collect();
+        let key = merged.iter().map(|(id, _)| (*id, fut[*id].fp)).collect();
         Self { key, powerstate: merged }
     }
 }
 
+// (eps_closure_multi remains the same)
 /// Computes the epsilon-closure from a set of source NWA configurations.
 fn eps_closure_multi(
     sources: &[(NWAStateID, Weight)],
@@ -64,10 +63,9 @@ fn eps_closure_multi(
 ) -> Vec<(NWAStateID, Weight)> {
     let n = nwa.states.len();
 
-    // Initialize scratch space from all source configurations.
     for &(s, ref w) in sources {
         if s >= n { continue; }
-        let prop = w & &fut[s]; // Mask with future weights to prune dead paths.
+        let prop = w & &fut[s];
         if prop.is_empty() { continue; }
 
         let old_w = &scratch_w[s];
@@ -81,7 +79,6 @@ fn eps_closure_multi(
 
     q.extend(touched.iter().copied());
 
-    // Propagate weights through the epsilon-transition graph until a fixpoint is reached.
     while let Some(u) = q.pop_front() {
         let base = scratch_w[u].clone();
         if base.is_empty() { continue; }
@@ -104,7 +101,6 @@ fn eps_closure_multi(
         }
     }
 
-    // Collect results and reset scratch space for the next call.
     let mut out: Vec<(NWAStateID, Weight)> = Vec::with_capacity(touched.len());
     for &i in touched.iter() {
         out.push((i, scratch_w[i].clone()));
@@ -114,6 +110,7 @@ fn eps_closure_multi(
     out
 }
 
+
 /// Finds a compatible representative, unifying the new signature into it,
 /// or creates a new representative if none is found.
 fn find_or_unify_or_create(
@@ -121,6 +118,7 @@ fn find_or_unify_or_create(
     representatives: &mut Vec<DWAStateSignature>,
     worklist: &mut VecDeque<DWAStateID>,
     in_worklist: &mut HashSet<DWAStateID>,
+    fut: &[Weight],
 ) -> Option<DWAStateID> {
     if sig.key.is_empty() {
         return None;
@@ -129,7 +127,6 @@ fn find_or_unify_or_create(
     let mut best_candidate: Option<(DWAStateID, usize)> = None;
     let sig_key_set: HashSet<_> = sig.key.iter().collect();
 
-    // Find the best (smallest) existing superset representative.
     for (i, rep_sig) in representatives.iter().enumerate() {
         if sig_key_set.is_subset(&rep_sig.key.iter().collect()) {
             let cost = rep_sig.key.len();
@@ -140,26 +137,22 @@ fn find_or_unify_or_create(
     }
 
     if let Some((id, _)) = best_candidate {
-        // Found a compatible representative. Unify the new powerstate into it.
         let rep_sig = &representatives[id];
         let mut combined_powerstate = rep_sig.powerstate.clone();
         combined_powerstate.extend(sig.powerstate);
-        let new_sig = DWAStateSignature::from_powerstate(combined_powerstate);
+        let new_sig = DWAStateSignature::from_powerstate(combined_powerstate, fut);
 
-        // The key of the representative should not change because it was a superset.
         debug_assert!(new_sig.key == rep_sig.key);
 
         if new_sig.powerstate != rep_sig.powerstate {
             representatives[id] = new_sig;
-            // If the representative changed, it must be re-processed.
-            if in_worklist.insert(id) { // `insert` returns true if value was new
+            if in_worklist.insert(id) {
                 worklist.push_back(id);
             }
         }
         return Some(id);
     }
 
-    // No compatible representative found. Create a new one.
     let new_id = representatives.len();
     representatives.push(sig);
     if in_worklist.insert(new_id) {
@@ -185,8 +178,6 @@ impl NWA {
         result
     }
 
-    /// Efficient determinization algorithm that avoids state space explosion
-    /// by merging structurally compatible states on-the-fly.
     fn det_fixpoint_efficient(&self) -> DWA {
         let fut = self.compute_future_weights();
         let n = self.states.len();
@@ -206,7 +197,7 @@ impl NWA {
             &[(self.body.start_state, Weight::all())],
             self, &fut, &mut scratch_w, &mut q, &mut touched,
         );
-        let initial_sig = DWAStateSignature::from_powerstate(initial_powerstate);
+        let initial_sig = DWAStateSignature::from_powerstate(initial_powerstate, &fut);
 
         if initial_sig.key.is_empty() { return DWA::new(); }
 
@@ -221,7 +212,6 @@ impl NWA {
         while let Some(source_dwa_id) = worklist.pop_front() {
             in_worklist.remove(&source_dwa_id);
 
-            // Ensure DWA has enough states.
             while dwa.states.len() <= source_dwa_id {
                 dwa.add_state();
             }
@@ -258,33 +248,31 @@ impl NWA {
                     }
                 }
                 let closed = eps_closure_multi(&next_configs, self, &fut, &mut scratch_w, &mut q, &mut touched);
-                DWAStateSignature::from_powerstate(closed)
+                DWAStateSignature::from_powerstate(closed, &fut)
             };
 
             let default_sig = calculate_successor(None);
             let default_target_id =
-                find_or_unify_or_create(default_sig.clone(), &mut representatives, &mut worklist, &mut in_worklist);
+                find_or_unify_or_create(default_sig.clone(), &mut representatives, &mut worklist, &mut in_worklist, &fut);
             let default_weight = default_sig.powerstate.iter().fold(Weight::zeros(), |mut acc, (_, w)| { acc |= w; acc });
 
             if let Some(target_id) = default_target_id {
                 if !default_weight.is_empty() {
                     while dwa.states.len() <= target_id { dwa.add_state(); }
                     dwa.set_default_transition(source_dwa_id, target_id, default_weight.clone()).unwrap_or_else(|_| {
-                        // This can happen if the state was re-processed. Clear old transitions.
                         dwa.states[source_dwa_id].transitions.default = None;
                         dwa.set_default_transition(source_dwa_id, target_id, default_weight.clone()).unwrap();
                     });
                 }
             }
 
-            // Clear old exception transitions before setting new ones, as this state might be re-processed.
             dwa.states[source_dwa_id].transitions.exceptions.clear();
             dwa.states[source_dwa_id].trans_weights_exceptions.clear();
 
             for &symbol in &alphabet_of_interest {
                 let ex_sig = calculate_successor(Some(symbol));
                 let ex_target_id =
-                    find_or_unify_or_create(ex_sig.clone(), &mut representatives, &mut worklist, &mut in_worklist);
+                    find_or_unify_or_create(ex_sig.clone(), &mut representatives, &mut worklist, &mut in_worklist, &fut);
                 let ex_weight = ex_sig.powerstate.iter().fold(Weight::zeros(), |mut acc, (_, w)| { acc |= w; acc });
 
                 if ex_target_id != default_target_id || ex_weight != default_weight {
