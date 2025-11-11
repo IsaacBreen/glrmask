@@ -97,6 +97,15 @@ impl SimpleBitset {
     pub fn is_empty(&self) -> bool {
         self.rsb.is_empty()
     }
+    pub fn is_disjoint(&self, other: &SimpleBitset) -> bool {
+        if self.is_empty() || other.is_empty() {
+            return true;
+        }
+        if self.is_all_fast() || other.is_all_fast() {
+            return false;
+        }
+        (&self.rsb & &other.rsb).is_empty()
+    }
     pub fn contains(&self, index: usize) -> bool {
         self.rsb.contains(index)
     }
