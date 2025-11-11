@@ -104,120 +104,98 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
 }
 
-/// Helper to compute the weighted epsilon closure of a state.
-fn compute_eps_closure(
-    states: &NWAStates,
-    start_node: NWAStateID,
-    extra_epsilons: &HashMap<NWAStateID, Vec<(NWAStateID, Weight)>>,
-) -> HashMap<NWAStateID, Weight> {
-    let mut closure: HashMap<NWAStateID, Weight> = HashMap::new();
-    let mut q = VecDeque::new();
-
-    closure.insert(start_node, Weight::all());
-    q.push_back(start_node);
-
-    while let Some(u) = q.pop_front() {
-        let u_w = closure.get(&u).unwrap().clone();
-
-        // Original epsilons
-        for (v, w) in &states[u].epsilons {
-            let new_w = &u_w & w;
-            if new_w.is_empty() { continue; }
-            let entry = closure.entry(*v).or_insert_with(Weight::zeros);
-            let old_w = entry.clone();
-            *entry |= &new_w;
-            if *entry != old_w {
-                q.push_back(*v);
-            }
-        }
-        // Extra epsilons found during cancellation fixpoint
-        if let Some(edges) = extra_epsilons.get(&u) {
-            for (v, w) in edges {
-                let new_w = &u_w & w;
-                if new_w.is_empty() { continue; }
-                let entry = closure.entry(*v).or_insert_with(Weight::zeros);
-                let old_w = entry.clone();
-                *entry |= &new_w;
-                if *entry != old_w {
-                    q.push_back(*v);
-                }
-            }
-        }
-    }
-    closure
-}
-
 /// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
 /// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
 fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-    let mut all_new_epsilons: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
-    loop {
-        let mut changed_in_pass = false;
-        let mut pass_epsilons = Vec::new();
+    let n = states.len();
+    // `queries[s]` stores cancellation "searches" that have reached state `s`.
+    // A search is identified by its origin state `a` and the positive code `c` it's looking for.
+    // The map stores the accumulated weight of the path `a --neg(c)--> ... --eps*--> s`.
+    let mut queries: Vec<HashMap<(NWAStateID, i16), Weight>> = vec![HashMap::new(); n];
+    let mut worklist: VecDeque<(NWAStateID, NWAStateID, i16, Weight)> = VecDeque::new();
+    let mut new_epsilons: HashMap<(NWAStateID, NWAStateID), Weight> = HashMap::new();
 
-        for a in 0..states.len() {
-            let state_a = &states[a];
-            for (neg_label, targets) in &state_a.transitions {
-                if *neg_label >= 0 { continue; }
-                let c = neg_label.wrapping_sub(i16::MIN);
-
+    // 1. Initialize worklist with all negative transitions.
+    // Each `a --neg(c)--> b` starts a search at `b` for a matching `c`.
+    for a in 0..n {
+        for (label, targets) in &states[a].transitions {
+            if *label < 0 {
+                let c = label.wrapping_sub(i16::MIN);
                 for (b, w_ab) in targets {
-                    if *b >= states.len() { continue; }
-
-                    let eps_closure_of_b = compute_eps_closure(states, *b, &all_new_epsilons);
-
-                    for (b_reachable, w_b_br) in eps_closure_of_b {
-                        if b_reachable >= states.len() { continue; }
-                        let state_br = &states[b_reachable];
-
-                        // Labeled transitions
-                        if let Some(targets) = state_br.transitions.get(&c) {
-                            for (c_target, w_br_c) in targets {
-                                let new_w = w_ab & &w_b_br & w_br_c;
-                                if !new_w.is_empty() {
-                                    pass_epsilons.push((a, *c_target, new_w));
-                                }
-                            }
-                        }
-
-                        // Default transitions
-                        for def in &state_br.default {
-                            if !def.exceptions.contains(&c) {
-                                let new_w = w_ab & &w_b_br & &def.weight;
-                                if !new_w.is_empty() {
-                                    pass_epsilons.push((a, def.target, new_w));
-                                }
-                            }
-                        }
+                    if *b >= n { continue; }
+                    let query_key = (a, c);
+                    let query_weight = queries[*b].entry(query_key).or_default();
+                    let old_w = query_weight.clone();
+                    *query_weight |= w_ab;
+                    if *query_weight != old_w {
+                        worklist.push_back((*b, a, c, query_weight.clone()));
                     }
                 }
             }
         }
+    }
 
-        for (from, to, w) in pass_epsilons {
-            let edges = all_new_epsilons.entry(from).or_default();
-            if let Some((_, existing_w)) = edges.iter_mut().find(|(t, _)| *t == to) {
-                let old_w = existing_w.clone();
-                *existing_w |= &w;
-                if *existing_w != old_w {
-                    changed_in_pass = true;
+    // 2. Main fixpoint loop: propagate searches and generate new epsilon shortcuts.
+    while let Some((s, a, c, w_as)) = worklist.pop_front() {
+        // 2a. Check for cancellations at the current state `s`.
+        // A cancellation occurs if `s` has an outgoing transition on `c`.
+        let mut check_cancellations = |target: NWAStateID, w_st: &Weight, worklist: &mut VecDeque<_>| {
+            let new_eps_w = &w_as & w_st;
+            if new_eps_w.is_empty() { return; }
+
+            let eps_key = (a, target);
+            let eps_weight = new_epsilons.entry(eps_key).or_default();
+            let old_eps_w = eps_weight.clone();
+            *eps_weight |= &new_eps_w;
+
+            // If this epsilon is new or stronger, it can propagate existing searches.
+            if *eps_weight != old_eps_w {
+                // Any search that has reached `a` can now cross this new epsilon to `target`.
+                for (&(a_prime, c_prime), w_a_prime_a) in &queries[a] {
+                    let prop_w = w_a_prime_a & &*eps_weight;
+                    if prop_w.is_empty() { continue; }
+
+                    let query_key = (a_prime, c_prime);
+                    let query_weight = queries[target].entry(query_key).or_default();
+                    let old_qw = query_weight.clone();
+                    *query_weight |= &prop_w;
+                    if *query_weight != old_qw {
+                        worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
+                    }
                 }
-            } else {
-                edges.push((to, w));
-                changed_in_pass = true;
+            }
+        };
+
+        if let Some(pos_targets) = states[s].transitions.get(&c) {
+            for (t, w_st) in pos_targets {
+                if *t < n { check_cancellations(*t, w_st, &mut worklist); }
+            }
+        }
+        for def in &states[s].default {
+            if !def.exceptions.contains(&c) && def.target < n {
+                check_cancellations(def.target, &def.weight, &mut worklist);
             }
         }
 
-        if !changed_in_pass {
-            break;
+        // 2b. Propagate the current search forward over original epsilon edges.
+        for (t, w_st) in &states[s].epsilons {
+            if *t >= n { continue; }
+            let prop_w = &w_as & w_st;
+            if prop_w.is_empty() { continue; }
+
+            let query_key = (a, c);
+            let query_weight = queries[*t].entry(query_key).or_default();
+            let old_qw = query_weight.clone();
+            *query_weight |= &prop_w;
+            if *query_weight != old_qw {
+                worklist.push_back((*t, a, c, query_weight.clone()));
+            }
         }
     }
 
-    all_new_epsilons
+    new_epsilons
         .into_iter()
-        .flat_map(|(from, edges)| {
-            edges.into_iter().map(move |(to, w)| (from, to, w))
-        })
+        .map(|((from, to), w)| (from, to, w))
         .collect()
 }
 
