@@ -361,6 +361,15 @@ impl NWA {
             }
         }
 
+        fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
+            for (sid, w) in compiled.iter() {
+                let x = w & gate;
+                if !x.is_empty() {
+                    *dst.entry(*sid).or_default() |= &x;
+                }
+            }
+        }
+
         #[derive(Clone)]
         struct CompositionNode {
             gates: HashMap<usize, Weight>,
@@ -370,15 +379,6 @@ impl NWA {
             default_mask: Option<Weight>,
             exception_targets: BTreeMap<i16, usize>,
             exception_masks: BTreeMap<i16, Weight>,
-        }
-
-        fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
-            for (sid, w) in compiled.iter() {
-                let x = w & gate;
-                if !x.is_empty() {
-                    *dst.entry(*sid).or_default() |= &x;
-                }
-            }
         }
 
         let mut nodes: Vec<CompositionNode> = Vec::new();
@@ -486,7 +486,7 @@ impl NWA {
                     // Subtract states that have explicit labeled transitions on this label
                     let g_exers = def_exers.and_then(|de| de.get(def_step));
                     // Subtract states whose default is explicitly not applicable on this label (exception set)
-                    let g_exc = def_exceptions_by_label.get(&lbl).and_then(|dx| dx.get(def_step));
+                    let g_exc = def_exc.and_then(|dx| dx.get(def_step));
 
                     if is_debug_level_enabled(5) {
                         eprintln!("        - g_exers for this def_step: {:?}", g_exers);
@@ -603,18 +603,6 @@ impl NWA {
                     if target_idx != usize::MAX {
                         node.exception_targets.insert(lbl, target_idx);
                         node.exception_masks.insert(lbl, mask);
-                    }
-                }
-            }
-
-            if is_debug_level_enabled(5) {
-                eprintln!("  - Resolved transitions for node {}:", idx);
-                if let (Some(target), Some(mask)) = (node.default_target_idx, &node.default_mask) {
-                    eprintln!("    - default -> {} (mask: {})", target, mask);
-                }
-                for (lbl, target) in &node.exception_targets {
-                    if let Some(mask) = node.exception_masks.get(lbl) {
-                        eprintln!("    - on {}: -> {} (mask: {})", lbl, target, mask);
                     }
                 }
             }
