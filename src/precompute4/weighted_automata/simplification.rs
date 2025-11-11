@@ -105,6 +105,9 @@ impl DWA {
         let _ = Self::run_pass_with_test(states, body, "initial normalize_edges_inplace", |s, _b| {
             Self::normalize_edges_inplace(s)
         });
+        let _ = Self::run_pass_with_test(states, body, "initial prune_dead_ends", |s, _b| {
+            Self::prune_dead_ends(s)
+        });
         let _ = Self::run_pass_with_test(states, body, "initial prune_unreachable", |s, b| {
             Self::prune_unreachable(s, b)
         });
@@ -165,7 +168,12 @@ impl DWA {
                 Self::propagate_and_constrain_weights(s, b)
             });
 
-            if let Some(p) = &pb { p.set_message("prune".to_string()); }
+            if let Some(p) = &pb { p.set_message("prune dead".to_string()); }
+            changed_any |= Self::run_pass_with_test(states, body, "prune_dead_ends", |s, _b| {
+                Self::prune_dead_ends(s)
+            });
+
+            if let Some(p) = &pb { p.set_message("prune unreachable".to_string()); }
             changed_any |= Self::run_pass_with_test(states, body, "prune_unreachable", |s, b| {
                 Self::prune_unreachable(s, b)
             });
@@ -607,11 +615,11 @@ impl DWA {
         true
     }
 
-    pub fn prune_unreachable(states: &mut DWAStates, body: &mut DWABody) -> bool {
-        if states.0.is_empty() {
+    pub fn prune_dead_ends(states: &mut DWAStates) -> bool {
+        let n = states.len();
+        if n == 0 {
             return false;
         }
-        let n = states.0.len();
 
         // 1. Backward reachability from final states to find "live" states.
         let mut live = vec![false; n];
@@ -630,74 +638,107 @@ impl DWA {
         }
         while let Some(u) = q_live.pop_front() {
             for &v in &rev_adj[u] {
-                if !live[v] { live[v] = true; q_live.push_back(v); }
+                if !live[v] {
+                    live[v] = true;
+                    q_live.push_back(v);
+                }
             }
         }
 
-        // 2. Remove transitions to non-live states.
+        // 2. Remove transitions to non-live states, preserving correctness.
         let mut changed = false;
         for i in 0..n {
             let st = &mut states[i];
+
+            // Check if default transition goes to a live state.
+            // This check must happen before we modify the default transition.
+            let default_goes_live = st.transitions.default.map_or(false, |d| d < n && live[d]);
+
+            // A default transition to a dead state can be removed. This is equivalent to
+            // transitioning to an implicit sink state.
             if let Some(d) = st.transitions.default {
-                if !live[d] {
+                if d < n && !live[d] {
                     st.transitions.default = None;
                     st.trans_weight_default = None;
                     changed = true;
                 }
             }
+
             let before = st.transitions.exceptions.len();
-            let default_goes_live = st.transitions.default.map_or(false, |d| live[d]);
             st.transitions.exceptions.retain(|_, tgt| {
-                // Keep exception if:
-                // 1. It goes to a live state.
-                // 2. It goes to a dead state, but it needs to override a default transition
-                //    that goes to a live state.
-                live[*tgt] || default_goes_live
+                // Keep an exception if its target is live.
+                // Also keep it if it overrides a default transition that goes to a live state,
+                // even if the exception's own target is dead.
+                (*tgt < n && live[*tgt]) || default_goes_live
             });
+
             if st.transitions.exceptions.len() != before {
                 changed = true;
+                // Clean up corresponding weights for removed exception transitions.
                 st.trans_weights_exceptions.retain(|ch, _| st.transitions.exceptions.contains_key(ch));
             }
         }
+        changed
+    }
 
-        // 3. Forward reachability from start_state to find actually reachable states.
+    pub fn prune_unreachable(states: &mut DWAStates, body: &mut DWABody) -> bool {
+        if states.0.is_empty() {
+            return false;
+        }
+        let n = states.0.len();
+
+        // 1. Backward reachability from final states to find "live" states.
         let mut visited = vec![false; n];
         let mut q: VecDeque<usize> = VecDeque::new();
         if body.start_state < n {
             visited[body.start_state] = true;
             q.push_back(body.start_state);
+        } else {
+            // Start state is out of bounds, everything is unreachable.
+            if n > 0 {
+                states.0.clear();
+                body.start_state = states.add_state();
+                return true;
+            }
+            return false;
         }
         while let Some(u) = q.pop_front() {
             for (_lbl, v, _w) in states[u].iter_edges() {
-                if v < n && !visited[v] { visited[v] = true; q.push_back(v); }
+                if v < n && !visited[v] {
+                    visited[v] = true;
+                    q.push_back(v);
+                }
             }
         }
 
-        if visited.iter().all(|&b| b) && !changed {
+        let num_reachable = visited.iter().filter(|&&b| b).count();
+        if num_reachable == n {
             return false;
         }
 
-        // 4. Remap kept states.
+        // 2. Remap kept states.
         let mut map = vec![usize::MAX; n];
-        let mut next_id = 0usize;
-        for i in 0..n { if visited[i] { map[i] = next_id; next_id += 1; } }
+        let mut new_states: Vec<DWAState> = Vec::with_capacity(num_reachable);
+        for i in 0..n {
+            if visited[i] {
+                map[i] = new_states.len();
+                new_states.push(states[i].clone());
+            }
+        }
 
-        if next_id == n && !changed { return false; }
-
-        let mut new_states: Vec<DWAState> = Vec::with_capacity(next_id);
-        for old in 0..n {
-            if !visited[old] { continue; }
-            let mut st = states[old].clone();
-            if let Some(d) = st.transitions.default { st.transitions.default = Some(map[d]); }
-            let ex = st.transitions.exceptions.clone();
-            st.transitions.exceptions.clear();
-            for (ch, tgt) in ex { st.transitions.exceptions.insert(ch, map[tgt]); }
-            new_states.push(st);
+        for st in &mut new_states {
+            if let Some(d) = st.transitions.default.as_mut() {
+                *d = map[*d];
+            }
+            for tgt in st.transitions.exceptions.values_mut() {
+                *tgt = map[*tgt];
+            }
         }
         states.0 = new_states;
-        if next_id > 0 {
+        if num_reachable > 0 {
             body.start_state = map[body.start_state];
-        } else if n > 0 {
+        } else {
+            // This case should be handled by the start_state check above, but for safety:
             states.0.clear();
             body.start_state = states.add_state();
         }
