@@ -768,6 +768,36 @@ impl<'a> EpsClosureCache<'a> {
     }
 }
 
+fn update_target_node(
+    target_idx: usize,
+    map: &HashMap<usize, Weight>,
+    nodes: &mut Vec<CompositionNode>,
+    in_queue: &mut Vec<bool>,
+    work: &mut VecDeque<usize>,
+) {
+    let mut any_change = false;
+    for (sig_id, weight) in map {
+        let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
+        let new_w = &*entry | weight;
+        if new_w != *entry {
+            *entry = new_w;
+            any_change = true;
+        }
+    }
+    if any_change {
+        if target_idx >= in_queue.len() {
+            in_queue.resize(target_idx + 1, false);
+        }
+        if !in_queue[target_idx] {
+            in_queue[target_idx] = true;
+            work.push_back(target_idx);
+        }
+        nodes[target_idx].cache_dirty = true;
+        nodes[target_idx].behavior_fp = None;
+        nodes[target_idx].default_fp = None;
+    }
+}
+
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
@@ -1053,90 +1083,65 @@ impl NWA {
                 // Newly computed cache: index this node for future matches
                 cand_index.index_node(&mut nodes, idx);
             }
-            let node_cache = nodes[idx].cached_by_label.as_ref().unwrap();
 
             if is_debug_level_enabled(5) {
                 eprintln!("\nProcessing composition node {}: gates: {:?}", idx, nodes[idx].gates);
             }
 
-            // Resolve transitions (default + per-label)
-            let mut resolved_default: Option<(usize, Weight)> = None;
-            let mut resolved_exceptions: BTreeMap<i16, (usize, Weight)> = BTreeMap::new();
+            // Phase 1: Read from nodes[idx] and prepare updates.
+            let mut default_update_info = None;
+            let mut exception_updates_info = BTreeMap::new();
 
-            // Default
-            let def_pairs = &node_cache.by_label[0];
-            let def_total = union_weights(def_pairs.iter().map(|(_, w)| w.clone()));
-            if !def_total.is_empty() {
-                // Build target gates map from by_sig pairs
-                let mut map: HashMap<usize, Weight> = HashMap::new();
-                for (ts, w) in def_pairs {
-                    *map.entry(*ts).or_default() |= w;
+            {
+                let node_cache = nodes[idx].cached_by_label.as_ref().unwrap();
+
+                // Default
+                let def_pairs = &node_cache.by_label[0];
+                let def_total = union_weights(def_pairs.iter().map(|(_, w)| w.clone()));
+                if !def_total.is_empty() {
+                    let mut map: HashMap<usize, Weight> = HashMap::new();
+                    for (ts, w) in def_pairs {
+                        *map.entry(*ts).or_default() |= w;
+                    }
+                    default_update_info = Some((map, def_total));
                 }
-                let target_idx = find_or_create_target_node(&map, &mut nodes, &transfers, &mut cand_index);
-                // Update target gates
-                let mut any_change = false;
-                for (sig_id, weight) in &map {
-                    let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = &*entry | weight;
-                    if new_w != *entry {
-                        *entry = new_w;
-                        any_change = true;
+
+                // Labels
+                for li in &node_cache.labels_to_consider {
+                    let pairs = &node_cache.by_label[*li + 1];
+                    let total = union_weights(pairs.iter().map(|(_, w)| w.clone()));
+                    let lbl_code = transfers.labels.code_by_idx(*li);
+                    if total.is_empty() {
+                        // Block default
+                        exception_updates_info.insert(lbl_code, (None, total));
+                    } else {
+                        let mut map: HashMap<usize, Weight> = HashMap::new();
+                        for (ts, w) in pairs {
+                            *map.entry(*ts).or_default() |= w;
+                        }
+                        exception_updates_info.insert(lbl_code, (Some(map), total));
                     }
                 }
-                if any_change {
-                    if target_idx >= in_queue.len() {
-                        in_queue.resize(target_idx + 1, false);
-                    }
-                    if !in_queue[target_idx] {
-                        in_queue[target_idx] = true;
-                        work.push_back(target_idx);
-                    }
-                    nodes[target_idx].cache_dirty = true;
-                    nodes[target_idx].behavior_fp = None;
-                    nodes[target_idx].default_fp = None;
-                }
-                resolved_default = Some((target_idx, def_total.clone()));
             }
 
-            // Labels
-            for li in &node_cache.labels_to_consider {
-                let pairs = &node_cache.by_label[*li + 1];
-                let total = union_weights(pairs.iter().map(|(_, w)| w.clone()));
-                let lbl_code = transfers.labels.code_by_idx(*li);
-                if total.is_empty() {
-                    // Need to block default: explicit exception to self with zero mask
-                    resolved_exceptions.insert(lbl_code, (idx, Weight::zeros()));
-                    continue;
-                }
-                // Build target gates map for this label
-                let mut map: HashMap<usize, Weight> = HashMap::new();
-                for (ts, w) in pairs {
-                    *map.entry(*ts).or_default() |= w;
-                }
+            // Phase 2: Mutate nodes.
+            let mut resolved_default: Option<(usize, Weight)> = None;
+            if let Some((map, def_total)) = default_update_info {
                 let target_idx = find_or_create_target_node(&map, &mut nodes, &transfers, &mut cand_index);
+                update_target_node(target_idx, &map, &mut nodes, &mut in_queue, &mut work);
+                resolved_default = Some((target_idx, def_total));
+            }
 
-                let mut any_change = false;
-                for (sig_id, weight) in &map {
-                    let entry = nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = &*entry | weight;
-                    if new_w != *entry {
-                        *entry = new_w;
-                        any_change = true;
-                    }
+            let mut resolved_exceptions: BTreeMap<i16, (usize, Weight)> = BTreeMap::new();
+            for (lbl_code, (map_opt, total)) in exception_updates_info {
+                if let Some(map) = map_opt {
+                    let target_idx = find_or_create_target_node(&map, &mut nodes, &transfers, &mut cand_index);
+                    update_target_node(target_idx, &map, &mut nodes, &mut in_queue, &mut work);
+                    resolved_exceptions.insert(lbl_code, (target_idx, total));
+                } else {
+                    // Block default
+                    resolved_exceptions.insert(lbl_code, (idx, total)); // total is empty here
                 }
-                if any_change {
-                    if target_idx >= in_queue.len() {
-                        in_queue.resize(target_idx + 1, false);
-                    }
-                    if !in_queue[target_idx] {
-                        in_queue[target_idx] = true;
-                        work.push_back(target_idx);
-                    }
-                    nodes[target_idx].cache_dirty = true;
-                    nodes[target_idx].behavior_fp = None;
-                    nodes[target_idx].default_fp = None;
-                }
-                resolved_exceptions.insert(lbl_code, (target_idx, total));
             }
 
             // Attach transitions to node
