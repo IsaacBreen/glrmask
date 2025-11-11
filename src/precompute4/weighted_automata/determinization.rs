@@ -68,6 +68,57 @@ struct MacroSigKey {
     exception_transitions: Vec<(Label, Vec<usize>)>,
 }
 
+// Outgoing summary restricted to a weight slice.
+// Maps: None => default, Some(label) => exceptions.
+type OutMap = HashMap<usize, Weight>;
+#[derive(Clone, Default)]
+struct OutSummary {
+    def: OutMap,
+    ex: BTreeMap<Label, OutMap>,
+}
+impl OutSummary {
+    fn is_empty(&self) -> bool {
+        self.def.is_empty() && self.ex.values().all(|m| m.is_empty())
+    }
+    fn union_assign(&mut self, other: &OutSummary) {
+        for (k, w) in &other.def {
+            let e = self.def.entry(*k).or_default();
+            *e |= w;
+        }
+        for (lbl, m) in &other.ex {
+            let dst = self.ex.entry(*lbl).or_default();
+            for (k, w) in m {
+                let e = dst.entry(*k).or_default();
+                *e |= w;
+            }
+        }
+    }
+}
+impl PartialEq for OutSummary {
+    fn eq(&self, other: &Self) -> bool {
+        if self.def.len() != other.def.len() || self.ex.len() != other.ex.len() {
+            return false;
+        }
+        if self.def != other.def {
+            return false;
+        }
+        if self.ex.len() != other.ex.len() {
+            return false;
+        }
+        for (lbl, m) in &self.ex {
+            if let Some(m2) = other.ex.get(lbl) {
+                if m != m2 {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+}
+impl Eq for OutSummary {}
+
 // A DWA state builder: a composition of macro signatures reachable under gate weights.
 struct DWAStateBuilder {
     final_weight: Option<Weight>,
@@ -75,8 +126,94 @@ struct DWAStateBuilder {
     default_mask: Option<Weight>,
     exception_targets: BTreeMap<Label, usize>,
     exception_masks: BTreeMap<Label, Weight>,
-    gates: HashMap<usize, Weight>,         // macro_sig_id -> gate weight
-    incoming_weight_union: Weight,         // union of incoming masks (for merge heuristic)
+    gates: HashMap<usize, Weight>, // macro_sig_id -> gate mask
+    incoming_weight_union: Weight, // union of incoming masks (for merge heuristic)
+    macro_keys: BTreeSet<usize>,   // keys(gates)
+    atom_covered: BTreeSet<usize>, // indices of atoms covered in the AtomIndex
+    out_cache_by_atom: HashMap<usize, OutSummary>, // per-atom cache of outgoing summary
+}
+
+// Atom index over disjoint atoms of the weight domain.
+// Every mask is expressed as union of some atoms after refinement.
+struct AtomIndex {
+    atoms: Vec<Weight>,
+    nodes_in_atom: Vec<BTreeSet<usize>>, // atoms[i] -> set of node indices
+}
+impl AtomIndex {
+    fn new() -> Self {
+        Self { atoms: Vec::new(), nodes_in_atom: Vec::new() }
+    }
+
+    // Refine atoms so that 'w' is a union of atoms; return indices of atoms contained in 'w'.
+    fn refine_and_covering_atoms(&mut self, w: &Weight) -> Vec<usize> {
+        if w.is_empty() {
+            return Vec::new();
+        }
+        // If empty universe: just add w as the first atom.
+        if self.atoms.is_empty() {
+            self.atoms.push(w.clone());
+            self.nodes_in_atom.push(BTreeSet::new());
+            return vec![0];
+        }
+
+        let mut covering = Vec::new();
+        let mut pending_new_atoms: Vec<(usize, Weight)> = Vec::new(); // split results: (copy_from_atom_idx, new_atom_mask)
+        let mut w_remainder = w.clone();
+
+        for i in 0..self.atoms.len() {
+            let ai = &self.atoms[i];
+            let i1 = ai & w; // overlap
+            if i1.is_empty() {
+                continue;
+            }
+            covering.push(i);
+            // Split atom if needed: ai becomes i1, create i2 = ai - w
+            let i2 = ai - &w;
+            if !i2.is_empty() {
+                // ai becomes i1
+                self.atoms[i] = i1;
+                // new atom spawned, copy node set later
+                pending_new_atoms.push((i, i2));
+            }
+            // Remove covered portion from w_remainder (optional, but keeps new residual small)
+            w_remainder -= &self.atoms[i];
+        }
+
+        // Add residual part (disjoint from all existing atoms)
+        if !w_remainder.is_empty() {
+            self.atoms.push(w_remainder);
+            self.nodes_in_atom.push(BTreeSet::new());
+            covering.push(self.atoms.len() - 1);
+        }
+
+        // Materialize splits; copy node sets for new atoms.
+        for (src_idx, mask) in pending_new_atoms {
+            self.atoms.push(mask);
+            let mut copy = self.nodes_in_atom[src_idx].clone();
+            self.nodes_in_atom.push(std::mem::take(&mut copy)); // move copy, leave src unchanged
+            covering.push(self.atoms.len() - 1);
+        }
+
+        covering.sort_unstable();
+        covering.dedup();
+        covering
+    }
+
+    fn register_node_on_atoms(&mut self, node_idx: usize, atom_indices: &[usize]) {
+        for &ai in atom_indices {
+            self.nodes_in_atom[ai].insert(node_idx);
+        }
+    }
+
+    // All nodes that have any overlap with w (exact superset, no false negatives).
+    fn query_nodes_overlapping(&mut self, w: &Weight) -> BTreeSet<usize> {
+        let atoms = self.refine_and_covering_atoms(w);
+        let mut out: BTreeSet<usize> = BTreeSet::new();
+        for ai in atoms {
+            out.extend(self.nodes_in_atom[ai].iter().copied());
+        }
+        out
+    }
 }
 
 struct Determinizer<'a> {
@@ -87,9 +224,15 @@ struct Determinizer<'a> {
     signatures: Vec<MacroSig>,
     state_to_sig_id: Vec<usize>,
     compiled_steps: Vec<CompiledStep>,
+
+    // Composition nodes
     nodes: Vec<DWAStateBuilder>,
     work_queue: VecDeque<usize>,
     in_queue: Vec<bool>,
+
+    // New indices for faster merging
+    atom_index: AtomIndex,                            // weight-space index
+    size_index: BTreeMap<usize, BTreeSet<usize>>,     // gates.len() -> node IDs
 }
 
 impl<'a> Determinizer<'a> {
@@ -106,6 +249,8 @@ impl<'a> Determinizer<'a> {
             nodes: Vec::new(),
             work_queue: VecDeque::new(),
             in_queue: Vec::new(),
+            atom_index: AtomIndex::new(),
+            size_index: BTreeMap::new(),
         }
     }
 
@@ -206,25 +351,15 @@ impl<'a> Determinizer<'a> {
 
         while let Some(u) = q.pop_front() {
             let base = scratch[u].clone();
-            if base.is_empty() {
-                continue;
-            }
+            if base.is_empty() { continue; }
             for &(v, ref w) in &self.nwa.states[u].epsilons {
-                if v >= self.nwa.states.len() {
-                    continue;
-                }
+                if v >= self.nwa.states.len() { continue; }
                 let mut prop = &base & w;
-                if prop.is_empty() {
-                    continue;
-                }
+                if prop.is_empty() { continue; }
                 prop &= &self.future_weights[v];
-                if prop.is_empty() {
-                    continue;
-                }
+                if prop.is_empty() { continue; }
                 if !prop.is_subset_of(&scratch[v]) {
-                    if scratch[v].is_empty() {
-                        touched.push(v);
-                    }
+                    if scratch[v].is_empty() { touched.push(v); }
                     scratch[v] |= &prop;
                     q.push_back(v);
                 }
@@ -255,17 +390,12 @@ impl<'a> Determinizer<'a> {
                 id
             });
             self.state_to_sig_id[s] = sig_id;
-            if let Some(p) = &pb {
-                p.inc(1);
-            }
+            if let Some(p) = &pb { p.inc(1); }
         }
-        if let Some(p) = pb {
-            p.finish_with_message("Macro signatures done");
-        }
+        if let Some(p) = pb { p.finish_with_message("Macro signatures done"); }
     }
 
     fn build_one_macro_sig(&mut self, s: NWAStateID) -> (MacroSig, MacroSigKey) {
-        // Final weight = union over ε-closure to final states.
         let final_acc = self
             .eps_cache[s]
             .iter()
@@ -280,9 +410,7 @@ impl<'a> Determinizer<'a> {
         // Defaults.
         let mut defaults: Vec<DefSig> = Vec::new();
         for d in &self.nwa.states[s].default {
-            if d.target >= self.nwa.states.len() {
-                continue;
-            }
+            if d.target >= self.nwa.states.len() { continue; }
             let pairs = Self::apply_weight_to_pairs(&self.eps_cache[d.target], &d.weight);
             if !pairs.is_empty() {
                 defaults.push(DefSig {
@@ -297,13 +425,9 @@ impl<'a> Determinizer<'a> {
         for (lbl, targets) in &self.nwa.states[s].transitions {
             let mut ids: Vec<usize> = Vec::new();
             for (to, w) in targets {
-                if *to >= self.nwa.states.len() {
-                    continue;
-                }
+                if *to >= self.nwa.states.len() { continue; }
                 let pairs = Self::apply_weight_to_pairs(&self.eps_cache[*to], w);
-                if !pairs.is_empty() {
-                    ids.push(self.step_pool.intern(pairs));
-                }
+                if !pairs.is_empty() { ids.push(self.step_pool.intern(pairs)); }
             }
             if !ids.is_empty() {
                 ids.sort_unstable();
@@ -333,13 +457,9 @@ impl<'a> Determinizer<'a> {
             let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
             by_sig.sort_by_key(|(sid, _)| *sid);
             self.compiled_steps.push(CompiledStep { by_sig });
-            if let Some(p) = &pb {
-                p.inc(1);
-            }
+            if let Some(p) = &pb { p.inc(1); }
         }
-        if let Some(p) = pb {
-            p.finish_with_message("Compile steps done");
-        }
+        if let Some(p) = pb { p.finish_with_message("Compile steps done"); }
     }
 
     // Step 5: subset construction over macro signatures (with merge heuristics).
@@ -354,13 +474,9 @@ impl<'a> Determinizer<'a> {
 
         while let Some(idx) = self.work_queue.pop_front() {
             self.in_queue[idx] = false;
-            if let Some(p) = &pb {
-                p.inc(1);
-            }
+            if let Some(p) = &pb { p.inc(1); }
             self.process_state(idx);
-            if let Some(p) = &pb {
-                p.set_length(self.nodes.len() as u64);
-            }
+            if let Some(p) = &pb { p.set_length(self.nodes.len() as u64); }
         }
         if let Some(p) = pb {
             p.finish_with_message(format!("Discovered {} DWA states", self.nodes.len()));
@@ -373,14 +489,9 @@ impl<'a> Determinizer<'a> {
 
         let mut resolved = BTreeMap::new();
         for (label, map) in target_maps {
-            let mask = map.values().fold(Weight::zeros(), |mut a, b| {
-                a |= b;
-                a
-            });
+            let mask = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
             if mask.is_empty() {
-                if label.is_some() {
-                    resolved.insert(label, (idx, Weight::zeros()));
-                }
+                if label.is_some() { resolved.insert(label, (idx, Weight::zeros())); }
                 continue;
             }
             let target_idx = self.find_or_create_target_node(&map);
@@ -416,9 +527,7 @@ impl<'a> Determinizer<'a> {
         let mut excepted: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
 
         for (&sig_id, gate) in gates {
-            if gate.is_empty() {
-                continue;
-            }
+            if gate.is_empty() { continue; }
             let sig = &self.signatures[sig_id];
 
             for def in &sig.default_transitions {
@@ -481,80 +590,205 @@ impl<'a> Determinizer<'a> {
         target_maps
     }
 
-    // Merge heuristic: prefer reusing a node if consistent on overlaps.
+    // Fast target-node selection with atom index + per-atom caching.
     fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize {
-        let incoming = map.values().fold(Weight::zeros(), |mut a, b| {
-            a |= b;
-            a
-        });
+        // Compute incoming mask once
+        let incoming = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
 
-        let cost = |cand: &DWAStateBuilder| -> (usize, usize) {
-            let inc = map.keys().filter(|k| !cand.gates.contains_key(k)).count();
-            (inc, cand.gates.len())
-        };
+        // Overlap candidates via AtomIndex (exact, sublinear in #nodes).
+        let overlap_candidates = self.atom_index.query_nodes_overlapping(&incoming);
 
-        let best = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| self.mergeable(c, map, &incoming))
-            .min_by_key(|(_, c)| cost(c))
-            .map(|(i, _)| i);
-
-        if let Some(i) = best {
-            self.nodes[i].incoming_weight_union |= &incoming;
-            return i;
+        // Precompute per-atom OutSummary for "map" across atoms of incoming once.
+        let overlap_atoms = self.atom_index.refine_and_covering_atoms(&incoming);
+        let mut out_for_map_by_atom: HashMap<usize, OutSummary> = HashMap::new();
+        for &ai in &overlap_atoms {
+            let atom_mask = &self.atom_index.atoms[ai];
+            let mut filtered: HashMap<usize, Weight> = HashMap::new();
+            for (k, g) in map {
+                let x = g & atom_mask;
+                if !x.is_empty() { filtered.insert(*k, x); }
+            }
+            out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered));
         }
+
+        // Search a best overlapped candidate (prefer these to keep structure tight).
+        let mut best: Option<(usize, (usize, usize))> = None; // (idx, cost=(inc, gates_len))
+        for idx in overlap_candidates {
+            let cand = &self.nodes[idx];
+
+            // Intersect atoms for candidate and incoming
+            let inter_atoms: Vec<usize> = overlap_atoms.iter().copied()
+                .filter(|a| cand.atom_covered.contains(a)).collect();
+            if inter_atoms.is_empty() {
+                // Shouldn't happen given overlap selection, but guard anyway.
+                continue;
+            }
+
+            // Build OutSummary for candidate on inter_atoms via per-atom cache.
+            let mut cand_out = OutSummary::default();
+            for &ai in &inter_atoms {
+                let s = self.node_out_for_atom(idx, ai);
+                cand_out.union_assign(s);
+            }
+            if cand_out.is_empty() {
+                // If the candidate has no outgoing behavior on overlap (degenerate), consider unequal only if map has.
+                let mut map_out = OutSummary::default();
+                for &ai in &inter_atoms {
+                    if let Some(m) = out_for_map_by_atom.get(&ai) {
+                        map_out.union_assign(m);
+                    }
+                }
+                if !map_out.is_empty() { continue; }
+            } else {
+                // Build map's summary across the same inter atoms.
+                let mut map_out = OutSummary::default();
+                for &ai in &inter_atoms {
+                    if let Some(m) = out_for_map_by_atom.get(&ai) {
+                        map_out.union_assign(m);
+                    }
+                }
+                if cand_out != map_out {
+                    continue; // not mergeable on overlap
+                }
+            }
+
+            // Mergeable: compute cost (inc = number of new macro keys to add).
+            let inc = map.keys().filter(|k| !cand.macro_keys.contains(k)).count();
+            let cost = (inc, cand.gates.len());
+            if best.as_ref().map_or(true, |(_, c)| cost < *c) {
+                best = Some((idx, cost));
+            }
+        }
+
+        if let Some((idx, _)) = best {
+            // Reuse overlapped candidate
+            self.register_incoming_and_maybe_update_cache(idx, &incoming, map);
+            return idx;
+        }
+
+        // No overlapped mergeable: choose a disjoint node from the smallest gates bucket.
+        if let Some((&min_sz, ids)) = self.size_index.iter().next() {
+            if let Some(&idx) = ids.iter().next() {
+                // Guaranteed disjoint because no overlap existed; safe to reuse.
+                let _ = min_sz; // just to silence warnings if unused with LTO
+                self.register_incoming_and_maybe_update_cache(idx, &incoming, map);
+                return idx;
+            }
+        }
+
+        // Else create a fresh node.
         self.add_dwa_state_builder(HashMap::new(), incoming)
     }
 
-    fn mergeable(
-        &self,
-        cand: &DWAStateBuilder,
-        new_gates: &HashMap<usize, Weight>,
-        incoming: &Weight,
-    ) -> bool {
-        let inter = &cand.incoming_weight_union & incoming;
-        if inter.is_empty() {
-            return true;
+    // Per-atom outgoing summary for an existing node (cached).
+    fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize) -> &OutSummary {
+        let cache = &mut self.nodes[idx].out_cache_by_atom;
+        if !cache.contains_key(&atom_idx) {
+            let atom_mask = &self.atom_index.atoms[atom_idx];
+            // Filter gates by atom
+            let mut filtered: HashMap<usize, Weight> = HashMap::new();
+            for (k, g) in &self.nodes[idx].gates {
+                let x = g & atom_mask;
+                if !x.is_empty() { filtered.insert(*k, x); }
+            }
+            let summary = self.compute_summary_for_gates(&filtered);
+            cache.insert(atom_idx, summary);
         }
-
-        let filt = |gates: &HashMap<usize, Weight>, w: &Weight| -> HashMap<usize, Weight> {
-            gates
-                .iter()
-                .map(|(s, g)| (*s, g & w))
-                .filter(|(_, g)| !g.is_empty())
-                .collect()
-        };
-
-        let cand_i = filt(&cand.gates, &inter);
-        let new_i = filt(new_gates, &inter);
-        if cand_i.is_empty() && new_i.is_empty() {
-            return true;
-        }
-
-        self.compute_target_maps(&cand_i) == self.compute_target_maps(&new_i)
+        cache.get(&atom_idx).unwrap()
     }
+
+    // OutSummary for any gates set (helper).
+    fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>) -> OutSummary {
+        let maps = self.compute_target_maps(gates);
+        let mut out = OutSummary::default();
+        for (k, m) in maps {
+            match k {
+                None => out.def = m,
+                Some(lbl) => { out.ex.insert(lbl, m); }
+            }
+        }
+        out
+    }
+
+    // Merge heuristic: avoid recomputing target maps for entire gates repeatedly by caching per-atom;
+    // then register the chosen node's growth into indices.
+    fn register_incoming_and_maybe_update_cache(&mut self, idx: usize, incoming: &Weight, map: &HashMap<usize, Weight>) {
+        // Before modifying node, check whether macro keys grow to update size_index and invalidate per-atom cache.
+        let old_size = self.nodes[idx].macro_keys.len();
+        let mut added_macro_key = false;
+        for k in map.keys() {
+            if self.nodes[idx].macro_keys.insert(*k) {
+                added_macro_key = true;
+            }
+        }
+        if added_macro_key {
+            if let Some(set) = self.size_index.get_mut(&old_size) {
+                set.remove(&idx);
+                if set.is_empty() { self.size_index.remove(&old_size); }
+            }
+        }
+
+        // Update gates
+        if self.propagate_weights_to_node(idx, map) {
+            self.enqueue_node(idx);
+        }
+
+        // Grow bucket if size changed
+        let new_size = self.nodes[idx].macro_keys.len();
+        if added_macro_key {
+            self.size_index.entry(new_size).or_default().insert(idx);
+            // Invalidate per-atom cache since gates changed
+            self.nodes[idx].out_cache_by_atom.clear();
+        }
+
+        // Update incoming coverage and AtomIndex
+        let prior = self.nodes[idx].incoming_weight_union.clone();
+        let delta = incoming - &prior;
+        if !delta.is_empty() {
+            self.nodes[idx].incoming_weight_union |= incoming;
+            // Register coverage for new atoms
+            let atoms = self.atom_index.refine_and_covering_atoms(&delta);
+            self.atom_index.register_node_on_atoms(idx, &atoms);
+            for a in atoms { self.nodes[idx].atom_covered.insert(a); }
+        }
+    }
+
+    // Mergeability (original) retained for reference and for correctness in target computation equality via per-atom caches.
+    // The per-atom approach ensures equality over the exact overlap region.
 
     fn add_dwa_state_builder(&mut self, gates: HashMap<usize, Weight>, incoming_weight_union: Weight) -> usize {
         let idx = self.nodes.len();
-        self.nodes.push(DWAStateBuilder {
+        let macro_keys: BTreeSet<usize> = gates.keys().copied().collect();
+        let mut node = DWAStateBuilder {
             final_weight: None,
             default_target_idx: None,
             default_mask: None,
             exception_targets: BTreeMap::new(),
             exception_masks: BTreeMap::new(),
             gates,
-            incoming_weight_union,
-        });
+            incoming_weight_union: incoming_weight_union.clone(),
+            macro_keys,
+            atom_covered: BTreeSet::new(),
+            out_cache_by_atom: HashMap::new(),
+        };
+
+        // Index into AtomIndex if incoming is non-empty.
+        if !incoming_weight_union.is_empty() {
+            let atoms = self.atom_index.refine_and_covering_atoms(&incoming_weight_union);
+            self.atom_index.register_node_on_atoms(idx, &atoms);
+            for a in atoms { node.atom_covered.insert(a); }
+        }
+
+        // Size bucket
+        self.size_index.entry(node.macro_keys.len()).or_default().insert(idx);
+
+        self.nodes.push(node);
         self.enqueue_node(idx);
         idx
     }
 
     fn enqueue_node(&mut self, idx: usize) {
-        if idx >= self.in_queue.len() {
-            self.in_queue.resize(idx + 1, false);
-        }
+        if idx >= self.in_queue.len() { self.in_queue.resize(idx + 1, false); }
         if !self.in_queue[idx] {
             self.in_queue[idx] = true;
             self.work_queue.push_back(idx);
