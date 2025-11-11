@@ -1014,30 +1014,22 @@ impl NWA {
     fn dedup_labeled_edges(&mut self) -> bool {
         let mut changed = false;
         for st in &mut self.states.0 {
-            let mut new_map: BTreeMap<i16, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
-            for (lbl, targets) in &st.transitions {
-                let entry = new_map.entry(*lbl).or_insert_with(BTreeMap::new);
-                for (to, w) in targets {
-                    let e = entry.entry(*to).or_insert_with(Weight::zeros);
-                    let old = e.clone();
-                    *e |= w;
-                    if *e != old {
-                        changed = true;
-                    }
+            for targets in st.transitions.values_mut() {
+                if targets.len() <= 1 {
+                    continue;
                 }
-            }
-            if !new_map.is_empty() {
-                let mut new_trans = BTreeMap::new();
-                for (lbl, inner) in new_map {
-                    let vecv: Vec<(NWAStateID, Weight)> = inner.into_iter().collect();
-                    if let Some(old_vec) = st.transitions.get(&lbl) {
-                        if vecv != *old_vec {
-                            changed = true;
-                        }
-                    }
-                    new_trans.insert(lbl, vecv);
+                let old_targets = targets.clone();
+
+                let mut acc: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+                for (to, w) in targets.iter() {
+                    *acc.entry(*to).or_insert_with(Weight::zeros) |= w;
                 }
-                st.transitions = new_trans;
+
+                let new_targets: Vec<_> = acc.into_iter().collect();
+                if new_targets != old_targets {
+                    *targets = new_targets;
+                    changed = true;
+                }
             }
         }
         changed
@@ -1252,35 +1244,39 @@ impl NWA {
             rounds += 1;
             changed = false;
             let mut next_part: Vec<usize> = vec![0; n];
-            let mut sig2pid: BTreeMap<
+            let mut sig2pid: HashMap<
                 (
                     Option<Weight>,
-                    BTreeSet<(usize, Weight, BTreeSet<i16>)>,
-                    BTreeMap<usize, Weight>,
-                    BTreeMap<i16, BTreeSet<(usize, Weight)>>,
+                    Vec<(usize, Weight, BTreeSet<i16>)>,
+                    Vec<(usize, Weight)>,
+                    Vec<(i16, Vec<(usize, Weight)>)>,
                 ),
                 usize,
-            > = BTreeMap::new();
+            > = HashMap::new();
 
             for i in 0..n {
                 let st = &self.states[i];
-                let def_sig =
-                    st.default.iter().map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone())).collect::<BTreeSet<_>>();
+                let mut def_sig = st.default.iter()
+                    .map(|def| (part[def.target], def.weight.clone(), def.exceptions.clone()))
+                    .collect::<Vec<_>>();
+                def_sig.sort_unstable();
 
-                let eps_sig = st.epsilons.iter()
-                    .fold(BTreeMap::new(), |mut acc, (to, w)| {
-                        *acc.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
-                        acc
-                    });
+                let mut eps_map: BTreeMap<usize, Weight> = BTreeMap::new();
+                st.epsilons.iter().for_each(|(to, w)| {
+                    *eps_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
+                });
+                let eps_sig: Vec<(usize, Weight)> = eps_map.into_iter().collect();
 
-                let lbl_sig = st.transitions.iter()
-                    .map(|(lbl, targets)| {
-                        let target_sigs = targets.iter()
-                            .map(|(to, w)| (part[*to], w.clone()))
-                            .collect::<BTreeSet<_>>();
-                        (*lbl, target_sigs)
-                    })
-                    .collect::<BTreeMap<_,_>>();
+                let mut lbl_map: BTreeMap<i16, BTreeMap<usize, Weight>> = BTreeMap::new();
+                for (lbl, targets) in &st.transitions {
+                    let inner_map = lbl_map.entry(*lbl).or_default();
+                    for (to, w) in targets {
+                        *inner_map.entry(part[*to]).or_insert_with(Weight::zeros) |= w;
+                    }
+                }
+                let lbl_sig: Vec<(i16, Vec<(usize, Weight)>)> = lbl_map.into_iter()
+                    .map(|(lbl, inner)| (lbl, inner.into_iter().collect()))
+                    .collect();
 
                 let sig = (st.final_weight.clone(), def_sig, eps_sig, lbl_sig);
                 let pid_next = sig2pid.len();

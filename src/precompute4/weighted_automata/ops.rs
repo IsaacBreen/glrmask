@@ -134,24 +134,24 @@ impl NWA {
     pub fn compute_future_weights(&self) -> Vec<Weight> {
         let n = self.states.len();
         let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-        let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
+        let mut rev: Vec<Vec<(NWAStateID, &Weight)>> = vec![vec![]; n];
 
         // Build reverse adjacency aggregating all edge types with their weights.
         for p in 0..n {
             // Epsilon
             for &(t, ref w) in &self.states[p].epsilons {
-                if t < n { rev[t].push((p, w.clone())); }
+                if t < n { rev[t].push((p, w)); }
             }
             // Labeled
             for (_, targets) in &self.states[p].transitions {
                 for (t, w) in targets {
-                    if *t < n { rev[*t].push((p, w.clone())); }
+                    if *t < n { rev[*t].push((p, w)); }
                 }
             }
             // Default
             for def in &self.states[p].default {
                 if def.target < n {
-                    rev[def.target].push((p, def.weight.clone()));
+                    rev[def.target].push((p, &def.weight));
                 }
             }
         }
@@ -171,7 +171,7 @@ impl NWA {
         while let Some(v) = q.pop_front() {
             let fv = fut[v].clone();
             if fv.is_empty() { continue; }
-            for &(p, ref w_pv) in &rev[v] {
+            for &(p, w_pv) in &rev[v] {
                 let add = &fv & w_pv;
                 if add.is_empty() { continue; }
                 let old = &fut[p];
