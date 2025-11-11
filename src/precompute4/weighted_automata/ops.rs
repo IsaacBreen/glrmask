@@ -80,7 +80,7 @@ impl DWA {
         let union_body = NWA::union_components(&mut combined_states, &body1, &body2);
 
         let union_nwa = NWA { states: combined_states, body: union_body };
-        let mut result_dwa = union_nwa.determinize_to_dwa();
+        let result_dwa = union_nwa.determinize_to_dwa();
 
         if STOCHASTIC_DEBUG {
             DWA::stochastic_validate_union(&self, other, &result_dwa);
@@ -104,7 +104,7 @@ impl DWA {
         let concat_body = NWA::concatenate_components(&mut combined_states, &body1, &body2, &Weight::all());
 
         let concat_nwa = NWA { states: combined_states, body: concat_body };
-        let mut result_dwa = concat_nwa.determinize_to_dwa();
+        let result_dwa = concat_nwa.determinize_to_dwa();
 
         if STOCHASTIC_DEBUG {
             DWA::stochastic_validate_concatenate(&self, other, &result_dwa, &Weight::all());
@@ -128,62 +128,6 @@ impl DWA {
 }
 
 impl NWA {
-    /// Compute per-state future acceptance masks F[s]:
-    /// F[s] = final[s] ∪ ⋃_{ε s->t}(wε ∧ F[t]) ∪ ⋃_{lbl s->t}(wlbl ∧ F[t]) ∪ (if def s->t) (wdef ∧ F[t])
-    /// This is a standard monotone least fixpoint computed by reverse propagation.
-    pub fn compute_future_weights(&self) -> Vec<Weight> {
-        let n = self.states.len();
-        let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-        let mut rev: Vec<Vec<(NWAStateID, &Weight)>> = vec![vec![]; n];
-
-        // Build reverse adjacency aggregating all edge types with their weights.
-        for p in 0..n {
-            // Epsilon
-            for &(t, ref w) in &self.states[p].epsilons {
-                if t < n { rev[t].push((p, w)); }
-            }
-            // Labeled
-            for (_, targets) in &self.states[p].transitions {
-                for (t, w) in targets {
-                    if *t < n { rev[*t].push((p, w)); }
-                }
-            }
-            // Default
-            for def in &self.states[p].default {
-                if def.target < n {
-                    rev[def.target].push((p, &def.weight));
-                }
-            }
-        }
-
-        // Initialize with final weights
-        let mut q: VecDeque<NWAStateID> = VecDeque::new();
-        for s in 0..n {
-            if let Some(fw) = &self.states[s].final_weight {
-                if !fw.is_empty() {
-                    fut[s] = fw.clone();
-                    q.push_back(s);
-                }
-            }
-        }
-
-        // Reverse propagation: when fut[v] grows, update predecessors p using edge weight wpv.
-        while let Some(v) = q.pop_front() {
-            let fv = fut[v].clone();
-            if fv.is_empty() { continue; }
-            for &(p, w_pv) in &rev[v] {
-                let add = &fv & w_pv;
-                if add.is_empty() { continue; }
-                let old = &fut[p];
-                if (&add & old) != add {
-                    fut[p] |= &add;
-                    q.push_back(p);
-                }
-            }
-        }
-        fut
-    }
-
     /// Convert a DWA to a NWA:
     /// - DWA labeled transitions -> NWA labeled transitions (same label, same weight)
     /// - DWA default transitions -> NWA default transitions (weight of default)
@@ -235,9 +179,9 @@ impl NWA {
             let union_body = Self::internal_union_components(&mut states_after_union, body1, body2);
             let union_nwa = NWA { states: states_after_union, body: union_body };
 
-            let mut dwa1 = nwa1.determinize_to_dwa();
-            let mut dwa2 = nwa2.determinize_to_dwa();
-            let mut result_dwa = union_nwa.determinize_to_dwa();
+            let dwa1 = nwa1.determinize_to_dwa();
+            let dwa2 = nwa2.determinize_to_dwa();
+            let result_dwa = union_nwa.determinize_to_dwa();
 
             DWA::stochastic_validate_union(&dwa1, &dwa2, &result_dwa);
         }
@@ -305,9 +249,9 @@ impl NWA {
             let concat_body = Self::internal_concatenate_components(&mut states_after_concat, left, right, eps_weight);
             let concat_nwa = NWA { states: states_after_concat, body: concat_body };
 
-            let mut dwa1 = nwa1.determinize_to_dwa();
-            let mut dwa2 = nwa2.determinize_to_dwa();
-            let mut result_dwa = concat_nwa.determinize_to_dwa();
+            let dwa1 = nwa1.determinize_to_dwa();
+            let dwa2 = nwa2.determinize_to_dwa();
+            let result_dwa = concat_nwa.determinize_to_dwa();
 
 
             DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);

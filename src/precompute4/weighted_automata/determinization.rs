@@ -2,7 +2,7 @@ use super::bitset::{mix3, FP_K1, FP_K2, FP_ZERO};
 use super::common::Weight;
 use super::dwa::DWA;
 use super::nwa::{NWAStates, NWA};
-use crate::precompute4::weighted_automata::{NWADefaultTransition, NWAStateID};
+use crate::precompute4::weighted_automata::NWAStateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::r#macro::is_debug_level_enabled;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -11,132 +11,103 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::Hash;
 use std::time::Instant;
 
+// --- Determinization Algorithm ---
+
+impl NWA {
+    /// Determinizes the NWA into a DWA.
+    /// The process involves several steps:
+    /// 1.  Epsilon-closure computation for all states.
+    /// 2.  Grouping NWA states by behavior into "macro signatures".
+    /// 3.  Subset construction on these macro signatures to build DWA states ("composition nodes").
+    /// 4.  State merging heuristics to keep the resulting DWA smaller.
+    pub fn determinize_to_dwa(&self) -> DWA {
+        let now = Instant::now();
+        let mut nwa = self.clone();
+        nwa.simplify(); // Assumes simplify() exists on NWA.
+
+        if is_debug_level_enabled(5) {
+            eprintln!("NWA after simplify:\n{}", nwa);
+        }
+
+        if nwa.states.0.is_empty() {
+            return DWA::new();
+        }
+
+        let mut determinizer = Determinizer::new(&nwa);
+        let result = determinizer.run();
+
+        if is_debug_level_enabled(5) {
+            eprintln!("NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
+            eprintln!("NWA::determinize_to_dwa took: {:?}", now.elapsed());
+        }
+
+        result
+    }
+}
+
 // --- Helper Structs for Determinization ---
 
+/// Interns sequences of (NWAStateID, Weight) pairs to avoid duplication.
 struct StepPool {
     raw: Vec<Vec<(NWAStateID, Weight)>>,
     map: HashMap<u64, Vec<usize>>,
 }
 
+/// A compiled step represents transitions to a set of macro signatures with associated weights.
 #[derive(Clone)]
 struct CompiledStep {
     by_sig: Vec<(usize, Weight)>,
 }
 
+/// Signature for a default transition within a macro state.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct DefSig {
     step_id: usize,
     exceptions: BTreeSet<i16>,
 }
 
+/// A macro signature captures the behavior of an NWA state after epsilon closure.
 #[derive(Clone)]
 struct MacroSig {
-    final_w: Option<Weight>,
-    def: Vec<DefSig>,
-    ex: BTreeMap<i16, Vec<usize>>,
+    final_weight: Option<Weight>,
+    default_transitions: Vec<DefSig>,
+    exception_transitions: BTreeMap<i16, Vec<usize>>,
 }
 
+/// A key used for interning MacroSigs.
 #[derive(Clone, Hash, Eq, PartialEq)]
 struct MacroSigKey {
-    final_fp: u64,
-    def: Vec<(usize, Vec<i16>)>,
-    ex: Vec<(i16, Vec<usize>)>,
+    final_weight_fp: u64,
+    default_transitions: Vec<(usize, Vec<i16>)>,
+    exception_transitions: Vec<(i16, Vec<usize>)>,
 }
 
+/// A composition node represents a state in the DWA being constructed.
+/// It's a composition of NWA macro signatures, each with a "gate" weight.
 struct CompositionNode {
     final_weight: Option<Weight>,
     default_target_idx: Option<usize>,
     default_mask: Option<Weight>,
     exception_targets: BTreeMap<i16, usize>,
     exception_masks: BTreeMap<i16, Weight>,
+    /// Map from macro signature ID to its gate weight in this composition.
     gates: HashMap<usize, Weight>,
+    /// Union of all weights of incoming transitions to this node. Used for state merging heuristics.
     incoming_weight_union: Weight,
 }
 
-// --- Free Helper Functions ---
-
-fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
-    if w.is_all_fast() {
-        return base.to_vec();
-    }
-    base.iter().map(|(sid, wt)| (*sid, wt & w)).filter(|(_, x)| !x.is_empty()).collect()
-}
-
-fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
-    for (sid, w) in compiled.iter() {
-        let x = w & gate;
-        if !x.is_empty() {
-            *dst.entry(*sid).or_default() |= &x;
-        }
-    }
-}
-
-fn eps_closure_masked_vec_one(
-    s: NWAStateID,
-    states: &NWAStates,
-    fut: &[Weight],
-    scratch_w: &mut [Weight],
-    q: &mut VecDeque<NWAStateID>,
-    touched: &mut Vec<NWAStateID>,
-) -> Vec<(NWAStateID, Weight)> {
-    if s >= states.len() || fut[s].is_empty() {
-        return Vec::new();
-    }
-
-    scratch_w[s] = fut[s].clone();
-    touched.push(s);
-    q.push_back(s);
-
-    while let Some(u) = q.pop_front() {
-        let base = scratch_w[u].clone();
-        if base.is_empty() {
-            continue;
-        }
-        for &(v, ref w_eps) in &states[u].epsilons {
-            if v >= states.len() {
-                continue;
-            }
-            let mut prop = &base & w_eps;
-            if prop.is_empty() {
-                continue;
-            }
-            prop &= &fut[v];
-            if prop.is_empty() {
-                continue;
-            }
-            let old = &scratch_w[v];
-            if (&prop | old) != *old {
-                if old.is_empty() {
-                    touched.push(v);
-                }
-                scratch_w[v] |= &prop;
-                q.push_back(v);
-            }
-        }
-    }
-
-    let mut out: Vec<(NWAStateID, Weight)> = Vec::with_capacity(touched.len());
-    for &i in touched.iter() {
-        out.push((i, scratch_w[i].clone()));
-        scratch_w[i] = Weight::zeros();
-    }
-    touched.clear();
-    out.sort_by_key(|(sid, _)| *sid);
-    out
-}
-
-// --- Determinizer Struct and Implementation ---
+// --- Main Determinizer ---
 
 struct Determinizer<'a> {
     nwa: &'a NWA,
-    fut: Vec<Weight>,
+    future_weights: Vec<Weight>,
     eps_cache: Vec<Vec<(NWAStateID, Weight)>>,
     step_pool: StepPool,
-    sigs: Vec<MacroSig>,
+    signatures: Vec<MacroSig>,
     state_to_sig_id: Vec<usize>,
     compiled_steps: Vec<CompiledStep>,
     nodes: Vec<CompositionNode>,
-    work: VecDeque<usize>,
+    work_queue: VecDeque<usize>,
     in_queue: Vec<bool>,
 }
 
@@ -145,24 +116,21 @@ impl<'a> Determinizer<'a> {
         let n = nwa.states.len();
         Self {
             nwa,
-            fut: Vec::new(),
+            future_weights: Vec::new(),
             eps_cache: vec![Vec::new(); n],
             step_pool: StepPool::new(),
-            sigs: Vec::with_capacity(n),
+            signatures: Vec::with_capacity(n),
             state_to_sig_id: vec![0; n],
             compiled_steps: Vec::new(),
             nodes: Vec::new(),
-            work: VecDeque::new(),
+            work_queue: VecDeque::new(),
             in_queue: Vec::new(),
         }
     }
 
+    /// Executes the determinization algorithm.
     fn run(&mut self) -> DWA {
-        if self.nwa.states.0.is_empty() {
-            return DWA::new();
-        }
-
-        self.fut = self.nwa.compute_future_weights();
+        self.compute_future_weights();
         self.precompute_eps_closures();
         self.build_macro_signatures();
         self.compile_steps();
@@ -170,81 +138,113 @@ impl<'a> Determinizer<'a> {
         self.build_dwa()
     }
 
+    // --- Major Steps of Determinization ---
+
+    /// Step 1: Compute future weights for all NWA states.
+    /// A future weight of a state is the union of weights of all paths from that state to a final state.
+    fn compute_future_weights(&mut self) {
+        let n = self.nwa.states.len();
+        let mut fut = vec![Weight::zeros(); n];
+        let mut rev_adj: Vec<Vec<(NWAStateID, &Weight)>> = vec![vec![]; n];
+
+        // Build reverse adjacency list for weight propagation.
+        for p in 0..n {
+            for &(t, ref w) in &self.nwa.states[p].epsilons {
+                if t < n { rev_adj[t].push((p, w)); }
+            }
+            for (_, targets) in &self.nwa.states[p].transitions {
+                for (t, w) in targets {
+                    if *t < n { rev_adj[*t].push((p, w)); }
+                }
+            }
+            for def in &self.nwa.states[p].default {
+                if def.target < n { rev_adj[def.target].push((p, &def.weight)); }
+            }
+        }
+
+        // Initialize work queue with final states.
+        let mut q: VecDeque<NWAStateID> = VecDeque::new();
+        for s in 0..n {
+            if let Some(fw) = &self.nwa.states[s].final_weight {
+                if !fw.is_empty() {
+                    fut[s] = fw.clone();
+                    q.push_back(s);
+                }
+            }
+        }
+
+        // Propagate weights backwards until a fixed point is reached.
+        while let Some(v) = q.pop_front() {
+            let fv = fut[v].clone();
+            if fv.is_empty() { continue; }
+            for &(p, w_pv) in &rev_adj[v] {
+                let propagated_weight = &fv & w_pv;
+                if !propagated_weight.is_empty() && !propagated_weight.is_subset_of(&fut[p]) {
+                    fut[p] |= &propagated_weight;
+                    q.push_back(p);
+                }
+            }
+        }
+        self.future_weights = fut;
+    }
+
+    /// Step 2: Precompute epsilon closures for all NWA states, masked by future weights.
     fn precompute_eps_closures(&mut self) {
         let n = self.nwa.states.len();
-        let pb = if PROGRESS_BAR_ENABLED {
-            Some(ProgressBar::new(n as u64).with_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (ε-closures)")
-                    .unwrap(),
-            ))
-        } else { None };
+        let pb = Self::progress_bar(n as u64, "ε-closures");
 
         let mut scratch_w = vec![Weight::zeros(); n];
         let mut q = VecDeque::new();
         let mut touched = Vec::new();
         for s in 0..n {
-            self.eps_cache[s] = eps_closure_masked_vec_one(s, &self.nwa.states, &self.fut, &mut scratch_w, &mut q, &mut touched);
+            self.eps_cache[s] = self.compute_eps_closure_for_state(s, &mut scratch_w, &mut q, &mut touched);
             if let Some(p) = &pb { p.inc(1); }
         }
         if let Some(p) = pb { p.finish_with_message("ε-closures done"); }
     }
 
+    /// Step 3: Build macro signatures for each NWA state.
     fn build_macro_signatures(&mut self) {
         let n = self.nwa.states.len();
-        let pb = if PROGRESS_BAR_ENABLED {
-            Some(ProgressBar::new(n as u64).with_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Macro signatures)")
-                    .unwrap(),
-            ))
-        } else { None };
-        
-        let mut sig_intern: HashMap<MacroSigKey, usize> = HashMap::new();
+        let pb = Self::progress_bar(n as u64, "Macro signatures");
+        let mut sig_interner: HashMap<MacroSigKey, usize> = HashMap::new();
 
         for s in 0..n {
             let final_acc = self.eps_cache[s].iter().fold(Weight::zeros(), |mut acc, (t, w)| {
                 if let Some(fw) = &self.nwa.states[*t].final_weight { acc |= &(w & fw); }
                 acc
             });
-            let final_w = if final_acc.is_empty() { None } else { Some(final_acc) };
+            let final_weight = if final_acc.is_empty() { None } else { Some(final_acc) };
 
-            let mut def: Vec<DefSig> = Vec::new();
+            let mut default_transitions: Vec<DefSig> = Vec::new();
             for d in &self.nwa.states[s].default {
                 if d.target >= n { continue; }
-                let pairs = apply_weight_to_pairs(&self.eps_cache[d.target], &d.weight);
+                let pairs = Self::apply_weight_to_pairs(&self.eps_cache[d.target], &d.weight);
                 if !pairs.is_empty() {
-                    def.push(DefSig { step_id: self.step_pool.intern(pairs), exceptions: d.exceptions.clone() });
+                    default_transitions.push(DefSig { step_id: self.step_pool.intern(pairs), exceptions: d.exceptions.clone() });
                 }
             }
 
-            let mut ex: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
+            let mut exception_transitions: BTreeMap<i16, Vec<usize>> = BTreeMap::new();
             for (lbl, targets) in &self.nwa.states[s].transitions {
                 let mut step_exs: Vec<usize> = Vec::new();
                 for (to, w) in targets {
                     if *to >= n { continue; }
-                    let pairs = apply_weight_to_pairs(&self.eps_cache[*to], w);
+                    let pairs = Self::apply_weight_to_pairs(&self.eps_cache[*to], w);
                     if !pairs.is_empty() { step_exs.push(self.step_pool.intern(pairs)); }
                 }
                 if !step_exs.is_empty() {
                     step_exs.sort_unstable();
-                    let mut sorted_def_ids: Vec<_> = def.iter().map(|d| d.step_id).collect();
+                    let mut sorted_def_ids: Vec<_> = default_transitions.iter().map(|d| d.step_id).collect();
                     sorted_def_ids.sort_unstable();
-                    if step_exs != sorted_def_ids { ex.insert(*lbl, step_exs); }
+                    if step_exs != sorted_def_ids { exception_transitions.insert(*lbl, step_exs); }
                 }
             }
 
-            let mut sorted_def_key: Vec<_> = def.iter().map(|d| (d.step_id, d.exceptions.iter().copied().collect::<Vec<_>>())).collect();
-            sorted_def_key.sort_unstable();
-            let key = MacroSigKey {
-                final_fp: final_w.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
-                def: sorted_def_key,
-                ex: ex.iter().map(|(k, v)| (*k, v.clone())).collect(),
-            };
-
-            let sig_id = *sig_intern.entry(key).or_insert_with(|| {
-                let id = self.sigs.len();
-                self.sigs.push(MacroSig { final_w, def, ex });
+            let key = Self::create_macro_sig_key(&final_weight, &default_transitions, &exception_transitions);
+            let sig_id = *sig_interner.entry(key).or_insert_with(|| {
+                let id = self.signatures.len();
+                self.signatures.push(MacroSig { final_weight, default_transitions, exception_transitions });
                 id
             });
             self.state_to_sig_id[s] = sig_id;
@@ -253,15 +253,10 @@ impl<'a> Determinizer<'a> {
         if let Some(p) = pb { p.finish_with_message("Macro signatures done"); }
     }
 
+    /// Step 4: Compile interned steps into transitions between macro signatures.
     fn compile_steps(&mut self) {
         let num_steps = self.step_pool.raw.len();
-        let pb = if PROGRESS_BAR_ENABLED {
-            Some(ProgressBar::new(num_steps as u64).with_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Compile steps)")
-                    .unwrap(),
-            ))
-        } else { None };
+        let pb = Self::progress_bar(num_steps as u64, "Compile steps");
 
         self.compiled_steps = Vec::with_capacity(num_steps);
         for pairs in &self.step_pool.raw {
@@ -277,31 +272,18 @@ impl<'a> Determinizer<'a> {
         if let Some(p) = pb { p.finish_with_message("Compile steps done"); }
     }
 
+    /// Step 5: Discover DWA states (composition nodes) via subset construction.
     fn discover_composition_nodes(&mut self) {
-        let pb = if PROGRESS_BAR_ENABLED {
-            Some(ProgressBar::new(0).with_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Determinize: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} (Discovering states)")
-                    .unwrap(),
-            ))
-        } else { None };
+        let pb = Self::progress_bar(0, "Discovering states");
 
-        let mut init_map: HashMap<usize, Weight> = HashMap::new();
+        let mut initial_gates: HashMap<usize, Weight> = HashMap::new();
         for (t, w) in &self.eps_cache[self.nwa.body.start_state] {
-            *init_map.entry(self.state_to_sig_id[*t]).or_default() |= w;
+            *initial_gates.entry(self.state_to_sig_id[*t]).or_default() |= w;
         }
 
-        let start_idx = 0;
-        self.nodes.push(CompositionNode {
-            final_weight: None, default_target_idx: None, default_mask: None,
-            exception_targets: BTreeMap::new(), exception_masks: BTreeMap::new(),
-            gates: init_map, incoming_weight_union: Weight::all(),
-        });
-        self.in_queue = vec![false; 1];
-        self.in_queue[start_idx] = true;
-        self.work.push_back(start_idx);
+        self.add_composition_node(initial_gates, Weight::all());
 
-        while let Some(idx) = self.work.pop_front() {
+        while let Some(idx) = self.work_queue.pop_front() {
             self.in_queue[idx] = false;
             if let Some(p) = &pb { p.inc(1); }
 
@@ -311,24 +293,11 @@ impl<'a> Determinizer<'a> {
             let mut resolved_transitions = BTreeMap::new();
             for (label, map) in target_maps {
                 let total_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-                if total_weight.is_empty() {
-                    if label.is_some() { resolved_transitions.insert(label, (idx, Weight::zeros())); }
-                    continue;
-                }
+                if total_weight.is_empty() { continue; }
 
                 let target_idx = self.find_or_create_target_node(&map);
-                let mut any_change = false;
-                for (sig_id, weight) in &map {
-                    let entry = self.nodes[target_idx].gates.entry(*sig_id).or_default();
-                    let new_w = &*entry | weight;
-                    if new_w != *entry { *entry = new_w; any_change = true; }
-                }
-                if any_change {
-                    if target_idx >= self.in_queue.len() { self.in_queue.resize(target_idx + 1, false); }
-                    if !self.in_queue[target_idx] {
-                        self.in_queue[target_idx] = true;
-                        self.work.push_back(target_idx);
-                    }
+                if self.propagate_weights_to_node(target_idx, &map) {
+                    self.enqueue_node(target_idx);
                 }
                 resolved_transitions.insert(label, (target_idx, total_weight));
             }
@@ -345,14 +314,15 @@ impl<'a> Determinizer<'a> {
                 }
             }
             node.final_weight = Some(node_gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
-                if let Some(fw) = &self.sigs[*sig_id].final_w { acc |= &(gate & fw); }
+                if let Some(fw) = &self.signatures[*sig_id].final_weight { acc |= &(gate & fw); }
                 acc
             }));
             if let Some(p) = &pb { p.set_length(self.nodes.len() as u64); }
         }
-        if let Some(p) = pb { p.finish_with_message(format!("Discovered {} compositions", self.nodes.len())); }
+        if let Some(p) = pb { p.finish_with_message(format!("Discovered {} DWA states", self.nodes.len())); }
     }
 
+    /// Step 6: Build the final DWA from the discovered composition nodes.
     fn build_dwa(&self) -> DWA {
         let mut dwa = DWA::new();
         if self.nodes.is_empty() { return dwa; }
@@ -368,31 +338,79 @@ impl<'a> Determinizer<'a> {
             }
             for (lbl, &target) in &node.exception_targets {
                 let mask = node.exception_masks.get(lbl).cloned().unwrap_or_else(Weight::zeros);
-                dwa.add_transition(i, *lbl, target, mask).unwrap();
+                if !mask.is_empty() {
+                    dwa.add_transition(i, *lbl, target, mask).unwrap();
+                }
             }
         }
         dwa
     }
 
+    // --- Helper Methods ---
+
+    /// Computes the epsilon closure from a single state `s`.
+    fn compute_eps_closure_for_state(
+        &self, s: NWAStateID,
+        scratch_w: &mut [Weight], q: &mut VecDeque<NWAStateID>, touched: &mut Vec<NWAStateID>,
+    ) -> Vec<(NWAStateID, Weight)> {
+        if s >= self.nwa.states.len() || self.future_weights[s].is_empty() {
+            return Vec::new();
+        }
+
+        scratch_w[s] = self.future_weights[s].clone();
+        touched.push(s);
+        q.push_back(s);
+
+        while let Some(u) = q.pop_front() {
+            let base_weight = scratch_w[u].clone();
+            if base_weight.is_empty() { continue; }
+
+            for &(v, ref w_eps) in &self.nwa.states[u].epsilons {
+                if v >= self.nwa.states.len() { continue; }
+                let mut prop_weight = &base_weight & w_eps;
+                if prop_weight.is_empty() { continue; }
+                prop_weight &= &self.future_weights[v];
+                if prop_weight.is_empty() { continue; }
+
+                if !prop_weight.is_subset_of(&scratch_w[v]) {
+                    if scratch_w[v].is_empty() { touched.push(v); }
+                    scratch_w[v] |= &prop_weight;
+                    q.push_back(v);
+                }
+            }
+        }
+
+        let mut out: Vec<(NWAStateID, Weight)> = Vec::with_capacity(touched.len());
+        for &i in touched.iter() {
+            out.push((i, scratch_w[i].clone()));
+            scratch_w[i] = Weight::zeros();
+        }
+        touched.clear();
+        out.sort_by_key(|(sid, _)| *sid);
+        out
+    }
+
+    /// Computes transition maps for a set of gates, grouped by character label.
     fn compute_target_maps_for_gates(&self, node_gates: &HashMap<usize, Weight>) -> BTreeMap<Option<i16>, HashMap<usize, Weight>> {
-        let mut def_groups = HashMap::new();
+        let mut def_groups: HashMap<usize, Weight> = HashMap::new();
         let mut ex_groups_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
         let mut def_exers_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
         let mut def_exceptions_by_label: BTreeMap<i16, HashMap<usize, Weight>> = BTreeMap::new();
 
-        for (sig_id, gate) in node_gates {
+        for (&sig_id, gate) in node_gates {
             if gate.is_empty() { continue; }
-            for def in &self.sigs[*sig_id].def {
+            let sig = &self.signatures[sig_id];
+            for def in &sig.default_transitions {
                 *def_groups.entry(def.step_id).or_default() |= gate;
                 for &lbl in &def.exceptions {
                     *def_exceptions_by_label.entry(lbl).or_default().entry(def.step_id).or_default() |= gate;
                 }
             }
-            for (lbl, ex_steps) in &self.sigs[*sig_id].ex {
-                for ex_step in ex_steps {
-                    *ex_groups_by_label.entry(*lbl).or_default().entry(*ex_step).or_default() |= gate;
+            for (lbl, ex_steps) in &sig.exception_transitions {
+                for &ex_step in ex_steps {
+                    *ex_groups_by_label.entry(*lbl).or_default().entry(ex_step).or_default() |= gate;
                 }
-                for def in &self.sigs[*sig_id].def {
+                for def in &sig.default_transitions {
                     *def_exers_by_label.entry(*lbl).or_default().entry(def.step_id).or_default() |= gate;
                 }
             }
@@ -401,15 +419,14 @@ impl<'a> Determinizer<'a> {
         let mut target_maps = BTreeMap::new();
         let mut def_target_map = HashMap::new();
         for (def_step, g) in &def_groups {
-            accumulate(&mut def_target_map, &self.compiled_steps[*def_step].by_sig, g);
+            Self::accumulate(&mut def_target_map, &self.compiled_steps[*def_step].by_sig, g);
         }
         if !def_target_map.is_empty() {
             target_maps.insert(None, def_target_map);
         }
 
-        let mut labels_to_consider: BTreeSet<i16> = BTreeSet::new();
-        labels_to_consider.extend(ex_groups_by_label.keys().copied());
-        labels_to_consider.extend(def_exceptions_by_label.keys().copied());
+        let labels_to_consider: BTreeSet<i16> = ex_groups_by_label.keys().copied()
+            .chain(def_exceptions_by_label.keys().copied()).collect();
 
         for lbl in labels_to_consider {
             let mut map = HashMap::new();
@@ -418,25 +435,54 @@ impl<'a> Determinizer<'a> {
                 if let Some(g) = def_exers_by_label.get(&lbl).and_then(|de| de.get(def_step)) { g_nonex -= g; }
                 if let Some(g) = def_exceptions_by_label.get(&lbl).and_then(|dx| dx.get(def_step)) { g_nonex -= g; }
                 if !g_nonex.is_empty() {
-                    accumulate(&mut map, &self.compiled_steps[*def_step].by_sig, &g_nonex);
+                    Self::accumulate(&mut map, &self.compiled_steps[*def_step].by_sig, &g_nonex);
                 }
             }
             if let Some(ex_groups) = ex_groups_by_label.get(&lbl) {
                 for (ex_step, g_ex) in ex_groups {
-                    accumulate(&mut map, &self.compiled_steps[*ex_step].by_sig, g_ex);
+                    Self::accumulate(&mut map, &self.compiled_steps[*ex_step].by_sig, g_ex);
                 }
             }
-            target_maps.insert(Some(lbl), map);
+            if !map.is_empty() {
+                target_maps.insert(Some(lbl), map);
+            }
         }
         target_maps
     }
 
+    /// Finds an existing composition node to merge with, or creates a new one.
+    fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize {
+        let incoming_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
+
+        let calculate_merge_cost = |cand_node: &CompositionNode| -> (usize, usize) {
+            let spec_increase = map.keys().filter(|k| !cand_node.gates.contains_key(k)).count();
+            (spec_increase, cand_node.gates.len())
+        };
+
+        let best_cand_idx = self.nodes.iter().enumerate()
+            .filter(|(_, cand_node)| self.are_nodes_mergeable(cand_node, map, &incoming_weight))
+            .min_by_key(|&(_, cand_node)| calculate_merge_cost(cand_node))
+            .map(|(idx, _)| idx);
+
+        if let Some(merge_idx) = best_cand_idx {
+            self.nodes[merge_idx].incoming_weight_union |= &incoming_weight;
+            return merge_idx;
+        }
+
+        self.add_composition_node(HashMap::new(), incoming_weight)
+    }
+
+    /// Checks if a new set of gates can be merged into an existing candidate node.
     fn are_nodes_mergeable(&self, cand_node: &CompositionNode, new_gates: &HashMap<usize, Weight>, new_incoming_weight: &Weight) -> bool {
         let intersect = &cand_node.incoming_weight_union & new_incoming_weight;
         if intersect.is_empty() { return true; }
 
-        let cand_gates_intersect: HashMap<_, _> = cand_node.gates.iter().map(|(s, w)| (*s, w & &intersect)).filter(|(_, w)| !w.is_empty()).collect();
-        let new_gates_intersect: HashMap<_, _> = new_gates.iter().map(|(s, w)| (*s, w & &intersect)).filter(|(_, w)| !w.is_empty()).collect();
+        let filter_map_by_weight = |gates: &HashMap<usize, Weight>, w: &Weight| -> HashMap<usize, Weight> {
+            gates.iter().map(|(s, g)| (*s, g & w)).filter(|(_, g)| !g.is_empty()).collect()
+        };
+
+        let cand_gates_intersect = filter_map_by_weight(&cand_node.gates, &intersect);
+        let new_gates_intersect = filter_map_by_weight(new_gates, &intersect);
 
         if cand_gates_intersect.is_empty() && new_gates_intersect.is_empty() { return true; }
 
@@ -446,42 +492,89 @@ impl<'a> Determinizer<'a> {
         cand_transitions == new_transitions
     }
 
-    fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize {
-        let incoming_weight = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
-
-        let calculate_merge_cost = |cand_node: &CompositionNode| -> (usize, usize) {
-            let mut spec_increase = 0;
-            for sig_id in map.keys() {
-                if !cand_node.gates.contains_key(sig_id) { spec_increase += 1; }
-            }
-            (spec_increase, cand_node.gates.len())
-        };
-
-        let best_cand_idx = self.nodes.iter().enumerate()
-            .filter(|(_, cand_node)| self.are_nodes_mergeable(cand_node, map, &incoming_weight))
-            .min_by_key(|(idx, cand_node)| (calculate_merge_cost(cand_node), *idx))
-            .map(|(idx, _)| idx);
-
-        if let Some(merge_idx) = best_cand_idx {
-            self.nodes[merge_idx].incoming_weight_union |= &incoming_weight;
-            return merge_idx;
-        }
-
+    fn add_composition_node(&mut self, gates: HashMap<usize, Weight>, incoming_weight_union: Weight) -> usize {
         let new_idx = self.nodes.len();
         self.nodes.push(CompositionNode {
             final_weight: None, default_target_idx: None, default_mask: None,
             exception_targets: BTreeMap::new(), exception_masks: BTreeMap::new(),
-            gates: HashMap::new(), incoming_weight_union: incoming_weight,
+            gates, incoming_weight_union,
         });
+        self.enqueue_node(new_idx);
         new_idx
+    }
+
+    fn enqueue_node(&mut self, idx: usize) {
+        if idx >= self.in_queue.len() { self.in_queue.resize(idx + 1, false); }
+        if !self.in_queue[idx] {
+            self.in_queue[idx] = true;
+            self.work_queue.push_back(idx);
+        }
+    }
+
+    fn propagate_weights_to_node(&mut self, node_idx: usize, weights: &HashMap<usize, Weight>) -> bool {
+        let mut any_change = false;
+        for (sig_id, weight) in weights {
+            let entry = self.nodes[node_idx].gates.entry(*sig_id).or_default();
+            if !weight.is_subset_of(entry) {
+                *entry |= weight;
+                any_change = true;
+            }
+        }
+        any_change
+    }
+
+    // --- Static Helpers ---
+
+    fn create_macro_sig_key(
+        final_weight: &Option<Weight>,
+        default_transitions: &[DefSig],
+        exception_transitions: &BTreeMap<i16, Vec<usize>>,
+    ) -> MacroSigKey {
+        let mut sorted_def_key: Vec<_> = default_transitions.iter()
+            .map(|d| (d.step_id, d.exceptions.iter().copied().collect::<Vec<_>>()))
+            .collect();
+        sorted_def_key.sort_unstable();
+
+        MacroSigKey {
+            final_weight_fp: final_weight.as_ref().map(|w| w.fp).unwrap_or(FP_ZERO),
+            default_transitions: sorted_def_key,
+            exception_transitions: exception_transitions.iter().map(|(k, v)| (*k, v.clone())).collect(),
+        }
+    }
+
+    fn apply_weight_to_pairs(base: &[(NWAStateID, Weight)], w: &Weight) -> Vec<(NWAStateID, Weight)> {
+        if w.is_all_fast() { return base.to_vec(); }
+        base.iter().map(|(sid, wt)| (*sid, wt & w)).filter(|(_, x)| !x.is_empty()).collect()
+    }
+
+    fn accumulate(dst: &mut HashMap<usize, Weight>, compiled: &[(usize, Weight)], gate: &Weight) {
+        for (sid, w) in compiled.iter() {
+            let x = w & gate;
+            if !x.is_empty() { *dst.entry(*sid).or_default() |= &x; }
+        }
+    }
+
+    fn progress_bar(len: u64, stage: &str) -> Option<ProgressBar> {
+        if PROGRESS_BAR_ENABLED {
+            let pb = ProgressBar::new(len).with_style(
+                ProgressStyle::default_bar()
+                    .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({})", stage))
+                    .unwrap(),
+            );
+            Some(pb)
+        } else {
+            None
+        }
     }
 }
 
 impl StepPool {
     fn new() -> Self { Self { raw: Vec::new(), map: HashMap::new() } }
+
     fn fingerprint(pairs: &[(NWAStateID, Weight)]) -> u64 {
         pairs.iter().fold(FP_ZERO, |fp, (sid, w)| mix3(fp, (*sid as u64).wrapping_mul(FP_K1), w.fp.wrapping_mul(FP_K2)))
     }
+
     fn intern(&mut self, mut pairs: Vec<(NWAStateID, Weight)>) -> usize {
         pairs.retain(|(_, w)| !w.is_empty());
         let fp = Self::fingerprint(&pairs);
@@ -492,29 +585,5 @@ impl StepPool {
         self.raw.push(pairs);
         self.map.entry(fp).or_default().push(id);
         id
-    }
-}
-
-// --- NWA Public API ---
-
-impl NWA {
-    pub fn determinize_to_dwa(&self) -> DWA {
-        let now = Instant::now();
-        let mut nwa = self.clone();
-        nwa.simplify();
-
-        if is_debug_level_enabled(5) {
-            eprintln!("NWA after simplify:\n{}", nwa);
-        }
-
-        let mut determinizer = Determinizer::new(&nwa);
-        let result = determinizer.run();
-
-        if is_debug_level_enabled(5) {
-            eprintln!("NWA::determinize_to_dwa result DWA stats:\n{}", result.stats());
-            eprintln!("NWA::determinize_to_dwa took: {:?}", now.elapsed());
-        }
-
-        result
     }
 }
