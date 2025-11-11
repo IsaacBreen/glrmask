@@ -362,6 +362,63 @@ impl NWA {
             }
         }
 
+        /// Finds the best existing node to merge a new state composition into, or creates a new node.
+        fn find_or_create_target_node(
+            key: MembersKey,
+            nodes: &mut Vec<CompositionNode>,
+            key_to_idx: &mut HashMap<MembersKey, usize>,
+            in_queue: &mut Vec<bool>,
+        ) -> usize {
+            if let Some(&existing_idx) = key_to_idx.get(&key) {
+                return existing_idx;
+            }
+
+            // Helper to calculate the cost of merging the new key into a candidate node.
+            // Cost is (specificity_increase, current_specificity). Lower is better.
+            let calculate_merge_cost = |candidate_node: &CompositionNode| -> (usize, usize) {
+                let current_spec = candidate_node.gates.len();
+                let mut spec_increase = 0;
+                for sig_id in &key.0 {
+                    if !candidate_node.gates.contains_key(sig_id) {
+                        spec_increase += 1;
+                    }
+                }
+                (spec_increase, current_spec)
+            };
+
+            // Find the best existing node to merge into by minimizing the cost.
+            let best_cand_idx = nodes
+                .iter()
+                .enumerate()
+                .min_by_key(|(cand_idx, cand_node)| {
+                    let cost = calculate_merge_cost(cand_node);
+                    (cost.0, cost.1, *cand_idx) // Tie-break with index for determinism
+                })
+                .map(|(idx, _)| idx);
+
+            if let Some(merge_idx) = best_cand_idx {
+                // Found a home. Map the new key to the existing node's index.
+                key_to_idx.insert(key, merge_idx);
+                merge_idx
+            } else {
+                // No nodes exist yet. Create a new one.
+                let new_idx = nodes.len();
+                key_to_idx.insert(key, new_idx);
+                nodes.push(CompositionNode {
+                    final_weight: None,
+                    default_target_idx: None,
+                    default_mask: None,
+                    exception_targets: BTreeMap::new(),
+                    exception_masks: BTreeMap::new(),
+                    gates: HashMap::new(),
+                });
+                if new_idx >= in_queue.len() {
+                    in_queue.resize(new_idx + 1, false);
+                }
+                new_idx
+            }
+        }
+
         let mut nodes: Vec<CompositionNode> = Vec::new();
         let mut key_to_idx: HashMap<MembersKey, usize> = HashMap::new();
         let mut work: VecDeque<usize> = VecDeque::new();
@@ -529,51 +586,7 @@ impl NWA {
                 keys.sort_unstable();
                 let key = MembersKey(keys);
 
-                let target_idx = if let Some(&existing_idx) = key_to_idx.get(&key) {
-                    existing_idx
-                } else {
-                    // This is a new key. Find the best existing node to merge with.
-                    let mut best_cand_idx: Option<usize> = None;
-                    let mut best_cost: (usize, usize) = (usize::MAX, usize::MAX);
-
-                    for (cand_idx, cand_node) in nodes.iter().enumerate() {
-                        let current_spec = cand_node.gates.len();
-                        let mut spec_increase = 0;
-                        for sig_id in &key.0 {
-                            if !cand_node.gates.contains_key(sig_id) {
-                                spec_increase += 1;
-                            }
-                        }
-                        let cost = (spec_increase, current_spec);
-                        if cost < best_cost {
-                            best_cost = cost;
-                            best_cand_idx = Some(cand_idx);
-                        }
-                    }
-
-                    if let Some(merge_idx) = best_cand_idx {
-                        // Found a home. Map the new key to the existing node.
-                        key_to_idx.insert(key, merge_idx);
-                        merge_idx
-                    } else {
-                        // No nodes exist yet, or no suitable candidate. Create a new one.
-                        // This path should only be taken for the very first node.
-                        let new_idx = nodes.len();
-                        key_to_idx.insert(key, new_idx);
-                        nodes.push(CompositionNode {
-                            final_weight: None,
-                            default_target_idx: None,
-                            default_mask: None,
-                            exception_targets: BTreeMap::new(),
-                            exception_masks: BTreeMap::new(),
-                            gates: HashMap::new(),
-                        });
-                        if new_idx >= in_queue.len() {
-                            in_queue.resize(new_idx + 1, false);
-                        }
-                        new_idx
-                    }
-                };
+                let target_idx = find_or_create_target_node(key, &mut nodes, &mut key_to_idx, &mut in_queue);
 
                 let mut any_change = false;
                 for (sig_id, weight) in &map {
