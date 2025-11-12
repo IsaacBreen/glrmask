@@ -15,7 +15,7 @@ impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
         let mut nwa = self.clone();
-        nwa.simplify();
+        nwa.simplify(); // Simplification can reduce NWA size before determinization.
 
         if is_debug_level_enabled(5) {
             eprintln!("NWA after simplify:\n{}", nwa);
@@ -38,8 +38,8 @@ impl NWA {
 struct Determinizer<'a> {
     nwa: &'a NWA,
     dwa: DWA,
-    macrostate_to_dwa_state: HashMap<WeightedMacrostate, usize>,
-    work_queue: VecDeque<WeightedMacrostate>,
+    memo: HashMap<WeightedMacrostate, usize>,
+    worklist: VecDeque<WeightedMacrostate>,
 }
 
 impl<'a> Determinizer<'a> {
@@ -47,198 +47,160 @@ impl<'a> Determinizer<'a> {
         Self {
             nwa,
             dwa: DWA::default(),
-            macrostate_to_dwa_state: HashMap::new(),
-            work_queue: VecDeque::new(),
+            memo: HashMap::new(),
+            worklist: VecDeque::new(),
         }
     }
 
     fn run(&mut self) -> DWA {
-        let mut start_macrostate = WeightedMacrostate::new();
-        if self.nwa.body.start_state < self.nwa.states.len() {
-            start_macrostate.insert(self.nwa.body.start_state, Weight::all());
-        } else {
+        if self.nwa.body.start_state >= self.nwa.states.len() {
             return DWA::new();
         }
 
+        let mut start_macrostate = WeightedMacrostate::new();
+        start_macrostate.insert(self.nwa.body.start_state, Weight::all());
         let initial_macrostate = self.epsilon_closure(&start_macrostate);
 
         if initial_macrostate.is_empty() {
             return DWA::new();
         }
 
-        let start_id = self.get_or_create_dwa_state(&initial_macrostate);
-        self.dwa.body.start_state = start_id;
+        self.dwa.body.start_state = self.get_or_create_dwa_state(&initial_macrostate);
 
-        while let Some(current_macrostate) = self.work_queue.pop_front() {
-            let current_dwa_id = *self.macrostate_to_dwa_state.get(&current_macrostate).unwrap();
+        while let Some(macrostate) = self.worklist.pop_front() {
+            let dwa_state_id = self.memo[&macrostate];
 
-            // Final weight
-            let final_weight = self.calculate_final_weight(&current_macrostate);
-            if let Some(fw) = final_weight {
-                if !fw.is_empty() {
-                    self.dwa.set_final_weight(current_dwa_id, fw).unwrap();
-                }
+            // Set final weight for the DWA state
+            let final_weight = macrostate
+                .iter()
+                .filter_map(|(&id, weight)| {
+                    self.nwa.states.get(id).and_then(|s| s.final_weight.as_ref()).map(|fw| weight & fw)
+                })
+                .fold(Weight::zeros(), |acc, w| acc | w);
+
+            if !final_weight.is_empty() {
+                self.dwa.set_final_weight(dwa_state_id, final_weight).unwrap();
             }
 
-            // Transitions
-            self.calculate_transitions(&current_macrostate);
+            // Determine all outgoing transitions by checking critical symbols
+            let mut transitions = BTreeMap::new();
+            let mut critical_symbols = self.get_critical_symbols(&macrostate);
+
+            // Add a generic symbol to determine the default transition
+            let generic_symbol = {
+                let mut s: i16 = 0;
+                while critical_symbols.contains(&s) {
+                    s = s.wrapping_add(1);
+                }
+                s
+            };
+            critical_symbols.insert(generic_symbol);
+
+            for symbol in critical_symbols {
+                let (next_pre_closure, trans_weight) = self.move_on_symbol(&macrostate, symbol);
+                let next_macrostate = self.epsilon_closure(&next_pre_closure);
+                transitions.insert(symbol, (next_macrostate, trans_weight));
+            }
+
+            // Set default and exception transitions in DWA
+            let (default_macrostate, default_weight) =
+                transitions.remove(&generic_symbol).unwrap_or_else(|| (WeightedMacrostate::new(), Weight::zeros()));
+
+            if !default_macrostate.is_empty() {
+                let default_target_id = self.get_or_create_dwa_state(&default_macrostate);
+                self.dwa.set_default_transition(dwa_state_id, default_target_id, default_weight.clone()).unwrap();
+            }
+
+            for (symbol, (macrostate, weight)) in transitions {
+                if macrostate != default_macrostate || weight != default_weight {
+                    let target_id = self.get_or_create_dwa_state(&macrostate);
+                    self.dwa.add_transition(dwa_state_id, symbol, target_id, weight).unwrap();
+                }
+            }
         }
 
         std::mem::take(&mut self.dwa)
     }
 
-    /// Gets the DWA state ID for a given macrostate. If the macrostate hasn't been seen
-    /// before, it creates a new DWA state, adds it to the work queue, and returns the new ID.
+    fn get_critical_symbols(&self, macrostate: &WeightedMacrostate) -> BTreeSet<i16> {
+        let mut symbols = BTreeSet::new();
+        for &id in macrostate.keys() {
+            if let Some(state) = self.nwa.states.get(id) {
+                symbols.extend(state.transitions.keys());
+                for def in &state.default {
+                    symbols.extend(&def.exceptions);
+                }
+            }
+        }
+        symbols
+    }
+
     fn get_or_create_dwa_state(&mut self, macrostate: &WeightedMacrostate) -> usize {
-        if let Some(&id) = self.macrostate_to_dwa_state.get(macrostate) {
+        if let Some(&id) = self.memo.get(macrostate) {
             return id;
         }
         let new_id = self.dwa.add_state();
-        self.macrostate_to_dwa_state.insert(macrostate.clone(), new_id);
-        self.work_queue.push_back(macrostate.clone());
+        self.memo.insert(macrostate.clone(), new_id);
+        self.worklist.push_back(macrostate.clone());
         new_id
     }
 
-    /// Computes the epsilon-closure of a set of weighted NWA states.
     fn epsilon_closure(&self, start_states: &WeightedMacrostate) -> WeightedMacrostate {
         let mut closure = start_states.clone();
         let mut queue: VecDeque<NWAStateID> = start_states.keys().copied().collect();
 
         while let Some(u) = queue.pop_front() {
-            let w_u = if let Some(w) = closure.get(&u) {
-                w.clone()
-            } else {
-                continue;
+            let w_u = match closure.get(&u) {
+                Some(w) => w.clone(),
+                None => continue,
             };
 
-            if u >= self.nwa.states.len() {
-                continue;
-            }
-            for (v, w_uv) in &self.nwa.states[u].epsilons {
-                if *v >= self.nwa.states.len() {
-                    continue;
-                }
-                let propagated_weight = &w_u & w_uv;
-                if propagated_weight.is_empty() {
-                    continue;
-                }
+            if let Some(state) = self.nwa.states.get(u) {
+                for (v, w_uv) in &state.epsilons {
+                    let propagated_weight = &w_u & w_uv;
+                    if propagated_weight.is_empty() {
+                        continue;
+                    }
 
-                let v_weight = closure.entry(*v).or_default();
-                let old_v_weight = v_weight.clone();
-                *v_weight |= &propagated_weight;
+                    let v_weight = closure.entry(*v).or_default();
+                    let old_v_weight = v_weight.clone();
+                    *v_weight |= &propagated_weight;
 
-                if *v_weight != old_v_weight {
-                    queue.push_back(*v);
+                    if *v_weight != old_v_weight {
+                        queue.push_back(*v);
+                    }
                 }
             }
         }
         closure
     }
 
-    /// Calculates the final weight for a DWA state (macrostate).
-    fn calculate_final_weight(&self, macrostate: &WeightedMacrostate) -> Option<Weight> {
-        let mut final_weight = Weight::zeros();
-        for (&id, weight) in macrostate {
-            if id >= self.nwa.states.len() {
-                continue;
-            }
-            if let Some(fw) = &self.nwa.states[id].final_weight {
-                final_weight |= &(weight & fw);
-            }
-        }
-        if final_weight.is_empty() {
-            None
-        } else {
-            Some(final_weight)
-        }
-    }
-
-    /// Computes the set of next NWA states and the total transition weight after consuming a symbol.
     fn move_on_symbol(&self, macrostate: &WeightedMacrostate, symbol: i16) -> (WeightedMacrostate, Weight) {
         let mut next_macrostate = WeightedMacrostate::new();
-        let mut total_weight = Weight::zeros();
 
         for (&id, weight) in macrostate {
-            if id >= self.nwa.states.len() {
-                continue;
-            }
-            let state = &self.nwa.states[id];
-            let mut took_explicit = false;
-
-            // Labeled transitions
-            if let Some(transitions) = state.transitions.get(&symbol) {
-                took_explicit = true;
-                for (target, trans_weight) in transitions {
-                    if *target >= self.nwa.states.len() {
-                        continue;
-                    }
-                    let new_weight = weight & trans_weight;
-                    if !new_weight.is_empty() {
-                        total_weight |= &new_weight;
-                        *next_macrostate.entry(*target).or_default() |= &new_weight;
+            if let Some(state) = self.nwa.states.get(id) {
+                let mut took_explicit = false;
+                if let Some(transitions) = state.transitions.get(&symbol) {
+                    took_explicit = true;
+                    for (target, trans_weight) in transitions {
+                        let new_weight = weight & trans_weight;
+                        if !new_weight.is_empty() {
+                            *next_macrostate.entry(*target).or_default() |= &new_weight;
+                        }
                     }
                 }
-            }
-
-            // Default transitions
-            for def in &state.default {
-                if !took_explicit && !def.exceptions.contains(&symbol) {
-                    if def.target >= self.nwa.states.len() {
-                        continue;
-                    }
-                    let new_weight = weight & &def.weight;
-                    if !new_weight.is_empty() {
-                        total_weight |= &new_weight;
-                        *next_macrostate.entry(def.target).or_default() |= &new_weight;
+                for def in &state.default {
+                    if !took_explicit && !def.exceptions.contains(&symbol) {
+                        let new_weight = weight & &def.weight;
+                        if !new_weight.is_empty() {
+                            *next_macrostate.entry(def.target).or_default() |= &new_weight;
+                        }
                     }
                 }
             }
         }
+        let total_weight = next_macrostate.values().fold(Weight::zeros(), |acc, w| acc | w);
         (next_macrostate, total_weight)
-    }
-
-    /// Calculates and adds the default and exception transitions for a DWA state.
-    fn calculate_transitions(&mut self, current_macrostate: &WeightedMacrostate) {
-        let current_dwa_id = *self.macrostate_to_dwa_state.get(current_macrostate).unwrap();
-
-        let mut critical_symbols = BTreeSet::new();
-        for &id in current_macrostate.keys() {
-            if id >= self.nwa.states.len() {
-                continue;
-            }
-            let state = &self.nwa.states[id];
-            for &symbol in state.transitions.keys() {
-                critical_symbols.insert(symbol);
-            }
-            for def in &state.default {
-                for &symbol in &def.exceptions {
-                    critical_symbols.insert(symbol);
-                }
-            }
-        }
-
-        // Find a generic symbol that is not "critical" to determine the default transition.
-        let mut generic_symbol: i16 = 0;
-        while critical_symbols.contains(&generic_symbol) {
-            generic_symbol = generic_symbol.wrapping_add(1);
-        }
-
-        let (default_pre_closure, default_weight) = self.move_on_symbol(current_macrostate, generic_symbol);
-        let default_target_macrostate = self.epsilon_closure(&default_pre_closure);
-
-        if !default_target_macrostate.is_empty() {
-            let target_dwa_id = self.get_or_create_dwa_state(&default_target_macrostate);
-            self.dwa.set_default_transition(current_dwa_id, target_dwa_id, default_weight).unwrap();
-        }
-
-        for &symbol in &critical_symbols {
-            let (pre_closure, weight) = self.move_on_symbol(current_macrostate, symbol);
-            let target_macrostate = self.epsilon_closure(&pre_closure);
-
-            if target_macrostate != default_target_macrostate {
-                let target_dwa_id = self.get_or_create_dwa_state(&target_macrostate);
-                self.dwa.add_transition(current_dwa_id, symbol, target_dwa_id, weight).unwrap();
-            }
-        }
     }
 }
