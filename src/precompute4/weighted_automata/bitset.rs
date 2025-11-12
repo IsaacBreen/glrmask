@@ -4,7 +4,6 @@
 #![allow(clippy::needless_borrow)]
 
 use range_set_blaze::RangeSetBlaze;
-use serde::{Serialize, Serializer};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
@@ -20,26 +19,6 @@ pub struct SimpleBitset {
     pub(crate) rsb: RangeSetBlaze<usize>,
     pub(crate) fp: u64,
     is_all: bool,
-}
-
-impl Serialize for SimpleBitset {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        use serde::ser::SerializeSeq;
-        if self.is_all {
-            serializer.serialize_str("ALL")
-        } else if self.rsb.is_empty() {
-            serializer.serialize_seq(Some(0))?.end()
-        } else {
-            let mut seq = serializer.serialize_seq(None)?;
-            for range in self.rsb.ranges() {
-                seq.serialize_element(&(*range.start(), *range.end()))?;
-            }
-            seq.end()
-        }
-    }
 }
 
 // Fingerprint utilities

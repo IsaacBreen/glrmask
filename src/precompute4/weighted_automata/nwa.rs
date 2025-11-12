@@ -4,7 +4,6 @@
 #![allow(clippy::needless_borrow)]
 
 use super::common::{format_i16_char, NWAStateID, Weight};
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
@@ -23,7 +22,7 @@ impl Display for NWABuildError {
 }
 
 /// A default transition in an NWA. It is taken for any symbol that is NOT in its `exceptions` set.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct NWADefaultTransition {
     pub target: NWAStateID,
     pub weight: Weight,
@@ -32,7 +31,7 @@ pub struct NWADefaultTransition {
 /// - Non-epsilon transitions: unique target per input symbol.
 /// - Each transition carries a weight (Weight), which is intersected along the path; final states
 ///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NWAState {
     pub final_weight: Option<Weight>,
     /// Non-epsilon transitions: multiple targets per input symbol are allowed.
@@ -44,7 +43,7 @@ pub struct NWAState {
     pub default: Vec<NWADefaultTransition>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default)]
 pub struct NWAStates(pub Vec<NWAState>);
 
 impl NWAStates {
@@ -267,7 +266,7 @@ impl NWA {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NWABody {
     pub start_state: NWAStateID,
 }
@@ -278,7 +277,7 @@ impl Display for NWABody {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default)]
 pub struct NWA {
     pub states: NWAStates,
     pub body: NWABody,
