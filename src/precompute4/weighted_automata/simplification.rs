@@ -147,12 +147,6 @@ impl DWA {
                 });
 
             if !large {
-                if let Some(p) = &pb { p.set_message("push weights".to_string()); }
-                changed_any |=
-                    Self::run_pass_with_test(states, body, "push_weights", |s, b| {
-                        Self::push_weights(s, b)
-                    });
-
                 if let Some(p) = &pb { p.set_message("minimize".to_string()); }
                 changed_any |=
                     Self::run_pass_with_test(states, body, "minimize_partition_refinement", |s, b| {
@@ -306,108 +300,6 @@ impl DWA {
             }
         }
         changed_overall
-    }
-
-    pub fn push_weights(states: &mut DWAStates, body: &mut DWABody) -> bool {
-        let n = states.len();
-        if n == 0 {
-            return false;
-        }
-
-        // 1. Compute d[q] for all q (shortest distance to final state).
-        // d[q] = (sw(q) if any else ALL) & ( (⋁_{e: q->r} w(e) & d[r]) | (ρ(q) if any else ZEROS) )
-        let mut d = vec![Weight::zeros(); n];
-        for i in 0..n {
-            if let Some(fw) = &states[i].final_weight {
-                d[i] = fw.clone();
-            }
-        }
-
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for i in (0..n).rev() { // reverse order might converge faster
-                let mut future_weight = states[i].final_weight.clone().unwrap_or_else(Weight::zeros);
-                let st = &states[i];
-                for (_lbl, target, weight) in st.iter_edges() {
-                    if target < n {
-                        future_weight |= &(weight & &d[target]);
-                    }
-                }
-                if let Some(sw) = &st.state_weight {
-                    future_weight &= sw;
-                }
-                if future_weight != d[i] {
-                    d[i] = future_weight;
-                    changed = true;
-                }
-            }
-        }
-
-        // Precompute !d
-        let not_d: Vec<Weight> = d.iter().map(|w| !w).collect();
-        let mut any_change = false;
-
-        // 2. Update weights
-        // Start state's effective initial weight: λ'(q) ← λ(q) & d(q)
-        let start = body.start_state;
-        if start < n {
-            let st = &mut states[start];
-            let old_sw = st.state_weight.clone();
-            let new_sw = match &old_sw {
-                Some(sw) => sw & &d[start],
-                None => d[start].clone(),
-            };
-            if new_sw.is_empty() {
-                st.state_weight = None;
-            } else {
-                st.state_weight = Some(new_sw);
-            }
-            if st.state_weight != old_sw {
-                any_change = true;
-            }
-        }
-
-        for i in 0..n {
-            let st = &mut states[i];
-            // Final weights: ρ'(q) ← ρ(q) | !d(q)
-            let old_fw = st.final_weight.clone();
-            if st.final_weight.is_some() {
-                let new_fw = old_fw.as_ref().unwrap().clone() | &not_d[i];
-                if new_fw.is_empty() {
-                    st.final_weight = None;
-                } else {
-                    st.final_weight = Some(new_fw);
-                }
-            }
-            if st.final_weight != old_fw {
-                any_change = true;
-            }
-
-            // Edge weights: w'[e] = (w[e] | !d(p)) & d(n)
-            if let Some(target) = st.transitions.default {
-                if target < n {
-                    if let Some(w) = st.trans_weight_default.as_mut() {
-                        let old_w = w.clone();
-                        *w = (&*w | &not_d[i]) & &d[target];
-                        if *w != old_w { any_change = true; }
-                    }
-                }
-            }
-            let keys: Vec<i16> = st.transitions.exceptions.keys().copied().collect();
-            for ch in keys {
-                if let Some(&target) = st.transitions.exceptions.get(&ch) {
-                    if target < n {
-                        if let Some(w) = st.trans_weights_exceptions.get_mut(&ch) {
-                            let old_w = w.clone();
-                            *w = (&*w | &not_d[i]) & &d[target];
-                            if *w != old_w { any_change = true; }
-                        }
-                    }
-                }
-            }
-        }
-        any_change
     }
 
     pub fn propagate_future_weights(states: &mut DWAStates) -> bool {
@@ -822,6 +714,93 @@ impl DWA {
 }
 
 impl NWA {
+    pub fn push_weights(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 {
+            return false;
+        }
+
+        // 1. Compute d[q] for all q (shortest distance to final state).
+        // d[q] = ⋁_{\pi: q -> F} (w[\pi] & \rho(n[\pi]))
+        let mut d = vec![Weight::zeros(); n];
+        for i in 0..n {
+            if let Some(fw) = &self.states[i].final_weight {
+                d[i] = fw.clone();
+            }
+        }
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for i in (0..n).rev() { // reverse order might converge faster
+                let mut future_weight = self.states[i].final_weight.clone().unwrap_or_else(Weight::zeros);
+                let st = &self.states[i];
+
+                for (target, weight) in &st.epsilons {
+                    if *target < n {
+                        future_weight |= &(weight & &d[*target]);
+                    }
+                }
+                for (_, targets) in &st.transitions {
+                    for (target, weight) in targets {
+                        if *target < n {
+                            future_weight |= &(weight & &d[*target]);
+                        }
+                    }
+                }
+                for def in &st.default {
+                    if def.target < n {
+                        future_weight |= &(&def.weight & &d[def.target]);
+                    }
+                }
+
+                if future_weight != d[i] {
+                    d[i] = future_weight;
+                    changed = true;
+                }
+            }
+        }
+
+        let not_d: Vec<Weight> = d.iter().map(|w| !w).collect();
+        let mut any_change = false;
+
+        // 2. Update weights
+        for i in 0..n {
+            let st = &mut self.states[i];
+            // Final weights: ρ'(q) ← ρ(q) | !d(q)
+            let old_fw = st.final_weight.clone();
+            if st.final_weight.is_some() {
+                let new_fw = old_fw.as_ref().unwrap().clone() | &not_d[i];
+                if new_fw.is_empty() {
+                    st.final_weight = None;
+                } else {
+                    st.final_weight = Some(new_fw);
+                }
+            }
+            if st.final_weight != old_fw {
+                any_change = true;
+            }
+
+            // Edge weights: w'[e] = (w[e] | !d(p)) & d(n)
+            for (target, weight) in &mut st.epsilons { if *target < n { let old_w = weight.clone(); *weight = (&*weight & &d[*target]) | &not_d[i]; if *weight != old_w { any_change = true; } } }
+            for (_, targets) in &mut st.transitions { for (target, weight) in targets { if *target < n { let old_w = weight.clone(); *weight = (&*weight & &d[*target]) | &not_d[i]; if *weight != old_w { any_change = true; } } } }
+            for def in &mut st.default { if def.target < n { let old_w = def.weight.clone(); def.weight = (def.weight.clone() & &d[def.target]) | &not_d[i]; if def.weight != old_w { any_change = true; } } }
+        }
+
+        // Handle initial weight: λ'(start) = λ(start) & d(start)
+        let old_start = self.body.start_state;
+        if old_start < n && !d[old_start].is_all_fast() {
+            let new_start = self.states.add_state();
+            self.states.add_epsilon(new_start, old_start, d[old_start].clone());
+            self.body.start_state = new_start;
+            any_change = true;
+        }
+
+        any_change
+    }
+}
+
+impl NWA {
     fn run_pass(
         pb: &Option<ProgressBar>,
         msg: &str,
@@ -875,6 +854,7 @@ impl NWA {
             Self::run_pass(&pb, "collapse SCCs", &mut changed, || self.collapse_all_weight_epsilon_sccs());
             Self::run_pass(&pb, "prune unreachable", &mut changed, || self.prune_unreachable());
             Self::run_pass(&pb, "prune dead ends", &mut changed, || self.prune_dead_ends());
+            Self::run_pass(&pb, "push weights", &mut changed, || self.push_weights());
             Self::run_pass(&pb, "merge equivalent", &mut changed, || self.merge_equivalent_states_partition());
             Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
         }
