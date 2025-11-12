@@ -334,33 +334,6 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         |_node_data, node_idx, val| {
             let (mut nwa_body, tokens) = val;
             if !tokens.is_empty() {
-                // Simplify the NWA by determinizing and converting back.
-                // This is an expensive but powerful simplification step.
-                {
-                    let mut states = states_arena.borrow_mut();
-
-                    // Extract subgraph
-                    let mut sub_nwa_states = NWAStates::default();
-                    let (sub_start, _) = sub_nwa_states.copy_subgraph_from(&*states, nwa_body.start_state);
-                    let mut sub_nwa = NWA {
-                        states: sub_nwa_states,
-                        body: NWABody { start_state: sub_start },
-                    };
-                    sub_nwa.simplify();
-
-                    apply_cancellations(&mut sub_nwa);
-                    sub_nwa.simplify();
-
-                    // Determinize, simplify, convert back
-                    let mut temp_dwa = sub_nwa.determinize_to_dwa();
-                    temp_dwa.simplify();
-                    let new_nwa_from_dwa = NWA::from_dwa(&temp_dwa);
-
-                    // Copy back into shared arena
-                    let (new_start, _) = states.copy_subgraph_from(&new_nwa_from_dwa.states, new_nwa_from_dwa.body.start_state);
-                    nwa_body.start_state = new_start;
-                }
-
                 if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
                     for tokenizer_state_id in tokenizer_state_ids {
                         final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
@@ -394,12 +367,16 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
 
+    prune_continuations_from_final_states(&mut combined_nwa);
+    combined_nwa.simplify();
+    prune_continuations_from_final_states(&mut combined_nwa);
+    combined_nwa.simplify();
+    combined_nwa = NWA::from_dwa(&combined_nwa.determinize_to_dwa());
+
     let now = Instant::now();
     crate::debug!(4, "Starting negative code resolution...");
     apply_cancellations(&mut combined_nwa);
-    combined_nwa.simplify();
     apply_finality_fixpoint(&mut combined_nwa);
-    combined_nwa.simplify();
     remove_negative_transitions(&mut combined_nwa);
     combined_nwa.simplify();
     crate::debug!(4, "Negative code resolution took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
@@ -408,6 +385,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let now = Instant::now();
     crate::debug!(4, "Pruning continuations from final states...");
     prune_continuations_from_final_states(&mut combined_nwa);
+    combined_nwa.simplify();
     crate::debug!(4, "Pruning and simplifying took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after pruning:\n{}", combined_nwa.stats());
 
