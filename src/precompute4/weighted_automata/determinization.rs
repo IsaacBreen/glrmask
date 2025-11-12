@@ -262,8 +262,8 @@ impl<'a> Determinizer<'a> {
         self.compute_future_weights();
         self.precompute_eps_closures();
         self.build_macro_signatures();
-        self.precompute_signature_summaries();
         self.compile_steps();
+        self.precompute_signature_summaries();
         self.discover_composition_nodes();
         self.build_dwa()
     }
