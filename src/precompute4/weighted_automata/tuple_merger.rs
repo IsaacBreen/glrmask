@@ -85,6 +85,7 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 /// Symbol index in 0..alphabet_size.
 pub type Symbol = usize;
@@ -93,7 +94,7 @@ pub type Symbol = usize;
 pub type LocalState = usize;
 
 /// A K-tuple product point; coordinate i is either masked (None) or a concrete local state Some(id).
-pub type ProductTuple = Vec<Option<LocalState>>;
+pub type ProductTuple = Arc<[Option<LocalState>]>;
 
 /// Sparse encoding of one component's local transitions:
 /// For each local state s, a map from Symbol -> successor local state.
@@ -123,7 +124,7 @@ fn unify_tuples(a: &ProductTuple, b: &ProductTuple) -> Option<ProductTuple> {
             (None, None) => out.push(None),
         }
     }
-    Some(out)
+    Some(out.into())
 }
 
 /// Fast compatibility check and cost computation used during candidate selection.
@@ -190,7 +191,7 @@ pub fn successor_tuple(tuple: &ProductTuple, symbol: Symbol, components: &[Spars
             None => out.push(None),
         }
     }
-    out
+    out.into()
 }
 
 /// A dense encoding for components to speed up successor computations.
@@ -236,7 +237,7 @@ fn successor_tuple_dense(tuple: &ProductTuple, symbol: Symbol, dense: &DenseComp
             None => out.push(None),
         }
     }
-    out
+    out.into()
 }
 
 /// A complete problem instance.
@@ -611,39 +612,39 @@ mod tests {
     #[test]
     fn test_unify_tuples() {
         assert_eq!(
-            super::unify_tuples(&vec![Some(1), None], &vec![None, Some(2)]),
-            Some(vec![Some(1), Some(2)])
+            super::unify_tuples(&vec![Some(1), None].into(), &vec![None, Some(2)].into()),
+            Some(vec![Some(1), Some(2)].into())
         );
         assert_eq!(
-            super::unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]),
-            Some(vec![Some(1), Some(2)])
+            super::unify_tuples(&vec![Some(1), Some(2)].into(), &vec![Some(1), Some(2)].into()),
+            Some(vec![Some(1), Some(2)].into())
         );
         assert_eq!(
-            super::unify_tuples(&vec![Some(1), None], &vec![Some(1), Some(3)]),
-            Some(vec![Some(1), Some(3)])
+            super::unify_tuples(&vec![Some(1), None].into(), &vec![Some(1), Some(3)].into()),
+            Some(vec![Some(1), Some(3)].into())
         );
         assert_eq!(
-            super::unify_tuples(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)]),
+            super::unify_tuples(&vec![Some(1), Some(2)].into(), &vec![Some(1), Some(3)].into()),
             None
         );
         assert_eq!(
-            super::unify_tuples(&vec![None, None], &vec![Some(1), Some(2)]),
-            Some(vec![Some(1), Some(2)])
+            super::unify_tuples(&vec![None, None].into(), &vec![Some(1), Some(2)].into()),
+            Some(vec![Some(1), Some(2)].into())
         );
     }
 
     #[test]
     fn test_is_less_or_equal() {
         // x <= y
-        assert!(is_less_or_equal(&vec![None, None], &vec![Some(1), Some(2)]));
-        assert!(is_less_or_equal(&vec![Some(1), None], &vec![Some(1), Some(2)]));
-        assert!(is_less_or_equal(&vec![None, Some(2)], &vec![Some(1), Some(2)]));
-        assert!(is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(2)]));
+        assert!(is_less_or_equal(&vec![None, None].into(), &vec![Some(1), Some(2)].into()));
+        assert!(is_less_or_equal(&vec![Some(1), None].into(), &vec![Some(1), Some(2)].into()));
+        assert!(is_less_or_equal(&vec![None, Some(2)].into(), &vec![Some(1), Some(2)].into()));
+        assert!(is_less_or_equal(&vec![Some(1), Some(2)].into(), &vec![Some(1), Some(2)].into()));
 
         // x not <= y
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), None])); // x is more specific
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![Some(1), Some(3)])); // conflict
-        assert!(!is_less_or_equal(&vec![Some(1), Some(2)], &vec![None, Some(2)])); // x is more specific
+        assert!(!is_less_or_equal(&vec![Some(1), Some(2)].into(), &vec![Some(1), None].into())); // x is more specific
+        assert!(!is_less_or_equal(&vec![Some(1), Some(2)].into(), &vec![Some(1), Some(3)].into())); // conflict
+        assert!(!is_less_or_equal(&vec![Some(1), Some(2)].into(), &vec![None, Some(2)].into())); // x is more specific
     }
 
     #[test]
@@ -655,14 +656,14 @@ mod tests {
         let comp1 = vec![BTreeMap::from([(1usize, 0usize)])];
         let components = vec![comp0, comp1];
 
-        let p = vec![Some(0), Some(0)];
-        assert_eq!(successor_tuple(&p, 0, &components), vec![Some(0), None]);
-        assert_eq!(successor_tuple(&p, 1, &components), vec![None, Some(0)]);
-        assert_eq!(successor_tuple(&p, 2, &components), vec![None, None]);
+        let p: ProductTuple = vec![Some(0), Some(0)].into();
+        assert_eq!(successor_tuple(&p, 0, &components), vec![Some(0), None].into());
+        assert_eq!(successor_tuple(&p, 1, &components), vec![None, Some(0)].into());
+        assert_eq!(successor_tuple(&p, 2, &components), vec![None, None].into());
 
-        let q = vec![Some(0), None];
-        assert_eq!(successor_tuple(&q, 0, &components), vec![Some(0), None]);
-        assert_eq!(successor_tuple(&q, 1, &components), vec![None, None]);
+        let q: ProductTuple = vec![Some(0), None].into();
+        assert_eq!(successor_tuple(&q, 0, &components), vec![Some(0), None].into());
+        assert_eq!(successor_tuple(&q, 1, &components), vec![None, None].into());
     }
 
     #[test]
@@ -672,15 +673,15 @@ mod tests {
         let comp1 = vec![BTreeMap::from([(1usize, 0usize)])];
         let components = vec![comp0, comp1];
         let alphabet_size = 3;
-        let start_tuple = vec![Some(0), Some(0)];
+        let start_tuple: ProductTuple = vec![Some(0), Some(0)].into();
 
         let (states, point_map) =
-            merge_and_build_automaton(start_tuple, &components, alphabet_size);
+            merge_and_build_automaton(start_tuple.clone(), &components, alphabet_size);
 
         // The improved algorithm should find a single representative, because all
         // successors can be merged with the start representative with 0 specificity increase.
         assert_eq!(states.len(), 1);
-        assert_eq!(states[0], vec![Some(0), Some(0)]);
+        assert_eq!(states[0], start_tuple);
 
         let succ0 = successor_tuple(&states[0], 0, &components);
         let succ1 = successor_tuple(&states[0], 1, &components);
@@ -706,7 +707,7 @@ mod tests {
         let comp1 = vec![c1_s0, c1_s1];
 
         let components = vec![comp0, comp1];
-        let inst = Instance::new(vec![Some(0), Some(0)], components, 2);
+        let inst = Instance::new(vec![Some(0), Some(0)].into(), components, 2);
 
         let sol = synthesize_greedy(&inst);
         sol.verify(&inst).expect("greedy solution must satisfy constraints");
@@ -736,7 +737,7 @@ mod tests {
         //
         // Worklist empty. Final R = [(0,0), (1,1)]. Size 2. This is minimal.
         assert_eq!(sol.reps.len(), 2);
-        assert_eq!(sol.reps[0], vec![Some(0), Some(0)]);
-        assert_eq!(sol.reps[1], vec![Some(1), Some(1)]);
+        assert_eq!(sol.reps[0], vec![Some(0), Some(0)].into());
+        assert_eq!(sol.reps[1], vec![Some(1), Some(1)].into());
     }
 }
