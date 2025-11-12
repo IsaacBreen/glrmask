@@ -134,6 +134,13 @@ impl SimpleBitset {
         (self & rhs) == *self
     }
 
+    pub fn complement(&self) -> SimpleBitset {
+        if self.is_empty() { return SimpleBitset::all(); }
+        if self.is_all_fast() { return SimpleBitset::zeros(); }
+        let rsb = &universe_rsb() - &self.rsb;
+        SimpleBitset::with_new_rsb_unary(self, rsb, 0xD3)
+    }
+
     pub fn insert(&mut self, item: usize) {
         if self.is_all_fast() { return; }
         self.rsb.insert(item);
