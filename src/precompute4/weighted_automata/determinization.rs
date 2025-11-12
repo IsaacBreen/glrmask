@@ -845,42 +845,43 @@ impl DetDFA {
 
             // Compute preimage of block b under symbol sym
             let mut pre: Vec<usize> = Vec::new();
-            for &v in &blocks[b] { pre.extend_from_slice(&inv[sym][v]); }
+            for &v in &blocks[b] {
+                pre.extend_from_slice(&inv[sym][v]);
+            }
             if pre.is_empty() {
                 continue;
             }
-            pre.sort_unstable();
-            pre.dedup();
 
-            // For each block, split by intersection with pre
-            let mut affected: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
-            for &s in &pre { let pid = part_id[s]; affected.entry(pid).or_default().0.push(s); }
-            for (pid, (ref mut in_pre, ref mut not_in_pre)) in affected.iter_mut() {
-                // Fill not_in_pre
-                for &s in &blocks[*pid] { if !in_pre.binary_search(&s).is_ok() { not_in_pre.push(s); } }
+            // Find which blocks are affected by the preimage.
+            let mut affected_pids: Vec<usize> = pre.iter().map(|&s| part_id[s]).collect();
+            affected_pids.sort_unstable();
+            affected_pids.dedup();
+
+            // Use a boolean array for O(1) membership testing in `pre`.
+            let mut pre_set = vec![false; n];
+            for &s in &pre {
+                pre_set[s] = true;
             }
 
-            let mut to_replace: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
+            for &pid in &affected_pids {
+                let (in_pre, not_in_pre): (Vec<usize>, Vec<usize>) =
+                    blocks[pid].iter().copied().partition(|&s| pre_set[s]);
 
-            for (pid, (in_pre, not_in_pre)) in affected.into_iter() {
                 if in_pre.is_empty() || not_in_pre.is_empty() {
                     continue;
                 }
-                to_replace.push((pid, in_pre, not_in_pre));
-            }
 
-            if to_replace.is_empty() {
-                continue;
-            }
-
-            // Apply replacements (block splits)
-            for (pid, mut in_pre, mut not_in_pre) in to_replace {
-                in_pre.sort_unstable();
-                not_in_pre.sort_unstable();
-
+                // We have a split. The original block `pid` is now split.
                 let pid2 = blocks.len();
-                blocks.push(not_in_pre);
-                blocks[pid] = in_pre;
+
+                // We will put the smaller part in a new block `pid2` and update the existing `pid` with the larger part.
+                if in_pre.len() <= not_in_pre.len() {
+                    blocks.push(in_pre);
+                    blocks[pid] = not_in_pre;
+                } else {
+                    blocks.push(not_in_pre);
+                    blocks[pid] = in_pre;
+                }
 
                 // Update part_id map for all states in the newly created blocks
                 for &s in &blocks[pid] { part_id[s] = pid; }
@@ -894,8 +895,8 @@ impl DetDFA {
                         worklist.insert((pid2, sym2));
                     } else {
                         // The original block was not on the worklist. Add the smaller of the two new blocks.
-                        let (smaller_pid, _) = if blocks[pid].len() <= blocks[pid2].len() { (pid, pid2) } else { (pid2, pid) };
-                        worklist.insert((smaller_pid, sym2));
+                        // We arranged for pid2 to hold the smaller (or equal) part.
+                        worklist.insert((pid2, sym2));
                     }
                 }
             }
