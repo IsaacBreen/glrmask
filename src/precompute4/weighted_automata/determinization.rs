@@ -80,25 +80,14 @@ fn subset_key(sub: &WeightedSubset) -> String {
 // Output: closure map mapping every reachable state via ε-paths to the union of all
 // weights of those ε-paths (seed_weight ∧ ε-edges ∧ ...).
 fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap {
-    let mut closure: ClosureMap = ClosureMap::new();
-    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-
-    for (sid, w) in seed {
-        if !is_zero(w) {
-            let prev = closure.get(sid).cloned().unwrap_or_else(Weight::zeros);
-            let neww = weight_union(prev.clone(), w);
-            if neww != prev {
-                closure.insert(*sid, neww.clone());
-                queue.push_back(*sid);
-            }
-        }
-    }
+    let mut closure: ClosureMap = seed.clone();
+    closure.retain(|_, w| !is_zero(w));
+    let mut queue: VecDeque<NWAStateID> = closure.keys().copied().collect();
 
     while let Some(u) = queue.pop_front() {
-        let uw = closure.get(&u).cloned().unwrap_or_else(Weight::zeros);
-        if is_zero(&uw) {
-            continue;
-        }
+        // The state must be in the closure map. If not, something is wrong.
+        let uw = closure.get(&u).unwrap().clone();
+
         for (v, w_eps) in &nwa_states[u].epsilons {
             let cand = weight_intersection(&uw, w_eps);
             if is_zero(&cand) {
