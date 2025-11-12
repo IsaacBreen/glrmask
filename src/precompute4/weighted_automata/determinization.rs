@@ -286,6 +286,20 @@ impl<'a> Determinizer<'a> {
 
         let id = self.dwa.add_state();
 
+        // DEBUG: Log information about newly created states periodically.
+        if id > 0 && id % 1000 == 0 {
+            eprintln!("\n[DEBUG] New DWA state #{}", id);
+            eprintln!("  - From subset with {} NWA states.", subset_clean.len());
+            if subset_clean.len() < 10 {
+                let weight_summary: String = subset_clean
+                    .iter()
+                    .map(|(sid, w)| format!("{}({})", sid, w.len()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                eprintln!("  - Subset (state_id(weight_bits)): {{{}}}", weight_summary);
+            }
+        }
+
         // Compute ε-closure plus state-entry and final weights.
         let closure = epsilon_closure(&self.nwa.states, &subset_clean);
         let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
@@ -325,6 +339,16 @@ impl<'a> Determinizer<'a> {
 
         // exception labels are all explicit labels and default exceptions visible in closure
         let exception_labels = collect_exception_labels(&self.nwa.states, closure);
+
+        // DEBUG: Log branching factor for this state.
+        if sid > 0 && sid % 1000 == 0 {
+            eprintln!(
+                "[DEBUG] Expanding DWA state #{}: found {} exception labels.",
+                sid,
+                exception_labels.len()
+            );
+        }
+
         if let Some(pb) = &labels_pb {
             pb.set_length(exception_labels.len() as u64);
         }
@@ -534,6 +558,9 @@ impl NWA {
         }
 
         // General case
+        eprintln!(
+            "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
+        );
         if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
             return DWA::new();
         }
