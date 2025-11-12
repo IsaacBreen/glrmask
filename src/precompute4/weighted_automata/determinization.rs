@@ -711,35 +711,29 @@ impl<'a> Determinizer<'a> {
     // Merge heuristic: avoid recomputing target maps for entire gates repeatedly by caching per-atom;
     // then register the chosen node's growth into indices.
     fn register_incoming_and_maybe_update_cache(&mut self, idx: usize, incoming: &Weight, map: &HashMap<usize, Weight>) {
-        // Before modifying node, check whether macro keys grow to update size_index and invalidate per-atom cache.
         let old_size = self.nodes[idx].macro_keys.len();
-        let mut added_macro_key = false;
-        for k in map.keys() {
-            if self.nodes[idx].macro_keys.insert(*k) {
-                added_macro_key = true;
-            }
-        }
-        if added_macro_key {
-            if let Some(set) = self.size_index.get_mut(&old_size) {
-                set.remove(&idx);
-                if set.is_empty() { self.size_index.remove(&old_size); }
-            }
-        }
 
-        // Update gates
+        // Update gates and invalidate cache if they change.
         if self.propagate_weights_to_node(idx, map) {
             self.enqueue_node(idx);
-        }
-
-        // Grow bucket if size changed
-        let new_size = self.nodes[idx].macro_keys.len();
-        if added_macro_key {
-            self.size_index.entry(new_size).or_default().insert(idx);
-            // Invalidate per-atom cache since gates changed
+            // Invalidate per-atom cache since gates changed.
             self.nodes[idx].out_cache_by_atom.clear();
+
+            // Update macro keys and size index if needed.
+            for k in map.keys() {
+                self.nodes[idx].macro_keys.insert(*k);
+            }
+            let new_size = self.nodes[idx].macro_keys.len();
+            if new_size != old_size {
+                if let Some(set) = self.size_index.get_mut(&old_size) {
+                    set.remove(&idx);
+                    if set.is_empty() { self.size_index.remove(&old_size); }
+                }
+                self.size_index.entry(new_size).or_default().insert(idx);
+            }
         }
 
-        // Update incoming coverage and AtomIndex
+        // Update incoming coverage and AtomIndex for the new incoming weight.
         let prior = self.nodes[idx].incoming_weight_union.clone();
         let delta = incoming - &prior;
         if !delta.is_empty() {
