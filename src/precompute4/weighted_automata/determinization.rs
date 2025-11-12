@@ -21,9 +21,8 @@ impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
         let now = Instant::now();
         
-        // Pre-simplifying the NWA can significantly reduce the complexity of determinization.
         let mut nwa = self.clone();
-        nwa.simplify(); // Assuming `simplify` exists and is beneficial.
+        nwa.simplify();
 
         if is_debug_level_enabled(5) {
             eprintln!("NWA after simplify:\n{}", nwa);
@@ -47,19 +46,9 @@ impl NWA {
 struct Determinizer<'a> {
     nwa: &'a NWA,
     dwa: DWA,
-
-    /// A queue of DWA state IDs that need to be processed.
     work_queue: VecDeque<StateID>,
-
-    /// Maps a canonical weighted subset to the DWA state ID we've created for it.
-    /// This is the core of the subset construction, preventing duplicate DWA states.
     dwa_state_map: BTreeMap<WeightedSubset, StateID>,
-
-    /// Stores the weighted subset for each DWA state ID.
     weighted_subsets: Vec<WeightedSubset>,
-
-    /// Cache for epsilon-closure computations, which are expensive.
-    /// Arc is used to avoid cloning large BTreeMaps.
     eps_closure_cache: HashMap<NWAStateID, Arc<WeightedSubset>>,
 }
 
@@ -67,7 +56,7 @@ impl<'a> Determinizer<'a> {
     fn new(nwa: &'a NWA) -> Self {
         Self {
             nwa,
-            dwa: DWA::new(),
+            dwa: DWA::new(), // Creates a DWA with one state at index 0
             work_queue: VecDeque::new(),
             dwa_state_map: BTreeMap::new(),
             weighted_subsets: Vec::new(),
@@ -80,12 +69,17 @@ impl<'a> Determinizer<'a> {
         // 1. The initial DWA state is the epsilon-closure of the NWA's start state.
         let start_subset = self.compute_epsilon_closure(self.nwa.body.start_state);
         if start_subset.is_empty() {
-            // The NWA accepts no strings. Return an empty DWA.
+            // The NWA accepts no strings. The default DWA correctly accepts nothing.
             return DWA::new();
         }
 
-        let start_dwa_id = self.get_or_create_dwa_state(&start_subset);
-        self.dwa.body.start_state = start_dwa_id;
+        // --- FIX START ---
+        // Manually set up the start state (ID 0), which already exists in the DWA.
+        let start_dwa_id = self.dwa.body.start_state; // This is guaranteed to be 0
+        self.dwa_state_map.insert(start_subset.as_ref().clone(), start_dwa_id);
+        self.weighted_subsets.push(start_subset.as_ref().clone());
+        self.work_queue.push_back(start_dwa_id);
+        // --- FIX END ---
 
         let pb = Self::progress_bar(0, "Discovering states");
 
@@ -93,6 +87,7 @@ impl<'a> Determinizer<'a> {
         while let Some(dwa_id) = self.work_queue.pop_front() {
             if let Some(p) = &pb { p.inc(1); }
 
+            // This line is now safe because `weighted_subsets` is kept in sync with DWA state IDs.
             let p_prime = self.weighted_subsets[dwa_id].clone();
 
             // 3. For the current DWA state, compute its final weight.
@@ -106,7 +101,6 @@ impl<'a> Determinizer<'a> {
 
             // 5. For each transition, create the target DWA state and add the transition.
             for (label, q_prime) in outgoing_transitions {
-                // The weight of the DWA transition is the union of all weights in the target subset.
                 let w_prime = q_prime.values().fold(Weight::zeros(), |mut acc, w| {
                     acc |= w;
                     acc
@@ -122,27 +116,26 @@ impl<'a> Determinizer<'a> {
 
         if let Some(p) = pb { p.finish_with_message(format!("Discovered {} DWA states", self.dwa.states.len())); }
 
-        // The DWA is now fully constructed.
-        // An optional minimization step could be added here.
         std::mem::take(&mut self.dwa)
     }
 
     /// For a given weighted subset, finds or creates a corresponding DWA state.
-    /// If a new state is created, it's added to the work queue.
     fn get_or_create_dwa_state(&mut self, subset: &WeightedSubset) -> StateID {
         if let Some(&id) = self.dwa_state_map.get(subset) {
             return id;
         }
 
+        // This is for a *new* state, so we add one to the DWA.
         let new_id = self.dwa.add_state();
         self.dwa_state_map.insert(subset.clone(), new_id);
+
+        // The new subset corresponds to the new_id. This keeps the vectors in sync.
         self.weighted_subsets.push(subset.clone());
         self.work_queue.push_back(new_id);
         new_id
     }
 
     /// Computes the epsilon-closure from a given NWA state.
-    /// The result is a weighted subset of all reachable states via epsilon paths.
     fn compute_epsilon_closure(&mut self, start_state: NWAStateID) -> Arc<WeightedSubset> {
         if let Some(cached) = self.eps_closure_cache.get(&start_state) {
             return cached.clone();
@@ -151,7 +144,6 @@ impl<'a> Determinizer<'a> {
         let mut closure = WeightedSubset::new();
         let mut q: VecDeque<(NWAStateID, Weight)> = VecDeque::new();
 
-        // Start with the state itself, with the identity weight 'all'.
         closure.insert(start_state, Weight::all());
         q.push_back((start_state, Weight::all()));
 
@@ -163,7 +155,7 @@ impl<'a> Determinizer<'a> {
                 let current_v_weight = closure.entry(*v).or_default();
                 if !new_weight.is_subset_of(current_v_weight) {
                     *current_v_weight |= &new_weight;
-                    q.push_back((*v, new_weight));
+                    q.push_back((*v, new_weight.clone())); // Clone here
                 }
             }
         }
@@ -173,23 +165,18 @@ impl<'a> Determinizer<'a> {
         result
     }
 
-    /// For a given DWA state (p_prime), find all outgoing labeled transitions from its
-    /// constituent NWA states and compute the resulting target weighted subsets.
+    /// For a given DWA state (p_prime), find all outgoing labeled transitions.
     fn collect_outgoing_transitions(&mut self, p_prime: &WeightedSubset) -> BTreeMap<i16, WeightedSubset> {
         let mut transitions = BTreeMap::<i16, WeightedSubset>::new();
 
-        // For each NWA state in our current DWA state...
         for (&nwa_state, residual_weight) in p_prime {
             let state = &self.nwa.states[nwa_state];
 
-            // ...consider all its labeled transitions.
             for (label, targets) in &state.transitions {
                 for (target_state, trans_weight) in targets {
                     let propagated_weight = residual_weight & trans_weight;
                     if propagated_weight.is_empty() { continue; }
 
-                    // The result of taking this transition is the ε-closure of the target state,
-                    // weighted by the path we took to get there.
                     let target_closure = self.compute_epsilon_closure(*target_state);
                     let next_subset = transitions.entry(*label).or_default();
 
@@ -206,7 +193,6 @@ impl<'a> Determinizer<'a> {
     }
 
     /// Calculates the final weight of a DWA state.
-    /// This is the union of weights from all paths that end in a final NWA state.
     fn calculate_final_weight(&self, p_prime: &WeightedSubset) -> Weight {
         let mut final_weight = Weight::zeros();
         for (&nwa_state, residual_weight) in p_prime {
