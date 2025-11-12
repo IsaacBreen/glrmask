@@ -376,7 +376,6 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let now = Instant::now();
     crate::debug!(4, "Pruning continuations from final states...");
     prune_continuations_from_final_states(&mut combined_nwa);
-    combined_nwa.simplify();
     crate::debug!(4, "Pruning and simplifying took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after pruning:\n{}", combined_nwa.stats());
 
