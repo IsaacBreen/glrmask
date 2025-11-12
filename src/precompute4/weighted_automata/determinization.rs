@@ -233,22 +233,33 @@ fn union_over_values(map: &WeightedSubset) -> Weight {
     acc
 }
 
-// Compute the final weight for a DWA state derived from a closure.
-fn compute_final_weight(
+// Compute the state-entry weight (union over closure weights) and final weight
+// (union over closure_weight ∧ final_weight) for a DWA state derived from 'subset'.
+fn compute_state_and_final_weights(
     nwa: &NWA,
     closure: &ClosureMap,
-) -> Option<Weight> {
+) -> (Option<Weight>, Option<Weight>) {
+    // Entry weight is union over closure weights.
+    let mut entry = Weight::zeros();
+    for w in closure.values() {
+        let u = entry.clone() | w.clone();
+        entry = u;
+    }
+    let entry_opt = if entry.is_empty() { None } else { Some(entry) };
+
     // Final weight is union over closure_weight ∧ final_weight(q)
     let mut finalw = Weight::zeros();
     for (sid, cw) in closure {
         if let Some(fw) = &nwa.states[*sid].final_weight {
             let cand = cw & fw;
             if !is_zero(&cand) {
-                weight_union_in_place(&mut finalw, &cand);
+                let u = finalw.clone() | cand;
+                finalw = u;
             }
         }
     }
-    if finalw.is_empty() { None } else { Some(finalw) }
+    let final_opt = if finalw.is_empty() { None } else { Some(finalw) };
+    (entry_opt, final_opt)
 }
 
 // Register (or retrieve) a DWA state corresponding to a weighted subset (raw-map).
@@ -260,7 +271,9 @@ struct Determinizer<'a> {
     nwa: &'a NWA,
     // Map subset key -> DWA state id.
     seen: HashMap<String, usize>,
-    // For each DWA state id, we store its closure.
+    // For each DWA state id, we store its weighted subset (raw-map) and its closure.
+    // This avoids recomputation and lets us build outgoing transitions efficiently.
+    subsets: Vec<WeightedSubset>,
     closures: Vec<ClosureMap>,
     // Work queue of DWA state ids to expand.
     queue: VecDeque<usize>,
@@ -280,6 +293,7 @@ impl<'a> Determinizer<'a> {
         Determinizer {
             nwa,
             seen: HashMap::new(),
+            subsets: Vec::new(),
             closures: Vec::new(),
             queue: VecDeque::new(),
             dwa,
@@ -287,19 +301,14 @@ impl<'a> Determinizer<'a> {
     }
 
     fn register_state(&mut self, subset: WeightedSubset) -> usize {
-        // Drop empty weights from raw subset
+        // Drop empty weights
         let mut subset_clean: WeightedSubset = WeightedSubset::new();
         for (sid, w) in subset {
             if !is_zero(&w) {
                 subset_clean.insert(sid, w);
             }
         }
-
-        // State identity is determined by the epsilon closure of the raw subset.
-        // If two different raw subsets have the same closure, they are equivalent.
-        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
-        let key = subset_key(&closure);
-
+        let key = subset_key(&subset_clean);
         if let Some(&id) = self.seen.get(&key) {
             return id;
         }
@@ -307,23 +316,29 @@ impl<'a> Determinizer<'a> {
         // Create new DWA state
         let id = self.dwa.add_state();
 
-        // Set final weight from the closure. State-entry weights are not used;
-        // all weight information is on transitions.
-        if let Some(w) = compute_final_weight(self.nwa, &closure) {
+        // Compute epsilon-closure and from it the state-entry weight and final weight.
+        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+        let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
+        if let Some(w) = entry_opt {
+            // State-entry weight applied upon entering.
+            let _ = self.dwa.set_state_weight(id, w);
+        }
+        if let Some(w) = final_opt {
             let _ = self.dwa.set_final_weight(id, w);
         }
 
         self.seen.insert(key, id);
+        self.subsets.push(subset_clean);
         self.closures.push(closure);
         self.queue.push_back(id);
         id
     }
 
     fn expand_state(&mut self, sid: usize) {
+        // Get closure for this state; compute S_total of labels, then default and exceptions.
         // We must calculate all next subsets before calling self.register_state to avoid
-        // mutable borrow of self invalidating the immutable borrow of self.closures[sid].
-        // We clone the closure to work around the borrow checker.
-        let closure = self.closures[sid].clone();
+        // mutable borrow of self.closures invalidating the immutable borrow of self.closures[sid].
+        let closure = &self.closures[sid];
 
         // If closure is empty, there are no outgoing transitions.
         if closure.is_empty() {
@@ -331,23 +346,23 @@ impl<'a> Determinizer<'a> {
         }
 
         // 1. Compute exception labels (explicit labels + default exceptions).
-        let exception_labels = collect_exception_labels(&self.nwa.states, &closure);
+        let exception_labels = collect_exception_labels(&self.nwa.states, closure);
 
-        // 2. Compute default ("others") next-subset and its transition weight. The transition
-        // weight is the union of weights of the raw paths *before* epsilon closure.
-        let others_subset = next_subset_for_others(&self.nwa.states, &closure);
+        // 2. Compute default ("others") next-subset and edge-weight.
+        let others_subset = next_subset_for_others(&self.nwa.states, closure);
         let others_weight = union_over_values(&others_subset);
 
         // 3. Pre-calculate all exception subsets and weights.
         let mut exception_data: BTreeMap<i16, (WeightedSubset, Weight)> = BTreeMap::new();
         for ch in &exception_labels {
-            let sub_ch = next_subset_for_label(&self.nwa.states, &closure, *ch);
+            let sub_ch = next_subset_for_label(&self.nwa.states, closure, *ch);
             let w_ch = union_over_values(&sub_ch);
             // Only store non-empty transitions
             if !sub_ch.is_empty() && !is_zero(&w_ch) {
                 exception_data.insert(*ch, (sub_ch, w_ch));
             }
         }
+        // Immutable borrow of `closure` ends here.
 
         // 4. Install default transition if non-empty.
         let mut default_target_id: Option<usize> = None;
@@ -364,6 +379,7 @@ impl<'a> Determinizer<'a> {
         // 5. For each pre-calculated exception label, register the state and add an explicit exception
         //    only if it differs from default.
         for (ch, (sub_ch, w_ch)) in exception_data {
+            // sub_ch and w_ch are guaranteed to be non-empty by the check in step 3.
             let to_ch_id = self.register_state(sub_ch);
 
             // Decide whether we need an exception for ch.
@@ -374,7 +390,8 @@ impl<'a> Determinizer<'a> {
                     if def_id != to_ch_id {
                         true
                     } else {
-                        // Weights must also match.
+                        // Compare weights: if w_ch differs from default weight, we need exception to override the weight.
+                        // Get the default weight from current DWA state's stored default; we have it as others_weight.
                         w_ch != others_weight
                     }
                 }
@@ -410,25 +427,15 @@ impl NWA {
 
         let mut det = Determinizer::new(self);
 
-        // The initial DWA state corresponds to the epsilon closure of the NWA start state.
+        // Start subset: { start_state -> 1 (Weight::all) }.
         let mut start_subset: WeightedSubset = WeightedSubset::new();
         start_subset.insert(self.body.start_state, Weight::all());
-
-        // We register the raw subset. `register_state` will compute its closure,
-        // use that for the key, and set the final weight if needed.
         let start_id = det.register_state(start_subset);
         det.dwa.body.start_state = start_id;
 
         // BFS expand all reachable DWA states.
         while let Some(sid) = det.queue.pop_front() {
             det.expand_state(sid);
-        }
-
-        // If the NWA was empty or only had a non-final start state, determinization
-        // might produce an empty DWA. Ensure there's at least a start state.
-        if det.dwa.states.0.is_empty() {
-            det.dwa.add_state();
-            det.dwa.body.start_state = 0;
         }
 
         det.dwa
