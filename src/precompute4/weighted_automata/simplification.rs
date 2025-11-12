@@ -854,8 +854,8 @@ impl NWA {
             Self::run_pass(&pb, "collapse SCCs", &mut changed, || self.collapse_all_weight_epsilon_sccs());
             Self::run_pass(&pb, "prune unreachable", &mut changed, || self.prune_unreachable());
             Self::run_pass(&pb, "prune dead ends", &mut changed, || self.prune_dead_ends());
-            Self::run_pass(&pb, "push weights", &mut changed, || self.push_weights());
             Self::run_pass(&pb, "merge equivalent", &mut changed, || self.merge_equivalent_states_partition());
+            Self::run_pass(&pb, "push weights", &mut changed, || self.push_weights());
             Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
         }
         if let Some(p) = &pb { p.finish_with_message(format!("Simplified to {} states", self.states.len())); }
