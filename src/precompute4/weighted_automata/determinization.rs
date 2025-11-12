@@ -145,64 +145,62 @@ impl<'a> Determinizer<'a> {
 
     // --- REIMPLEMENTED FUNCTION ---
     fn collect_outgoing_transitions(&mut self, p_prime: &WeightedSubset) -> (Option<WeightedSubset>, BTreeMap<i16, WeightedSubset>) {
-        let mut default_target = WeightedSubset::new();
-        let mut exception_targets: BTreeMap<i16, WeightedSubset> = BTreeMap::new();
+        let mut transitions_map: BTreeMap<i16, WeightedSubset> = BTreeMap::new();
         let mut relevant_labels = BTreeSet::new();
 
-        // 1. First, collect all explicitly handled labels and compute their targets.
-        // Also, compute the "base" default target from NWA default transitions.
-        for (&nwa_state, residual_weight) in p_prime {
+        // 1. Collect all labels that need special handling.
+        for (&nwa_state, _) in p_prime {
             let state = &self.nwa.states[nwa_state];
-
-            // Handle explicit transitions
-            for (&label, targets) in &state.transitions {
-                relevant_labels.insert(label);
-                let target_subset = exception_targets.entry(label).or_default();
-                for (target_state, trans_weight) in targets {
-                    self.propagate_weight(target_subset, *target_state, residual_weight, trans_weight);
-                }
-            }
-
-            // Handle default transitions
-            for default_trans in &state.default {
-                // Add exceptions to the set of labels we need to check later
-                for &label in &default_trans.exceptions {
-                    relevant_labels.insert(label);
-                }
-                // Propagate weight to the main default target
-                self.propagate_weight(&mut default_target, default_trans.target, residual_weight, &default_trans.weight);
+            relevant_labels.extend(state.transitions.keys());
+            for default in &state.default {
+                relevant_labels.extend(&default.exceptions);
             }
         }
 
-        // 2. Now, for each relevant label, we must compute its full target.
-        // Some of it may have come from explicit transitions (already in `exception_targets`),
-        // and some may come from default transitions that *don't* except this label.
+        // 2. For each special label, compute its precise target subset.
         for &label in &relevant_labels {
-            let target_subset = exception_targets.entry(label).or_default();
+            let target_subset = transitions_map.entry(label).or_default();
             for (&nwa_state, residual_weight) in p_prime {
-                let state = &self.nwa.states[nwa_state];
-                // If this state has an explicit transition on this label, it was already handled.
-                if state.transitions.contains_key(&label) {
-                    continue;
-                }
-                // Otherwise, check its defaults.
-                for default_trans in &state.default {
-                    if !default_trans.exceptions.contains(&label) {
-                        self.propagate_weight(target_subset, default_trans.target, residual_weight, &default_trans.weight);
-                    }
-                }
+                self.compute_target_for_state(target_subset, nwa_state, label, residual_weight);
             }
         }
 
-        // 3. Prune exceptions that are identical to the default.
+        // 3. Compute the target for a generic default character.
+        let generic_char = relevant_labels.iter().max().map_or(0, |x| x.wrapping_add(1));
+        let mut default_target = WeightedSubset::new();
+        for (&nwa_state, residual_weight) in p_prime {
+            self.compute_target_for_state(&mut default_target, nwa_state, generic_char, residual_weight);
+        }
+
+        // 4. Prune the explicit transitions that are identical to the new default.
+        let mut exception_targets = transitions_map;
         exception_targets.retain(|_, subset| *subset != default_target);
 
         let final_default_target = if default_target.is_empty() { None } else { Some(default_target) };
         (final_default_target, exception_targets)
     }
 
-    /// Helper to propagate a weight through an NWA transition and its target's ε-closure
-    /// into a destination weighted subset.
+    /// Helper: For a single NWA state and a label, compute its contribution to a target subset.
+    fn compute_target_for_state(&mut self, target_subset: &mut WeightedSubset, nwa_state: NWAStateID, label: i16, residual_weight: &Weight) {
+        let state = &self.nwa.states[nwa_state];
+
+        // Explicit transitions have priority.
+        if let Some(targets) = state.transitions.get(&label) {
+            for (target_state, trans_weight) in targets {
+                self.propagate_weight(target_subset, *target_state, residual_weight, trans_weight);
+            }
+            return; // Found an explicit transition, so we don't check defaults.
+        }
+
+        // If no explicit transition, check defaults.
+        for default in &state.default {
+            if !default.exceptions.contains(&label) {
+                self.propagate_weight(target_subset, default.target, residual_weight, &default.weight);
+            }
+        }
+    }
+
+    /// Helper to propagate a weight through an NWA transition and its target's ε-closure.
     fn propagate_weight(&mut self, dest_subset: &mut WeightedSubset, target_state: NWAStateID, residual_weight: &Weight, trans_weight: &Weight) {
         let propagated_weight = residual_weight & trans_weight;
         if propagated_weight.is_empty() { return; }
