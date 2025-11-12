@@ -284,6 +284,12 @@ struct Determinizer<'a> {
 impl<'a> Determinizer<'a> {
     fn new(nwa: &'a NWA) -> Self {
         let mut dwa = DWA::new();
+        // The state 0 created by DWA::new() is not used by determinization,
+        // which creates its own states. Clearing it ensures our state IDs
+        // start from 0 and align with Vec indices.
+        dwa.states.0.clear();
+        // The start state will be set to the first registered state.
+        dwa.body.start_state = 0; // Placeholder
         Determinizer {
             nwa,
             seen: HashMap::new(),
