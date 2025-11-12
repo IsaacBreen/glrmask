@@ -58,14 +58,8 @@ fn is_zero(w: &Weight) -> bool {
 }
 
 // Canonical key for Weight (deterministic)
-fn weight_key(w: &Weight) -> String {
-    // Using w.to_string() is incorrect if the underlying implementation (e.g.,
-    // iterating over a hash map) is not deterministic. A non-canonical key
-    // prevents the determinizer from recognizing equivalent states, leading to
-    // state explosion and non-termination for cyclic NWAs.
-    let mut items: Vec<_> = w.iter().collect();
-    items.sort_unstable();
-    format!("{:?}", items)
+fn weight_key(w: &Weight) -> &Weight {
+    w
 }
 
 // Create a canonical key for a weighted subset to identify states in a HashMap.
