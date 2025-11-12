@@ -1,9 +1,10 @@
 // src/precompute4/weighted_automata/determinization.rs
 
 use super::common::{StateID, Weight};
-use super::dwa::{DWA, DWABody, DWAState, DWAStates};
-use super::nwa::{NWAStateID, NWA};
-use hashbrown::{HashMap, HashSet};
+use super::dwa::DWA;
+use super::nwa::NWA;
+use crate::precompute4::weighted_automata::NWAStateID;
+use hashbrown::HashMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::Write;
