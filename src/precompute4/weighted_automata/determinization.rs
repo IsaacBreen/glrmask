@@ -180,7 +180,7 @@ impl NWA {
         let mut worklist: VecDeque<NWAStateID> = VecDeque::new();
 
         for (id, w) in initial_states {
-            if closure.entry(*id).or_default().bitor(w) != *closure.get(id).unwrap() {
+            if &*closure.entry(*id).or_default() | w != *closure.get(id).unwrap() {
                 worklist.push_back(*id);
             }
         }
