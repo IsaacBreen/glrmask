@@ -614,11 +614,9 @@ impl<'a> Determinizer<'a> {
         // Search a best overlapped candidate (prefer these to keep structure tight).
         let mut best: Option<(usize, (usize, usize))> = None; // (idx, cost=(inc, gates_len))
         for idx in overlap_candidates {
-            let cand = &self.nodes[idx];
-
             // Intersect atoms for candidate and incoming
             let inter_atoms: Vec<usize> = overlap_atoms.iter().copied()
-                .filter(|a| cand.atom_covered.contains(a)).collect();
+                .filter(|a| self.nodes[idx].atom_covered.contains(a)).collect();
             if inter_atoms.is_empty() {
                 // Shouldn't happen given overlap selection, but guard anyway.
                 continue;
@@ -627,8 +625,8 @@ impl<'a> Determinizer<'a> {
             // Build OutSummary for candidate on inter_atoms via per-atom cache.
             let mut cand_out = OutSummary::default();
             for &ai in &inter_atoms {
-                let s = self.node_out_for_atom(idx, ai);
-                cand_out.union_assign(s);
+                let s = self.node_out_for_atom(idx, ai).clone();
+                cand_out.union_assign(&s);
             }
             if cand_out.is_empty() {
                 // If the candidate has no outgoing behavior on overlap (degenerate), consider unequal only if map has.
@@ -653,8 +651,8 @@ impl<'a> Determinizer<'a> {
             }
 
             // Mergeable: compute cost (inc = number of new macro keys to add).
-            let inc = map.keys().filter(|k| !cand.macro_keys.contains(k)).count();
-            let cost = (inc, cand.gates.len());
+            let inc = map.keys().filter(|k| !self.nodes[idx].macro_keys.contains(k)).count();
+            let cost = (inc, self.nodes[idx].gates.len());
             if best.as_ref().map_or(true, |(_, c)| cost < *c) {
                 best = Some((idx, cost));
             }
@@ -682,19 +680,19 @@ impl<'a> Determinizer<'a> {
 
     // Per-atom outgoing summary for an existing node (cached).
     fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize) -> &OutSummary {
-        let cache = &mut self.nodes[idx].out_cache_by_atom;
-        if !cache.contains_key(&atom_idx) {
-            let atom_mask = &self.atom_index.atoms[atom_idx];
+        if !self.nodes[idx].out_cache_by_atom.contains_key(&atom_idx) {
+            let atom_mask = self.atom_index.atoms[atom_idx].clone();
+            let gates = self.nodes[idx].gates.clone();
             // Filter gates by atom
             let mut filtered: HashMap<usize, Weight> = HashMap::new();
-            for (k, g) in &self.nodes[idx].gates {
-                let x = g & atom_mask;
+            for (k, g) in &gates {
+                let x = g & &atom_mask;
                 if !x.is_empty() { filtered.insert(*k, x); }
             }
             let summary = self.compute_summary_for_gates(&filtered);
-            cache.insert(atom_idx, summary);
+            self.nodes[idx].out_cache_by_atom.insert(atom_idx, summary);
         }
-        cache.get(&atom_idx).unwrap()
+        self.nodes[idx].out_cache_by_atom.get(&atom_idx).unwrap()
     }
 
     // OutSummary for any gates set (helper).
