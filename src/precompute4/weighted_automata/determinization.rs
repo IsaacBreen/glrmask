@@ -153,11 +153,11 @@ impl<'a> Determinizer<'a> {
             }
 
             // Content of this determinized node
-            let content = self.interner.get(u);
+            let content = self.interner.get(u).to_vec();
 
             // 1) Final weight
             let mut fin = Weight::zeros();
-            for (sid, gate) in content.iter() {
+            for (sid, gate) in &content {
                 let f = &self.final_via_closure[*sid];
                 if !f.is_empty() {
                     fin |= &(gate & f);
@@ -168,10 +168,10 @@ impl<'a> Determinizer<'a> {
             }
 
             // 2) Default target (content + mask) aggregated over defaults ignoring exceptions.
-            let (def_vec, def_mask) = self.build_default_target(content);
+            let (def_vec, def_mask) = self.build_default_target(&content);
             let mut def_target_id = None;
             if !def_vec.is_empty() && !def_mask.is_empty() {
-                let (tid, is_new) = self.interner.intern(def_vec);
+                let (tid, is_new) = self.interner.intern(def_vec.clone());
                 def_target_id = Some(tid);
                 if is_new {
                     if self.interner.len() > dwa.states.len() {
@@ -188,19 +188,17 @@ impl<'a> Determinizer<'a> {
             }
 
             // 3) Exception labels: labels where behavior differs from default.
-            let labels = self.labels_of_interest_for(content);
+            let labels = self.labels_of_interest_for(&content);
             for lbl in labels {
-                let (lbl_vec, lbl_mask) = self.build_label_target(content, lbl);
+                let (lbl_vec, lbl_mask) = self.build_label_target(&content, lbl);
                 if lbl_vec.is_empty() || lbl_mask.is_empty() {
                     continue;
                 }
                 // If label's target content equals default content, it's not an exception.
-                if let Some(ref dv) = def_target_id.map(|_| ()) {
-                    let (tmp_def_vec, _) = self.build_default_target(content); // We already computed; don't recompute to avoid cost.
-                    if lbl_vec == tmp_def_vec {
+                if def_target_id.is_some() {
+                    if lbl_vec == def_vec {
                         continue;
                     }
-                    let _ = dv; // silence unused warning in some LTO settings
                 } else {
                     // If no default exists, any non-empty labeled behavior is necessarily an exception.
                 }
