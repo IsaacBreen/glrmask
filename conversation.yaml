@@ -3572,12 +3572,14 @@ local_system:
               }
 
               // No overlapped mergeable: choose a disjoint node from the smallest gates bucket.
-              if let Some((&min_sz, ids)) = self.size_index.iter().next() {
-                  if let Some(&idx) = ids.iter().next() {
-                      // Guaranteed disjoint because no overlap existed; safe to reuse.
-                      let _ = min_sz; // just to silence warnings if unused with LTO
-                      self.register_incoming_and_maybe_update_cache(idx, &incoming, map);
-                      return idx;
+              // Iterate through size buckets to find the first available disjoint node.
+              for (_, ids) in &self.size_index {
+                  for &idx in ids {
+                      if (&self.nodes[idx].incoming_weight_union & &incoming).is_empty() {
+                          // Found a disjoint node to reuse.
+                          self.register_incoming_and_maybe_update_cache(idx, &incoming, map);
+                          return idx;
+                      }
                   }
               }
 
@@ -7017,5 +7019,214 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor: Implement weight-space atomization
       (AtomIndex) and per-atom caching for sublinear DWA state merging"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --package sep1 --lib precompute4::test_weighted_automata::determinization_tests::test_det_simple_char --profile test --no-fail-fast -- --format=json --exact -Z unstable-options --show-output
+      Testing started at 12:21 pm ...
+          Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+           Running unittests src/lib.rs (target/debug/deps/sep1-ab994d3f4be66692)
+      NWA simplify pass 'normalize' took 3.539583ms (changed: false)
+      NWA simplify pass 'dedup labeled' took 133.709µs (changed: false)
+      NWA simplify pass 'dedup epsilons' took 83ns (changed: false)
+      NWA simplify pass 'unify defaults' took 84ns (changed: false)
+      NWA simplify pass 'unify final states' took 3.504667ms (changed: false)
+      NWA simplify pass 'bypass ε-chains' took 715.791µs (changed: false)
+      NWA simplify pass 'collapse SCCs' took 2.361333ms (changed: false)
+      NWA simplify pass 'prune unreachable' took 1.890875ms (changed: false)
+      NWA simplify pass 'prune dead ends' took 830.209µs (changed: false)
+      NWA simplify pass 'merge equivalent' took 11.029958ms (changed: false)
+      NWA simplify pass 'normalize' took 6.375µs (changed: false)
+      NWA::simplify (2 states -> 2 states) took: 26.318209ms
+      NWA after simplify:
+      NWA (start: 0)
+        State 0:
+          97 -> 1 (weight: ALL)
+        State 1:
+          final_weight: [1]
+
+      NWA::determinize_to_dwa result DWA stats:
+      DWA Stats:
+        - States: 1
+        - Transitions: 1
+        - Final States: 1
+        - States with Default: 0
+        - Avg Exceptions/State: 1.00
+
+      NWA::determinize_to_dwa took: 47.098542ms
+      [DEBUG] 5] src/precompute4/test_weighted_automata.rs:256: Starting stochastic equivalence test
+
+
+      thread 'precompute4::test_weighted_automata::determinization_tests::test_det_simple_char' (19577339) panicked at src/precompute4/test_weighted_automata.rs:262:13:
+      assertion `left == right` failed: Equivalence fail: A(w) != B(w) for word from A.
+      word: [97, 97, 97, 97, 97]
+      A(w): [1]
+      B(w): []
+
+      DWA A:
+      DWA (start: 0)
+        State 0:
+          final_weight: [1]
+          97 -> 0 (trans_weight: [1])
+
+
+      DWA B:
+      DWA (start: 0)
+        State 0:
+          97 -> 1 (trans_weight: ALL)
+        State 1:
+          final_weight: [1]
+
+        left: 1..=1
+       right: 
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::precompute4::test_weighted_automata::stochastic_equivalence_test
+                   at ./src/precompute4/test_weighted_automata.rs:262:13
+         5: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_simple_char
+                   at ./src/precompute4/test_weighted_automata.rs:1806:9
+         6: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_simple_char::{{closure}}
+                   at ./src/precompute4/test_weighted_automata.rs:1802:30
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      error: test failed, to rerun pass `-p sep1 --lib`
+      error: 1 target failed:
+          `-p sep1 --lib`
+
+      Process finished with exit code 101
+    metadata:
+  - user: Still occurring. This issue wasn't present before.
+    metadata:
+  - assistant: |-
+      I've found a subtle but critical bug in the new merge logic I introduced. My apologies. The heuristic for reusing an existing state to avoid creating a new one was flawed. It was intended to reuse a state that was "disjoint" (operated on a completely different part of the weight space), but it was incorrectly reusing any non-mergeable state, including ones that overlapped.
+
+      This caused states that should have been kept separate to be incorrectly merged, leading to the wrong automaton. The fix is to ensure that when we look for a state to reuse, we only select one that is genuinely disjoint from the new state we're trying to place.
+
+      This change restores the logical behavior of the original implementation (in cases where no disjoint state can be found for reuse) while keeping the performance benefits of the new indexing for mergeable cases.
+
+      ### Step-by-step instructions
+
+      1.  **Modify `src/precompute4/weighted_automata/determinization.rs`**:
+          *   Navigate to the `find_or_create_target_node` function.
+          *   Replace the logic for reusing a disjoint node with a corrected version that properly checks for disjointness.
+
+          The section to replace looks like this:
+          ```rust
+          // No overlapped mergeable: choose a disjoint node from the smallest gates bucket.
+          if let Some((&min_sz, ids)) = self.size_index.iter().next() {
+              if let Some(&idx) = ids.iter().next() {
+                  // Guaranteed disjoint because no overlap existed; safe to reuse.
+                  let _ = min_sz; // just to silence warnings if unused with LTO
+                  self.register_incoming_and_maybe_update_cache(idx, &incoming, map);
+                  return idx;
+              }
+          }
+          ```
+
+          Replace it with this corrected loop:
+          ```rust
+          // No overlapped mergeable: choose a disjoint node from the smallest gates bucket.
+          // Iterate through size buckets to find the first available disjoint node.
+          for (_, ids) in &self.size_index {
+              for &idx in ids {
+                  if (&self.nodes[idx].incoming_weight_union & &incoming).is_empty() {
+                      // Found a disjoint node to reuse.
+                      self.register_incoming_and_maybe_update_cache(idx, &incoming, map);
+                      return idx;
+                  }
+              }
+          }
+          ```
+
+      ### Git Diffs
+
+      Here is the corresponding git diff for the change.
+
+      ```diff "src/precompute4/weighted_automata/determinization.rs"
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -659,15 +659,17 @@
+               }
+       
+               // No overlapped mergeable: choose a disjoint node from the smallest gates bucket.
+      -        if let Some((&min_sz, ids)) = self.size_index.iter().next() {
+      -            if let Some(&idx) = ids.iter().next() {
+      -                // Guaranteed disjoint because no overlap existed; safe to reuse.
+      -                let _ = min_sz; // just to silence warnings if unused with LTO
+      -                self.register_incoming_and_maybe_update_cache(idx, &incoming, map);
+      -                return idx;
+      +        // Iterate through size buckets to find the first available disjoint node.
+      +        for (_, ids) in &self.size_index {
+      +            for &idx in ids {
+      +                if (&self.nodes[idx].incoming_weight_union & &incoming).is_empty() {
+      +                    // Found a disjoint node to reuse.
+      +                    self.register_incoming_and_maybe_update_cache(idx, &incoming, map);
+      +                    return idx;
+      +                }
+                   }
+               }
+       
+               // Else create a fresh node.
+               self.add_dwa_state_builder(HashMap::new(), incoming)
+           }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Correctly reuse disjoint DWA state
+      by checking incoming weight union in find_or_create_target_node"'
     metadata:
 ...

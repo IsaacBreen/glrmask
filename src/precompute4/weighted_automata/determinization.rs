@@ -665,12 +665,14 @@ impl<'a> Determinizer<'a> {
         }
 
         // No overlapped mergeable: choose a disjoint node from the smallest gates bucket.
-        if let Some((&min_sz, ids)) = self.size_index.iter().next() {
-            if let Some(&idx) = ids.iter().next() {
-                // Guaranteed disjoint because no overlap existed; safe to reuse.
-                let _ = min_sz; // just to silence warnings if unused with LTO
-                self.register_incoming_and_maybe_update_cache(idx, &incoming, map);
-                return idx;
+        // Iterate through size buckets to find the first available disjoint node.
+        for (_, ids) in &self.size_index {
+            for &idx in ids {
+                if (&self.nodes[idx].incoming_weight_union & &incoming).is_empty() {
+                    // Found a disjoint node to reuse.
+                    self.register_incoming_and_maybe_update_cache(idx, &incoming, map);
+                    return idx;
+                }
             }
         }
 
