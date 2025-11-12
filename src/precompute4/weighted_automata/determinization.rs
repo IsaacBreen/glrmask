@@ -21,13 +21,6 @@
 //   this equals
 //       ⋁_q ( B_q ∧ w(q,a1) ∧ ... ∧ w(q,ak) )
 //   which is exactly the NWA semantics for this class (each q "reads" the sequence in-place).
-//
-// Implementation notes about state identity canonicalization:
-//   - Prior versions keyed determinized states by String built from Weight's Display.
-//     If Weight's Display is non-canonical (e.g., unsorted iteration), equal states got
-//     distinct keys, causing non-termination on cyclic inputs.
-//   - We fix this by using Weight::canonical_string(), which is deterministic,
-//     when building closure keys.
 
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
@@ -55,29 +48,6 @@ fn weight_intersection(a: &Weight, b: &Weight) -> Weight {
 }
 fn is_zero(w: &Weight) -> bool {
     w.is_empty()
-}
-
-// Canonical key for Weight (deterministic)
-fn weight_key(w: &Weight) -> &Weight {
-    w
-}
-
-// Create a canonical key for a weighted subset to identify states in a HashMap.
-fn subset_key(sub: &WeightedSubset) -> String {
-    let mut s = String::new();
-    for (sid, w) in sub {
-        s.push_str(&format!("{}#{};", sid, weight_key(w)));
-    }
-    s
-}
-
-// Create a canonical key for a closure map used to identify determinized states.
-fn closure_key(cl: &ClosureMap) -> String {
-    let mut s = String::new();
-    for (sid, w) in cl {
-        s.push_str(&format!("{}#{};", sid, weight_key(w)));
-    }
-    s
 }
 
 // Epsilon-closure from a weighted subset:
@@ -216,11 +186,7 @@ fn compute_state_and_final_weights(
     nwa: &NWA,
     closure: &ClosureMap,
 ) -> (Option<Weight>, Option<Weight>) {
-    // State-entry weights are not part of Mohri's determinization algorithm for
-    // standard weighted automata. Their inclusion was conceptually incorrect and
-    // could interfere with the DWA's semantics, even if idempotent operations
-    // masked immediate issues. The correct approach is to encode all necessary
-    // information in the DWA's state transitions and final weights.
+    // State-entry weights are not part of Mohri's determinization algorithm.
     let entry_opt = None;
     let mut finalw = Weight::zeros();
     for (sid, cw) in closure {
@@ -239,10 +205,10 @@ fn compute_state_and_final_weights(
 
 struct Determinizer<'a> {
     nwa: &'a NWA,
-    seen: HashMap<String, usize>,  // closure key -> DWA state id (canonical, deterministic)
-    subsets: Vec<WeightedSubset>,  // for each DWA id, its (raw) weighted subset
-    closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
-    queue: VecDeque<usize>,        // worklist of DWA ids
+    seen: HashMap<ClosureMap, usize>,
+    subsets: Vec<WeightedSubset>,
+    closures: Vec<ClosureMap>,
+    queue: VecDeque<usize>,
     dwa: DWA,
     mp: Option<MultiProgress>,
 }
@@ -250,9 +216,8 @@ struct Determinizer<'a> {
 impl<'a> Determinizer<'a> {
     fn new(nwa: &'a NWA, mp: Option<MultiProgress>) -> Self {
         let mut dwa = DWA::new();
-        // We'll manage our own state indexing; clear the auto-created state.
         dwa.states.0.clear();
-        dwa.body.start_state = 0; // placeholder; will be reset after first register_state
+        dwa.body.start_state = 0;
         Determinizer {
             nwa,
             seen: HashMap::new(),
@@ -270,20 +235,22 @@ impl<'a> Determinizer<'a> {
         for (sid, w) in subset {
             if !is_zero(&w) { subset_clean.insert(sid, w); }
         }
-        // 2) Compute ε-closure; determinized state identity depends on closure
+        // 2) Compute ε-closure; determinized state identity depends on closure.
         let closure = epsilon_closure(&self.nwa.states, &subset_clean);
-        let key = closure_key(&closure);
-        if let Some(&id) = self.seen.get(&key) { return id; }
 
-        // 3) Create brand-new DWA state for this closure
+        // Use the closure object itself as the key.
+        if let Some(&id) = self.seen.get(&closure) {
+            return id;
+        }
+
+        // 3) Create brand-new DWA state for this closure.
         let id = self.dwa.add_state();
 
-        // 4) Install state-entry and final weights from closure
-        // State-entry weights are not used in the standard determinization algorithm.
+        // 4) Install final weight from closure.
         let (_entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
         if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
 
-        self.seen.insert(key, id);
+        self.seen.insert(closure.clone(), id);
         self.subsets.push(subset_clean);
         self.closures.push(closure);
         self.queue.push_back(id);
@@ -310,14 +277,12 @@ impl<'a> Determinizer<'a> {
             None
         };
 
-        // exception labels are all explicit labels and default exceptions visible in closure
         let exception_labels = collect_exception_labels(&self.nwa.states, closure);
 
         if let Some(pb) = &labels_pb {
             pb.set_length(exception_labels.len() as u64);
         }
 
-        // default "others"
         let others_subset = next_subset_for_others(&self.nwa.states, closure);
         let others_weight = union_over_values(&others_subset);
 
@@ -339,7 +304,6 @@ impl<'a> Determinizer<'a> {
             pb.set_position(0);
         }
 
-        // install default if non-empty
         let mut default_target_id: Option<usize> = None;
         if !others_subset.is_empty() && !is_zero(&others_weight) {
             let to_id = self.register_state(others_subset);
@@ -382,10 +346,7 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     }
 
     let start = nwa.body.start_state;
-    if !nwa.states[start].transitions.is_empty() {
-        return None;
-    }
-    if !nwa.states[start].default.is_empty() {
+    if !nwa.states[start].transitions.is_empty() || !nwa.states[start].default.is_empty() {
         return None;
     }
 
@@ -400,11 +361,7 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         }
         let st = &nwa.states[*sid];
 
-        // singleton: no ε-out, no defaults, all labeled loops to itself
-        if !st.epsilons.is_empty() {
-            return None;
-        }
-        if !st.default.is_empty() {
+        if !st.epsilons.is_empty() || !st.default.is_empty() {
             return None;
         }
         for (_lbl, vec_targets) in st.transitions.iter() {
@@ -427,7 +384,6 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         return None;
     }
 
-    // Pairwise disjointness of base weights
     for i in 0..comps.len() {
         for j in (i + 1)..comps.len() {
             if !(comps[i].1.clone() & comps[j].1.clone()).is_empty() {
@@ -436,7 +392,6 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         }
     }
 
-    // Build per-label weights W[l] = ⋁_q ( base_q ∧ ⋁_{q -l-> q} w_edge )
     let mut label_to_weight: BTreeMap<i16, Weight> = BTreeMap::new();
     for (sid, base) in &comps {
         let st = &nwa.states[*sid];
@@ -455,7 +410,6 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         }
     }
 
-    // Single DWA state with final F = ⋁ base_q and loops with weights W[l].
     let mut final_union = Weight::zeros();
     for (_sid, base) in &comps {
         final_union = final_union | base.clone();
@@ -478,7 +432,6 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
 impl NWA {
     /// Determinize the subgraph reachable from `self.body.start_state` into a DWA.
     pub fn determinize_to_dwa(&self) -> DWA {
-        // Fast-path: avoid blow-up for "singleton-loop union" cases
         if let Some(dwa) = try_build_singleton_loop_union(self) {
             return dwa;
         }
@@ -502,7 +455,6 @@ impl NWA {
 
         let mut det = Determinizer::new(self, Some(mp));
 
-        // Start subset: { start_state -> 1 (Weight::all) }.
         let mut start_subset: WeightedSubset = WeightedSubset::new();
         start_subset.insert(self.body.start_state, Weight::all());
         let start_id = det.register_state(start_subset);
