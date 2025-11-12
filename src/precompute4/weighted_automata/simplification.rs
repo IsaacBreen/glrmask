@@ -372,11 +372,13 @@ impl DWA {
             let st = &mut states[i];
             // Final weights: ρ'(q) ← ρ(q) | !d(q)
             let old_fw = st.final_weight.clone();
-            let new_fw = old_fw.clone().unwrap_or_else(Weight::zeros) | &not_d[i];
-            if new_fw.is_empty() {
-                st.final_weight = None;
-            } else {
-                st.final_weight = Some(new_fw);
+            if st.final_weight.is_some() {
+                let new_fw = old_fw.as_ref().unwrap().clone() | &not_d[i];
+                if new_fw.is_empty() {
+                    st.final_weight = None;
+                } else {
+                    st.final_weight = Some(new_fw);
+                }
             }
             if st.final_weight != old_fw {
                 any_change = true;
