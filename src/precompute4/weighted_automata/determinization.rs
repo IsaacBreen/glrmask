@@ -40,6 +40,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use super::common::{NWAStateID, Weight};
@@ -250,10 +251,11 @@ struct Determinizer<'a> {
     closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
     queue: VecDeque<usize>,        // worklist of DWA ids
     dwa: DWA,
+    mp: Option<MultiProgress>,
 }
 
 impl<'a> Determinizer<'a> {
-    fn new(nwa: &'a NWA) -> Self {
+    fn new(nwa: &'a NWA, mp: Option<MultiProgress>) -> Self {
         let mut dwa = DWA::new();
         // We'll manage our own state indexing; clear the auto-created state.
         dwa.states.0.clear();
@@ -265,6 +267,7 @@ impl<'a> Determinizer<'a> {
             closures: Vec::new(),
             queue: VecDeque::new(),
             dwa,
+            mp,
         }
     }
 
@@ -306,8 +309,25 @@ impl<'a> Determinizer<'a> {
             return;
         }
 
+        let labels_pb = if let Some(mp) = &self.mp {
+            let pb = mp.add(ProgressBar::new(0));
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("  {spinner:.green} [{elapsed_precise}] Labels: [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+            pb.set_message(format!("State {}", sid));
+            Some(pb)
+        } else {
+            None
+        };
+
         // exception labels are all explicit labels and default exceptions visible in closure
         let exception_labels = collect_exception_labels(&self.nwa.states, closure);
+        if let Some(pb) = &labels_pb {
+            pb.set_length(exception_labels.len() as u64);
+        }
 
         // default "others"
         let others_subset = next_subset_for_others(&self.nwa.states, closure);
@@ -320,6 +340,15 @@ impl<'a> Determinizer<'a> {
             if !sub_ch.is_empty() && !is_zero(&w_ch) {
                 exception_data.insert(*ch, (sub_ch, w_ch));
             }
+            if let Some(pb) = &labels_pb {
+                pb.inc(1);
+            }
+        }
+
+        if let Some(pb) = &labels_pb {
+            pb.set_message(format!("State {}: installing transitions", sid));
+            pb.set_length(exception_data.len() as u64);
+            pb.set_position(0);
         }
 
         // install default if non-empty
@@ -347,6 +376,13 @@ impl<'a> Determinizer<'a> {
                     .map_err(|_e: DWABuildError| ())
                     .ok();
             }
+            if let Some(pb) = &labels_pb {
+                pb.inc(1);
+            }
+        }
+
+        if let Some(pb) = labels_pb {
+            pb.finish_and_clear();
         }
     }
 }
@@ -502,7 +538,17 @@ impl NWA {
             return DWA::new();
         }
 
-        let mut det = Determinizer::new(self);
+        let mp = MultiProgress::new();
+        let main_pb = mp.add(ProgressBar::new(1));
+        main_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        main_pb.set_message("Determinizing NWA");
+
+        let mut det = Determinizer::new(self, Some(mp));
 
         // Start subset: { start_state -> 1 (Weight::all) }.
         let mut start_subset: WeightedSubset = WeightedSubset::new();
@@ -510,9 +556,17 @@ impl NWA {
         let start_id = det.register_state(start_subset);
         det.dwa.body.start_state = start_id;
 
+        let mut processed_count = 0;
         while let Some(sid) = det.queue.pop_front() {
+            let total_states = det.seen.len();
+            main_pb.set_length(total_states as u64);
+            main_pb.set_position(processed_count as u64);
+            main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
+
             det.expand_state(sid);
+            processed_count += 1;
         }
+        main_pb.finish_with_message("Determinization complete");
 
         det.dwa
     }
