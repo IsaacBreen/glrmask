@@ -330,6 +330,8 @@ impl<'a> Determinizer<'a> {
 
     fn expand_state(&mut self, sid: usize) {
         // Get closure for this state; compute S_total of labels, then default and exceptions.
+        // We must calculate all next subsets before calling self.register_state to avoid
+        // mutable borrow of self.closures invalidating the immutable borrow of self.closures[sid].
         let closure = &self.closures[sid];
 
         // If closure is empty, there are no outgoing transitions.
@@ -337,14 +339,26 @@ impl<'a> Determinizer<'a> {
             return;
         }
 
-        // Compute exception labels (explicit labels + default exceptions).
+        // 1. Compute exception labels (explicit labels + default exceptions).
         let exception_labels = collect_exception_labels(&self.nwa.states, closure);
 
-        // Compute default ("others") next-subset and edge-weight.
+        // 2. Compute default ("others") next-subset and edge-weight.
         let others_subset = next_subset_for_others(&self.nwa.states, closure);
         let others_weight = union_over_values(&others_subset);
 
-        // Install default transition if non-empty.
+        // 3. Pre-calculate all exception subsets and weights.
+        let mut exception_data: BTreeMap<i16, (WeightedSubset, Weight)> = BTreeMap::new();
+        for ch in &exception_labels {
+            let sub_ch = next_subset_for_label(&self.nwa.states, closure, *ch);
+            let w_ch = union_over_values(&sub_ch);
+            // Only store non-empty transitions
+            if !sub_ch.is_empty() && !is_zero(&w_ch) {
+                exception_data.insert(*ch, (sub_ch, w_ch));
+            }
+        }
+        // Immutable borrow of `closure` ends here.
+
+        // 4. Install default transition if non-empty.
         let mut default_target_id: Option<usize> = None;
         if !others_subset.is_empty() && !is_zero(&others_weight) {
             let to_id = self.register_state(others_subset);
@@ -356,20 +370,10 @@ impl<'a> Determinizer<'a> {
                 .ok();
         }
 
-        // For each exception label, compute its next-subset and edge weight,
-        // and add an explicit exception only if it differs from default.
-        for ch in exception_labels {
-            let sub_ch = next_subset_for_label(&self.nwa.states, closure, ch);
-            let w_ch = union_over_values(&sub_ch);
-
-            // If empty, no outgoing transition for this label (unless default is set).
-            if sub_ch.is_empty() || is_zero(&w_ch) {
-                // If default exists and yields a transition, and sub_ch is empty,
-                // this means: for this label, no explicit edge; the default continues to apply.
-                // Do nothing here (no exception).
-                continue;
-            }
-
+        // 5. For each pre-calculated exception label, register the state and add an explicit exception
+        //    only if it differs from default.
+        for (ch, (sub_ch, w_ch)) in exception_data {
+            // sub_ch and w_ch are guaranteed to be non-empty by the check in step 3.
             let to_ch_id = self.register_state(sub_ch);
 
             // Decide whether we need an exception for ch.
