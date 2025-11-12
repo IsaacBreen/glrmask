@@ -418,6 +418,13 @@ impl NWA {
     /// - Default transitions are emitted for "other" labels (not in any explicit label or default exception),
     ///   with explicit exceptions only when a label's behavior differs.
     pub fn determinize_to_dwa(&self) -> DWA {
+        if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
+            // An NWA with no states, or an invalid start state, accepts no strings.
+            // Return a DWA that does the same.
+            // DWA::new() creates a single non-final start state with no transitions.
+            return DWA::new();
+        }
+
         let mut det = Determinizer::new(self);
 
         // Start subset: { start_state -> 1 (Weight::all) }.

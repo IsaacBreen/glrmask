@@ -6002,6 +6002,13 @@ local_system:
           /// - Default transitions are emitted for "other" labels (not in any explicit label or default exception),
           ///   with explicit exceptions only when a label's behavior differs.
           pub fn determinize_to_dwa(&self) -> DWA {
+              if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
+                  // An NWA with no states, or an invalid start state, accepts no strings.
+                  // Return a DWA that does the same.
+                  // DWA::new() creates a single non-final start state with no transitions.
+                  return DWA::new();
+              }
+
               let mut det = Determinizer::new(self);
 
               // Start subset: { start_state -> 1 (Weight::all) }.
@@ -9560,5 +9567,142 @@ messages:
     metadata:
   - user: "Changes committed with message: \"Implement efficient weighted NWA determinization
       (Mohri's algorithm) and fix state ID indexing panic\""
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/Mohri - Weighted Automata Algorithms.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |2+
+
+      thread 'precompute4::test_weighted_automata::determinization_tests::test_det_empty_nwa' (20122145) panicked at src/precompute4/weighted_automata/determinization.rs:111:38:
+      index out of bounds: the len is 0 but the index is 0
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::panic_bounds_check
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:271:5
+         3: <usize as core::slice::index::SliceIndex<[T]>>::index
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:265:10
+         4: core::slice::index::<impl core::ops::index::Index<I> for [T]>::index
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:18:15
+         5: <alloc::vec::Vec<T,A> as core::ops::index::Index<I>>::index
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3621:9
+         6: <sep1::precompute4::weighted_automata::nwa::NWAStates as core::ops::index::Index<usize>>::index
+                   at ./src/precompute4/weighted_automata/nwa.rs:164:66
+         7: sep1::precompute4::weighted_automata::determinization::epsilon_closure
+                   at ./src/precompute4/weighted_automata/determinization.rs:111:38
+         8: sep1::precompute4::weighted_automata::determinization::Determinizer::register_state
+                   at ./src/precompute4/weighted_automata/determinization.rs:320:23
+         9: sep1::precompute4::weighted_automata::determinization::<impl sep1::precompute4::weighted_automata::nwa::NWA>::determinize_to_dwa
+                   at ./src/precompute4/weighted_automata/determinization.rs:426:28
+        10: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_empty_nwa
+                   at ./src/precompute4/test_weighted_automata.rs:1918:23
+        11: sep1::precompute4::test_weighted_automata::determinization_tests::test_det_empty_nwa::{{closure}}
+                   at ./src/precompute4/test_weighted_automata.rs:1915:28
+        12: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+        13: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - assistant: |-
+      You've hit another edge case: determinizing an NWA with no states. The panic occurs because the code attempts to access `nwa_states[0]` when the `nwa_states` vector is empty.
+
+      The correct behavior for an NWA with no states (or an invalid start state) is to produce a DWA that accepts no strings. A newly created DWA from `DWA::new()` does exactly this, so we can add a guard to handle this case.
+
+      ### Step-by-step instructions
+
+      1.  **Open `src/precompute4/weighted_automata/determinization.rs`**.
+      2.  **Go to the `determinize_to_dwa` function** inside the `impl NWA` block.
+      3.  **Add a guard at the beginning of the function** to check if the NWA has any states or if the start state is valid. If not, return a new, empty DWA immediately.
+
+          Insert this code at the top of the `determinize_to_dwa` function body:
+          ```rust
+          if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
+              // An NWA with no states, or an invalid start state, accepts no strings.
+              // Return a DWA that does the same.
+              // DWA::new() creates a single non-final start state with no transitions.
+              return DWA::new();
+          }
+          ```
+
+      This change will fix the panic by gracefully handling empty or invalid NWAs.
+
+      ### Git diff
+
+      Here is the git diff for the fix:
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -414,6 +414,13 @@
+           /// - Default transitions are emitted for "other" labels (not in any explicit label or default exception),
+           ///   with explicit exceptions only when a label's behavior differs.
+           pub fn determinize_to_dwa(&self) -> DWA {
+      +        if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
+      +            // An NWA with no states, or an invalid start state, accepts no strings.
+      +            // Return a DWA that does the same.
+      +            // DWA::new() creates a single non-final start state with no transitions.
+      +            return DWA::new();
+      +        }
+      +
+               let mut det = Determinizer::new(self);
+       
+               // Start subset: { start_state -> 1 (Weight::all) }.
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Handle empty NWA input and correct
+      DWA state ID initialization in determinization"'
     metadata:
 ...
