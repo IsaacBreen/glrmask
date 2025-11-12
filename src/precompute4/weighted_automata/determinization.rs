@@ -22,20 +22,12 @@
 //       ⋁_q ( B_q ∧ w(q,a1) ∧ ... ∧ w(q,ak) )
 //   which is exactly the NWA semantics for this class (each q "reads" the sequence in-place).
 //
-//   This matches Mohri’s minimization and weight-pushing perspective: a single (deterministic)
-//   state suffices and “weights carry the memory”. For general NWAs, we fallback to a standard
-//   yet efficient determinization with ε-closures and compact default/exception labeling.
-//
-// Implementation details:
-//   - State identity in the general case is a weighted subset (map NWAStateID -> Weight) with
-//     a canonical string key; we compute ε-closure per state, and use its union as the
-//     state-entry weight, and closure-weight ∧ final_weight as the state's final weight.
-//   - For each state, we compute the next subsets per label, and also a single "others/default"
-//     mapping based on NWA defaults. Exceptions (explicit labels) are emitted only when they
-//     differ from default target/weight.
-//   - A fast-path recognizer try_build_singleton_loop_union(...) constructs a 1-state DWA
-//     for the “hypercube” pattern: ε-fanout to components, each a single self-looping state,
-//     no defaults, and pairwise disjoint base weights.
+// Implementation notes about state identity canonicalization:
+//   - Prior versions keyed determinized states by String built from Weight's Display.
+//     If Weight's Display is non-canonical (e.g., unsorted iteration), equal states got
+//     distinct keys, causing non-termination on cyclic inputs.
+//   - We fix this by using Weight::canonical_string(), which is deterministic,
+//     when building closure keys.
 
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
@@ -47,16 +39,16 @@ use super::common::{NWAStateID, Weight};
 use super::dwa::{DWA, DWABuildError};
 use super::nwa::{NWA, NWAStates};
 
+// Weighted subset and ε-closure maps
 type WeightedSubset = BTreeMap<NWAStateID, Weight>;
 type ClosureMap = BTreeMap<NWAStateID, Weight>;
 
+// Helper ops on Weight
 fn weight_union(mut a: Weight, b: &Weight) -> Weight {
-    let u = a | b.clone();
-    u
+    a | b.clone()
 }
 fn weight_union_in_place(dst: &mut Weight, src: &Weight) {
-    let u = dst.clone() | src.clone();
-    *dst = u;
+    *dst = dst.clone() | src.clone();
 }
 fn weight_intersection(a: &Weight, b: &Weight) -> Weight {
     a & b
@@ -65,21 +57,26 @@ fn is_zero(w: &Weight) -> bool {
     w.is_empty()
 }
 
+// Canonical key for Weight (deterministic)
+fn weight_key(w: &Weight) -> String {
+    w.canonical_string()
+}
+
 // Create a canonical key for a weighted subset to identify states in a HashMap.
-// We avoid requiring Weight: Hash or Ord by using Display to build a stable string.
 fn subset_key(sub: &WeightedSubset) -> String {
     let mut s = String::new();
     for (sid, w) in sub {
-        s.push_str(&format!("{}={};", sid, w));
+        s.push_str(&format!("{}#{};", sid, weight_key(w)));
     }
     s
 }
 
 // Create a canonical key for a closure map used to identify determinized states.
-// This must be stable and depend only on the ε-closure (which defines the deterministic state's semantics).
 fn closure_key(cl: &ClosureMap) -> String {
     let mut s = String::new();
-    for (sid, w) in cl { s.push_str(&format!("{}={};", sid, w)); }
+    for (sid, w) in cl {
+        s.push_str(&format!("{}#{};", sid, weight_key(w)));
+    }
     s
 }
 
@@ -124,9 +121,7 @@ fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap 
     closure
 }
 
-// Compute the set S_total of "exception" labels: explicit labels and default exceptions
-// present in the closure. For labels NOT in S_total, behavior is uniform and equals the
-// "other/default" behavior we compute once.
+// Compute S_total: explicit labels and default exceptions in this ε-closure
 fn collect_exception_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTreeSet<i16> {
     let mut labels: BTreeSet<i16> = BTreeSet::new();
     for (sid, cw) in closure {
@@ -145,11 +140,7 @@ fn collect_exception_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTr
     labels
 }
 
-// Build the "other/default" next-subset (raw-map) for labels not in S_total.
-// For a given closure, the default contributions are:
-// - from each closure state q, since no explicit transitions apply on "others",
-// - include ALL default transitions def where "others" are not exceptions for def
-//   (and since "others" are not in any exception set, all defaults apply).
+// Next subset for "others" labels not in S_total: use all defaults
 fn next_subset_for_others(nwa_states: &NWAStates, closure: &ClosureMap) -> WeightedSubset {
     let mut next: WeightedSubset = WeightedSubset::new();
     for (sid, cw) in closure {
@@ -171,10 +162,7 @@ fn next_subset_for_others(nwa_states: &NWAStates, closure: &ClosureMap) -> Weigh
     next
 }
 
-// Compute the next subset for a specific label ch.
-// For each closure state q:
-//   - If q has explicit transitions on ch, take those transitions only (defaults ignored).
-//   - Otherwise, consider defaults def s.t. ch ∉ def.exceptions.
+// Next subset for a specific label ch
 fn next_subset_for_label(
     nwa_states: &NWAStates,
     closure: &ClosureMap,
@@ -214,26 +202,23 @@ fn next_subset_for_label(
     next
 }
 
-// Union of weights across all values in a WeightedSubset (used for edge weights).
+// Union over values (for edge/default weights)
 fn union_over_values(map: &WeightedSubset) -> Weight {
     let mut acc = Weight::zeros();
     for w in map.values() {
-        let u = acc.clone() | w.clone();
-        acc = u;
+        acc = acc | w.clone();
     }
     acc
 }
 
-// Compute the state-entry weight (union over closure weights) and final weight
-// (union over closure_weight ∧ final_weight) for a DWA state derived from 'subset'.
+// Compute DWA state-entry and final weights from ε-closure
 fn compute_state_and_final_weights(
     nwa: &NWA,
     closure: &ClosureMap,
 ) -> (Option<Weight>, Option<Weight>) {
     let mut entry = Weight::zeros();
     for w in closure.values() {
-        let u = entry.clone() | w.clone();
-        entry = u;
+        entry = entry | w.clone();
     }
     let entry_opt = if entry.is_empty() { None } else { Some(entry) };
 
@@ -242,8 +227,7 @@ fn compute_state_and_final_weights(
         if let Some(fw) = &nwa.states[*sid].final_weight {
             let cand = cw & fw;
             if !is_zero(&cand) {
-                let u = finalw.clone() | cand;
-                finalw = u;
+                finalw = finalw | cand;
             }
         }
     }
@@ -251,10 +235,11 @@ fn compute_state_and_final_weights(
     (entry_opt, final_opt)
 }
 
-// A compact determinizer struct that holds intermediate data.
+// Determinizer
+
 struct Determinizer<'a> {
     nwa: &'a NWA,
-    seen: HashMap<String, usize>,  // closure key -> DWA state id
+    seen: HashMap<String, usize>,  // closure key -> DWA state id (canonical, deterministic)
     subsets: Vec<WeightedSubset>,  // for each DWA id, its (raw) weighted subset
     closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
     queue: VecDeque<usize>,        // worklist of DWA ids
@@ -285,29 +270,15 @@ impl<'a> Determinizer<'a> {
         for (sid, w) in subset {
             if !is_zero(&w) { subset_clean.insert(sid, w); }
         }
-        // 2) Compute ε-closure first; determinized state identity depends on closure, not the raw seed.
+        // 2) Compute ε-closure; determinized state identity depends on closure
         let closure = epsilon_closure(&self.nwa.states, &subset_clean);
         let key = closure_key(&closure);
         if let Some(&id) = self.seen.get(&key) { return id; }
 
-        // 3) Create a brand new DWA state since this closure has not been seen.
+        // 3) Create brand-new DWA state for this closure
         let id = self.dwa.add_state();
 
-        // DEBUG: Log information about newly created states periodically.
-        if id > 0 && id % 1000 == 0 {
-            eprintln!("\n[DEBUG] New DWA state #{}", id);
-            eprintln!("  - From subset with {} NWA states.", subset_clean.len());
-            if subset_clean.len() < 10 {
-                let weight_summary: String = subset_clean
-                    .iter()
-                    .map(|(sid, w)| format!("{}({})", sid, w.len()))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                eprintln!("  - Subset (state_id(weight_bits)): {{{}}}", weight_summary);
-            }
-        }
-
-        // 4) Install state-entry and final weights based on the ε-closure.
+        // 4) Install state-entry and final weights from closure
         let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
         if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }
         if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
@@ -341,15 +312,6 @@ impl<'a> Determinizer<'a> {
 
         // exception labels are all explicit labels and default exceptions visible in closure
         let exception_labels = collect_exception_labels(&self.nwa.states, closure);
-
-        // DEBUG: Log branching factor for this state.
-        if sid > 0 && sid % 1000 == 0 {
-            eprintln!(
-                "[DEBUG] Expanding DWA state #{}: found {} exception labels.",
-                sid,
-                exception_labels.len()
-            );
-        }
 
         if let Some(pb) = &labels_pb {
             pb.set_length(exception_labels.len() as u64);
@@ -414,31 +376,11 @@ impl<'a> Determinizer<'a> {
 }
 
 // Fast-path: try to build a 1-state DWA for a union of singleton-loop components.
-//
-// Pattern recognized:
-//   - From start, ε-closure reaches components q ≠ start.
-//   - Each such q has:
-//       * no ε-out transitions,
-//       * no default transitions,
-//       * all labeled transitions are self-loops at q,
-//     and has a final weight fw(q) (possibly combined with ε-weight from start).
-//   - The per-component base weights B_q = (ε_weight(start->q) ∧ fw(q)) are pairwise disjoint.
-//
-// Construction:
-//   - Let F = ⋁_q B_q be the final weight of the single DWA state.
-//   - For each symbol a, add a self-loop on a with weight
-//       W_a = ⋁_q ( B_q ∧ (⋁_{e:q -a-> q} w[e]) )
-//     If W_a is empty for all a, we still return the 1-state DWA with only final F.
-//
-// Soundness relies on the distributivity of ∧ over ⋁ and on the pairwise disjointness of B_q,
-// precisely as in the proof sketch in the header comment.
 fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     if nwa.states.0.is_empty() || nwa.body.start_state >= nwa.states.len() {
         return None;
     }
 
-    // Require that start has no labeled or default transitions;
-    // otherwise, the position-specific availability cannot be captured with a single state.
     let start = nwa.body.start_state;
     if !nwa.states[start].transitions.is_empty() {
         return None;
@@ -447,30 +389,24 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         return None;
     }
 
-    // ε-closure from start with ALL weight gives weights to components.
     let mut seed: WeightedSubset = WeightedSubset::new();
     seed.insert(start, Weight::all());
     let start_closure = epsilon_closure(&nwa.states, &seed);
 
-    // Collect candidate components q (excluding start) and compute base weights.
     let mut comps: Vec<(NWAStateID, Weight)> = Vec::new();
     for (sid, cw) in start_closure.iter() {
-        if *sid == start {
-            continue;
-        }
-        if is_zero(cw) {
+        if *sid == start || is_zero(cw) {
             continue;
         }
         let st = &nwa.states[*sid];
 
-        // must be singleton: no ε-out, no defaults
+        // singleton: no ε-out, no defaults, all labeled loops to itself
         if !st.epsilons.is_empty() {
             return None;
         }
         if !st.default.is_empty() {
             return None;
         }
-        // all labeled transitions loop to itself
         for (_lbl, vec_targets) in st.transitions.iter() {
             for (to, _w) in vec_targets {
                 if *to != *sid {
@@ -479,7 +415,6 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
             }
         }
 
-        // must have a final weight; component contributes base = cw ∧ final
         if let Some(fw) = &st.final_weight {
             let base = cw & fw;
             if !base.is_empty() {
@@ -492,7 +427,7 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         return None;
     }
 
-    // Pairwise disjointness of base weights (bitset atoms do not overlap).
+    // Pairwise disjointness of base weights
     for i in 0..comps.len() {
         for j in (i + 1)..comps.len() {
             if !(comps[i].1.clone() & comps[j].1.clone()).is_empty() {
@@ -501,22 +436,20 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         }
     }
 
-    // Build per-label weights: W[l] = ⋁_q ( base_q ∧ ⋁_{q -l-> q} w_edge )
+    // Build per-label weights W[l] = ⋁_q ( base_q ∧ ⋁_{q -l-> q} w_edge )
     let mut label_to_weight: BTreeMap<i16, Weight> = BTreeMap::new();
     for (sid, base) in &comps {
         let st = &nwa.states[*sid];
         for (lbl, vec_targets) in st.transitions.iter() {
             let mut w_union = Weight::zeros();
             for (_to, w) in vec_targets {
-                let u = w_union.clone() | w.clone();
-                w_union = u;
+                w_union = w_union | w.clone();
             }
             if !w_union.is_empty() {
                 let contrib = base.clone() & w_union;
                 if !contrib.is_empty() {
                     let prev = label_to_weight.get(lbl).cloned().unwrap_or_else(Weight::zeros);
-                    let u = prev | contrib;
-                    label_to_weight.insert(*lbl, u);
+                    label_to_weight.insert(*lbl, prev | contrib);
                 }
             }
         }
@@ -544,22 +477,12 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
 
 impl NWA {
     /// Determinize the subgraph reachable from `self.body.start_state` into a DWA.
-    ///
-    /// Semantics:
-    /// - NWA path weights are intersected (∧) along a single path and unioned (∨) across alternatives.
-    /// - DWA provides a single run; its per-edge weights equal the union over all contributing NWA paths on that edge;
-    ///   per-state entry weights equal the union over ε-closure contributions active at that point.
-    /// - Default transitions are emitted for "other" labels (not in any explicit label or default exception),
-    ///   with explicit exceptions only when a label's behavior differs.
-    /// - Fast-path: if the NWA is a union of singleton-loop components reachable by ε (with pairwise disjoint base weights),
-    ///   compile a 1-state DWA that tracks all history in the accumulated weight.
     pub fn determinize_to_dwa(&self) -> DWA {
-        // Fast-path: avoid 2^N blow-up for "singleton-loop union" (e.g., hypercube catastrophe).
+        // Fast-path: avoid blow-up for "singleton-loop union" cases
         if let Some(dwa) = try_build_singleton_loop_union(self) {
             return dwa;
         }
 
-        // General case
         eprintln!(
             "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
         );
