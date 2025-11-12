@@ -18,18 +18,28 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     };
 
     if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(1); }
-    let epsilons_to_add = compute_cancellations(&nwa.states);
-    crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
+    apply_cancellations(nwa);
 
     if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(2); }
-    let final_fix = compute_final_fixpoint(&nwa.states, &epsilons_to_add);
+    apply_finality_fixpoint(nwa);
 
     if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(3); }
-    // Add new epsilons
+    remove_negative_transitions(nwa);
+    crate::debug!(4, "Applied changes to NWA.");
+
+    if let Some(p) = &pb { p.finish_with_message("Done"); }
+}
+
+pub fn apply_cancellations(nwa: &mut NWA) {
+    let epsilons_to_add = compute_cancellations(&nwa.states);
+    crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
     for (from, to, w) in epsilons_to_add {
         nwa.states.add_epsilon(from, to, w);
     }
-    // Add propagated final weights
+}
+
+pub fn apply_finality_fixpoint(nwa: &mut NWA) {
+    let final_fix = compute_finality_fixpoint(&nwa.states);
     for sid in 0..nwa.states.len() {
         if !final_fix[sid].is_empty() {
             let st = &mut nwa.states.0[sid];
@@ -40,13 +50,12 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
             }
         }
     }
-    // Remove all negative transitions
+}
+
+pub fn remove_negative_transitions(nwa: &mut NWA) {
     for st in &mut nwa.states.0 {
         st.transitions.retain(|k, _| *k >= 0);
     }
-    crate::debug!(4, "Applied changes to NWA.");
-
-    if let Some(p) = &pb { p.finish_with_message("Done"); }
 }
 
 /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
@@ -203,14 +212,14 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
 
 /// Compute the least fixpoint of final weights propagated backward along all epsilon edges
 /// (original and new) and all negative-labeled edges.
-fn compute_final_fixpoint(states: &NWAStates, new_epsilons: &[(NWAStateID, NWAStateID, Weight)]) -> Vec<Weight> {
+fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
     let n = states.len();
     let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
     let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
 
     // Build reverse graph for propagation
     for u in 0..n {
-        // Original epsilons
+        // All epsilons
         for &(v, ref w) in &states[u].epsilons {
             if v < n { rev[v].push((u, w.clone())); }
         }
@@ -222,10 +231,6 @@ fn compute_final_fixpoint(states: &NWAStates, new_epsilons: &[(NWAStateID, NWASt
                 }
             }
         }
-    }
-    // New epsilons from cancellations
-    for (u, v, w) in new_epsilons {
-        if *v < n { rev[*v].push((*u, w.clone())); }
     }
 
     let mut q: VecDeque<NWAStateID> = VecDeque::new();
