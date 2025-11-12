@@ -31,14 +31,6 @@ use crate::precompute4::weighted_automata::format_i16_char;
 ///    - Final weight as computed in (5).
 impl NWA {
     pub fn determinize_to_dwa(&self) -> DWA {
-        self.determinize_to_dwa_internal(false)
-    }
-
-    pub fn determinize_to_dwa_with_final_state_simplification(&self) -> DWA {
-        self.determinize_to_dwa_internal(true)
-    }
-
-    fn determinize_to_dwa_internal(&self, simplify_final_states: bool) -> DWA {
         let now_total = Instant::now();
 
         // Work on a copy to avoid side effects.
@@ -82,7 +74,7 @@ impl NWA {
         let mut comp_sinks: Vec<Option<usize>> = Vec::with_capacity(atoms.intervals.len());
         for (i, atom) in atoms.intervals.iter().enumerate() {
             let nfa = PerAtomNFA::from_nwa(&nwa.states, nwa.body.start_state, &sigma, atom, &fut);
-            let mut dfa = nfa.determinize(&sigma, simplify_final_states);
+            let mut dfa = nfa.determinize(&sigma);
             dfa.minimize(&sigma);
             crate::debug!(4, "Atom {}: interval={:?}, DFA states={}", i, atom, dfa.n_states);
             let sink = dfa.find_sink_index(&sigma);
@@ -570,7 +562,7 @@ impl PerAtomNFA {
     }
 
     /// Determinize this NFA to a complete DFA with alphabet Sigma' (labels + OTHER).
-    fn determinize(&self, sigma: &Alphabet, simplify_final_states: bool) -> DetDFA {
+    fn determinize(&self, sigma: &Alphabet) -> DetDFA {
         let per = self.eps_closure_per_state();
 
         // Start set: closure({start})
@@ -689,15 +681,6 @@ impl PerAtomNFA {
             p.finish_with_message(format!("Subset construction done, {} states", states.len()));
         }
 
-        if simplify_final_states {
-            // From final states, all transitions go to a sink.
-            for s in 0..states.len() {
-                if finals[s] {
-                    trans[s] = vec![None; sigma.size()];
-                }
-            }
-        }
- 
         // Build sink state if any transition is None
         let needs_sink = trans.iter().any(|row| row.iter().any(|x| x.is_none()));
         let mut sink_index: Option<usize> = None;
