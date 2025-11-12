@@ -349,6 +349,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                     sub_nwa.simplify();
 
                     apply_cancellations(&mut sub_nwa);
+                    sub_nwa.simplify();
 
                     // Determinize, simplify, convert back
                     let mut temp_dwa = sub_nwa.determinize_to_dwa();
