@@ -370,6 +370,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let now = Instant::now();
     crate::debug!(4, "Starting resolve_negative_codes_in_nwa...");
     resolve_negative_codes_in_nwa(&mut combined_nwa);
+    combined_nwa.simplify();
     crate::debug!(4, "resolve_negative_codes_in_nwa took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after negative resolution:\n{}", combined_nwa.stats());
 
