@@ -74,7 +74,7 @@ impl<'a> Determinizer<'a> {
             let final_weight = macrostate
                 .iter()
                 .filter_map(|(&id, weight)| {
-                    self.nwa.states.get(id).and_then(|s| s.final_weight.as_ref()).map(|fw| weight & fw)
+                    self.nwa.states.0.get(id).and_then(|s| s.final_weight.as_ref()).map(|fw| weight & fw)
                 })
                 .fold(Weight::zeros(), |acc, w| acc | w);
 
@@ -125,7 +125,7 @@ impl<'a> Determinizer<'a> {
     fn get_critical_symbols(&self, macrostate: &WeightedMacrostate) -> BTreeSet<i16> {
         let mut symbols = BTreeSet::new();
         for &id in macrostate.keys() {
-            if let Some(state) = self.nwa.states.get(id) {
+            if let Some(state) = self.nwa.states.0.get(id) {
                 symbols.extend(state.transitions.keys());
                 for def in &state.default {
                     symbols.extend(&def.exceptions);
@@ -155,7 +155,7 @@ impl<'a> Determinizer<'a> {
                 None => continue,
             };
 
-            if let Some(state) = self.nwa.states.get(u) {
+            if let Some(state) = self.nwa.states.0.get(u) {
                 for (v, w_uv) in &state.epsilons {
                     let propagated_weight = &w_u & w_uv;
                     if propagated_weight.is_empty() {
@@ -179,7 +179,7 @@ impl<'a> Determinizer<'a> {
         let mut next_macrostate = WeightedMacrostate::new();
 
         for (&id, weight) in macrostate {
-            if let Some(state) = self.nwa.states.get(id) {
+            if let Some(state) = self.nwa.states.0.get(id) {
                 let mut took_explicit = false;
                 if let Some(transitions) = state.transitions.get(&symbol) {
                     took_explicit = true;
