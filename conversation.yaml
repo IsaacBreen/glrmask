@@ -6069,19 +6069,38 @@ local_system:
           s
       }
 
+      // Create a canonical key for a closure map used to identify determinized states.
+      // This must be stable and depend only on the ε-closure (which defines the deterministic state's semantics).
+      fn closure_key(cl: &ClosureMap) -> String {
+          let mut s = String::new();
+          for (sid, w) in cl { s.push_str(&format!("{}={};", sid, w)); }
+          s
+      }
+
       // Epsilon-closure from a weighted subset:
       // Input: initial weighted subset 'seed' mapping NWA states to input weights (bitsets).
       // Output: closure map mapping every reachable state via ε-paths to the union of all
       // weights of those ε-paths (seed_weight ∧ ε-edges ∧ ...).
       fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap {
-          let mut closure: ClosureMap = seed.clone();
-          closure.retain(|_, w| !is_zero(w));
-          let mut queue: VecDeque<NWAStateID> = closure.keys().copied().collect();
+          let mut closure: ClosureMap = ClosureMap::new();
+          let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+
+          for (sid, w) in seed {
+              if !is_zero(w) {
+                  let prev = closure.get(sid).cloned().unwrap_or_else(Weight::zeros);
+                  let neww = weight_union(prev.clone(), w);
+                  if neww != prev {
+                      closure.insert(*sid, neww.clone());
+                      queue.push_back(*sid);
+                  }
+              }
+          }
 
           while let Some(u) = queue.pop_front() {
-              // The state must be in the closure map. If not, something is wrong.
-              let uw = closure.get(&u).unwrap().clone();
-
+              let uw = closure.get(&u).cloned().unwrap_or_else(Weight::zeros);
+              if is_zero(&uw) {
+                  continue;
+              }
               for (v, w_eps) in &nwa_states[u].epsilons {
                   let cand = weight_intersection(&uw, w_eps);
                   if is_zero(&cand) {
@@ -6229,7 +6248,7 @@ local_system:
       // A compact determinizer struct that holds intermediate data.
       struct Determinizer<'a> {
           nwa: &'a NWA,
-          seen: HashMap<String, usize>,  // subset key -> DWA state id
+          seen: HashMap<String, usize>,  // closure key -> DWA state id
           subsets: Vec<WeightedSubset>,  // for each DWA id, its (raw) weighted subset
           closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
           queue: VecDeque<usize>,        // worklist of DWA ids
@@ -6255,18 +6274,17 @@ local_system:
           }
 
           fn register_state(&mut self, subset: WeightedSubset) -> usize {
-              // canonicalize by dropping empties
+              // 1) Canonicalize incoming seed by dropping empty weights.
               let mut subset_clean: WeightedSubset = WeightedSubset::new();
               for (sid, w) in subset {
-                  if !is_zero(&w) {
-                      subset_clean.insert(sid, w);
-                  }
+                  if !is_zero(&w) { subset_clean.insert(sid, w); }
               }
-              let key = subset_key(&subset_clean);
-              if let Some(&id) = self.seen.get(&key) {
-                  return id;
-              }
+              // 2) Compute ε-closure first; determinized state identity depends on closure, not the raw seed.
+              let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+              let key = closure_key(&closure);
+              if let Some(&id) = self.seen.get(&key) { return id; }
 
+              // 3) Create a brand new DWA state since this closure has not been seen.
               let id = self.dwa.add_state();
 
               // DEBUG: Log information about newly created states periodically.
@@ -6283,15 +6301,10 @@ local_system:
                   }
               }
 
-              // Compute ε-closure plus state-entry and final weights.
-              let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+              // 4) Install state-entry and final weights based on the ε-closure.
               let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
-              if let Some(w) = entry_opt {
-                  let _ = self.dwa.set_state_weight(id, w);
-              }
-              if let Some(w) = final_opt {
-                  let _ = self.dwa.set_final_weight(id, w);
-              }
+              if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }
+              if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
 
               self.seen.insert(key, id);
               self.subsets.push(subset_clean);
@@ -9975,125 +9988,264 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The non-termination of the determinization algorithm is a critical issue. A deep analysis of the algorithm's logic, especially in comparison to established theoretical results, reveals the root cause.
+      Root cause analysis and fix plan
 
-      ### Analysis of Non-Termination
+      Hypotheses
+      - H1 (state identity bug): In a subset construction with ε-closures, the identity of a determinized state must be its ε-closure (including the accumulated weights), not the raw pre-closure seed. The current code keys states by the pre-closure seed (subset_key), but determinization semantics depend only on the ε-closure. Different seeds can (and often do) lead to the same closure. Keying by the seed allows an unbounded creation of logically identical states, which can cause the worklist never to quiesce in graphs with pervasive ε-structure.
+      - H2 (string-key fragility): The current “key” is produced via format!("{}", weight). If the Display of Weight ever changes non-canonically (e.g., by including non-deterministic detail), different string keys can be produced for equal weights. This would further defeat deduplication and exacerbate the non-termination symptoms. While we can’t change Weight here, we can reduce the risk by using the closure as the canonical descriptor, which dramatically reduces the number of distinct keys and eliminates duplicates due to different seeds with the same closure.
 
-      1.  **Hypothesis:** The determinization algorithm, which constructs a deterministic weighted automaton (DWA) from a non-deterministic one (NWA), fails to terminate because it generates an infinite sequence of unique DWA states.
+      Why this causes non-termination
+      - Determinization terminates when the algorithm visits only finitely many distinct canonical states. Over our bitset semiring (finite distributive lattice), the set of ε-closures is finite: each closure is a map Q → 2^K (finite), hence |Closures| ≤ (2^K)^|Q|.
+      - By keying on pre-closure seeds, the algorithm may keep producing new states whose ε-closures are equal but whose seeds differ slightly due to how contributions were computed for different incoming labels or due to repeated ε traversal patterns. This creates artificial state blow-up (potentially unbounded in practice), making the algorithm appear to “not terminate.”
+      - Proof sketch for termination with the fix: By keying on the ε-closure, the visited state set is a subset of a finite set (maps Q → 2^K). Breadth-first expansion terminates because every edge from a canonical state produces a next canonical state in the same finite universe, and duplicates are deduplicated by the key.
 
-      2.  **State Representation:** In the provided implementation, a DWA state is uniquely identified by a "weighted subset" — a mapping from NWA state IDs to `Weight`s (which are bitsets). The algorithm maintains a `seen` map to avoid re-processing states it has already created.
+      Fix (high-level)
+      - Compute the ε-closure of the (cleaned) seed immediately in register_state.
+      - Key the “seen” map by a canonical serialization of that ε-closure (closure_key), not by the pre-closure subset (subset_key).
+      - If a closure is already seen, return its state id early without creating a new DWA state.
+      - Only if unseen: allocate a DWA state, set entry and final weights from the closure, store both the subset (for debugging) and the closure, and enqueue.
 
-      3.  **Termination Condition:** For the algorithm to terminate, the total number of possible unique weighted subsets it can generate must be finite.
-          *   The number of states in the NWA is finite.
-          *   The `Weight` type is a bitset. For any given NWA, the universe of items that can appear in a bitset is finite, determined by the items present in the weights of the input NWA's transitions and final states. All subsequent weights are created by unions (`|`) and intersections (`&`) of existing weights, which cannot introduce new items.
-          *   Therefore, the number of possible `Weight` values is finite ($2^N$ where N is the number of unique items).
-          *   Consequently, the number of possible weighted subsets is also finite, albeit very large.
+      Step-by-step changes
 
-      4.  **Contradiction and Root Cause:** The theoretical foundation guarantees termination. If the implementation fails to terminate, it must contain a logical flaw that violates the premises of this proof. The most complex and sensitive part of the algorithm is the computation of the ε-closure, as this is where weights are combined via union (`|`), potentially "growing" them and forming the basis for new DWA states.
+      1) File: src/precompute4/weighted_automata/determinization.rs
+      - Add a new helper function closure_key(cl: &ClosureMap) -> String that serializes a closure in a stable order (BTreeMap ensures key order).
+      - In struct Determinizer, update the comment on seen to indicate it stores a closure key, not a subset key.
+      - Rewrite register_state to:
+        - Clean the incoming subset by removing zero-weights.
+        - Compute the ε-closure closure first.
+        - Build a key from closure (closure_key).
+        - If seen contains the key, return the existing id (do NOT create a new state).
+        - Otherwise, add a new DWA state, set its state-entry and final weights from compute_state_and_final_weights(self.nwa, &closure), insert the seen entry for the closure key, push subset and closure into their vectors, and enqueue the state id.
 
-          The bug lies in the `epsilon_closure` function. Its implementation is non-standard and contains two issues:
-          *   The initialization logic is convoluted. It iterates through the `seed` subset and builds up the initial `closure` map and worklist `queue`. While it appears correct for many cases, this non-standard approach is fragile and hard to reason about. A standard worklist algorithm would simply initialize the `closure` map with the `seed` and the `queue` with all states in the `seed`.
-          *   Inside the main worklist loop, it fetches the current state's weight with `unwrap_or_else(Weight::zeros)`, which hides a critical invariant: a state in the worklist *must* have a non-zero weight in the `closure` map. A simple `.unwrap()` would enforce this invariant, turning a silent failure or incorrect propagation into a panic.
-
-          Replacing the initialization with a standard, clear implementation and tightening the weight lookup logic will fix the bug and restore the termination guarantee.
-
-      ### Step-by-step Instructions
-
-      Here are the precise edits to fix the non-termination issue in the determinization algorithm.
-
-      **File: `src/precompute4/weighted_automata/determinization.rs`**
-
-      1.  **Navigate to the `epsilon_closure` function.**
-
-      2.  **Replace the initialization logic.** Delete the entire `for` loop at the beginning of the function. In its place, add three lines to clone the `seed` map, remove any zero-weight entries, and populate the `queue` from its keys.
-
-      3.  **Refine the worklist loop.** Inside the `while let Some(u) = queue.pop_front()` loop, replace the two lines that fetch `uw` and check if it's zero with a single line that unwraps the weight. This enforces the invariant that any state in the queue must have a valid, non-zero weight in the `closure` map.
-
-      Here is a summary of the changes:
-
-      *   **Lines 61-72:**
-          ```rust
-          // src/precompute4/weighted_automata/determinization.rs
-
-          let mut closure: ClosureMap = ClosureMap::new();
-          let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-
-          for (sid, w) in seed {
-              if !is_zero(w) {
-                  let prev = closure.get(sid).cloned().unwrap_or_else(Weight::zeros);
-                  let neww = weight_union(prev.clone(), w);
-                  if neww != prev {
-                      closure.insert(*sid, neww.clone());
-                      queue.push_back(*sid);
-                  }
-              }
-          }
-          ```
-          will be replaced by:
-          ```rust
-          // src/precompute4/weighted_automata/determinization.rs
-
-          let mut closure: ClosureMap = seed.clone();
-          closure.retain(|_, w| !is_zero(w));
-          let mut queue: VecDeque<NWAStateID> = closure.keys().copied().collect();
-          ```
-
-      *   **Lines 75-78:**
-          ```rust
-          // src/precompute4/weighted_automata/determinization.rs
-
-          let uw = closure.get(&u).cloned().unwrap_or_else(Weight::zeros);
-          if is_zero(&uw) {
-              continue;
-          }
-          ```
-          will be replaced by:
-          ```rust
-          // src/precompute4/weighted_automata/determinization.rs
-
-          // The state must be in the closure map. If not, something is wrong.
-          let uw = closure.get(&u).unwrap().clone();
-          ```
-
-      ### Git Diffs
-
-      Here are the changes in `git diff` format.
+      Git diffs
 
       ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
       --- a/src/precompute4/weighted_automata/determinization.rs
       +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -60,26 +60,16 @@
-       // weights of those ε-paths (seed_weight ∧ ε-edges ∧ ...).
-       fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap {
-      -    let mut closure: ClosureMap = ClosureMap::new();
-      -    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-      -
-      -    for (sid, w) in seed {
-      -        if !is_zero(w) {
-      -            let prev = closure.get(sid).cloned().unwrap_or_else(Weight::zeros);
-      -            let neww = weight_union(prev.clone(), w);
-      -            if neww != prev {
-      -                closure.insert(*sid, neww.clone());
-      -                queue.push_back(*sid);
+      @@ -38,6 +38,13 @@
+           }
+           s
+       }
+      +
+      +// Create a canonical key for a closure map used to identify determinized states.
+      +// This must be stable and depend only on the ε-closure (which defines the deterministic state's semantics).
+      +fn closure_key(cl: &ClosureMap) -> String {
+      +    let mut s = String::new();
+      +    for (sid, w) in cl { s.push_str(&format!("{}={};", sid, w)); }
+      +    s
+       }
+       
+       // Epsilon-closure from a weighted subset:
+      @@ -177,7 +184,7 @@
+       
+       // A compact determinizer struct that holds intermediate data.
+       struct Determinizer<'a> {
+      -    nwa: &'a NWA,
+      -    seen: HashMap<String, usize>,  // subset key -> DWA state id
+      +    nwa: &'a NWA,
+      +    seen: HashMap<String, usize>,  // closure key -> DWA state id
+           subsets: Vec<WeightedSubset>,  // for each DWA id, its (raw) weighted subset
+           closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
+           queue: VecDeque<usize>,        // worklist of DWA ids
+      @@ -205,43 +212,39 @@
+               }
+           }
+       
+      -    fn register_state(&mut self, subset: WeightedSubset) -> usize {
+      -        // canonicalize by dropping empties
+      -        let mut subset_clean: WeightedSubset = WeightedSubset::new();
+      -        for (sid, w) in subset {
+      -            if !is_zero(&w) {
+      -                subset_clean.insert(sid, w);
       -            }
       -        }
-      -    }
-      +    let mut closure: ClosureMap = seed.clone();
-      +    closure.retain(|_, w| !is_zero(w));
-      +    let mut queue: VecDeque<NWAStateID> = closure.keys().copied().collect();
-       
-           while let Some(u) = queue.pop_front() {
-      -        let uw = closure.get(&u).cloned().unwrap_or_else(Weight::zeros);
-      -        if is_zero(&uw) {
-      -            continue;
+      -        let key = subset_key(&subset_clean);
+      -        if let Some(&id) = self.seen.get(&key) {
+      -            return id;
       -        }
-      +        // The state must be in the closure map. If not, something is wrong.
-      +        let uw = closure.get(&u).unwrap().clone();
+      -
+      -        let id = self.dwa.add_state();
+      -
+      -        // DEBUG: Log information about newly created states periodically.
+      -        if id > 0 && id % 1000 == 0 {
+      -            eprintln!("\n[DEBUG] New DWA state #{}", id);
+      -            eprintln!("  - From subset with {} NWA states.", subset_clean.len());
+      -            if subset_clean.len() < 10 {
+      -                let weight_summary: String = subset_clean
+      -                    .iter()
+      -                    .map(|(sid, w)| format!("{}({})", sid, w.len()))
+      -                    .collect::<Vec<_>>()
+      -                    .join(", ");
+      -                eprintln!("  - Subset (state_id(weight_bits)): {{{}}}", weight_summary);
+      -            }
+      -        }
+      -
+      -        // Compute ε-closure plus state-entry and final weights.
+      -        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+      -        let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
+      -        if let Some(w) = entry_opt {
+      -            let _ = self.dwa.set_state_weight(id, w);
+      -        }
+      -        if let Some(w) = final_opt {
+      -            let _ = self.dwa.set_final_weight(id, w);
+      -        }
+      +    fn register_state(&mut self, subset: WeightedSubset) -> usize {
+      +        // 1) Canonicalize incoming seed by dropping empty weights.
+      +        let mut subset_clean: WeightedSubset = WeightedSubset::new();
+      +        for (sid, w) in subset {
+      +            if !is_zero(&w) { subset_clean.insert(sid, w); }
+      +        }
+      +        // 2) Compute ε-closure first; determinized state identity depends on closure, not the raw seed.
+      +        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+      +        let key = closure_key(&closure);
+      +        if let Some(&id) = self.seen.get(&key) { return id; }
       +
-               for (v, w_eps) in &nwa_states[u].epsilons {
-                   let cand = weight_intersection(&uw, w_eps);
-                   if is_zero(&cand) {
-
+      +        // 3) Create a brand new DWA state since this closure has not been seen.
+      +        let id = self.dwa.add_state();
+      +
+      +        // DEBUG: Log information about newly created states periodically.
+      +        if id > 0 && id % 1000 == 0 {
+      +            eprintln!("\n[DEBUG] New DWA state #{}", id);
+      +            eprintln!("  - From subset with {} NWA states.", subset_clean.len());
+      +            if subset_clean.len() < 10 {
+      +                let weight_summary: String = subset_clean
+      +                    .iter()
+      +                    .map(|(sid, w)| format!("{}({})", sid, w.len()))
+      +                    .collect::<Vec<_>>()
+      +                    .join(", ");
+      +                eprintln!("  - Subset (state_id(weight_bits)): {{{}}}", weight_summary);
+      +            }
+      +        }
+      +
+      +        // 4) Install state-entry and final weights based on the ε-closure.
+      +        let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
+      +        if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }
+      +        if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
+       
+               self.seen.insert(key, id);
+               self.subsets.push(subset_clean);
+               self.closures.push(closure);
+               self.queue.push_back(id);
+               id
+           }
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -72,6 +72,14 @@
+           }
+           s
+       }
+      +
+      +// Create a canonical key for a closure map used to identify determinized states.
+      +// This must be stable and depend only on the ε-closure (which defines the deterministic state's semantics).
+      +fn closure_key(cl: &ClosureMap) -> String {
+      +    let mut s = String::new();
+      +    for (sid, w) in cl { s.push_str(&format!("{}={};", sid, w)); }
+      +    s
+      +}
+       
+       // Epsilon-closure from a weighted subset:
+       // Input: initial weighted subset 'seed' mapping NWA states to input weights (bitsets).
+      @@ -177,7 +184,7 @@
+       
+       // A compact determinizer struct that holds intermediate data.
+       struct Determinizer<'a> {
+      -    nwa: &'a NWA,
+      -    seen: HashMap<String, usize>,  // subset key -> DWA state id
+      +    nwa: &'a NWA,
+      +    seen: HashMap<String, usize>,  // closure key -> DWA state id
+           subsets: Vec<WeightedSubset>,  // for each DWA id, its (raw) weighted subset
+           closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
+           queue: VecDeque<usize>,        // worklist of DWA ids
+      @@ -205,43 +212,39 @@
+               }
+           }
+       
+      -    fn register_state(&mut self, subset: WeightedSubset) -> usize {
+      -        // canonicalize by dropping empties
+      -        let mut subset_clean: WeightedSubset = WeightedSubset::new();
+      -        for (sid, w) in subset {
+      -            if !is_zero(&w) {
+      -                subset_clean.insert(sid, w);
+      -            }
+      -        }
+      -        let key = subset_key(&subset_clean);
+      -        if let Some(&id) = self.seen.get(&key) {
+      -            return id;
+      -        }
+      -
+      -        let id = self.dwa.add_state();
+      -
+      -        // DEBUG: Log information about newly created states periodically.
+      -        if id > 0 && id % 1000 == 0 {
+      -            eprintln!("\n[DEBUG] New DWA state #{}", id);
+      -            eprintln!("  - From subset with {} NWA states.", subset_clean.len());
+      -            if subset_clean.len() < 10 {
+      -                let weight_summary: String = subset_clean
+      -                    .iter()
+      -                    .map(|(sid, w)| format!("{}({})", sid, w.len()))
+      -                    .collect::<Vec<_>>()
+      -                    .join(", ");
+      -                eprintln!("  - Subset (state_id(weight_bits)): {{{}}}", weight_summary);
+      -            }
+      -        }
+      -
+      -        // Compute ε-closure plus state-entry and final weights.
+      -        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+      -        let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
+      -        if let Some(w) = entry_opt {
+      -            let _ = self.dwa.set_state_weight(id, w);
+      -        }
+      -        if let Some(w) = final_opt {
+      -            let _ = self.dwa.set_final_weight(id, w);
+      -        }
+      +    fn register_state(&mut self, subset: WeightedSubset) -> usize {
+      +        // 1) Canonicalize incoming seed by dropping empty weights.
+      +        let mut subset_clean: WeightedSubset = WeightedSubset::new();
+      +        for (sid, w) in subset {
+      +            if !is_zero(&w) { subset_clean.insert(sid, w); }
+      +        }
+      +        // 2) Compute ε-closure first; determinized state identity depends on closure, not the raw seed.
+      +        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+      +        let key = closure_key(&closure);
+      +        if let Some(&id) = self.seen.get(&key) { return id; }
+      +
+      +        // 3) Create a brand new DWA state since this closure has not been seen.
+      +        let id = self.dwa.add_state();
+      +
+      +        // DEBUG: Log information about newly created states periodically.
+      +        if id > 0 && id % 1000 == 0 {
+      +            eprintln!("\n[DEBUG] New DWA state #{}", id);
+      +            eprintln!("  - From subset with {} NWA states.", subset_clean.len());
+      +            if subset_clean.len() < 10 {
+      +                let weight_summary: String = subset_clean
+      +                    .iter()
+      +                    .map(|(sid, w)| format!("{}({})", sid, w.len()))
+      +                    .collect::<Vec<_>>()
+      +                    .join(", ");
+      +                eprintln!("  - Subset (state_id(weight_bits)): {{{}}}", weight_summary);
+      +            }
+      +        }
+      +
+      +        // 4) Install state-entry and final weights based on the ε-closure.
+      +        let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
+      +        if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }
+      +        if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
+       
+               self.seen.insert(key, id);
+               self.subsets.push(subset_clean);
+               self.closures.push(closure);
+               self.queue.push_back(id);
+               id
+           }
       ```
     metadata:
   - user: |
@@ -10105,7 +10257,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Robustify epsilon_closure initialization
-      and weight retrieval to prevent non-termination"'
+  - user: 'Changes committed with message: "Fix: Determinization termination by keying
+      states on $\epsilon$-closure instead of raw subset seed"'
     metadata:
 ...

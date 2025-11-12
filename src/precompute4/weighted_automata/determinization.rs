@@ -75,19 +75,38 @@ fn subset_key(sub: &WeightedSubset) -> String {
     s
 }
 
+// Create a canonical key for a closure map used to identify determinized states.
+// This must be stable and depend only on the ε-closure (which defines the deterministic state's semantics).
+fn closure_key(cl: &ClosureMap) -> String {
+    let mut s = String::new();
+    for (sid, w) in cl { s.push_str(&format!("{}={};", sid, w)); }
+    s
+}
+
 // Epsilon-closure from a weighted subset:
 // Input: initial weighted subset 'seed' mapping NWA states to input weights (bitsets).
 // Output: closure map mapping every reachable state via ε-paths to the union of all
 // weights of those ε-paths (seed_weight ∧ ε-edges ∧ ...).
 fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap {
-    let mut closure: ClosureMap = seed.clone();
-    closure.retain(|_, w| !is_zero(w));
-    let mut queue: VecDeque<NWAStateID> = closure.keys().copied().collect();
+    let mut closure: ClosureMap = ClosureMap::new();
+    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+
+    for (sid, w) in seed {
+        if !is_zero(w) {
+            let prev = closure.get(sid).cloned().unwrap_or_else(Weight::zeros);
+            let neww = weight_union(prev.clone(), w);
+            if neww != prev {
+                closure.insert(*sid, neww.clone());
+                queue.push_back(*sid);
+            }
+        }
+    }
 
     while let Some(u) = queue.pop_front() {
-        // The state must be in the closure map. If not, something is wrong.
-        let uw = closure.get(&u).unwrap().clone();
-
+        let uw = closure.get(&u).cloned().unwrap_or_else(Weight::zeros);
+        if is_zero(&uw) {
+            continue;
+        }
         for (v, w_eps) in &nwa_states[u].epsilons {
             let cand = weight_intersection(&uw, w_eps);
             if is_zero(&cand) {
@@ -235,7 +254,7 @@ fn compute_state_and_final_weights(
 // A compact determinizer struct that holds intermediate data.
 struct Determinizer<'a> {
     nwa: &'a NWA,
-    seen: HashMap<String, usize>,  // subset key -> DWA state id
+    seen: HashMap<String, usize>,  // closure key -> DWA state id
     subsets: Vec<WeightedSubset>,  // for each DWA id, its (raw) weighted subset
     closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
     queue: VecDeque<usize>,        // worklist of DWA ids
@@ -261,18 +280,17 @@ impl<'a> Determinizer<'a> {
     }
 
     fn register_state(&mut self, subset: WeightedSubset) -> usize {
-        // canonicalize by dropping empties
+        // 1) Canonicalize incoming seed by dropping empty weights.
         let mut subset_clean: WeightedSubset = WeightedSubset::new();
         for (sid, w) in subset {
-            if !is_zero(&w) {
-                subset_clean.insert(sid, w);
-            }
+            if !is_zero(&w) { subset_clean.insert(sid, w); }
         }
-        let key = subset_key(&subset_clean);
-        if let Some(&id) = self.seen.get(&key) {
-            return id;
-        }
+        // 2) Compute ε-closure first; determinized state identity depends on closure, not the raw seed.
+        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+        let key = closure_key(&closure);
+        if let Some(&id) = self.seen.get(&key) { return id; }
 
+        // 3) Create a brand new DWA state since this closure has not been seen.
         let id = self.dwa.add_state();
 
         // DEBUG: Log information about newly created states periodically.
@@ -289,15 +307,10 @@ impl<'a> Determinizer<'a> {
             }
         }
 
-        // Compute ε-closure plus state-entry and final weights.
-        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+        // 4) Install state-entry and final weights based on the ε-closure.
         let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
-        if let Some(w) = entry_opt {
-            let _ = self.dwa.set_state_weight(id, w);
-        }
-        if let Some(w) = final_opt {
-            let _ = self.dwa.set_final_weight(id, w);
-        }
+        if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }
+        if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
 
         self.seen.insert(key, id);
         self.subsets.push(subset_clean);
