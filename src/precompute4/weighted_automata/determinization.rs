@@ -59,7 +59,13 @@ fn is_zero(w: &Weight) -> bool {
 
 // Canonical key for Weight (deterministic)
 fn weight_key(w: &Weight) -> String {
-    w.to_string()
+    // Using w.to_string() is incorrect if the underlying implementation (e.g.,
+    // iterating over a hash map) is not deterministic. A non-canonical key
+    // prevents the determinizer from recognizing equivalent states, leading to
+    // state explosion and non-termination for cyclic NWAs.
+    let mut items: Vec<_> = w.iter().collect();
+    items.sort_unstable();
+    format!("{:?}", items)
 }
 
 // Create a canonical key for a weighted subset to identify states in a HashMap.
@@ -216,12 +222,12 @@ fn compute_state_and_final_weights(
     nwa: &NWA,
     closure: &ClosureMap,
 ) -> (Option<Weight>, Option<Weight>) {
-    let mut entry = Weight::zeros();
-    for w in closure.values() {
-        entry = entry | w.clone();
-    }
-    let entry_opt = if entry.is_empty() { None } else { Some(entry) };
-
+    // State-entry weights are not part of Mohri's determinization algorithm for
+    // standard weighted automata. Their inclusion was conceptually incorrect and
+    // could interfere with the DWA's semantics, even if idempotent operations
+    // masked immediate issues. The correct approach is to encode all necessary
+    // information in the DWA's state transitions and final weights.
+    let entry_opt = None;
     let mut finalw = Weight::zeros();
     for (sid, cw) in closure {
         if let Some(fw) = &nwa.states[*sid].final_weight {
@@ -279,8 +285,8 @@ impl<'a> Determinizer<'a> {
         let id = self.dwa.add_state();
 
         // 4) Install state-entry and final weights from closure
-        let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
-        if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }
+        // State-entry weights are not used in the standard determinization algorithm.
+        let (_entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
         if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
 
         self.seen.insert(key, id);
