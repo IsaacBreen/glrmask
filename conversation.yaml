@@ -1595,7 +1595,7 @@ local_system:
               while let Some(idx) = self.work_queue.pop_front() {
                   self.in_queue[idx] = false;
                   if let Some(p) = &pb { p.inc(1); }
-                  self.process_state(idx);
+                  self.process_state(idx, pb.as_ref());
                   if let Some(p) = &pb { p.set_length(self.nodes.len() as u64); }
               }
               if let Some(p) = pb {
@@ -1603,24 +1603,34 @@ local_system:
               }
           }
 
-          fn process_state(&mut self, idx: usize) {
+          fn process_state(&mut self, idx: usize, pb: Option<&ProgressBar>) {
+              if let Some(p) = pb {
+                  p.set_message(format!("state {}: compute_target_maps", idx));
+              }
               let gates = self.nodes[idx].gates.clone();
-              let target_maps = self.compute_target_maps(&gates);
+              let target_maps = self.compute_target_maps(&gates, pb);
 
               let mut resolved = BTreeMap::new();
-              for (label, map) in target_maps {
+              let num_target_maps = target_maps.len();
+              for (i, (label, map)) in target_maps.into_iter().enumerate() {
+                  if let Some(p) = pb {
+                      p.set_message(format!("state {}: find_or_create_target_node {}/{}", idx, i + 1, num_target_maps));
+                  }
                   let mask = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
                   if mask.is_empty() {
                       if label.is_some() { resolved.insert(label, (idx, Weight::zeros())); }
                       continue;
                   }
-                  let target_idx = self.find_or_create_target_node(&map);
+                  let target_idx = self.find_or_create_target_node(&map, pb);
                   if self.propagate_weights_to_node(target_idx, &map) {
                       self.enqueue_node(target_idx);
                   }
                   resolved.insert(label, (target_idx, mask));
               }
 
+              if let Some(p) = pb {
+                  p.set_message(format!("state {}: resolving", idx));
+              }
               let node = &mut self.nodes[idx];
               if let Some((t, m)) = resolved.get(&None).cloned() {
                   node.default_target_idx = Some(t);
@@ -1631,16 +1641,22 @@ local_system:
                   node.exception_masks.insert(lbl, m);
               }
 
+              if let Some(p) = pb {
+                  p.set_message(format!("state {}: final_weight", idx));
+              }
               node.final_weight = Some(gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
                   if let Some(fw) = &self.signatures[*sig_id].final_weight {
                       acc |= &(gate & fw);
                   }
                   acc
               }));
+              if let Some(p) = pb {
+                  p.set_message("");
+              }
           }
 
           // Compute outgoing transitions for a set of gates, grouped by label (None = default).
-          fn compute_target_maps(&self, gates: &HashMap<usize, Weight>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
+          fn compute_target_maps(&self, gates: &HashMap<usize, Weight>, _pb: Option<&ProgressBar>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
               let mut all_defaults: HashMap<usize, Weight> = HashMap::new();
               let mut all_exceptions: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
               let mut overridden: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
@@ -1711,7 +1727,7 @@ local_system:
           }
 
           // Fast target-node selection with atom index + per-atom caching.
-          fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize {
+          fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> usize {
               // Compute incoming mask once
               let incoming = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
 
@@ -1728,7 +1744,7 @@ local_system:
                       let x = g & atom_mask;
                       if !x.is_empty() { filtered.insert(*k, x); }
                   }
-                  out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered));
+                  out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered, pb));
               }
 
               // Search a best overlapped candidate (prefer these to keep structure tight).
@@ -1745,7 +1761,7 @@ local_system:
                   // Build OutSummary for candidate on inter_atoms via per-atom cache.
                   let mut cand_out = OutSummary::default();
                   for &ai in &inter_atoms {
-                      let s = self.node_out_for_atom(idx, ai).clone();
+                      let s = self.node_out_for_atom(idx, ai, pb).clone();
                       cand_out.union_assign(&s);
                   }
                   if cand_out.is_empty() {
@@ -1801,7 +1817,7 @@ local_system:
           }
 
           // Per-atom outgoing summary for an existing node (cached).
-          fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize) -> &OutSummary {
+          fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize, pb: Option<&ProgressBar>) -> &OutSummary {
               if !self.nodes[idx].out_cache_by_atom.contains_key(&atom_idx) {
                   let atom_mask = self.atom_index.atoms[atom_idx].clone();
                   let gates = self.nodes[idx].gates.clone();
@@ -1811,15 +1827,15 @@ local_system:
                       let x = g & &atom_mask;
                       if !x.is_empty() { filtered.insert(*k, x); }
                   }
-                  let summary = self.compute_summary_for_gates(&filtered);
+                  let summary = self.compute_summary_for_gates(&filtered, pb);
                   self.nodes[idx].out_cache_by_atom.insert(atom_idx, summary);
               }
               self.nodes[idx].out_cache_by_atom.get(&atom_idx).unwrap()
           }
 
           // OutSummary for any gates set (helper).
-          fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>) -> OutSummary {
-              let maps = self.compute_target_maps(gates);
+          fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> OutSummary {
+              let maps = self.compute_target_maps(gates, pb);
               let mut out = OutSummary::default();
               for (k, m) in maps {
                   match k {
@@ -1996,7 +2012,7 @@ local_system:
                   return None;
               }
               let style = ProgressStyle::default_bar()
-                  .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({})", label))
+                  .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({}) {{msg}}", label))
                   .unwrap();
               Some(ProgressBar::new(len).with_style(style))
           }
@@ -3374,6 +3390,7 @@ local_system:
           // New indices for faster merging
           atom_index: AtomIndex,                            // weight-space index
           size_index: BTreeMap<usize, BTreeSet<usize>>,     // gates.len() -> node IDs
+          pb: Option<ProgressBar>,
       }
 
       impl<'a> Determinizer<'a> {
@@ -3392,6 +3409,7 @@ local_system:
                   in_queue: Vec::new(),
                   atom_index: AtomIndex::new(),
                   size_index: BTreeMap::new(),
+                  pb: None,
               }
           }
 
@@ -3459,7 +3477,7 @@ local_system:
           // Step 2: ε-closure per state masked by future weights.
           fn precompute_eps_closures(&mut self) {
               let n = self.nwa.states.len();
-              let pb = Self::progress_bar(n as u64, "ε-closures");
+              self.init_progress_bar(n as u64, "ε-closures");
 
               let mut scratch = vec![Weight::zeros(); n];
               let mut q = VecDeque::new();
@@ -3467,11 +3485,11 @@ local_system:
 
               for s in 0..n {
                   self.eps_cache[s] = self.eps_closure(s, &mut scratch, &mut q, &mut touched);
-                  if let Some(p) = &pb {
+                  if let Some(p) = &self.pb {
                       p.inc(1);
                   }
               }
-              if let Some(p) = pb {
+              if let Some(p) = &self.pb {
                   p.finish_with_message("ε-closures done");
               }
           }
@@ -3520,7 +3538,7 @@ local_system:
           // Step 3: build macro signatures (behavior after ε-closure).
           fn build_macro_signatures(&mut self) {
               let n = self.nwa.states.len();
-              let pb = Self::progress_bar(n as u64, "Macro signatures");
+              self.init_progress_bar(n as u64, "Macro signatures");
               let mut interner: HashMap<MacroSigKey, usize> = HashMap::new();
 
               for s in 0..n {
@@ -3531,9 +3549,9 @@ local_system:
                       id
                   });
                   self.state_to_sig_id[s] = sig_id;
-                  if let Some(p) = &pb { p.inc(1); }
+                  if let Some(p) = &self.pb { p.inc(1); }
               }
-              if let Some(p) = pb { p.finish_with_message("Macro signatures done"); }
+              if let Some(p) = &self.pb { p.finish_with_message("Macro signatures done"); }
           }
 
           fn build_one_macro_sig(&mut self, s: NWAStateID) -> (MacroSig, MacroSigKey) {
@@ -3587,7 +3605,7 @@ local_system:
           // Step 4: compile steps to macro-signature space.
           fn compile_steps(&mut self) {
               let m = self.step_pool.raw.len();
-              let pb = Self::progress_bar(m as u64, "Compile steps");
+              self.init_progress_bar(m as u64, "Compile steps");
               self.compiled_steps = Vec::with_capacity(m);
 
               for pairs in &self.step_pool.raw {
@@ -3598,14 +3616,14 @@ local_system:
                   let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
                   by_sig.sort_by_key(|(sid, _)| *sid);
                   self.compiled_steps.push(CompiledStep { by_sig });
-                  if let Some(p) = &pb { p.inc(1); }
+                  if let Some(p) = &self.pb { p.inc(1); }
               }
-              if let Some(p) = pb { p.finish_with_message("Compile steps done"); }
+              if let Some(p) = &self.pb { p.finish_with_message("Compile steps done"); }
           }
 
           // Step 5: subset construction over macro signatures (with merge heuristics).
           fn discover_composition_nodes(&mut self) {
-              let pb = Self::progress_bar(0, "Discovering states");
+              self.init_progress_bar(0, "Discovering states");
 
               let mut init: HashMap<usize, Weight> = HashMap::new();
               for (t, w) in &self.eps_cache[self.nwa.body.start_state] {
@@ -3615,26 +3633,26 @@ local_system:
 
               while let Some(idx) = self.work_queue.pop_front() {
                   self.in_queue[idx] = false;
-                  if let Some(p) = &pb { p.inc(1); }
-                  self.process_state(idx, pb.as_ref());
-                  if let Some(p) = &pb { p.set_length(self.nodes.len() as u64); }
+                  if let Some(p) = &self.pb { p.inc(1); }
+                  self.process_state(idx);
+                  if let Some(p) = &self.pb { p.set_length(self.nodes.len() as u64); }
               }
-              if let Some(p) = pb {
+              if let Some(p) = &self.pb {
                   p.finish_with_message(format!("Discovered {} DWA states", self.nodes.len()));
               }
           }
 
-          fn process_state(&mut self, idx: usize, pb: Option<&ProgressBar>) {
-              if let Some(p) = pb {
+          fn process_state(&mut self, idx: usize) {
+              if let Some(p) = self.pb.as_ref() {
                   p.set_message(format!("state {}: compute_target_maps", idx));
               }
               let gates = self.nodes[idx].gates.clone();
-              let target_maps = self.compute_target_maps(&gates, pb);
+              let target_maps = self.compute_target_maps(&gates);
 
               let mut resolved = BTreeMap::new();
               let num_target_maps = target_maps.len();
               for (i, (label, map)) in target_maps.into_iter().enumerate() {
-                  if let Some(p) = pb {
+                  if let Some(p) = self.pb.as_ref() {
                       p.set_message(format!("state {}: find_or_create_target_node {}/{}", idx, i + 1, num_target_maps));
                   }
                   let mask = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
@@ -3642,14 +3660,14 @@ local_system:
                       if label.is_some() { resolved.insert(label, (idx, Weight::zeros())); }
                       continue;
                   }
-                  let target_idx = self.find_or_create_target_node(&map, pb);
+                  let target_idx = self.find_or_create_target_node(&map);
                   if self.propagate_weights_to_node(target_idx, &map) {
                       self.enqueue_node(target_idx);
                   }
                   resolved.insert(label, (target_idx, mask));
               }
 
-              if let Some(p) = pb {
+              if let Some(p) = self.pb.as_ref() {
                   p.set_message(format!("state {}: resolving", idx));
               }
               let node = &mut self.nodes[idx];
@@ -3662,7 +3680,7 @@ local_system:
                   node.exception_masks.insert(lbl, m);
               }
 
-              if let Some(p) = pb {
+              if let Some(p) = self.pb.as_ref() {
                   p.set_message(format!("state {}: final_weight", idx));
               }
               node.final_weight = Some(gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
@@ -3671,13 +3689,13 @@ local_system:
                   }
                   acc
               }));
-              if let Some(p) = pb {
+              if let Some(p) = self.pb.as_ref() {
                   p.set_message("");
               }
           }
 
           // Compute outgoing transitions for a set of gates, grouped by label (None = default).
-          fn compute_target_maps(&self, gates: &HashMap<usize, Weight>, _pb: Option<&ProgressBar>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
+          fn compute_target_maps(&self, gates: &HashMap<usize, Weight>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
               let mut all_defaults: HashMap<usize, Weight> = HashMap::new();
               let mut all_exceptions: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
               let mut overridden: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
@@ -3748,7 +3766,7 @@ local_system:
           }
 
           // Fast target-node selection with atom index + per-atom caching.
-          fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> usize {
+          fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize {
               // Compute incoming mask once
               let incoming = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
 
@@ -3765,7 +3783,7 @@ local_system:
                       let x = g & atom_mask;
                       if !x.is_empty() { filtered.insert(*k, x); }
                   }
-                  out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered, pb));
+                  out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered));
               }
 
               // Search a best overlapped candidate (prefer these to keep structure tight).
@@ -3782,7 +3800,7 @@ local_system:
                   // Build OutSummary for candidate on inter_atoms via per-atom cache.
                   let mut cand_out = OutSummary::default();
                   for &ai in &inter_atoms {
-                      let s = self.node_out_for_atom(idx, ai, pb).clone();
+                      let s = self.node_out_for_atom(idx, ai).clone();
                       cand_out.union_assign(&s);
                   }
                   if cand_out.is_empty() {
@@ -3838,7 +3856,7 @@ local_system:
           }
 
           // Per-atom outgoing summary for an existing node (cached).
-          fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize, pb: Option<&ProgressBar>) -> &OutSummary {
+          fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize) -> &OutSummary {
               if !self.nodes[idx].out_cache_by_atom.contains_key(&atom_idx) {
                   let atom_mask = self.atom_index.atoms[atom_idx].clone();
                   let gates = self.nodes[idx].gates.clone();
@@ -3848,15 +3866,15 @@ local_system:
                       let x = g & &atom_mask;
                       if !x.is_empty() { filtered.insert(*k, x); }
                   }
-                  let summary = self.compute_summary_for_gates(&filtered, pb);
+                  let summary = self.compute_summary_for_gates(&filtered);
                   self.nodes[idx].out_cache_by_atom.insert(atom_idx, summary);
               }
               self.nodes[idx].out_cache_by_atom.get(&atom_idx).unwrap()
           }
 
           // OutSummary for any gates set (helper).
-          fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> OutSummary {
-              let maps = self.compute_target_maps(gates, pb);
+          fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>) -> OutSummary {
+              let maps = self.compute_target_maps(gates);
               let mut out = OutSummary::default();
               for (k, m) in maps {
                   match k {
@@ -4028,14 +4046,15 @@ local_system:
               }
           }
 
-          fn progress_bar(len: u64, label: &str) -> Option<ProgressBar> {
+          fn init_progress_bar(&mut self, len: u64, label: &str) {
               if !PROGRESS_BAR_ENABLED {
-                  return None;
+                  self.pb = None;
+                  return;
               }
               let style = ProgressStyle::default_bar()
                   .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({}) {{msg}}", label))
                   .unwrap();
-              Some(ProgressBar::new(len).with_style(style))
+              self.pb = Some(ProgressBar::new(len).with_style(style));
           }
       }
 
@@ -5720,7 +5739,7 @@ messages:
               while let Some(idx) = self.work_queue.pop_front() {
                   self.in_queue[idx] = false;
                   if let Some(p) = &pb { p.inc(1); }
-                  self.process_state(idx);
+                  self.process_state(idx, pb.as_ref());
                   if let Some(p) = &pb { p.set_length(self.nodes.len() as u64); }
               }
               if let Some(p) = pb {
@@ -5728,24 +5747,34 @@ messages:
               }
           }
 
-          fn process_state(&mut self, idx: usize) {
+          fn process_state(&mut self, idx: usize, pb: Option<&ProgressBar>) {
+              if let Some(p) = pb {
+                  p.set_message(format!("state {}: compute_target_maps", idx));
+              }
               let gates = self.nodes[idx].gates.clone();
-              let target_maps = self.compute_target_maps(&gates);
+              let target_maps = self.compute_target_maps(&gates, pb);
 
               let mut resolved = BTreeMap::new();
-              for (label, map) in target_maps {
+              let num_target_maps = target_maps.len();
+              for (i, (label, map)) in target_maps.into_iter().enumerate() {
+                  if let Some(p) = pb {
+                      p.set_message(format!("state {}: find_or_create_target_node {}/{}", idx, i + 1, num_target_maps));
+                  }
                   let mask = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
                   if mask.is_empty() {
                       if label.is_some() { resolved.insert(label, (idx, Weight::zeros())); }
                       continue;
                   }
-                  let target_idx = self.find_or_create_target_node(&map);
+                  let target_idx = self.find_or_create_target_node(&map, pb);
                   if self.propagate_weights_to_node(target_idx, &map) {
                       self.enqueue_node(target_idx);
                   }
                   resolved.insert(label, (target_idx, mask));
               }
 
+              if let Some(p) = pb {
+                  p.set_message(format!("state {}: resolving", idx));
+              }
               let node = &mut self.nodes[idx];
               if let Some((t, m)) = resolved.get(&None).cloned() {
                   node.default_target_idx = Some(t);
@@ -5756,16 +5785,22 @@ messages:
                   node.exception_masks.insert(lbl, m);
               }
 
+              if let Some(p) = pb {
+                  p.set_message(format!("state {}: final_weight", idx));
+              }
               node.final_weight = Some(gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
                   if let Some(fw) = &self.signatures[*sig_id].final_weight {
                       acc |= &(gate & fw);
                   }
                   acc
               }));
+              if let Some(p) = pb {
+                  p.set_message("");
+              }
           }
 
           // Compute outgoing transitions for a set of gates, grouped by label (None = default).
-          fn compute_target_maps(&self, gates: &HashMap<usize, Weight>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
+          fn compute_target_maps(&self, gates: &HashMap<usize, Weight>, _pb: Option<&ProgressBar>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
               let mut all_defaults: HashMap<usize, Weight> = HashMap::new();
               let mut all_exceptions: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
               let mut overridden: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
@@ -5836,7 +5871,7 @@ messages:
           }
 
           // Fast target-node selection with atom index + per-atom caching.
-          fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize {
+          fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> usize {
               // Compute incoming mask once
               let incoming = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
 
@@ -5853,7 +5888,7 @@ messages:
                       let x = g & atom_mask;
                       if !x.is_empty() { filtered.insert(*k, x); }
                   }
-                  out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered));
+                  out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered, pb));
               }
 
               // Search a best overlapped candidate (prefer these to keep structure tight).
@@ -5870,7 +5905,7 @@ messages:
                   // Build OutSummary for candidate on inter_atoms via per-atom cache.
                   let mut cand_out = OutSummary::default();
                   for &ai in &inter_atoms {
-                      let s = self.node_out_for_atom(idx, ai).clone();
+                      let s = self.node_out_for_atom(idx, ai, pb).clone();
                       cand_out.union_assign(&s);
                   }
                   if cand_out.is_empty() {
@@ -5926,7 +5961,7 @@ messages:
           }
 
           // Per-atom outgoing summary for an existing node (cached).
-          fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize) -> &OutSummary {
+          fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize, pb: Option<&ProgressBar>) -> &OutSummary {
               if !self.nodes[idx].out_cache_by_atom.contains_key(&atom_idx) {
                   let atom_mask = self.atom_index.atoms[atom_idx].clone();
                   let gates = self.nodes[idx].gates.clone();
@@ -5936,15 +5971,15 @@ messages:
                       let x = g & &atom_mask;
                       if !x.is_empty() { filtered.insert(*k, x); }
                   }
-                  let summary = self.compute_summary_for_gates(&filtered);
+                  let summary = self.compute_summary_for_gates(&filtered, pb);
                   self.nodes[idx].out_cache_by_atom.insert(atom_idx, summary);
               }
               self.nodes[idx].out_cache_by_atom.get(&atom_idx).unwrap()
           }
 
           // OutSummary for any gates set (helper).
-          fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>) -> OutSummary {
-              let maps = self.compute_target_maps(gates);
+          fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> OutSummary {
+              let maps = self.compute_target_maps(gates, pb);
               let mut out = OutSummary::default();
               for (k, m) in maps {
                   match k {
@@ -6121,7 +6156,7 @@ messages:
                   return None;
               }
               let style = ProgressStyle::default_bar()
-                  .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({})", label))
+                  .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({}) {{msg}}", label))
                   .unwrap();
               Some(ProgressBar::new(len).with_style(style))
           }
@@ -6158,9 +6193,9 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata/determinization.rs
-  - user: In `process_state`, there are a bunch of smaller methods called like `compute_target_maps`.
-      Update the progress bar with these so we can see exactly where we are at a given
-      moment.
+  - user: Determinizer
+    metadata:
+  - user: Save the progress bar to Determinizer. Simpler.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -6180,203 +6215,443 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. I'll provide you with step-by-step instructions to update the progress bar reporting and then the corresponding git diff.
+      Of course. Here are the step-by-step instructions to refactor the `Determinizer` to manage its own progress bar, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      Here are the edits for `src/precompute4/weighted_automata/determinization.rs`:
+      I'll modify the `Determinizer` in `src/precompute4/weighted_automata/determinization.rs` to hold an `Option<ProgressBar>` and manage its lifecycle internally. This simplifies function signatures by removing the need to pass the progress bar as an argument.
 
-      1.  **Update `progress_bar` template:**
-          In the `Determinizer::progress_bar` function, modify the `template` string to include `{{msg}}` which will display messages we set on the progress bar.
+      #### File: `src/precompute4/weighted_automata/determinization.rs`
+
+      1.  **Add `pb` field to `Determinizer` struct:**
+          In the `Determinizer` struct definition, add a new field `pb: Option<ProgressBar>`.
 
           ```rust
-          // in src/precompute4/weighted_automata/determinization.rs
-          fn progress_bar(len: u64, label: &str) -> Option<ProgressBar> {
+          // src/precompute4/weighted_automata/determinization.rs
+
+          struct Determinizer<'a> {
+              // ... existing fields
+              // New indices for faster merging
+              atom_index: AtomIndex,                            // weight-space index
+              size_index: BTreeMap<usize, BTreeSet<usize>>,     // gates.len() -> node IDs
+              pb: Option<ProgressBar>,
+          }
+          ```
+
+      2.  **Initialize `pb` in `Determinizer::new()`:**
+          In the `new` function, initialize `pb` to `None`.
+
+          ```rust
+          // src/precompute4/weighted_automata/determinization.rs
+
+          impl<'a> Determinizer<'a> {
+              fn new(nwa: &'a NWA) -> Self {
+                  // ...
+                  Self {
+                      // ... existing initializations
+                      atom_index: AtomIndex::new(),
+                      size_index: BTreeMap::new(),
+                      pb: None,
+                  }
+              }
+          ```
+
+      3.  **Replace `progress_bar()` with `init_progress_bar()`:**
+          Rename the static `progress_bar` method to `init_progress_bar`, change its signature to take `&mut self`, and have it set `self.pb`.
+
+          ```rust
+          // src/precompute4/weighted_automata/determinization.rs
+
+          // ... inside impl Determinizer
+          fn init_progress_bar(&mut self, len: u64, label: &str) {
               if !PROGRESS_BAR_ENABLED {
-                  return None;
+                  self.pb = None;
+                  return;
               }
               let style = ProgressStyle::default_bar()
                   .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({}) {{msg}}", label))
                   .unwrap();
-              Some(ProgressBar::new(len).with_style(style))
+              self.pb = Some(ProgressBar::new(len).with_style(style));
           }
           ```
 
-      2.  **Pass the progress bar to `process_state`:**
-          In `Determinizer::discover_composition_nodes`, find the `while` loop and modify the call to `self.process_state` to pass a reference to the progress bar.
+      4.  **Update progress bar usage in `precompute_eps_closures()`:**
+          Modify the function to call `self.init_progress_bar` and use `self.pb`.
 
           ```rust
-          // in src/precompute4/weighted_automata/determinization.rs, inside discover_composition_nodes
-          while let Some(idx) = self.work_queue.pop_front() {
-              self.in_queue[idx] = false;
-              if let Some(p) = &pb { p.inc(1); }
-              self.process_state(idx, pb.as_ref());
-              if let Some(p) = &pb { p.set_length(self.nodes.len() as u64); }
+          // src/precompute4/weighted_automata/determinization.rs
+
+          fn precompute_eps_closures(&mut self) {
+              let n = self.nwa.states.len();
+              self.init_progress_bar(n as u64, "ε-closures");
+
+              let mut scratch = vec![Weight::zeros(); n];
+              let mut q = VecDeque::new();
+              let mut touched = Vec::new();
+
+              for s in 0..n {
+                  self.eps_cache[s] = self.eps_closure(s, &mut scratch, &mut q, &mut touched);
+                  if let Some(p) = &self.pb {
+                      p.inc(1);
+                  }
+              }
+              if let Some(p) = &self.pb {
+                  p.finish_with_message("ε-closures done");
+              }
           }
           ```
 
-      3.  **Update `process_state` to use the progress bar:**
-          -   Change the function signature to accept `pb: Option<&ProgressBar>`.
-          -   Add calls to `p.set_message(...)` to report the current activity.
-          -   Update the calls to `compute_target_maps` and `find_or_create_target_node` to pass the progress bar along.
+      5.  **Update progress bar usage in `build_macro_signatures()`:**
+          Similarly, update this function to use `self.init_progress_bar` and `self.pb`.
 
-      4.  **Thread the progress bar through function calls:**
-          You'll need to update the signatures for a few functions to accept the optional progress bar and pass it down the call stack.
-          -   `process_state(..., pb: Option<&ProgressBar>)`
-          -   `compute_target_maps(..., pb: Option<&ProgressBar>)`
-          -   `find_or_create_target_node(..., pb: Option<&ProgressBar>)`
-          -   `node_out_for_atom(..., pb: Option<&ProgressBar>)`
-          -   `compute_summary_for_gates(..., pb: Option<&ProgressBar>)`
+          ```rust
+          // src/precompute4/weighted_automata/determinization.rs
 
-          For each of these functions, add `pb: Option<&ProgressBar>` to the parameters and pass it in any calls to the other functions in this list.
+          fn build_macro_signatures(&mut self) {
+              let n = self.nwa.states.len();
+              self.init_progress_bar(n as u64, "Macro signatures");
+              // ...
+              for s in 0..n {
+                  // ...
+                  if let Some(p) = &self.pb { p.inc(1); }
+              }
+              if let Some(p) = &self.pb { p.finish_with_message("Macro signatures done"); }
+          }
+          ```
 
-      The git patch below includes all of these changes.
+      6.  **Update progress bar usage in `compile_steps()`:**
+          Update this function as well.
+
+          ```rust
+          // src/precompute4/weighted_automata/determinization.rs
+
+          fn compile_steps(&mut self) {
+              let m = self.step_pool.raw.len();
+              self.init_progress_bar(m as u64, "Compile steps");
+              // ...
+              for pairs in &self.step_pool.raw {
+                  // ...
+                  if let Some(p) = &self.pb { p.inc(1); }
+              }
+              if let Some(p) = &self.pb { p.finish_with_message("Compile steps done"); }
+          }
+          ```
+
+      7.  **Update `discover_composition_nodes()` and its callees:**
+          - In `discover_composition_nodes`, call `self.init_progress_bar` and use `self.pb`.
+          - Remove the progress bar argument from the call to `self.process_state(idx)`.
+          - Remove the `pb` parameter from the signatures of `process_state`, `compute_target_maps`, `find_or_create_target_node`, `node_out_for_atom`, and `compute_summary_for_gates`.
+          - Update the bodies of these functions to use `self.pb.as_ref()` where needed and to call each other with the new signatures.
+
+          Here are the key changes:
+
+          ```rust
+          // src/precompute4/weighted_automata/determinization.rs
+
+          fn discover_composition_nodes(&mut self) {
+              self.init_progress_bar(0, "Discovering states");
+              // ...
+              while let Some(idx) = self.work_queue.pop_front() {
+                  self.in_queue[idx] = false;
+                  if let Some(p) = &self.pb { p.inc(1); }
+                  self.process_state(idx); // No more pb argument
+                  if let Some(p) = &self.pb { p.set_length(self.nodes.len() as u64); }
+              }
+              if let Some(p) = &self.pb {
+                  p.finish_with_message(format!("Discovered {} DWA states", self.nodes.len()));
+              }
+          }
+
+          fn process_state(&mut self, idx: usize) { // No more pb parameter
+              if let Some(p) = self.pb.as_ref() {
+                  p.set_message(format!("state {}: compute_target_maps", idx));
+              }
+              let gates = self.nodes[idx].gates.clone();
+              let target_maps = self.compute_target_maps(&gates); // No more pb argument
+              // ...
+              for (i, (label, map)) in target_maps.into_iter().enumerate() {
+                  if let Some(p) = self.pb.as_ref() {
+                      p.set_message(format!("state {}: find_or_create_target_node {}/{}", idx, i + 1, num_target_maps));
+                  }
+                  // ...
+                  let target_idx = self.find_or_create_target_node(&map); // No more pb argument
+                  // ...
+              }
+              // ... and so on for the rest of the function
+          }
+
+          fn compute_target_maps(&self, gates: &HashMap<usize, Weight>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> { // No more pb parameter
+              // ...
+          }
+
+          fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize { // No more pb parameter
+              // ...
+              out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered)); // No more pb argument
+              // ...
+              let s = self.node_out_for_atom(idx, ai).clone(); // No more pb argument
+              // ...
+          }
+          
+          fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize) -> &OutSummary { // No more pb parameter
+              // ...
+              let summary = self.compute_summary_for_gates(&filtered); // No more pb argument
+              // ...
+          }
+
+          fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>) -> OutSummary { // No more pb parameter
+              let maps = self.compute_target_maps(gates); // No more pb argument
+              // ...
+          }
+          ```
 
       ### Git Diff
 
-      Here is the git diff with all the necessary changes.
+      Here is the git patch that applies all the changes described above.
 
       ```diff
-      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
       --- a/src/precompute4/weighted_automata/determinization.rs
       +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -528,21 +528,49 @@
+      @@ -282,6 +282,7 @@
+           // New indices for faster merging
+           atom_index: AtomIndex,                            // weight-space index
+           size_index: BTreeMap<usize, BTreeSet<usize>>,     // gates.len() -> node IDs
+      +    pb: Option<ProgressBar>,
+       }
+       
+       impl<'a> Determinizer<'a> {
+      @@ -300,6 +301,7 @@
+                   in_queue: Vec::new(),
+                   atom_index: AtomIndex::new(),
+                   size_index: BTreeMap::new(),
+      +            pb: None,
+               }
+           }
+       
+      @@ -361,17 +363,17 @@
+           // Step 2: ε-closure per state masked by future weights.
+           fn precompute_eps_closures(&mut self) {
+               let n = self.nwa.states.len();
+      -        let pb = Self::progress_bar(n as u64, "ε-closures");
+      +        self.init_progress_bar(n as u64, "ε-closures");
+       
+               let mut scratch = vec![Weight::zeros(); n];
+               let mut q = VecDeque::new();
+               let mut touched = Vec::new();
+       
+               for s in 0..n {
+                   self.eps_cache[s] = self.eps_closure(s, &mut scratch, &mut q, &mut touched);
+      -            if let Some(p) = &pb {
+      +            if let Some(p) = &self.pb {
+                       p.inc(1);
+                   }
+               }
+      -        if let Some(p) = pb {
+      +        if let Some(p) = &self.pb {
+                   p.finish_with_message("ε-closures done");
+               }
+           }
+      @@ -414,7 +416,7 @@
+           // Step 3: build macro signatures (behavior after ε-closure).
+           fn build_macro_signatures(&mut self) {
+               let n = self.nwa.states.len();
+      -        let pb = Self::progress_bar(n as u64, "Macro signatures");
+      +        self.init_progress_bar(n as u64, "Macro signatures");
+               let mut interner: HashMap<MacroSigKey, usize> = HashMap::new();
+       
+               for s in 0..n {
+      @@ -425,9 +427,9 @@
+                       id
+                   });
+                   self.state_to_sig_id[s] = sig_id;
+      -            if let Some(p) = &pb { p.inc(1); }
+      -        }
+      -        if let Some(p) = pb { p.finish_with_message("Macro signatures done"); }
+      +            if let Some(p) = &self.pb { p.inc(1); }
+      +        }
+      +        if let Some(p) = &self.pb { p.finish_with_message("Macro signatures done"); }
+           }
+       
+           fn build_one_macro_sig(&mut self, s: NWAStateID) -> (MacroSig, MacroSigKey) {
+      @@ -477,7 +479,7 @@
+           // Step 4: compile steps to macro-signature space.
+           fn compile_steps(&mut self) {
+               let m = self.step_pool.raw.len();
+      -        let pb = Self::progress_bar(m as u64, "Compile steps");
+      +        self.init_progress_bar(m as u64, "Compile steps");
+               self.compiled_steps = Vec::with_capacity(m);
+       
+               for pairs in &self.step_pool.raw {
+      @@ -488,15 +490,15 @@
+                   let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
+                   by_sig.sort_by_key(|(sid, _)| *sid);
+                   self.compiled_steps.push(CompiledStep { by_sig });
+      -            if let Some(p) = &pb { p.inc(1); }
+      -        }
+      -        if let Some(p) = pb { p.finish_with_message("Compile steps done"); }
+      +            if let Some(p) = &self.pb { p.inc(1); }
+      +        }
+      +        if let Some(p) = &self.pb { p.finish_with_message("Compile steps done"); }
+           }
+       
+           // Step 5: subset construction over macro signatures (with merge heuristics).
+           fn discover_composition_nodes(&mut self) {
+      -        let pb = Self::progress_bar(0, "Discovering states");
+      +        self.init_progress_bar(0, "Discovering states");
+       
+               let mut init: HashMap<usize, Weight> = HashMap::new();
+               for (t, w) in &self.eps_cache[self.nwa.body.start_state] {
+      @@ -506,40 +508,40 @@
        
                while let Some(idx) = self.work_queue.pop_front() {
                    self.in_queue[idx] = false;
-                   if let Some(p) = &pb { p.inc(1); }
-      -            self.process_state(idx);
-      +            self.process_state(idx, pb.as_ref());
-                   if let Some(p) = &pb { p.set_length(self.nodes.len() as u64); }
-               }
-               if let Some(p) = pb {
+      -            if let Some(p) = &pb { p.inc(1); }
+      -            self.process_state(idx, pb.as_ref());
+      -            if let Some(p) = &pb { p.set_length(self.nodes.len() as u64); }
+      -        }
+      -        if let Some(p) = pb {
+      +            if let Some(p) = &self.pb { p.inc(1); }
+      +            self.process_state(idx);
+      +            if let Some(p) = &self.pb { p.set_length(self.nodes.len() as u64); }
+      +        }
+      +        if let Some(p) = &self.pb {
                    p.finish_with_message(format!("Discovered {} DWA states", self.nodes.len()));
                }
            }
        
-      -    fn process_state(&mut self, idx: usize) {
-      +    fn process_state(&mut self, idx: usize, pb: Option<&ProgressBar>) {
-      +        if let Some(p) = pb {
-      +            p.set_message(format!("state {}: compute_target_maps", idx));
-      +        }
+      -    fn process_state(&mut self, idx: usize, pb: Option<&ProgressBar>) {
+      -        if let Some(p) = pb {
+      +    fn process_state(&mut self, idx: usize) {
+      +        if let Some(p) = self.pb.as_ref() {
+                   p.set_message(format!("state {}: compute_target_maps", idx));
+               }
                let gates = self.nodes[idx].gates.clone();
-      -        let target_maps = self.compute_target_maps(&gates);
-      +        let target_maps = self.compute_target_maps(&gates, pb);
+      -        let target_maps = self.compute_target_maps(&gates, pb);
+      +        let target_maps = self.compute_target_maps(&gates);
        
                let mut resolved = BTreeMap::new();
-      -        for (label, map) in target_maps {
-      +        let num_target_maps = target_maps.len();
-      +        for (i, (label, map)) in target_maps.into_iter().enumerate() {
-      +            if let Some(p) = pb {
-      +                p.set_message(format!("state {}: find_or_create_target_node {}/{}", idx, i + 1, num_target_maps));
-      +            }
+               let num_target_maps = target_maps.len();
+               for (i, (label, map)) in target_maps.into_iter().enumerate() {
+      -            if let Some(p) = pb {
+      +            if let Some(p) = self.pb.as_ref() {
+                       p.set_message(format!("state {}: find_or_create_target_node {}/{}", idx, i + 1, num_target_maps));
+                   }
                    let mask = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
                    if mask.is_empty() {
                        if label.is_some() { resolved.insert(label, (idx, Weight::zeros())); }
                        continue;
                    }
-      -            let target_idx = self.find_or_create_target_node(&map);
-      +            let target_idx = self.find_or_create_target_node(&map, pb);
+      -            let target_idx = self.find_or_create_target_node(&map, pb);
+      +            let target_idx = self.find_or_create_target_node(&map);
                    if self.propagate_weights_to_node(target_idx, &map) {
                        self.enqueue_node(target_idx);
                    }
                    resolved.insert(label, (target_idx, mask));
                }
        
-      +        if let Some(p) = pb {
-      +            p.set_message(format!("state {}: resolving", idx));
-      +        }
+      -        if let Some(p) = pb {
+      +        if let Some(p) = self.pb.as_ref() {
+                   p.set_message(format!("state {}: resolving", idx));
+               }
                let node = &mut self.nodes[idx];
-               if let Some((t, m)) = resolved.get(&None).cloned() {
-                   node.default_target_idx = Some(t);
-      @@ -553,17 +581,23 @@
+      @@ -551,7 +553,7 @@
                    node.exception_masks.insert(lbl, m);
                }
        
-      +        if let Some(p) = pb {
-      +            p.set_message(format!("state {}: final_weight", idx));
-      +        }
+      -        if let Some(p) = pb {
+      +        if let Some(p) = self.pb.as_ref() {
+                   p.set_message(format!("state {}: final_weight", idx));
+               }
                node.final_weight = Some(gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
-                   if let Some(fw) = &self.signatures[*sig_id].final_weight {
-                       acc |= &(gate & fw);
+      @@ -560,13 +562,13 @@
                    }
                    acc
                }));
-      +        if let Some(p) = pb {
-      +            p.set_message("");
-      +        }
+      -        if let Some(p) = pb {
+      +        if let Some(p) = self.pb.as_ref() {
+                   p.set_message("");
+               }
            }
        
            // Compute outgoing transitions for a set of gates, grouped by label (None = default).
-      -    fn compute_target_maps(&self, gates: &HashMap<usize, Weight>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
-      +    fn compute_target_maps(&self, gates: &HashMap<usize, Weight>, _pb: Option<&ProgressBar>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
+      -    fn compute_target_maps(&self, gates: &HashMap<usize, Weight>, _pb: Option<&ProgressBar>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
+      +    fn compute_target_maps(&self, gates: &HashMap<usize, Weight>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
                let mut all_defaults: HashMap<usize, Weight> = HashMap::new();
                let mut all_exceptions: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
                let mut overridden: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
-      @@ -633,7 +667,7 @@
+      @@ -635,7 +637,7 @@
            }
        
            // Fast target-node selection with atom index + per-atom caching.
-      -    fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize {
-      +    fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> usize {
+      -    fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> usize {
+      +    fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize {
                // Compute incoming mask once
                let incoming = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
        
-      @@ -649,7 +683,7 @@
+      @@ -652,7 +654,7 @@
                        let x = g & atom_mask;
                        if !x.is_empty() { filtered.insert(*k, x); }
                    }
-      -            out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered));
-      +            out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered, pb));
+      -            out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered, pb));
+      +            out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered));
                }
        
                // Search a best overlapped candidate (prefer these to keep structure tight).
-      @@ -665,7 +699,7 @@
+      @@ -668,7 +670,7 @@
                    // Build OutSummary for candidate on inter_atoms via per-atom cache.
                    let mut cand_out = OutSummary::default();
                    for &ai in &inter_atoms {
-      -                let s = self.node_out_for_atom(idx, ai).clone();
-      +                let s = self.node_out_for_atom(idx, ai, pb).clone();
+      -                let s = self.node_out_for_atom(idx, ai, pb).clone();
+      +                let s = self.node_out_for_atom(idx, ai).clone();
                        cand_out.union_assign(&s);
                    }
                    if cand_out.is_empty() {
-      @@ -717,7 +751,7 @@
+      @@ -726,7 +728,7 @@
            }
        
            // Per-atom outgoing summary for an existing node (cached).
-      -    fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize) -> &OutSummary {
-      +    fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize, pb: Option<&ProgressBar>) -> &OutSummary {
+      -    fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize, pb: Option<&ProgressBar>) -> &OutSummary {
+      +    fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize) -> &OutSummary {
                if !self.nodes[idx].out_cache_by_atom.contains_key(&atom_idx) {
                    let atom_mask = self.atom_index.atoms[atom_idx].clone();
                    let gates = self.nodes[idx].gates.clone();
-      @@ -727,15 +761,15 @@
+      @@ -736,7 +738,7 @@
                        let x = g & &atom_mask;
                        if !x.is_empty() { filtered.insert(*k, x); }
                    }
-      -            let summary = self.compute_summary_for_gates(&filtered);
-      +            let summary = self.compute_summary_for_gates(&filtered, pb);
+      -            let summary = self.compute_summary_for_gates(&filtered, pb);
+      +            let summary = self.compute_summary_for_gates(&filtered);
                    self.nodes[idx].out_cache_by_atom.insert(atom_idx, summary);
                }
                self.nodes[idx].out_cache_by_atom.get(&atom_idx).unwrap()
-           }
+      @@ -744,8 +746,8 @@
        
            // OutSummary for any gates set (helper).
-      -    fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>) -> OutSummary {
-      -        let maps = self.compute_target_maps(gates);
-      +    fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> OutSummary {
-      +        let maps = self.compute_target_maps(gates, pb);
+      -    fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> OutSummary {
+      -        let maps = self.compute_target_maps(gates, pb);
+      +    fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>) -> OutSummary {
+      +        let maps = self.compute_target_maps(gates);
                let mut out = OutSummary::default();
                for (k, m) in maps {
                    match k {
-      @@ -877,7 +911,7 @@
-                   return None;
+      @@ -888,15 +890,15 @@
+               }
+           }
+       
+      -    fn progress_bar(len: u64, label: &str) -> Option<ProgressBar> {
+      +    fn init_progress_bar(&mut self, len: u64, label: &str) {
+               if !PROGRESS_BAR_ENABLED {
+      -            return None;
+      +            self.pb = None;
+      +            return;
                }
                let style = ProgressStyle::default_bar()
-      -            .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({})", label))
-      +            .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({}) {{msg}}", label))
+                   .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({}) {{msg}}", label))
                    .unwrap();
-               Some(ProgressBar::new(len).with_style(style))
+      -        Some(ProgressBar::new(len).with_style(style))
+      +        self.pb = Some(ProgressBar::new(len).with_style(style));
            }
+       }
+       
 
       ```
     metadata:
@@ -6389,7 +6664,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
     metadata:
-  - user: 'Changes committed with message: "dwa: Enhance progress bar reporting during
-      NWA determinization"'
+  - user: 'Changes committed with message: "Refactor: Encapsulate ProgressBar management
+      within Determinizer struct"'
     metadata:
 ...

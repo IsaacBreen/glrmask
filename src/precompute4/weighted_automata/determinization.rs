@@ -233,6 +233,7 @@ struct Determinizer<'a> {
     // New indices for faster merging
     atom_index: AtomIndex,                            // weight-space index
     size_index: BTreeMap<usize, BTreeSet<usize>>,     // gates.len() -> node IDs
+    pb: Option<ProgressBar>,
 }
 
 impl<'a> Determinizer<'a> {
@@ -251,6 +252,7 @@ impl<'a> Determinizer<'a> {
             in_queue: Vec::new(),
             atom_index: AtomIndex::new(),
             size_index: BTreeMap::new(),
+            pb: None,
         }
     }
 
@@ -318,7 +320,7 @@ impl<'a> Determinizer<'a> {
     // Step 2: ε-closure per state masked by future weights.
     fn precompute_eps_closures(&mut self) {
         let n = self.nwa.states.len();
-        let pb = Self::progress_bar(n as u64, "ε-closures");
+        self.init_progress_bar(n as u64, "ε-closures");
 
         let mut scratch = vec![Weight::zeros(); n];
         let mut q = VecDeque::new();
@@ -326,11 +328,11 @@ impl<'a> Determinizer<'a> {
 
         for s in 0..n {
             self.eps_cache[s] = self.eps_closure(s, &mut scratch, &mut q, &mut touched);
-            if let Some(p) = &pb {
+            if let Some(p) = &self.pb {
                 p.inc(1);
             }
         }
-        if let Some(p) = pb {
+        if let Some(p) = &self.pb {
             p.finish_with_message("ε-closures done");
         }
     }
@@ -379,7 +381,7 @@ impl<'a> Determinizer<'a> {
     // Step 3: build macro signatures (behavior after ε-closure).
     fn build_macro_signatures(&mut self) {
         let n = self.nwa.states.len();
-        let pb = Self::progress_bar(n as u64, "Macro signatures");
+        self.init_progress_bar(n as u64, "Macro signatures");
         let mut interner: HashMap<MacroSigKey, usize> = HashMap::new();
 
         for s in 0..n {
@@ -390,9 +392,9 @@ impl<'a> Determinizer<'a> {
                 id
             });
             self.state_to_sig_id[s] = sig_id;
-            if let Some(p) = &pb { p.inc(1); }
+            if let Some(p) = &self.pb { p.inc(1); }
         }
-        if let Some(p) = pb { p.finish_with_message("Macro signatures done"); }
+        if let Some(p) = &self.pb { p.finish_with_message("Macro signatures done"); }
     }
 
     fn build_one_macro_sig(&mut self, s: NWAStateID) -> (MacroSig, MacroSigKey) {
@@ -446,7 +448,7 @@ impl<'a> Determinizer<'a> {
     // Step 4: compile steps to macro-signature space.
     fn compile_steps(&mut self) {
         let m = self.step_pool.raw.len();
-        let pb = Self::progress_bar(m as u64, "Compile steps");
+        self.init_progress_bar(m as u64, "Compile steps");
         self.compiled_steps = Vec::with_capacity(m);
 
         for pairs in &self.step_pool.raw {
@@ -457,14 +459,14 @@ impl<'a> Determinizer<'a> {
             let mut by_sig: Vec<(usize, Weight)> = acc.into_iter().collect();
             by_sig.sort_by_key(|(sid, _)| *sid);
             self.compiled_steps.push(CompiledStep { by_sig });
-            if let Some(p) = &pb { p.inc(1); }
+            if let Some(p) = &self.pb { p.inc(1); }
         }
-        if let Some(p) = pb { p.finish_with_message("Compile steps done"); }
+        if let Some(p) = &self.pb { p.finish_with_message("Compile steps done"); }
     }
 
     // Step 5: subset construction over macro signatures (with merge heuristics).
     fn discover_composition_nodes(&mut self) {
-        let pb = Self::progress_bar(0, "Discovering states");
+        self.init_progress_bar(0, "Discovering states");
 
         let mut init: HashMap<usize, Weight> = HashMap::new();
         for (t, w) in &self.eps_cache[self.nwa.body.start_state] {
@@ -474,26 +476,26 @@ impl<'a> Determinizer<'a> {
 
         while let Some(idx) = self.work_queue.pop_front() {
             self.in_queue[idx] = false;
-            if let Some(p) = &pb { p.inc(1); }
-            self.process_state(idx, pb.as_ref());
-            if let Some(p) = &pb { p.set_length(self.nodes.len() as u64); }
+            if let Some(p) = &self.pb { p.inc(1); }
+            self.process_state(idx);
+            if let Some(p) = &self.pb { p.set_length(self.nodes.len() as u64); }
         }
-        if let Some(p) = pb {
+        if let Some(p) = &self.pb {
             p.finish_with_message(format!("Discovered {} DWA states", self.nodes.len()));
         }
     }
 
-    fn process_state(&mut self, idx: usize, pb: Option<&ProgressBar>) {
-        if let Some(p) = pb {
+    fn process_state(&mut self, idx: usize) {
+        if let Some(p) = self.pb.as_ref() {
             p.set_message(format!("state {}: compute_target_maps", idx));
         }
         let gates = self.nodes[idx].gates.clone();
-        let target_maps = self.compute_target_maps(&gates, pb);
+        let target_maps = self.compute_target_maps(&gates);
 
         let mut resolved = BTreeMap::new();
         let num_target_maps = target_maps.len();
         for (i, (label, map)) in target_maps.into_iter().enumerate() {
-            if let Some(p) = pb {
+            if let Some(p) = self.pb.as_ref() {
                 p.set_message(format!("state {}: find_or_create_target_node {}/{}", idx, i + 1, num_target_maps));
             }
             let mask = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
@@ -501,14 +503,14 @@ impl<'a> Determinizer<'a> {
                 if label.is_some() { resolved.insert(label, (idx, Weight::zeros())); }
                 continue;
             }
-            let target_idx = self.find_or_create_target_node(&map, pb);
+            let target_idx = self.find_or_create_target_node(&map);
             if self.propagate_weights_to_node(target_idx, &map) {
                 self.enqueue_node(target_idx);
             }
             resolved.insert(label, (target_idx, mask));
         }
 
-        if let Some(p) = pb {
+        if let Some(p) = self.pb.as_ref() {
             p.set_message(format!("state {}: resolving", idx));
         }
         let node = &mut self.nodes[idx];
@@ -521,7 +523,7 @@ impl<'a> Determinizer<'a> {
             node.exception_masks.insert(lbl, m);
         }
 
-        if let Some(p) = pb {
+        if let Some(p) = self.pb.as_ref() {
             p.set_message(format!("state {}: final_weight", idx));
         }
         node.final_weight = Some(gates.iter().fold(Weight::zeros(), |mut acc, (sig_id, gate)| {
@@ -530,13 +532,13 @@ impl<'a> Determinizer<'a> {
             }
             acc
         }));
-        if let Some(p) = pb {
+        if let Some(p) = self.pb.as_ref() {
             p.set_message("");
         }
     }
 
     // Compute outgoing transitions for a set of gates, grouped by label (None = default).
-    fn compute_target_maps(&self, gates: &HashMap<usize, Weight>, _pb: Option<&ProgressBar>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
+    fn compute_target_maps(&self, gates: &HashMap<usize, Weight>) -> BTreeMap<Option<Label>, HashMap<usize, Weight>> {
         let mut all_defaults: HashMap<usize, Weight> = HashMap::new();
         let mut all_exceptions: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
         let mut overridden: BTreeMap<Label, HashMap<usize, Weight>> = BTreeMap::new();
@@ -607,7 +609,7 @@ impl<'a> Determinizer<'a> {
     }
 
     // Fast target-node selection with atom index + per-atom caching.
-    fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> usize {
+    fn find_or_create_target_node(&mut self, map: &HashMap<usize, Weight>) -> usize {
         // Compute incoming mask once
         let incoming = map.values().fold(Weight::zeros(), |mut a, b| { a |= b; a });
 
@@ -624,7 +626,7 @@ impl<'a> Determinizer<'a> {
                 let x = g & atom_mask;
                 if !x.is_empty() { filtered.insert(*k, x); }
             }
-            out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered, pb));
+            out_for_map_by_atom.insert(ai, self.compute_summary_for_gates(&filtered));
         }
 
         // Search a best overlapped candidate (prefer these to keep structure tight).
@@ -641,7 +643,7 @@ impl<'a> Determinizer<'a> {
             // Build OutSummary for candidate on inter_atoms via per-atom cache.
             let mut cand_out = OutSummary::default();
             for &ai in &inter_atoms {
-                let s = self.node_out_for_atom(idx, ai, pb).clone();
+                let s = self.node_out_for_atom(idx, ai).clone();
                 cand_out.union_assign(&s);
             }
             if cand_out.is_empty() {
@@ -697,7 +699,7 @@ impl<'a> Determinizer<'a> {
     }
 
     // Per-atom outgoing summary for an existing node (cached).
-    fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize, pb: Option<&ProgressBar>) -> &OutSummary {
+    fn node_out_for_atom(&mut self, idx: usize, atom_idx: usize) -> &OutSummary {
         if !self.nodes[idx].out_cache_by_atom.contains_key(&atom_idx) {
             let atom_mask = self.atom_index.atoms[atom_idx].clone();
             let gates = self.nodes[idx].gates.clone();
@@ -707,15 +709,15 @@ impl<'a> Determinizer<'a> {
                 let x = g & &atom_mask;
                 if !x.is_empty() { filtered.insert(*k, x); }
             }
-            let summary = self.compute_summary_for_gates(&filtered, pb);
+            let summary = self.compute_summary_for_gates(&filtered);
             self.nodes[idx].out_cache_by_atom.insert(atom_idx, summary);
         }
         self.nodes[idx].out_cache_by_atom.get(&atom_idx).unwrap()
     }
 
     // OutSummary for any gates set (helper).
-    fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>, pb: Option<&ProgressBar>) -> OutSummary {
-        let maps = self.compute_target_maps(gates, pb);
+    fn compute_summary_for_gates(&self, gates: &HashMap<usize, Weight>) -> OutSummary {
+        let maps = self.compute_target_maps(gates);
         let mut out = OutSummary::default();
         for (k, m) in maps {
             match k {
@@ -887,14 +889,15 @@ impl<'a> Determinizer<'a> {
         }
     }
 
-    fn progress_bar(len: u64, label: &str) -> Option<ProgressBar> {
+    fn init_progress_bar(&mut self, len: u64, label: &str) {
         if !PROGRESS_BAR_ENABLED {
-            return None;
+            self.pb = None;
+            return;
         }
         let style = ProgressStyle::default_bar()
             .template(&format!("{{spinner:.green}} [Determinize: {{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({}) {{msg}}", label))
             .unwrap();
-        Some(ProgressBar::new(len).with_style(style))
+        self.pb = Some(ProgressBar::new(len).with_style(style));
     }
 }
 
