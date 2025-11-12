@@ -5917,18 +5917,16 @@ local_system:
               // 1. Compute exception labels (explicit labels + default exceptions).
               let exception_labels = collect_exception_labels(&self.nwa.states, &closure);
 
-              // 2. Compute default ("others") next-subset and its transition weight.
-              // The transition weight includes contributions from subsequent epsilon paths.
+              // 2. Compute default ("others") next-subset and its transition weight. The transition
+              // weight is the union of weights of the raw paths *before* epsilon closure.
               let others_subset = next_subset_for_others(&self.nwa.states, &closure);
-              let others_closure = epsilon_closure(&self.nwa.states, &others_subset);
-              let others_weight = union_over_values(&others_closure);
+              let others_weight = union_over_values(&others_subset);
 
               // 3. Pre-calculate all exception subsets and weights.
               let mut exception_data: BTreeMap<i16, (WeightedSubset, Weight)> = BTreeMap::new();
               for ch in &exception_labels {
                   let sub_ch = next_subset_for_label(&self.nwa.states, &closure, *ch);
-                  let closure_ch = epsilon_closure(&self.nwa.states, &sub_ch);
-                  let w_ch = union_over_values(&closure_ch);
+                  let w_ch = union_over_values(&sub_ch);
                   // Only store non-empty transitions
                   if !sub_ch.is_empty() && !is_zero(&w_ch) {
                       exception_data.insert(*ch, (sub_ch, w_ch));
@@ -10112,5 +10110,201 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Handle empty NWA input and ensure
       non-empty DWA output in determinization"'
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/Mohri - Weighted Automata Algorithms.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |2+
+
+      thread 'precompute4::weighted_automata::test_determinization::test_determinize_hypercube_catastrophe' (20152793) panicked at src/precompute4/weighted_automata/test_determinization.rs:95:5:
+      Expected a very small DWA (1-2 states) for hypercube, but got 15 states. State explosion was not avoided.
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::precompute4::weighted_automata::test_determinization::test_determinize_hypercube_catastrophe
+                   at ./src/precompute4/weighted_automata/test_determinization.rs:95:5
+         3: sep1::precompute4::weighted_automata::test_determinization::test_determinize_hypercube_catastrophe::{{closure}}
+                   at ./src/precompute4/weighted_automata/test_determinization.rs:60:44
+         4: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         5: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      NWA (start: 6)
+        State 0:
+          97 -> 1 (weight: ALL)
+        State 1:
+          99 -> 2 (weight: ALL)
+        State 2:
+          final_weight: [0]
+        State 3:
+          98 -> 4 (weight: ALL)
+        State 4:
+          99 -> 5 (weight: ALL)
+        State 5:
+          final_weight: [1]
+        State 6:
+          ε -> 0 (weight: ALL)
+          ε -> 3 (weight: ALL)
+
+      DWA (start: 0)
+        State 0:
+          97 -> 1 (trans_weight: ALL)
+          98 -> 2 (trans_weight: ALL)
+        State 1:
+          99 -> 3 (trans_weight: ALL)
+        State 2:
+          99 -> 4 (trans_weight: ALL)
+        State 3:
+          final_weight: [0]
+        State 4:
+          final_weight: [1]
+
+
+
+      thread 'precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence' (20152794) panicked at src/precompute4/weighted_automata/test_determinization.rs:52:5:
+      Expected a small number of states for simple divergence, got 5
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence
+                   at ./src/precompute4/weighted_automata/test_determinization.rs:52:5
+         3: sep1::precompute4::weighted_automata::test_determinization::test_determinize_simple_divergence::{{closure}}
+                   at ./src/precompute4/weighted_automata/test_determinization.rs:6:40
+         4: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         5: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - assistant: |-
+      The test failures indicate that the determinization algorithm is producing a correct but non-minimal DWA, leading to a "state explosion" for certain NWA structures. The previous refactoring attempted to address this by making the DWA state identity depend on the epsilon closure, but this was not sufficient.
+
+      The core issue lies in how transition weights are calculated. My previous implementation calculated the transition weight as the union of all weights in the *epsilon closure* of the target subset. This conflates the weight of the explicit character transition with the weights of all subsequent epsilon paths. A more correct approach, aligned with Mohri's algorithm, is to have the transition weight represent only the contribution of the character transition itself. The effects of subsequent epsilon paths are captured by the identity of the destination DWA state (which is based on the epsilon closure).
+
+      This separation prevents the creation of redundant states when different paths lead to subsets that are distinct but become equivalent after epsilon closure.
+
+      ### Step-by-step instructions
+
+      1.  **Open `src/precompute4/weighted_automata/determinization.rs`**.
+      2.  **Go to the `expand_state` function** inside the `impl Determinizer` block.
+      3.  **Modify the transition weight calculation.** The weight should be the union of weights from the *raw* next subset, *before* computing its epsilon closure.
+
+          -   For the "others" (default) case, change this:
+              ```rust
+              let others_subset = next_subset_for_others(&self.nwa.states, &closure);
+              let others_closure = epsilon_closure(&self.nwa.states, &others_subset);
+              let others_weight = union_over_values(&others_closure);
+              ```
+              to this:
+              ```rust
+              let others_subset = next_subset_for_others(&self.nwa.states, &closure);
+              let others_weight = union_over_values(&others_subset);
+              ```
+
+          -   For the "exception labels" case inside the loop, change this:
+              ```rust
+              let sub_ch = next_subset_for_label(&self.nwa.states, &closure, *ch);
+              let closure_ch = epsilon_closure(&self.nwa.states, &sub_ch);
+              let w_ch = union_over_values(&closure_ch);
+              ```
+              to this:
+              ```rust
+              let sub_ch = next_subset_for_label(&self.nwa.states, &closure, *ch);
+              let w_ch = union_over_values(&sub_ch);
+              ```
+
+      This change correctly assigns weights to the transitions, allowing the state-merging (based on identical epsilon closures) to work as intended and avoid the state explosion.
+
+      ### Git diff
+
+      Here is the git diff for the changes:
+
+      ```diff
+      --- a/src/precompute4/weighted_automata/determinization.rs
+      +++ b/src/precompute4/weighted_automata/determinization.rs
+      @@ -339,17 +339,15 @@
+               // 1. Compute exception labels (explicit labels + default exceptions).
+               let exception_labels = collect_exception_labels(&self.nwa.states, &closure);
+       
+      -        // 2. Compute default ("others") next-subset and its transition weight.
+      -        // The transition weight includes contributions from subsequent epsilon paths.
+      +        // 2. Compute default ("others") next-subset and its transition weight. The transition
+      +        // weight is the union of weights of the raw paths *before* epsilon closure.
+               let others_subset = next_subset_for_others(&self.nwa.states, &closure);
+      -        let others_closure = epsilon_closure(&self.nwa.states, &others_subset);
+      -        let others_weight = union_over_values(&others_closure);
+      +        let others_weight = union_over_values(&others_subset);
+       
+               // 3. Pre-calculate all exception subsets and weights.
+               let mut exception_data: BTreeMap<i16, (WeightedSubset, Weight)> = BTreeMap::new();
+               for ch in &exception_labels {
+                   let sub_ch = next_subset_for_label(&self.nwa.states, &closure, *ch);
+      -            let closure_ch = epsilon_closure(&self.nwa.states, &sub_ch);
+      -            let w_ch = union_over_values(&closure_ch);
+      +            let w_ch = union_over_values(&sub_ch);
+                   // Only store non-empty transitions
+                   if !sub_ch.is_empty() && !is_zero(&w_ch) {
+                       exception_data.insert(*ch, (sub_ch, w_ch));
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/determinization.rs
+      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor determinization: Use epsilon
+      closure for state identity and raw subset weights for transitions to avoid state
+      explosion"'
     metadata:
 ...

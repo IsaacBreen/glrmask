@@ -333,18 +333,16 @@ impl<'a> Determinizer<'a> {
         // 1. Compute exception labels (explicit labels + default exceptions).
         let exception_labels = collect_exception_labels(&self.nwa.states, &closure);
 
-        // 2. Compute default ("others") next-subset and its transition weight.
-        // The transition weight includes contributions from subsequent epsilon paths.
+        // 2. Compute default ("others") next-subset and its transition weight. The transition
+        // weight is the union of weights of the raw paths *before* epsilon closure.
         let others_subset = next_subset_for_others(&self.nwa.states, &closure);
-        let others_closure = epsilon_closure(&self.nwa.states, &others_subset);
-        let others_weight = union_over_values(&others_closure);
+        let others_weight = union_over_values(&others_subset);
 
         // 3. Pre-calculate all exception subsets and weights.
         let mut exception_data: BTreeMap<i16, (WeightedSubset, Weight)> = BTreeMap::new();
         for ch in &exception_labels {
             let sub_ch = next_subset_for_label(&self.nwa.states, &closure, *ch);
-            let closure_ch = epsilon_closure(&self.nwa.states, &sub_ch);
-            let w_ch = union_over_values(&closure_ch);
+            let w_ch = union_over_values(&sub_ch);
             // Only store non-empty transitions
             if !sub_ch.is_empty() && !is_zero(&w_ch) {
                 exception_data.insert(*ch, (sub_ch, w_ch));
