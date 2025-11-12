@@ -157,6 +157,10 @@ impl NWA {
             sparse_trans
         }).collect();
 
+        crate::debug!(
+            4,
+            "Merging and building merged automaton",
+        );
         let (merged_reps, point_map) = tuple_merger::merge_and_build_automaton(
             start_tuple,
             &merger_components,

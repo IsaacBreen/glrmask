@@ -412,7 +412,7 @@ pub fn synthesize_greedy(inst: &Instance) -> Solution {
     let _ = inst.validate_shape(); // If invalid, we'll likely fail later; callers can validate first.
 
     // Toggle this to true if you want to re-enable progress logs for diagnostics.
-    const VERBOSE: bool = false;
+    const VERBOSE: bool = true;
 
     // Precompute a dense adjacency for fast successors.
     let k = inst.components.len();
