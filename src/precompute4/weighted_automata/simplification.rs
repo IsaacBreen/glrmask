@@ -720,43 +720,85 @@ impl NWA {
             return false;
         }
 
-        // 1. Compute d[q] for all q (shortest distance to final state).
-        // d[q] = ⋁_{\pi: q -> F} (w[\pi] & \rho(n[\pi]))
+        // 1. Compute d[q] for all q (future weights) using a worklist algorithm.
+        // This is a backward dataflow analysis.
         let mut d = vec![Weight::zeros(); n];
+        let mut worklist = VecDeque::new();
+        let mut in_worklist = vec![false; n];
+
+        // Precompute reverse adjacency list.
+        let mut rev_adj: Vec<Vec<NWAStateID>> = vec![vec![]; n];
         for i in 0..n {
-            if let Some(fw) = &self.states[i].final_weight {
-                d[i] = fw.clone();
+            let st = &self.states[i];
+            for (target, _) in &st.epsilons {
+                if *target < n {
+                    rev_adj[*target].push(i);
+                }
             }
-        }
-
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for i in (0..n).rev() { // reverse order might converge faster
-                let mut future_weight = self.states[i].final_weight.clone().unwrap_or_else(Weight::zeros);
-                let st = &self.states[i];
-
-                for (target, weight) in &st.epsilons {
+            for (_, targets) in &st.transitions {
+                for (target, _) in targets {
                     if *target < n {
-                        future_weight |= &(weight & &d[*target]);
+                        rev_adj[*target].push(i);
                     }
                 }
-                for (_, targets) in &st.transitions {
-                    for (target, weight) in targets {
-                        if *target < n {
-                            future_weight |= &(weight & &d[*target]);
+            }
+            for def in &st.default {
+                if def.target < n {
+                    rev_adj[def.target].push(i);
+                }
+            }
+        }
+        for preds in &mut rev_adj {
+            preds.sort_unstable();
+            preds.dedup();
+        }
+
+        // Initialize d and worklist with final states.
+        for i in 0..n {
+            if let Some(fw) = &self.states[i].final_weight {
+                if !fw.is_empty() {
+                    d[i] = fw.clone();
+                    // Add predecessors of final states to the worklist.
+                    for &p in &rev_adj[i] {
+                        if !in_worklist[p] {
+                            worklist.push_back(p);
+                            in_worklist[p] = true;
                         }
                     }
                 }
-                for def in &st.default {
-                    if def.target < n {
-                        future_weight |= &(&def.weight & &d[def.target]);
+            }
+        }
+
+        while let Some(p) = worklist.pop_front() {
+            in_worklist[p] = false;
+            let st = &self.states[p];
+            let mut new_d_p = st.final_weight.clone().unwrap_or_else(Weight::zeros);
+
+            for (target, weight) in &st.epsilons {
+                if *target < n {
+                    new_d_p |= &(weight & &d[*target]);
+                }
+            }
+            for (_, targets) in &st.transitions {
+                for (target, weight) in targets {
+                    if *target < n {
+                        new_d_p |= &(weight & &d[*target]);
                     }
                 }
+            }
+            for def in &st.default {
+                if def.target < n {
+                    new_d_p |= &(&def.weight & &d[def.target]);
+                }
+            }
 
-                if future_weight != d[i] {
-                    d[i] = future_weight;
-                    changed = true;
+            if !new_d_p.is_subset_of(&d[p]) {
+                d[p] |= &new_d_p;
+                for &pred in &rev_adj[p] {
+                    if !in_worklist[pred] {
+                        worklist.push_back(pred);
+                        in_worklist[pred] = true;
+                    }
                 }
             }
         }
@@ -769,22 +811,49 @@ impl NWA {
             let st = &mut self.states[i];
             // Final weights: ρ'(q) ← ρ(q) | !d(q)
             let old_fw = st.final_weight.clone();
-            if st.final_weight.is_some() {
-                let new_fw = old_fw.as_ref().unwrap().clone() | &not_d[i];
-                if new_fw.is_empty() {
-                    st.final_weight = None;
-                } else {
-                    st.final_weight = Some(new_fw);
-                }
+            let new_fw = st.final_weight.clone().unwrap_or_else(Weight::zeros) | &not_d[i];
+            if new_fw.is_empty() {
+                st.final_weight = None;
+            } else {
+                st.final_weight = Some(new_fw);
             }
             if st.final_weight != old_fw {
                 any_change = true;
             }
 
             // Edge weights: w'[e] = (w[e] | !d(p)) & d(n)
-            for (target, weight) in &mut st.epsilons { if *target < n { let old_w = weight.clone(); *weight = (&*weight & &d[*target]) | &not_d[i]; if *weight != old_w { any_change = true; } } }
-            for (_, targets) in &mut st.transitions { for (target, weight) in targets { if *target < n { let old_w = weight.clone(); *weight = (&*weight & &d[*target]) | &not_d[i]; if *weight != old_w { any_change = true; } } } }
-            for def in &mut st.default { if def.target < n { let old_w = def.weight.clone(); def.weight = (def.weight.clone() & &d[def.target]) | &not_d[i]; if def.weight != old_w { any_change = true; } } }
+            for (target, weight) in &mut st.epsilons {
+                if *target < n {
+                    let old_w = weight.clone();
+                    *weight |= &not_d[i];
+                    *weight &= &d[*target];
+                    if *weight != old_w {
+                        any_change = true;
+                    }
+                }
+            }
+            for (_, targets) in &mut st.transitions {
+                for (target, weight) in targets {
+                    if *target < n {
+                        let old_w = weight.clone();
+                        *weight |= &not_d[i];
+                        *weight &= &d[*target];
+                        if *weight != old_w {
+                            any_change = true;
+                        }
+                    }
+                }
+            }
+            for def in &mut st.default {
+                if def.target < n {
+                    let old_w = def.weight.clone();
+                    def.weight |= &not_d[i];
+                    def.weight &= &d[def.target];
+                    if def.weight != old_w {
+                        any_change = true;
+                    }
+                }
+            }
         }
 
         // Handle initial weight: λ'(start) = λ(start) & d(start)
