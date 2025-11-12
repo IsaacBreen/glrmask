@@ -75,6 +75,14 @@ fn subset_key(sub: &WeightedSubset) -> String {
     s
 }
 
+// Create a canonical key for a closure map used to identify determinized states.
+// This must be stable and depend only on the ε-closure (which defines the deterministic state's semantics).
+fn closure_key(cl: &ClosureMap) -> String {
+    let mut s = String::new();
+    for (sid, w) in cl { s.push_str(&format!("{}={};", sid, w)); }
+    s
+}
+
 // Epsilon-closure from a weighted subset:
 // Input: initial weighted subset 'seed' mapping NWA states to input weights (bitsets).
 // Output: closure map mapping every reachable state via ε-paths to the union of all
@@ -216,29 +224,37 @@ fn union_over_values(map: &WeightedSubset) -> Weight {
     acc
 }
 
-// Compute the final weight (union over closure_weight ∧ final_weight)
-// for a DWA state derived from a closure. State-entry weights are not used
-// in determinized automata as their information is encoded in transition weights.
-fn compute_final_weight(
+// Compute the state-entry weight (union over closure weights) and final weight
+// (union over closure_weight ∧ final_weight) for a DWA state derived from 'subset'.
+fn compute_state_and_final_weights(
     nwa: &NWA,
     closure: &ClosureMap,
-) -> Option<Weight> {
+) -> (Option<Weight>, Option<Weight>) {
+    let mut entry = Weight::zeros();
+    for w in closure.values() {
+        let u = entry.clone() | w.clone();
+        entry = u;
+    }
+    let entry_opt = if entry.is_empty() { None } else { Some(entry) };
+
     let mut finalw = Weight::zeros();
     for (sid, cw) in closure {
         if let Some(fw) = &nwa.states[*sid].final_weight {
             let cand = cw & fw;
             if !is_zero(&cand) {
-                weight_union_in_place(&mut finalw, &cand);
+                let u = finalw.clone() | cand;
+                finalw = u;
             }
         }
     }
-    if finalw.is_empty() { None } else { Some(finalw) }
+    let final_opt = if finalw.is_empty() { None } else { Some(finalw) };
+    (entry_opt, final_opt)
 }
 
 // A compact determinizer struct that holds intermediate data.
 struct Determinizer<'a> {
     nwa: &'a NWA,
-    seen: HashMap<String, usize>,  // subset key -> DWA state id
+    seen: HashMap<String, usize>,  // closure key -> DWA state id
     subsets: Vec<WeightedSubset>,  // for each DWA id, its (raw) weighted subset
     closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
     queue: VecDeque<usize>,        // worklist of DWA ids
@@ -264,18 +280,17 @@ impl<'a> Determinizer<'a> {
     }
 
     fn register_state(&mut self, subset: WeightedSubset) -> usize {
-        // canonicalize by dropping empties
+        // 1) Canonicalize incoming seed by dropping empty weights.
         let mut subset_clean: WeightedSubset = WeightedSubset::new();
         for (sid, w) in subset {
-            if !is_zero(&w) {
-                subset_clean.insert(sid, w);
-            }
+            if !is_zero(&w) { subset_clean.insert(sid, w); }
         }
-        let key = subset_key(&subset_clean);
-        if let Some(&id) = self.seen.get(&key) {
-            return id;
-        }
+        // 2) Compute ε-closure first; determinized state identity depends on closure, not the raw seed.
+        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+        let key = closure_key(&closure);
+        if let Some(&id) = self.seen.get(&key) { return id; }
 
+        // 3) Create a brand new DWA state since this closure has not been seen.
         let id = self.dwa.add_state();
 
         // DEBUG: Log information about newly created states periodically.
@@ -292,12 +307,10 @@ impl<'a> Determinizer<'a> {
             }
         }
 
-        // Compute ε-closure and final weight.
-        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
-        let final_opt = compute_final_weight(self.nwa, &closure);
-        if let Some(w) = final_opt {
-            let _ = self.dwa.set_final_weight(id, w);
-        }
+        // 4) Install state-entry and final weights based on the ε-closure.
+        let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
+        if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }
+        if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
 
         self.seen.insert(key, id);
         self.subsets.push(subset_clean);
@@ -351,13 +364,7 @@ impl<'a> Determinizer<'a> {
             let sub_ch = next_subset_for_label(&self.nwa.states, closure, *ch);
             let w_ch = union_over_values(&sub_ch);
             if !sub_ch.is_empty() && !is_zero(&w_ch) {
-                // Normalize residual weights in the subset to promote state merging.
-                let w_ch_complement = w_ch.complement();
-                let normalized_sub_ch = sub_ch
-                    .into_iter()
-                    .map(|(sid, w_q)| (sid, weight_union(w_q, &w_ch_complement)))
-                    .collect();
-                exception_data.insert(*ch, (normalized_sub_ch, w_ch));
+                exception_data.insert(*ch, (sub_ch, w_ch));
             }
             if let Some(pb) = &labels_pb {
                 pb.inc(1);
@@ -373,13 +380,7 @@ impl<'a> Determinizer<'a> {
         // install default if non-empty
         let mut default_target_id: Option<usize> = None;
         if !others_subset.is_empty() && !is_zero(&others_weight) {
-            // Normalize residual weights in the subset to promote state merging.
-            let others_weight_complement = others_weight.complement();
-            let normalized_others_subset = others_subset
-                .into_iter()
-                .map(|(sid, w_q)| (sid, weight_union(w_q, &others_weight_complement)))
-                .collect();
-            let to_id = self.register_state(normalized_others_subset);
+            let to_id = self.register_state(others_subset);
             default_target_id = Some(to_id);
             let _ = self
                 .dwa
