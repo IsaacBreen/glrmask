@@ -59,7 +59,7 @@ fn is_zero(w: &Weight) -> bool {
 
 // Canonical key for Weight (deterministic)
 fn weight_key(w: &Weight) -> String {
-    w.canonical_string()
+    w.to_string()
 }
 
 // Create a canonical key for a weighted subset to identify states in a HashMap.
