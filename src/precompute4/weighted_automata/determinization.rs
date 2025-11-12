@@ -451,7 +451,15 @@ impl<'a> Determinizer<'a> {
             .map(|sig_id| {
                 self.pb.inc(1);
                 let gates = HashMap::from([(sig_id, Weight::all())]);
-                self.compute_summary_for_gates_impl(&gates)
+                let maps = self.compute_target_maps_impl(&gates);
+                let mut out = OutSummary::default();
+                for (k, m) in maps {
+                    match k {
+                        None => out.def = m,
+                        Some(lbl) => { out.ex.insert(lbl, m); }
+                    }
+                }
+                out
             })
             .collect();
         self.pb.finish_with_message("Precomputing summaries done");
