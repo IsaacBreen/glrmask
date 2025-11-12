@@ -4,9 +4,9 @@
 #![allow(clippy::needless_borrow)]
 
 use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
-use super::dwa::DWA;
+use super::dwa::{DWA};
 use super::nwa::{NWABody, NWADefaultTransition, NWAStates, NWA};
-use crate::precompute4::weighted_automata::NWAStateID;
+use crate::precompute4::weighted_automata::{NWAStateID, DFA};
 use std::collections::{BTreeSet, VecDeque};
 
 impl DWA {
@@ -211,6 +211,31 @@ impl NWA {
             for (lbl, to) in &st.transitions.exceptions {
                 let w = st.trans_weights_exceptions.get(lbl).cloned().unwrap_or_else(Weight::all);
                 nwa.states.add_transition(i, *lbl, *to, w).unwrap();
+            }
+        }
+        nwa
+    }
+
+    pub fn from_dfa(dfa: &DFA) -> Self {
+        let mut nwa = NWA::new();
+        nwa.states.0.clear();
+        for _ in 0..dfa.states.len() { nwa.states.add_state(); }
+        nwa.body.start_state = dfa.body.start_state;
+
+        for (i, st) in dfa.states.0.iter().enumerate() {
+            if st.is_final {
+                nwa.states[i].final_weight = Some(Weight::all());
+            }
+            if let Some(to) = st.transitions.default {
+                let exceptions = st.transitions.exceptions.keys().copied().collect();
+                nwa.states.0[i].default.push(NWADefaultTransition {
+                    target: to,
+                    weight: Weight::all(),
+                    exceptions,
+                });
+            }
+            for (lbl, to) in &st.transitions.exceptions {
+                nwa.states.add_transition(i, *lbl, *to, Weight::all()).unwrap();
             }
         }
         nwa

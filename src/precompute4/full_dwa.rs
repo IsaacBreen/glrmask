@@ -6,7 +6,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::precompute4::utils;
-use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight};
+use crate::precompute4::weighted_automata::{DFA, DWA, NFA, NFABuildError, NWA, NWABuildError, NWABody, NWAStates, StateID, Weight};
 use crate::constraint::LLMTokenBV;
 use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
@@ -20,6 +20,7 @@ use crate::tokenizer::TokenizerStateID;
 pub enum FullDWABuildError {
     ParserStateIdOutOfRange { state_id: ParserStateID },
     AutomatonBuild(NWABuildError),
+    NFAAutomatonBuild(NFABuildError),
 }
 
 impl From<NWABuildError> for FullDWABuildError {
@@ -28,20 +29,25 @@ impl From<NWABuildError> for FullDWABuildError {
     }
 }
 
-fn build_template_nwa_from_characterization(
+impl From<NFABuildError> for FullDWABuildError {
+    fn from(e: NFABuildError) -> Self {
+        FullDWABuildError::NFAAutomatonBuild(e)
+    }
+}
+
+fn build_template_nfa_from_characterization(
     bb: &BelowBottomCharacterization,
-) -> Result<NWA, FullDWABuildError> {
-    let mut nwa = NWA::new();
-    let w_all = Weight::all();
+) -> Result<NFA, FullDWABuildError> {
+    let mut nfa = NFA::new();
 
     // Create a node for each non-terminal, similar to the NWA construction.
     let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
     for &nt in &bb.all_nts {
-        let id = nwa.states.add_state();
+        let id = nfa.states.add_state();
         nt_nodes.insert(nt, id);
     }
 
-    let start = nwa.body.start_state;
+    let start = nfa.body.start_state;
 
     // --- Initial Actions from Start State ---
 
@@ -50,17 +56,17 @@ fn build_template_nwa_from_characterization(
         let neg_initial = utils::encode_negative_i16(initial_state)?;
         let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-        let s0 = nwa.states.add_state();
-        let s1 = nwa.states.add_state();
-        let s2 = nwa.states.add_state();
-        let s3 = nwa.states.add_state();
+        let s0 = nfa.states.add_state();
+        let s1 = nfa.states.add_state();
+        let s2 = nfa.states.add_state();
+        let s3 = nfa.states.add_state();
 
         // start --(eps)--> s0 --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
-        nwa.add_epsilon(start, s0, w_all.clone());
-        nwa.add_transition(s0, pos_initial, s1, w_all.clone())?;
-        nwa.add_transition(s1, neg_initial, s2, w_all.clone())?;
-        nwa.add_transition(s2, neg_shift, s3, w_all.clone())?;
-        nwa.states[s3].final_weight = Some(w_all.clone());
+        nfa.add_epsilon(start, s0);
+        nfa.add_transition(s0, pos_initial, s1)?;
+        nfa.add_transition(s1, neg_initial, s2)?;
+        nfa.add_transition(s2, neg_shift, s3)?;
+        nfa.states[s3].is_final = true;
     }
 
     for &(initial_state, len, nt) in &bb.initial_reduces {
@@ -69,16 +75,16 @@ fn build_template_nwa_from_characterization(
 
         // Create a chain of default transitions for the pops.
         // start --(eps)--> s0 --(+initial)--> s1 --(default)*len--> target_nt_state
-        let s0 = nwa.states.add_state();
-        nwa.add_epsilon(start, s0, w_all.clone());
+        let s0 = nfa.states.add_state();
+        nfa.add_epsilon(start, s0);
         let mut from = s0;
-        let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
-        nwa.add_transition(from, pos_initial, next_state, w_all.clone())?;
+        let next_state = if len == 0 { target_nt_state } else { nfa.states.add_state() };
+        nfa.add_transition(from, pos_initial, next_state)?;
         from = next_state;
 
         for i in 0..len {
-            let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
-            nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
+            let to = if i == len - 1 { target_nt_state } else { nfa.states.add_state() };
+            nfa.add_default_transition(from, to, BTreeSet::new())?;
             from = to;
         }
     }
@@ -93,16 +99,16 @@ fn build_template_nwa_from_characterization(
             let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
 
             // src --(eps)--> s0 --(+revealed)--> s1 --(default)*len--> dst
-            let s0 = nwa.states.add_state();
-            nwa.add_epsilon(src_nt_state, s0, w_all.clone());
+            let s0 = nfa.states.add_state();
+            nfa.add_epsilon(src_nt_state, s0);
             let mut from = s0;
-            let next_state = if len == 0 { dst_nt_state } else { nwa.states.add_state() };
-            nwa.add_transition(from, pos_revealed, next_state, w_all.clone())?;
+            let next_state = if len == 0 { dst_nt_state } else { nfa.states.add_state() };
+            nfa.add_transition(from, pos_revealed, next_state)?;
             from = next_state;
 
             for i in 0..len {
-                let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
-                nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
+                let to = if i == len - 1 { dst_nt_state } else { nfa.states.add_state() };
+                nfa.add_default_transition(from, to, BTreeSet::new())?;
                 from = to;
             }
         }
@@ -113,46 +119,46 @@ fn build_template_nwa_from_characterization(
             let neg_goto = utils::encode_negative_i16(goto_state)?;
             let neg_shift = utils::encode_negative_i16(shift_state)?;
 
-            let s0 = nwa.states.add_state();
-            let s1 = nwa.states.add_state();
-            let s2 = nwa.states.add_state();
-            let s3 = nwa.states.add_state();
-            let s4 = nwa.states.add_state();
+            let s0 = nfa.states.add_state();
+            let s1 = nfa.states.add_state();
+            let s2 = nfa.states.add_state();
+            let s3 = nfa.states.add_state();
+            let s4 = nfa.states.add_state();
 
             // src --(eps)--> s0 --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
-            nwa.add_epsilon(src_nt_state, s0, w_all.clone());
-            nwa.add_transition(s0, pos_revealed, s1, w_all.clone())?;
-            nwa.add_transition(s1, neg_revealed, s2, w_all.clone())?;
-            nwa.add_transition(s2, neg_goto, s3, w_all.clone())?;
-            nwa.add_transition(s3, neg_shift, s4, w_all.clone())?;
-            nwa.states[s4].final_weight = Some(w_all.clone());
+            nfa.add_epsilon(src_nt_state, s0);
+            nfa.add_transition(s0, pos_revealed, s1)?;
+            nfa.add_transition(s1, neg_revealed, s2)?;
+            nfa.add_transition(s2, neg_goto, s3)?;
+            nfa.add_transition(s3, neg_shift, s4)?;
+            nfa.states[s4].is_final = true;
         }
     }
 
-    Ok(nwa)
+    Ok(nfa)
 }
 
-fn build_template_dwas(
+fn build_template_dfas(
     parser: &GLRParser,
-) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+) -> Result<BTreeMap<TerminalID, DFA>, FullDWABuildError> {
     let all = compute_all_characterizations(parser);
     let mut out = BTreeMap::new();
     for (term, bb) in all {
-        let nwa = build_template_nwa_from_characterization(&bb)?;
-        let mut dwa = nwa.determinize_to_dwa();
-        dwa.simplify();
-        crate::debug!(5, "Built template DWA for terminal {:?}:", term);
-        crate::debug!(5, "{}", dwa);
-        out.insert(term, dwa);
+        let nfa = build_template_nfa_from_characterization(&bb)?;
+        let mut dfa = nfa.determinize_to_dfa();
+        dfa.simplify();
+        crate::debug!(5, "Built template DFA for terminal {:?}:", term);
+        // crate::debug!(5, "{}", dfa);
+        out.insert(term, dfa);
     }
     Ok(out)
 }
 
-fn build_ignore_terminal_dwa() -> DWA {
-    // Identity DWA: start is final, no transitions.
-    let mut dwa = DWA::new();
-    dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
-    dwa
+fn build_ignore_terminal_dfa() -> DFA {
+    // Identity DFA: start is final, no transitions.
+    let mut dfa = DFA::new();
+    dfa.states[dfa.body.start_state].is_final = true;
+    dfa
 }
 
 /// For any state with a final weight, subtract that weight from all outgoing transitions.
@@ -227,16 +233,16 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let now_total = Instant::now();
     let now = Instant::now();
     crate::debug!(5, "Starting precompute4...");
-    // 1. Build template DWAs for all terminals.
-    let template_dwas = match build_template_dwas(parser) {
+    // 1. Build template DFAs for all terminals.
+    let template_dfas = match build_template_dfas(parser) {
         Ok(m) => m,
-        Err(e) => panic!("Failed to build template DWAs: {:?}", e),
+        Err(e) => panic!("Failed to build template DFAs: {:?}", e),
     };
-    let ignore_dwa = build_ignore_terminal_dwa();
-    crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
+    let ignore_dfa = build_ignore_terminal_dfa();
+    crate::debug!(4, "Built {} template DFAs in {:?}", template_dfas.len(), now.elapsed());
     if is_debug_level_enabled(5) {
-        for (term, dwa) in template_dwas.iter().take(5) {
-            crate::debug!(5, "Stats for template DWA for terminal {:?}:\n{}", term, dwa.stats());
+        for (term, _dfa) in template_dfas.iter().take(5) {
+            crate::debug!(5, "Got template DFA for terminal {:?}", term);
         }
     }
 
@@ -287,11 +293,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         // step function
         |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
             let (current_nwa_body, current_tokens) = current_val;
-            let template_dwa: &DWA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+            let template_dfa: &DFA = if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
                 let terminal_id = edge_terminal_opt.unwrap();
-                template_dwas.get(&terminal_id).expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
+                template_dfas.get(&terminal_id).expect_else(|| format!("No template DFA for terminal {:?}", terminal_id))
             } else {
-                &ignore_dwa
+                &ignore_dfa
             };
 
             let mut results: Vec<(PrecomputeNode1Index, (NWABody, LLMTokenBV))> = Vec::new();
@@ -303,8 +309,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
                 let mut states = states_arena.borrow_mut();
 
-                // Convert template DWA to NWA and copy it into the arena
-                let template_nwa = NWA::from_dwa(template_dwa);
+                // Convert template DFA to NWA and copy it into the arena
+                let template_nwa = NWA::from_dfa(template_dfa);
                 crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
                 let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
                 crate::debug!(5, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
