@@ -1,6 +1,7 @@
 use super::common::Weight;
 use super::dwa::DWA;
-use super::nwa::{NWA, NWAStateID};
+use super::nwa::NWA;
+use crate::precompute4::weighted_automata::NWAStateID;
 use crate::r#macro::is_debug_level_enabled;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::Instant;
