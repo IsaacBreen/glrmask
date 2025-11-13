@@ -291,36 +291,36 @@ if __name__ == "__main__":
         print_nwa_stats(stats)
 
         fst = create_rustfst_from_nwa(nwa)
-        if fst:
-            print("\n--- rustfst.VectorFst Summary (before determinization) ---")
-            print(f"Number of states: {fst.num_states()}")
-            if fst.start() is not None:
-                print(f"Start state: {fst.start()}")
+        fst: VectorFst
+        print("\n--- rustfst.VectorFst Summary (before determinization) ---")
+        print(f"Number of states: {fst.num_states()}")
+        if fst.start() is not None:
+            print(f"Start state: {fst.start()}")
+            num_arcs = 0
+            for s in fst.states():
+                num_arcs += fst.num_trs(s)
+            print(f"Number of arcs: {num_arcs}")
+        else:
+            print("No start state.")
+
+        print("\n--- Determinizing FST ---")
+        try:
+            # Disambiguation is often needed when weights are simplified
+            config = DeterminizeConfig(DeterminizeType.DETERMINIZE_DISAMBIGUATE)
+            det_fst = fst.determinize(config)
+            print("Determinization successful.")
+            print("\n--- rustfst.VectorFst Summary (after determinization) ---")
+            print(f"Number of states: {det_fst.num_states()}")
+            if det_fst.start() is not None:
+                print(f"Start state: {det_fst.start()}")
                 num_arcs = 0
-                for s in fst.states():
-                    num_arcs += fst.num_trs(s)
+                for s in det_fst.states():
+                    num_arcs += det_fst.num_trs(s)
                 print(f"Number of arcs: {num_arcs}")
             else:
                 print("No start state.")
-
-            print("\n--- Determinizing FST ---")
-            try:
-                # Disambiguation is often needed when weights are simplified
-                config = DeterminizeConfig(DeterminizeType.DETERMINIZE_DISAMBIGUATE)
-                det_fst = fst.determinize(config)
-                print("Determinization successful.")
-                print("\n--- rustfst.VectorFst Summary (after determinization) ---")
-                print(f"Number of states: {det_fst.num_states()}")
-                if det_fst.start() is not None:
-                    print(f"Start state: {det_fst.start()}")
-                    num_arcs = 0
-                    for s in det_fst.states():
-                        num_arcs += det_fst.num_trs(s)
-                    print(f"Number of arcs: {num_arcs}")
-                else:
-                    print("No start state.")
-            except ValueError as e:
-                print(f"Determinization failed: {e}", file=sys.stderr)
+        except ValueError as e:
+            print(f"Determinization failed: {e}", file=sys.stderr)
     except FileNotFoundError:
         print(f"Error: File not found at {filepath}", file=sys.stderr)
         sys.exit(1)
