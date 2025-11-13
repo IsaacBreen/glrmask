@@ -286,6 +286,23 @@ if __name__ == "__main__":
             else:
                 print("No start state.")
 
+            print("\n--- Removing epsilon transitions ---")
+            try:
+                fst.rm_epsilon()
+                print("Epsilon removal successful.")
+                print("\n--- rustfst.VectorFst Summary (after rm_epsilon) ---")
+                print(f"Number of states: {fst.num_states()}")
+                if fst.start() is not None:
+                    print(f"Start state: {fst.start()}")
+                    num_arcs = 0
+                    for s in fst.states():
+                        num_arcs += fst.num_trs(s)
+                    print(f"Number of arcs: {num_arcs}")
+                else:
+                    print("No start state.")
+            except ValueError as e:
+                print(f"Epsilon removal failed: {e}", file=sys.stderr)
+
             print("\n--- Determinizing FST ---")
             try:
                 # Disambiguation is often needed when weights are simplified
