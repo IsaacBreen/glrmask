@@ -172,18 +172,26 @@ def run_scc_pass(args):
 
 def run_determinize_pass(args):
     """Executes the 'determinize' pass."""
-    print(f"--- Running Determinization Pass (Timeout: {args.timeout}s) ---")
+    print("--- Running Determinization Pass ---")
     nwa = load_nwa_data(args.filepath)
     print("\nAttempting to determinize the full NWA...")
-    timed_out = time_determinization_with_timeout(
-        nwa["num_states"], nwa["start_state"], nwa["final_states"], nwa["transitions"], args.timeout
-    )
-    if timed_out:
-        print(f"RESULT: ❌ Timed out after {args.timeout} seconds.")
-    else:
-        print("RESULT: ✅ Determinization finished within the time limit.")
+    try:
+        fst = VectorFst()
+        state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
+        fst.set_start(state_map[nwa["start_state"]])
+        for state_id in nwa["final_states"]:
+            fst.set_final(state_map[state_id], 0.0)
+        for source, label, dest in nwa["transitions"]:
+            fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-
+        print("Minimizing...")
+        fst = fst.minimize()
+        print("Determinizing...")
+        fst = fst.determinize()
+        print("RESULT: ✅ Determinization finished successfully.")
+        print(f"Resulting FST has {fst.num_states()} states.")
+    except Exception as e:
+        print(f"RESULT: ❌ Determinization failed with an error: {e}")
 # --- NEW AND MODIFIED PASSES FOR STATE INSPECTION ---
 
 def run_inspect_states_pass(args):
@@ -313,9 +321,8 @@ if __name__ == "__main__":
     parser_scc.set_defaults(func=run_scc_pass)
 
     # --- Determinize Pass ---
-    parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA with a timeout.")
+    parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA.")
     parser_det.add_argument("filepath", help="Path to the nwa_dump.json file.")
-    parser_det.add_argument("--timeout", type=float, default=10.0, help="Timeout in seconds for the determinization attempt.")
     parser_det.set_defaults(func=run_determinize_pass)
 
     # --- MODIFIED: Inspect States Pass (Pretty) ---
