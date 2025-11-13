@@ -893,45 +893,61 @@ impl NWA {
     pub fn simplify(&mut self) -> bool {
         let now = Instant::now();
         let initial_n = self.states.len();
-        let max_passes = 12;
+        let max_passes = 15; // Allow a few more passes for the new logic
         let pb = if PROGRESS_BAR_ENABLED {
             let p = ProgressBar::new(max_passes as u64);
             p.set_style(
                 ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Simplifying NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} passes ({msg})")
+                    .template("{spinner:.green} [Simplifying NWA: {elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} passes ({msg})")
                     .expect("progress-bar"),
             );
             Some(p)
         } else {
             None
         };
-
-        let mut changed = true;
+ 
+        let mut changed_overall = false;
         let mut passes = 0;
-        while changed && passes < max_passes {
+        loop {
             passes += 1;
             if let Some(p) = &pb { p.inc(1); }
-            changed = false;
+            let mut changed_this_iteration = false;
 
-            Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
-            Self::run_pass(&pb, "dedup labeled", &mut changed, || self.dedup_labeled_edges());
-            Self::run_pass(&pb, "dedup epsilons", &mut changed, || self.dedup_epsilon_edges());
-            Self::run_pass(&pb, "unify defaults", &mut changed, || self.unify_default_transitions());
+            // --- Structural Simplification Passes ---
+            Self::run_pass(&pb, "normalize", &mut changed_this_iteration, || self.normalize_edges_inplace());
+            Self::run_pass(&pb, "dedup labeled", &mut changed_this_iteration, || self.dedup_labeled_edges());
+            Self::run_pass(&pb, "dedup epsilons", &mut changed_this_iteration, || self.dedup_epsilon_edges());
+            Self::run_pass(&pb, "unify defaults", &mut changed_this_iteration, || self.unify_default_transitions());
+            Self::run_pass(&pb, "unify final states", &mut changed_this_iteration, || self.unify_final_states());
+            Self::run_pass(&pb, "bypass ε-chains", &mut changed_this_iteration, || self.bypass_trivial_epsilon_chains());
+            Self::run_pass(&pb, "collapse SCCs", &mut changed_this_iteration, || self.collapse_all_weight_epsilon_sccs());
+            Self::run_pass(&pb, "prune unreachable", &mut changed_this_iteration, || self.prune_unreachable());
+            Self::run_pass(&pb, "prune dead ends", &mut changed_this_iteration, || self.prune_dead_ends());
+            Self::run_pass(&pb, "merge equivalent", &mut changed_this_iteration, || self.merge_equivalent_states_partition());
 
-            Self::run_pass(&pb, "unify final states", &mut changed, || self.unify_final_states());
-            Self::run_pass(&pb, "bypass ε-chains", &mut changed, || self.bypass_trivial_epsilon_chains());
-            Self::run_pass(&pb, "collapse SCCs", &mut changed, || self.collapse_all_weight_epsilon_sccs());
-            Self::run_pass(&pb, "prune unreachable", &mut changed, || self.prune_unreachable());
-            Self::run_pass(&pb, "prune dead ends", &mut changed, || self.prune_dead_ends());
-            Self::run_pass(&pb, "merge equivalent", &mut changed, || self.merge_equivalent_states_partition());
-            Self::run_pass(&pb, "push weights", &mut changed, || self.push_weights());
-            Self::run_pass(&pb, "normalize", &mut changed, || self.normalize_edges_inplace());
+            if changed_this_iteration {
+                changed_overall = true;
+            } else {
+                // Structure is stable. Try pushing weights to unlock more simplifications.
+                let mut pushed = false;
+                Self::run_pass(&pb, "push weights", &mut pushed, || self.push_weights());
+                if pushed {
+                    changed_overall = true;
+                    // Loop again to apply structural passes on the weight-pushed graph.
+                } else {
+                    // No more changes are possible.
+                    break;
+                }
+            }
+
+            if passes >= max_passes { break; }
         }
+
         if let Some(p) = &pb { p.finish_with_message(format!("Simplified to {} states", self.states.len())); }
         if is_debug_level_enabled(3) {
             eprintln!("NWA::simplify ({} states -> {} states) took: {:?}", initial_n, self.states.len(), now.elapsed());
         }
-        self.states.len() != initial_n
+        changed_overall
     }
 
     fn prune_unreachable(&mut self) -> bool {
@@ -1321,17 +1337,42 @@ impl NWA {
             return false;
         }
 
-        let new_final_id = self.states.add_state();
-        self.states[new_final_id].final_weight = Some(Weight::all());
+        // Find a suitable existing sink final state to reuse.
+        let sink_final_id = self.states.0.iter().enumerate().find(|(_, s)| {
+            s.final_weight.is_some() &&
+            s.transitions.is_empty() &&
+            s.epsilons.is_empty() &&
+            s.default.is_empty()
+        }).map(|(i, _)| i);
 
-        for (sid, weight) in final_states {
-            if !weight.is_empty() {
-                self.states.add_epsilon(sid, new_final_id, weight);
-            }
-            self.states[sid].final_weight = None;
+        let unified_final_id = sink_final_id.unwrap_or_else(|| {
+            let new_id = self.states.add_state();
+            self.states[new_id].final_weight = Some(Weight::all());
+            new_id
+        });
+
+        // Ensure the target final state has weight ALL. This is safe because we redirect
+        // other final states via epsilons carrying their original final weights.
+        if self.states[unified_final_id].final_weight != Some(Weight::all()) {
+            self.states[unified_final_id].final_weight = Some(Weight::all());
         }
 
-        true
+        let mut changed = false;
+        for (sid, weight) in final_states {
+            if sid == unified_final_id {
+                continue;
+            }
+
+            if !weight.is_empty() {
+                self.states.add_epsilon(sid, unified_final_id, weight);
+            }
+            if self.states[sid].final_weight.is_some() {
+                self.states[sid].final_weight = None;
+                changed = true;
+            }
+        }
+
+        changed
     }
 
     /// Bypass trivial ε-chains: if a state s
