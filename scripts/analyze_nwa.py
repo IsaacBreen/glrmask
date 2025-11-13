@@ -101,9 +101,27 @@ def time_determinization_with_timeout(
 
 # --- ANALYSIS FUNCTIONS (unchanged) ---
 
-def print_graph_stats(G: nx.DiGraph):
+def print_graph_stats(G: nx.DiGraph, nwa_data: dict):
     """Prints high-level stats for a graph."""
-    print(f"\nThe graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
+    num_nodes = G.number_of_nodes()
+    num_edges = G.number_of_edges()  # Unique (src, dst) pairs
+
+    num_transitions = len(nwa_data['transitions'])
+    epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
+    symbol_transitions = num_transitions - epsilon_transitions
+
+    print("\n--- NWA Structure ---")
+    print(f"Total States: {num_nodes}")
+    print(f"Start State: {nwa_data['start_state']}")
+    print(f"Final States: {len(nwa_data['final_states'])}")
+
+    print("\n--- Transitions ---")
+    print(f"Total Unique Transitions (src, label, dst): {num_transitions}")
+    print(f"  - Epsilon (ε) transitions: {epsilon_transitions}")
+    print(f"  - Symbol transitions: {symbol_transitions}")
+
+    print(f"\n--- Graph Connectivity ---")
+    print(f"The graph has {num_nodes} nodes and {num_edges} unique source-destination edges.")
     in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
     out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
     print("\nTop 5 States by In-Degree (Hubs for Fan-In):")
@@ -165,7 +183,7 @@ def run_stats_pass(args):
     G = nx.DiGraph()
     G.add_nodes_from(range(nwa["num_states"]))
     G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
-    print_graph_stats(G)
+    print_graph_stats(G, nwa)
 
 
 def run_scc_pass(args):
@@ -323,7 +341,12 @@ def run_prune_pass(args):
     G_final = nx.DiGraph()
     G_final.add_nodes_from(range(nwa["num_states"]))
     G_final.add_edges_from([(s, d) for s, l, d in essential_transitions])
-    print_graph_stats(G_final)
+    pruned_nwa_data = {
+        "start_state": nwa["start_state"],
+        "final_states": nwa["final_states"],
+        "transitions": essential_transitions,
+    }
+    print_graph_stats(G_final, pruned_nwa_data)
     print_scc_analysis(G_final, essential_transitions)
 
 

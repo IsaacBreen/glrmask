@@ -9936,6 +9936,12 @@ local_system:
               if len(internal_edges) > MAX_EDGES_TO_SHOW:
                   print(f"      - ... and {len(internal_edges) - MAX_EDGES_TO_SHOW} more internal edges")
 
+      def print_fst_stats(fst: VectorFst, message: str):
+          """Prints basic stats for a rustfst FST."""
+          num_states = fst.num_states()
+          num_arcs = sum(fst.num_trs(s) for s in fst.states())
+          print(f"  - {message}: {num_states} states, {num_arcs} arcs.")
+
 
       # --- PASS FUNCTIONS ---
 
@@ -9973,12 +9979,30 @@ local_system:
               for source, label, dest in nwa["transitions"]:
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-              print("Minimizing...")
+              print("\nFST Statistics:")
+              print_fst_stats(fst, "Initial FST")
+
+              print("\nRemoving epsilons...")
+              fst = fst.rm_epsilon()
+              print_fst_stats(fst, "After removing epsilons")
+
+              print("\nConnecting...")
+              fst = fst.connect()
+              print_fst_stats(fst, "After connecting")
+
+              print("\ntr_unique...")
+              fst = fst.tr_unique()
+              print_fst_stats(fst, "After tr_unique")
+
+              print("\nMinimizing...")
               fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
-              print("Determinizing...")
+              print_fst_stats(fst, "After minimizing")
+
+              print("\nDeterminizing...")
               fst = fst.determinize()
-              print("RESULT: ✅ Determinization finished successfully.")
-              print(f"Resulting FST has {fst.num_states()} states.")
+              print_fst_stats(fst, "After determinizing")
+
+              print("\nRESULT: ✅ Determinization finished successfully.")
           except Exception as e:
               print(f"RESULT: ❌ Determinization failed with an error: {e}")
       # --- NEW AND MODIFIED PASSES FOR STATE INSPECTION ---
@@ -19914,9 +19938,27 @@ local_system:
 
       # --- ANALYSIS FUNCTIONS (unchanged) ---
 
-      def print_graph_stats(G: nx.DiGraph):
+      def print_graph_stats(G: nx.DiGraph, nwa_data: dict):
           """Prints high-level stats for a graph."""
-          print(f"\nThe graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
+          num_nodes = G.number_of_nodes()
+          num_edges = G.number_of_edges()  # Unique (src, dst) pairs
+
+          num_transitions = len(nwa_data['transitions'])
+          epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
+          symbol_transitions = num_transitions - epsilon_transitions
+
+          print("\n--- NWA Structure ---")
+          print(f"Total States: {num_nodes}")
+          print(f"Start State: {nwa_data['start_state']}")
+          print(f"Final States: {len(nwa_data['final_states'])}")
+
+          print("\n--- Transitions ---")
+          print(f"Total Unique Transitions (src, label, dst): {num_transitions}")
+          print(f"  - Epsilon (ε) transitions: {epsilon_transitions}")
+          print(f"  - Symbol transitions: {symbol_transitions}")
+
+          print(f"\n--- Graph Connectivity ---")
+          print(f"The graph has {num_nodes} nodes and {num_edges} unique source-destination edges.")
           in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
           out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
           print("\nTop 5 States by In-Degree (Hubs for Fan-In):")
@@ -19978,7 +20020,7 @@ local_system:
           G = nx.DiGraph()
           G.add_nodes_from(range(nwa["num_states"]))
           G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
-          print_graph_stats(G)
+          print_graph_stats(G, nwa)
 
 
       def run_scc_pass(args):
@@ -20007,6 +20049,18 @@ local_system:
 
               print("\nFST Statistics:")
               print_fst_stats(fst, "Initial FST")
+
+              print("\nRemoving epsilons...")
+              fst = fst.rm_epsilon()
+              print_fst_stats(fst, "After removing epsilons")
+
+              print("\nConnecting...")
+              fst = fst.connect()
+              print_fst_stats(fst, "After connecting")
+
+              print("\ntr_unique...")
+              fst = fst.tr_unique()
+              print_fst_stats(fst, "After tr_unique")
 
               print("\nMinimizing...")
               fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
@@ -20124,7 +20178,12 @@ local_system:
           G_final = nx.DiGraph()
           G_final.add_nodes_from(range(nwa["num_states"]))
           G_final.add_edges_from([(s, d) for s, l, d in essential_transitions])
-          print_graph_stats(G_final)
+          pruned_nwa_data = {
+              "start_state": nwa["start_state"],
+              "final_states": nwa["final_states"],
+              "transitions": essential_transitions,
+          }
+          print_graph_stats(G_final, pruned_nwa_data)
           print_scc_analysis(G_final, essential_transitions)
 
 
@@ -30652,6 +30711,12 @@ messages:
               if len(internal_edges) > MAX_EDGES_TO_SHOW:
                   print(f"      - ... and {len(internal_edges) - MAX_EDGES_TO_SHOW} more internal edges")
 
+      def print_fst_stats(fst: VectorFst, message: str):
+          """Prints basic stats for a rustfst FST."""
+          num_states = fst.num_states()
+          num_arcs = sum(fst.num_trs(s) for s in fst.states())
+          print(f"  - {message}: {num_states} states, {num_arcs} arcs.")
+
 
       # --- PASS FUNCTIONS ---
 
@@ -30689,12 +30754,30 @@ messages:
               for source, label, dest in nwa["transitions"]:
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-              print("Minimizing...")
+              print("\nFST Statistics:")
+              print_fst_stats(fst, "Initial FST")
+
+              print("\nRemoving epsilons...")
+              fst = fst.rm_epsilon()
+              print_fst_stats(fst, "After removing epsilons")
+
+              print("\nConnecting...")
+              fst = fst.connect()
+              print_fst_stats(fst, "After connecting")
+
+              print("\ntr_unique...")
+              fst = fst.tr_unique()
+              print_fst_stats(fst, "After tr_unique")
+
+              print("\nMinimizing...")
               fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
-              print("Determinizing...")
+              print_fst_stats(fst, "After minimizing")
+
+              print("\nDeterminizing...")
               fst = fst.determinize()
-              print("RESULT: ✅ Determinization finished successfully.")
-              print(f"Resulting FST has {fst.num_states()} states.")
+              print_fst_stats(fst, "After determinizing")
+
+              print("\nRESULT: ✅ Determinization finished successfully.")
           except Exception as e:
               print(f"RESULT: ❌ Determinization failed with an error: {e}")
       # --- NEW AND MODIFIED PASSES FOR STATE INSPECTION ---
@@ -30861,7 +30944,8 @@ messages:
       ```
     metadata:
       filename: scripts/analyze_nwa.py
-  - user: In determinize, print stats. e.g. after minimizing print stats too
+  - user: More stats in stats mode please. e.g. whhy the fk isn't there like number
+      of final states
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -30881,63 +30965,142 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add statistics printing to the determinization pass, followed by the corresponding git diff.
+      Of course! Here are the step-by-step instructions to add more statistics to the `stats` mode, followed by the corresponding git diff.
 
-      ### Instructions
+      ### Step-by-step Instructions
 
-      I will make the following changes to `scripts/analyze_nwa.py`:
+      1.  **Open `scripts/analyze_nwa.py`**.
 
-      1.  **Add a helper function for FST statistics:**
-          In `scripts/analyze_nwa.py`, I'll introduce a new function called `print_fst_stats`. This function will take an FST object and a message, and it will print the number of states and arcs. I will place this function after the existing `print_scc_analysis` function.
+      2.  **Update the `print_graph_stats` function:**
+          -   Change the function signature from `def print_graph_stats(G: nx.DiGraph):` to `def print_graph_stats(G: nx.DiGraph, nwa_data: dict):`.
+          -   Replace the body of the function with the new implementation below, which calculates and prints more detailed statistics about the NWA structure and transitions.
 
-      2.  **Update the determinization pass:**
-          In the `run_determinize_pass` function within `scripts/analyze_nwa.py`, I will update the `try` block to:
-          *   Call `print_fst_stats` to show the size of the FST immediately after it is created.
-          *   Call `print_fst_stats` again after the minimization step.
-          *   Call `print_fst_stats` a final time after the determinization step.
-          *   Adjust the surrounding print statements for better readability and remove a now-redundant line that reported only the final state count.
+          ```python
+          def print_graph_stats(G: nx.DiGraph, nwa_data: dict):
+              """Prints high-level stats for a graph."""
+              num_nodes = G.number_of_nodes()
+              num_edges = G.number_of_edges()  # Unique (src, dst) pairs
+          
+              num_transitions = len(nwa_data['transitions'])
+              epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
+              symbol_transitions = num_transitions - epsilon_transitions
+          
+              print("\n--- NWA Structure ---")
+              print(f"Total States: {num_nodes}")
+              print(f"Start State: {nwa_data['start_state']}")
+              print(f"Final States: {len(nwa_data['final_states'])}")
+          
+              print("\n--- Transitions ---")
+              print(f"Total Unique Transitions (src, label, dst): {num_transitions}")
+              print(f"  - Epsilon (ε) transitions: {epsilon_transitions}")
+              print(f"  - Symbol transitions: {symbol_transitions}")
+          
+              print(f"\n--- Graph Connectivity ---")
+              print(f"The graph has {num_nodes} nodes and {num_edges} unique source-destination edges.")
+              in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
+              out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
+              print("\nTop 5 States by In-Degree (Hubs for Fan-In):")
+              for node, degree in in_degrees[:5]:
+                  print(f"  - State {node}: {degree} incoming edges")
+              print("\nTop 5 States by Out-Degree (Hubs for Fan-Out):")
+              for node, degree in out_degrees[:5]:
+                  print(f"  - State {node}: {degree} outgoing edges")
+              wccs = list(nx.weakly_connected_components(G))
+              print(f"\nFound {len(wccs)} Weakly Connected Component(s).")
+              if wccs:
+                  print(f"  - Largest WCC contains {len(max(wccs, key=len))} nodes.")
+          ```
+
+      3.  **Update the `run_stats_pass` function:**
+          -   Find the line `print_graph_stats(G)`.
+          -   Change it to `print_graph_stats(G, nwa)` to pass the loaded NWA data to the updated stats function.
+
+      4.  **Update the `run_prune_pass` function:**
+          -   Near the end of the function, find the line `print_graph_stats(G_final)`.
+          -   Before this line, insert code to create a dictionary containing the stats for the pruned graph.
+          -   Update the call to pass this new dictionary. The block should look like this:
+
+          ```python
+          pruned_nwa_data = {
+              "start_state": nwa["start_state"],
+              "final_states": nwa["final_states"],
+              "transitions": essential_transitions,
+          }
+          print_graph_stats(G_final, pruned_nwa_data)
+          ```
 
       ### Git Diff
+
+      Here is the git diff for the changes:
 
       ```diff
       --- a/scripts/analyze_nwa.py
       +++ b/scripts/analyze_nwa.py
-      @@ -160,6 +160,13 @@
-               if len(internal_edges) > MAX_EDGES_TO_SHOW:
-                   print(f"      - ... and {len(internal_edges) - MAX_EDGES_TO_SHOW} more internal edges")
+      @@ -100,24 +100,37 @@
        
-      +def print_fst_stats(fst: VectorFst, message: str):
-      +    """Prints basic stats for a rustfst FST."""
-      +    num_states = fst.num_states()
-      +    num_arcs = sum(fst.num_trs(s) for s in fst.states())
-      +    print(f"  - {message}: {num_states} states, {num_arcs} arcs.")
-      +
+       # --- ANALYSIS FUNCTIONS (unchanged) ---
        
-       # --- PASS FUNCTIONS ---
+      -def print_graph_stats(G: nx.DiGraph):
+      +def print_graph_stats(G: nx.DiGraph, nwa_data: dict):
+           """Prints high-level stats for a graph."""
+      -    print(f"\nThe graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
+      +    num_nodes = G.number_of_nodes()
+      +    num_edges = G.number_of_edges()  # Unique (src, dst) pairs
+      +
+      +    num_transitions = len(nwa_data['transitions'])
+      +    epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
+      +    symbol_transitions = num_transitions - epsilon_transitions
+      +
+      +    print("\n--- NWA Structure ---")
+      +    print(f"Total States: {num_nodes}")
+      +    print(f"Start State: {nwa_data['start_state']}")
+      +    print(f"Final States: {len(nwa_data['final_states'])}")
+      +
+      +    print("\n--- Transitions ---")
+      +    print(f"Total Unique Transitions (src, label, dst): {num_transitions}")
+      +    print(f"  - Epsilon (ε) transitions: {epsilon_transitions}")
+      +    print(f"  - Symbol transitions: {symbol_transitions}")
+      +
+      +    print(f"\n--- Graph Connectivity ---")
+      +    print(f"The graph has {num_nodes} nodes and {num_edges} unique source-destination edges.")
+           in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
+           out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
+           print("\nTop 5 States by In-Degree (Hubs for Fan-In):")
+           for node, degree in in_degrees[:5]:
+               print(f"  - State {node}: {degree} incoming edges")
+           print("\nTop 5 States by Out-Degree (Hubs for Fan-Out):")
+           for node, degree in out_degrees[:5]:
+               print(f"  - State {node}: {degree} outgoing edges")
+           wccs = list(nx.weakly_connected_components(G))
+           print(f"\nFound {len(wccs)} Weakly Connected Component(s).")
+           if wccs:
+               print(f"  - Largest WCC contains {len(max(wccs, key=len))} nodes.")
        
-      @@ -188,13 +195,19 @@
-               for source, label, dest in nwa["transitions"]:
-                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
        
-      -        print("Minimizing...")
-      +        print("\nFST Statistics:")
-      +        print_fst_stats(fst, "Initial FST")
-      +
-      +        print("\nMinimizing...")
-               fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
-      -        print("Determinizing...")
-      +        print_fst_stats(fst, "After minimizing")
-      +
-      +        print("\nDeterminizing...")
-               fst = fst.determinize()
-      -        print("RESULT: ✅ Determinization finished successfully.")
-      -        print(f"Resulting FST has {fst.num_states()} states.")
-      +        print_fst_stats(fst, "After determinizing")
-      +
-      +        print("\nRESULT: ✅ Determinization finished successfully.")
-           except Exception as e:
-               print(f"RESULT: ❌ Determinization failed with an error: {e}")
-       # --- NEW AND MODIFIED PASSES FOR STATE INSPECTION ---
+       def print_scc_analysis(G: nx.DiGraph, transitions: set):
+      @@ -161,7 +174,7 @@
+           G = nx.DiGraph()
+           G.add_nodes_from(range(nwa["num_states"]))
+           G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
+      -    print_graph_stats(G)
+      +    print_graph_stats(G, nwa)
+       
+       
+       def run_scc_pass(args):
+      @@ -282,7 +295,12 @@
+           G_final = nx.DiGraph()
+           G_final.add_nodes_from(range(nwa["num_states"]))
+           G_final.add_edges_from([(s, d) for s, l, d in essential_transitions])
+      -    print_graph_stats(G_final)
+      +    pruned_nwa_data = {
+      +        "start_state": nwa["start_state"],
+      +        "final_states": nwa["final_states"],
+      +        "transitions": essential_transitions,
+      +    }
+      +    print_graph_stats(G_final, pruned_nwa_data)
+           print_scc_analysis(G_final, essential_transitions)
+       
+       
 
       ```
     metadata:
@@ -30950,7 +31113,7 @@ messages:
       Applying patch to 'scripts/analyze_nwa.py' using custom patcher...
       Successfully applied patch and wrote to scripts/analyze_nwa.py.
     metadata:
-  - user: 'Changes committed with message: "Add FST statistics printing in determinization
-      pass"'
+  - user: 'Changes committed with message: "Enhance stats mode in analyze_nwa.py with
+      detailed NWA structure and transition counts"'
     metadata:
 ...
