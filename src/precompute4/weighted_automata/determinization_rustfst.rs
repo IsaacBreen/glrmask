@@ -7,7 +7,7 @@ use crate::precompute4::weighted_automata::bitset::SimpleBitset;
 use crate::precompute4::weighted_automata::NWAStateID;
 use anyhow::Result;
 use nom::IResult;
-use rustfst::parsers::NomCustomError;
+use rustfst::NomCustomError;
 use rustfst::prelude::*;
 use rustfst::semirings::{
     DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring,
@@ -112,12 +112,11 @@ impl SerializableSemiring for BitsetWeight {
     }
 
     fn write_binary<F: Write>(&self, file: &mut F) -> Result<()> {
-        use rustfst::parsers::write_bin_u64;
         let ranges: Vec<_> = self.0.rsb.ranges().collect();
-        write_bin_u64(file, ranges.len() as u64)?;
+        file.write_all(&(ranges.len() as u64).to_le_bytes())?;
         for range in ranges {
-            write_bin_u64(file, *range.start() as u64)?;
-            write_bin_u64(file, *range.end() as u64)?;
+            file.write_all(&((*range.start() as u64).to_le_bytes()))?;
+            file.write_all(&((*range.end() as u64).to_le_bytes()))?;
         }
         Ok(())
     }
@@ -242,7 +241,7 @@ fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                 if let Err(DWABuildError::TransitionAlreadyExists { from, on }) = res {
                     let state = &mut dwa.states[from];
                     if let Some(w) = state.trans_weights.get_mut(&on) {
-                        *w |= tr.weight.0.clone();
+                        *w |= &tr.weight.0.clone();
                     }
                 } else if let Err(e) = res {
                     panic!("Unexpected error converting VectorFst to DWA: {:?}", e);
