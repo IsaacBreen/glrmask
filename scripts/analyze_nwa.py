@@ -72,9 +72,12 @@ def prune_to_final_state_transitions(transitions: set, final_states: set) -> set
     for (source, label), dests in source_label_to_dests.items():
         has_final_dest = any(d in final_states for d in dests)
         if has_final_dest:
-            for dest in dests:
-                if dest not in final_states:
-                    transitions_to_remove.add((source, label, dest))
+            transitions_to_remove = {(source, label, d) for d in dests}
+            # Remove the first transition to a final state found
+            for d in dests:
+                if d in final_states:
+                    transitions_to_remove.remove((source, label, d))
+                    break
 
     if transitions_to_remove:
         print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
