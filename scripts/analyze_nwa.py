@@ -7,6 +7,16 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Optional, List, Dict, Tuple
 
+# Try to import rustfst, but don't fail if it's not there.
+try:
+    from rustfst import VectorFst, Tr
+    from rustfst.weight import weight_one
+    RUSTFST_AVAILABLE = True
+except ImportError:
+    RUSTFST_AVAILABLE = False
+    VectorFst = None # for type hinting
+
+
 # Type aliases for clarity based on Rust types
 Weight = Any
 NWAStateID = int
@@ -39,7 +49,7 @@ class NWA:
     Represents a Non-deterministic Weighted Automaton (NWA), loaded from a JSON dump.
     """
     body: NWABody
-    states: List[NWAState]
+    states: List['NWAState']
 
     @staticmethod
     def from_dict(data: dict) -> 'NWA':
@@ -164,6 +174,62 @@ def load_nwa(filepath: str) -> NWA:
         data = json.load(f)
     return NWA.from_dict(data)
 
+def create_rustfst_from_nwa(nwa: NWA) -> Optional['VectorFst']:
+    """
+    Creates a rustfst.VectorFst from an NWA object.
+
+    Note: This is a partial conversion.
+    - Weights (SimpleBitset) are not converted; a default weight is used.
+    - Default transitions are ignored.
+    """
+    if not RUSTFST_AVAILABLE:
+        print("rustfst library not found. Cannot create FST.", file=sys.stderr)
+        return None
+
+    print("\n--- Creating rustfst.VectorFst from NWA ---")
+    print("WARNING: This is a partial conversion. Weights and default transitions are not fully supported.")
+
+    fst = VectorFst()
+    state_map = {}  # NWAStateID -> FST state ID
+
+    # Create states
+    for i in range(nwa.num_states()):
+        state_map[i] = fst.add_state()
+
+    # Set start state
+    if nwa.body.start_state < nwa.num_states():
+        fst.set_start(state_map[nwa.body.start_state])
+
+    # Add transitions and final states
+    for i, state in enumerate(nwa.states):
+        from_id = state_map[i]
+
+        # Final state
+        if state.final_weight is not None:
+            # Using default weight as we can't represent SimpleBitset
+            fst.set_final(from_id, weight_one())
+
+        # Epsilon transitions
+        for target, _weight in state.epsilons:
+            to_id = state_map[target]
+            # Using default weight
+            fst.add_tr(from_id, Tr(0, 0, weight_one(), to_id))
+
+        # Labeled transitions
+        for label_str, targets in state.transitions.items():
+            label = int(label_str)
+            for target, _weight in targets:
+                to_id = state_map[target]
+                # Using default weight
+                fst.add_tr(from_id, Tr(label, label, weight_one(), to_id))
+        
+        # Default transitions are ignored
+        if state.default:
+            print(f"WARNING: Ignoring {len(state.default)} default transition(s) from state {i}", file=sys.stderr)
+
+    print("FST created successfully (partially).")
+    return fst
+
 if __name__ == "__main__":
     filepath = None
     if len(sys.argv) > 2:
@@ -195,6 +261,19 @@ if __name__ == "__main__":
         nwa = load_nwa(filepath)
         stats = get_nwa_stats(nwa)
         print_nwa_stats(stats)
+
+        fst = create_rustfst_from_nwa(nwa)
+        if fst:
+            print("\n--- rustfst.VectorFst Summary ---")
+            print(f"Number of states: {fst.num_states()}")
+            if fst.start() is not None:
+                print(f"Start state: {fst.start()}")
+                num_arcs = 0
+                for s in fst.states():
+                    num_arcs += fst.num_trs(s)
+                print(f"Number of arcs: {num_arcs}")
+            else:
+                print("No start state.")
     except FileNotFoundError:
         print(f"Error: File not found at {filepath}", file=sys.stderr)
         sys.exit(1)
