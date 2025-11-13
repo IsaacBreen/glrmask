@@ -393,10 +393,24 @@ impl Not for &SimpleBitset {
 
 impl Serialize for SimpleBitset {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
+where
         S: Serializer,
     {
-        self.rsb.serialize(serializer)
+        use serde::ser::SerializeStruct;
+        if self.is_all {
+            let mut state = serializer.serialize_struct("SimpleBitset", 1)?;
+            state.serialize_field("is_all", &true)?;
+            state.end()
+        } else if self.is_empty() {
+            let mut state = serializer.serialize_struct("SimpleBitset", 1)?;
+            state.serialize_field("is_all", &false)?;
+            state.end()
+        } else {
+            let mut state = serializer.serialize_struct("SimpleBitset", 2)?;
+            state.serialize_field("is_all", &false)?;
+            state.serialize_field("rsb", &self.rsb)?;
+            state.end()
+        }
     }
 }
 
@@ -405,7 +419,62 @@ impl<'de> Deserialize<'de> for SimpleBitset {
     where
         D: Deserializer<'de>,
     {
-        let rsb = RangeSetBlaze::<usize>::deserialize(deserializer)?;
-        Ok(SimpleBitset::from_rsb_inner(rsb))
+        use serde::de::{self, MapAccess, Visitor};
+
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            IsAll,
+            Rsb,
+        }
+
+        struct SimpleBitsetVisitor;
+
+        impl<'de> Visitor<'de> for SimpleBitsetVisitor {
+            type Value = SimpleBitset;
+
+            fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
+                formatter.write_str("struct SimpleBitset")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<SimpleBitset, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut is_all = None;
+                let mut rsb = None;
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::IsAll => {
+                            if is_all.is_some() {
+                                return Err(de::Error::duplicate_field("is_all"));
+                            }
+                            is_all = Some(map.next_value()?);
+                        }
+                        Field::Rsb => {
+                            if rsb.is_some() {
+                                return Err(de::Error::duplicate_field("rsb"));
+                            }
+                            rsb = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let is_all: bool = is_all.ok_or_else(|| de::Error::missing_field("is_all"))?;
+                if is_all {
+                    if rsb.is_some() {
+                        return Err(de::Error::custom(
+                            "field `rsb` is not allowed when `is_all` is true",
+                        ));
+                    }
+                    Ok(SimpleBitset::all())
+                } else {
+                    let rsb = rsb.unwrap_or_else(RangeSetBlaze::new);
+                    Ok(SimpleBitset::from_rsb_inner(rsb))
+                }
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["is_all", "rsb"];
+        deserializer.deserialize_struct("SimpleBitset", FIELDS, SimpleBitsetVisitor)
     }
 }
