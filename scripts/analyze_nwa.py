@@ -380,10 +380,9 @@ def print_dwa_stats(dwa_data: dict):
     print(f"Total Transitions: {num_transitions}")
 
     if num_transitions > 0 or num_final > 0:
-        # Analyze weight complexity
         weight_intervals = list(dwa_data["transitions"].values()) + list(dwa_data["final_states"].values())
         # CORRECTED LINE: Use .atomic instead of .atomic_intervals
-        num_atomic_intervals = sum(len(list(w.atomic)) for w in weight_intervals)
+        num_atomic_intervals = sum(len(list(w.atomic)) for w in weight_intervals if not w.empty)
         print(f"Complexity: The weights are described by {num_atomic_intervals} distinct atomic intervals.")
 
 
