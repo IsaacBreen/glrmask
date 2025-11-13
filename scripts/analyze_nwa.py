@@ -350,6 +350,64 @@ def run_prune_pass(args):
     print_scc_analysis(G_final, essential_transitions)
 
 
+def run_analyze_sccs_pass(args):
+    """Executes the 'analyze-sccs' pass to test determinization on individual large SCCs."""
+    print(f"--- Running Analyze SCCs Pass (Threshold: {args.scc_threshold}, Timeout: {args.timeout}s) ---")
+    nwa = load_nwa_data(args.filepath)
+
+    print("\n--- 1. Identifying SCCs ---")
+    G = nx.DiGraph()
+    G.add_nodes_from(range(nwa["num_states"]))
+    G.add_edges_from(set((s, d) for s, l, d in nwa["transitions"]))
+
+    all_sccs = list(nx.strongly_connected_components(G))
+    large_sccs = [scc for scc in all_sccs if len(scc) > args.scc_threshold]
+
+    print(f"Found {len(all_sccs)} SCCs. Analyzing {len(large_sccs)} SCCs with >{args.scc_threshold} states.")
+
+    scc_internal_transitions = defaultdict(set)
+    for source, label, dest in nwa["transitions"]:
+        # This is inefficient, but correct for clarity.
+        for i, scc in enumerate(large_sccs):
+            if source in scc and dest in scc:
+                scc_internal_transitions[i].add((source, label, dest))
+                break
+
+    for i, scc in enumerate(large_sccs):
+        transitions = scc_internal_transitions[i]
+        print(f"\n--- Analyzing SCC #{i} (Size: {len(scc)}, Internal Transitions: {len(transitions)}) ---")
+
+        # Create a mapping from original state IDs to 0-based IDs for this SCC
+        scc_map = {orig_id: new_id for new_id, orig_id in enumerate(scc)}
+
+        # Add a new, single start state that can reach all nodes in the SCC
+        num_scc_states = len(scc)
+        new_start_state_id = num_scc_states
+
+        # Remap internal transitions to the new 0-based state IDs
+        remapped_transitions = set()
+        for source, label, dest in transitions:
+            remapped_transitions.add((scc_map[source], label, scc_map[dest]))
+
+        # Add epsilon transitions from the new start state to all other states
+        for new_id in range(num_scc_states):
+            remapped_transitions.add((new_start_state_id, 0, new_id)) # Epsilon is label 0
+
+        # Make all original SCC states final to capture all paths
+        scc_final_states = set(range(num_scc_states))
+
+        if time_determinization_with_timeout(
+            num_scc_states + 1, # Total states including our new start state
+            new_start_state_id,
+            scc_final_states,
+            remapped_transitions,
+            args.timeout
+        ):
+            print("  RESULT: ❌ Determinization timed out or failed.")
+        else:
+            print("  RESULT: ✅ Determinization succeeded within the time limit.")
+
+
 # --- MAIN CLI ---
 
 if __name__ == "__main__":
@@ -399,6 +457,26 @@ if __name__ == "__main__":
         help="Timeout in seconds for each determinization check during pruning."
         )
     parser_prune.set_defaults(func=run_prune_pass)
+
+    # --- Analyze SCCs Pass ---
+    parser_analyze_sccs = subparsers.add_parser(
+        "analyze-sccs",
+        help="Isolate large SCCs and attempt to determinize each one individually."
+    )
+    parser_analyze_sccs.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_analyze_sccs.add_argument(
+        "--scc-threshold",
+        type=int,
+        default=10,
+        help="Minimum number of states for an SCC to be considered 'large' and analyzed separately."
+    )
+    parser_analyze_sccs.add_argument(
+        "--timeout",
+        type=float,
+        default=5.0,
+        help="Timeout in seconds for each individual SCC determinization check."
+    )
+    parser_analyze_sccs.set_defaults(func=run_analyze_sccs_pass)
 
     args = parser.parse_args()
     args.func(args)
