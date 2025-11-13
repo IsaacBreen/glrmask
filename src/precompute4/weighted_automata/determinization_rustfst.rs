@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::ops::{BitAndAssign, BitOrAssign};
 use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
+use rustfst::algorithms::rm_epsilon::rm_epsilon;
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Default, Eq, Hash, Serialize, Deserialize)]
 pub struct BitsetWeight(pub Weight);
@@ -238,13 +239,9 @@ fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                     state_map[&tr.nextstate],
                     tr.weight.0.clone(),
                 );
-                if let Err(DWABuildError::TransitionAlreadyExists { from, on }) = res {
-                    let state = &mut dwa.states[from];
-                    if let Some(w) = state.trans_weights.get_mut(&on) {
-                        *w |= &tr.weight.0.clone();
-                    }
-                } else if let Err(e) = res {
-                    panic!("Unexpected error converting VectorFst to DWA: {:?}", e);
+                if let Err(e) = res {
+                    // This should not happen if the input FST is deterministic.
+                    panic!("Error converting VectorFst to DWA: transition already exists. This indicates non-determinism. Error: {:?}", e);
                 }
             }
         }
@@ -253,7 +250,8 @@ fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
 }
 
 pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
-    let fst = nwa_to_vector_fst(nwa);
+    let mut fst = nwa_to_vector_fst(nwa);
+    rm_epsilon(&mut fst).unwrap();
     let det_config =
         DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeNonFunctional);
     let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
