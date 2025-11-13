@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::io::Write;
-use std::ops::{BitAndAssign, BitOrAssign};
 use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
+use range_set_blaze::RangeSetBlaze;
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Default, Eq, Hash, Serialize, Deserialize)]
 pub struct BitsetWeight(pub Weight);
@@ -39,12 +39,12 @@ impl Semiring for BitsetWeight {
     }
 
     fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-        self.0.bitor_assign(&rhs.borrow().0);
+        self.0 |= &rhs.borrow().0;
         Ok(())
     }
 
     fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-        self.0.bitand_assign(&rhs.borrow().0);
+        self.0 &= &rhs.borrow().0;
         Ok(())
     }
 
@@ -108,7 +108,7 @@ impl SerializableSemiring for BitsetWeight {
             ranges.push(start as usize..=end as usize);
             i = next_i;
         }
-        let rsb = range_set_blaze::RangeSetBlaze::from_iter(ranges);
+        let rsb = RangeSetBlaze::from_iter(ranges);
         Ok((i, BitsetWeight(Weight::from_rsb(rsb))))
     }
 

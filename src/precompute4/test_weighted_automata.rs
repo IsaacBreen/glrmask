@@ -2287,6 +2287,398 @@ mod determinization_tests {
         let dwa = nwa.determinize_to_dwa();
         let word = vec![9, 3, neg(3), neg(5), neg(10)];
         let weight = dwa.eval_word_weight(&word);
+        assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
+    }
+
+    #[test]
+    fn test_det_rustfst_simple_char() {
+        let nwa = nwa_accepts_char('a', Weight::from_item(1));
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+        let expected = dwa_accepts_char('a', Weight::from_item(1));
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_union_of_chars_rustfst() {
+        // NWA for a|b
+        let mut nwa = NWA::new();
+        let s_a = nwa.states.add_state();
+        let s_b = nwa.states.add_state();
+        let final_a = nwa.states.add_state();
+        let final_b = nwa.states.add_state();
+        nwa.add_epsilon(nwa.body.start_state, s_a, Weight::all());
+        nwa.add_epsilon(nwa.body.start_state, s_b, Weight::all());
+        nwa.add_transition(s_a, 'a' as i16, final_a, Weight::all()).unwrap();
+        nwa.add_transition(s_b, 'b' as i16, final_b, Weight::all()).unwrap();
+        nwa.states[final_a].final_weight = Some(Weight::from_item(1));
+        nwa.states[final_b].final_weight = Some(Weight::from_item(2));
+
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+
+        let mut expected = DWA::new();
+        let final_a_dwa = expected.add_state();
+        let final_b_dwa = expected.add_state();
+        expected.add_transition(expected.body.start_state, 'a' as i16, final_a_dwa, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, 'b' as i16, final_b_dwa, Weight::all()).unwrap();
+        expected.set_final_weight(final_a_dwa, Weight::from_item(1)).unwrap();
+        expected.set_final_weight(final_b_dwa, Weight::from_item(2)).unwrap();
+
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_nondeterminism_on_char_rustfst() {
+        // NWA with two transitions on 'a'
+        let mut nwa = NWA::new();
+        let f1 = nwa.states.add_state();
+        let f2 = nwa.states.add_state();
+        nwa.add_transition(nwa.body.start_state, 'a' as i16, f1, Weight::from_item(1)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as i16, f2, Weight::from_item(2)).unwrap();
+        nwa.states[f1].final_weight = Some(Weight::all());
+        nwa.states[f2].final_weight = Some(Weight::all());
+
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+
+        // Expected DWA accepts 'a' with weight [1, 2]
+        let mut expected = DWA::new();
+        let final_state = expected.add_state();
+        expected.add_transition(expected.body.start_state, 'a' as i16, final_state, Weight::from_iter([1, 2])).unwrap();
+        expected.set_final_weight(final_state, Weight::all()).unwrap();
+
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_weight_partitioning_rustfst() {
+        // NWA with overlapping weights on 'a'
+        let mut nwa = NWA::new();
+        let f1 = nwa.states.add_state();
+        let f2 = nwa.states.add_state();
+        // 'a' can lead to f1 with weight [0,1] or f2 with weight [1,2]
+        nwa.add_transition(nwa.body.start_state, 'a' as i16, f1, Weight::from_iter(0..=1)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as i16, f2, Weight::from_iter(1..=2)).unwrap();
+        // f1 is final for its path, f2 is final for its path
+        nwa.states[f1].final_weight = Some(Weight::all());
+        nwa.states[f2].final_weight = Some(Weight::all());
+
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+
+        // Expected DWA:
+        // On 'a', we get a state. The final weight of this state should be:
+        // Atom [0]: from f1 -> [0]
+        // Atom [1]: from f1 and f2 -> [1]
+        // Atom [2]: from f2 -> [2]
+        // Total final weight: [0,1,2]
+        // The edge weight should also be [0,1,2]
+        let mut expected = DWA::new();
+        let final_state = expected.add_state();
+        expected.add_transition(expected.body.start_state, 'a' as i16, final_state, Weight::from_iter(0..=2)).unwrap();
+        expected.set_final_weight(final_state, Weight::from_iter(0..=2)).unwrap();
+
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_default_transition_rustfst() {
+        let mut nwa = NWA::new();
+        let s_a = nwa.states.add_state();
+        let s_def = nwa.states.add_state();
+        nwa.add_transition(nwa.body.start_state, 'a' as i16, s_a, Weight::all()).unwrap();
+        nwa.add_default_transition(nwa.body.start_state, s_def, Weight::all(), BTreeSet::from(['a' as i16])).unwrap();
+        nwa.states[s_a].final_weight = Some(Weight::from_item(1));
+        nwa.states[s_def].final_weight = Some(Weight::from_item(2));
+
+        println!("{}", nwa);
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+        println!("{}", dwa);
+
+        let mut expected = DWA::new();
+        let s_a_dwa = expected.add_state();
+        let s_def_dwa = expected.add_state();
+        expected.add_transition(expected.body.start_state, 'a' as i16, s_a_dwa, Weight::all()).unwrap();
+        expected.set_default_transition(expected.body.start_state, s_def_dwa, Weight::all()).unwrap();
+        expected.set_final_weight(s_a_dwa, Weight::from_item(1)).unwrap();
+        expected.set_final_weight(s_def_dwa, Weight::from_item(2)).unwrap();
+
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_empty_nwa_rustfst() {
+        let mut nwa = NWA::new();
+        nwa.states.0.clear(); // Truly empty
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+        assert_eq!(dwa.states.len(), 1);
+        assert!(dwa.states[dwa.body.start_state].final_weight.is_none());
+        assert!(!dwa.states[dwa.body.start_state].transitions.contains_key(&DEFAULT_TRANSITION_SYMBOL));
+        assert!(dwa.states[dwa.body.start_state].transitions.is_empty());
+    }
+
+    #[test]
+    fn test_det_accepts_nothing_rustfst() {
+        let nwa = NWA::new(); // start state, but no transitions and not final
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+        let expected = DWA::new();
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_det_accepts_empty_word_rustfst() {
+        let mut nwa = NWA::new();
+        nwa.states[nwa.body.start_state].final_weight = Some(Weight::from_item(42));
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+        let mut expected = DWA::new();
+        expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
+        stochastic_equivalence_test(dwa, expected);
+    }
+
+    #[test]
+    fn test_determinize_default_vs_exception_bug_rustfst() {
+        // DWA 'a' (the ground truth)
+        let mut a = DWA::new();
+        let s1 = a.add_state();
+        let s2_default_target = a.add_state();
+        let s3_exception_target = a.add_state();
+        let s4_final = a.add_state();
+
+        // Path: start --'a'--> s1
+        a.add_transition(a.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
+
+        // From s1:
+        // - Default transition to s2
+        // - Exception on 'b' to s3
+        a.set_default_transition(s1, s2_default_target, Weight::all()).unwrap();
+        a.add_transition(s1, 'b' as i16, s3_exception_target, Weight::all()).unwrap();
+
+        // The default path continues and is accepting.
+        a.add_transition(s2_default_target, 'c' as i16, s4_final, Weight::all()).unwrap();
+        a.set_final_weight(s4_final, Weight::from_item(1)).unwrap();
+
+        println!("Original DWA:\n{}", a);
+
+        // The exception path 'b' leads to a non-final sink state s3.
+        // So, "ab" is not accepted, and "abc" is not accepted.
+
+        // Check A's behavior.
+        // A word taking the default path should be accepted.
+        assert_eq!(a.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+        // Words taking the exception path should be rejected.
+        assert_eq!(a.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
+        assert_eq!(a.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
+
+        // Now, convert A to NWA and back to DWA 'b'.
+        let nwa = NWA::from_dwa(&a);
+        let mut b = nwa.determinize_to_dwa_with_rustfst();
+        println!("Determinized DWA:\n{}", b);
+
+        assert_eq!(b.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+        assert_eq!(b.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
+        assert_eq!(b.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
+
+        // Run the full stochastic equivalence test for good measure.
+        stochastic_equivalence_test(a.clone(), b.clone());
+
+        let mut c = b.clone();
+        c.simplify();
+        println!("Simplified DWA:\n{}", c);
+
+        assert_eq!(c.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
+        assert_eq!(c.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
+        assert_eq!(c.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
+
+        stochastic_equivalence_test(a, c);
+    }
+
+    #[test]
+    fn test_determinize_complex_nwa_from_template_rustfst() {
+        fn neg(x: i16) -> i16 {
+            i16::MIN + x
+        }
+
+        let mut nwa = NWA::new();
+        for _ in 0..38 {
+            nwa.states.add_state();
+        }
+
+        // State 0
+        nwa.add_epsilon(0, 6, Weight::all());
+        nwa.add_epsilon(0, 10, Weight::all());
+        nwa.add_epsilon(0, 13, Weight::all());
+        nwa.add_epsilon(0, 14, Weight::all());
+        nwa.add_epsilon(0, 15, Weight::all());
+        nwa.add_epsilon(0, 17, Weight::all());
+        nwa.add_epsilon(0, 19, Weight::all());
+        nwa.add_epsilon(0, 20, Weight::all());
+        // State 3
+        nwa.add_epsilon(3, 21, Weight::all());
+        // State 4
+        nwa.add_epsilon(4, 22, Weight::all());
+        nwa.add_epsilon(4, 23, Weight::all());
+        nwa.add_epsilon(4, 28, Weight::all());
+        nwa.add_epsilon(4, 33, Weight::all());
+        // State 5
+        nwa.add_epsilon(5, 38, Weight::all());
+        // State 6
+        nwa.add_transition(6, 5, 7, Weight::all()).unwrap();
+        // State 7
+        nwa.add_transition(7, neg(5), 8, Weight::all()).unwrap();
+        // State 8
+        nwa.add_transition(8, neg(10), 9, Weight::all()).unwrap();
+        // State 9
+        nwa.states[9].final_weight = Some(Weight::all());
+        // State 10
+        nwa.add_transition(10, 2, 11, Weight::all()).unwrap();
+        // State 11
+        nwa.add_default_transition(11, 12, Weight::all(), BTreeSet::new()).unwrap();
+        // State 12
+        nwa.add_default_transition(12, 2, Weight::all(), BTreeSet::new()).unwrap();
+        // State 13
+        nwa.add_transition(13, 4, 1, Weight::all()).unwrap();
+        // State 14
+        nwa.add_transition(14, 5, 3, Weight::all()).unwrap();
+        // State 15
+        nwa.add_transition(15, 6, 16, Weight::all()).unwrap();
+        // State 16
+        nwa.add_default_transition(16, 3, Weight::all(), BTreeSet::new()).unwrap();
+        // State 17
+        nwa.add_transition(17, 8, 18, Weight::all()).unwrap();
+        // State 18
+        nwa.add_default_transition(18, 4, Weight::all(), BTreeSet::new()).unwrap();
+        // State 19
+        nwa.add_transition(19, 9, 4, Weight::all()).unwrap();
+        // State 20
+        nwa.add_transition(20, 10, 5, Weight::all()).unwrap();
+        // State 21
+        nwa.add_transition(21, 7, 4, Weight::all()).unwrap();
+        // State 22
+        nwa.add_transition(22, 7, 4, Weight::all()).unwrap();
+        // State 23
+        nwa.add_transition(23, 0, 24, Weight::all()).unwrap();
+        // State 24
+        nwa.add_transition(24, neg(0), 25, Weight::all()).unwrap();
+        // State 25
+        nwa.add_transition(25, neg(5), 26, Weight::all()).unwrap();
+        // State 26
+        nwa.add_transition(26, neg(10), 27, Weight::all()).unwrap();
+        // State 27
+        nwa.states[27].final_weight = Some(Weight::all());
+        // State 28
+        nwa.add_transition(28, 3, 29, Weight::all()).unwrap();
+        // State 29
+        nwa.add_transition(29, neg(3), 30, Weight::all()).unwrap();
+        // State 30
+        nwa.add_transition(30, neg(5), 31, Weight::all()).unwrap();
+        // State 31
+        nwa.add_transition(31, neg(10), 32, Weight::all()).unwrap();
+        // State 32
+        nwa.states[32].final_weight = Some(Weight::all());
+        // State 33
+        nwa.add_transition(33, 7, 34, Weight::all()).unwrap();
+        // State 34
+        nwa.add_transition(34, neg(7), 35, Weight::all()).unwrap();
+        // State 35
+        nwa.add_transition(35, neg(5), 36, Weight::all()).unwrap();
+        // State 36
+        nwa.add_transition(36, neg(10), 37, Weight::all()).unwrap();
+        // State 37
+        nwa.states[37].final_weight = Some(Weight::all());
+        // State 38
+        nwa.add_transition(38, 5, 3, Weight::all()).unwrap();
+
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+
+        let word = vec![9, 3, neg(3), neg(5), neg(10)];
+        let weight = dwa.eval_word_weight(&word);
+
+        assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
+    }
+
+    #[test]
+    fn test_determinize_minimal_failing_nwa_repro_rustfst() {
+        fn neg(x: i16) -> i16 {
+            i16::MIN + x
+        }
+
+        let mut nwa = NWA::new();
+        // Need states 0 to 37, so 38 states total.
+        for _ in 0..37 { nwa.states.add_state(); }
+        assert_eq!(nwa.states.len(), 38);
+
+        let w_all = Weight::all();
+
+        // Epsilon transitions from state 0
+        nwa.add_epsilon(0, 6, w_all.clone());
+        nwa.add_epsilon(0, 10, w_all.clone());
+        nwa.add_epsilon(0, 14, w_all.clone());
+        nwa.add_epsilon(0, 19, w_all.clone());
+
+        // Epsilon transitions from state 3
+        nwa.add_epsilon(3, 21, w_all.clone());
+
+        // Epsilon transitions from state 4
+        nwa.add_epsilon(4, 28, w_all.clone());
+        nwa.add_epsilon(4, 33, w_all.clone());
+
+        // Path 1: 0 --eps--> 6 --5--> 7 --neg(5)--> 8 --neg(10)--> 9 (Final)
+        nwa.add_transition(6, 5, 7, w_all.clone()).unwrap();
+        nwa.add_transition(7, neg(5), 8, w_all.clone()).unwrap();
+        nwa.add_transition(8, neg(10), 9, w_all.clone()).unwrap();
+        nwa.states[9].final_weight = Some(w_all.clone());
+
+        // Path 2: 0 --eps--> 10 --2--> 11 (sink)
+        nwa.add_transition(10, 2, 11, w_all.clone()).unwrap();
+
+        // Path 3: 0 --eps--> 14 --5--> 3 --eps--> 21 --7--> 4
+        nwa.add_transition(14, 5, 3, w_all.clone()).unwrap();
+        nwa.add_transition(21, 7, 4, w_all.clone()).unwrap();
+
+        // Path 4: 0 --eps--> 19 --9--> 4 --eps--> 28 --3--> 29 --neg(3)--> 30 --neg(5)--> 31 --neg(10)--> 32 (Final)
+        nwa.add_transition(19, 9, 4, w_all.clone()).unwrap();
+        nwa.add_transition(28, 3, 29, w_all.clone()).unwrap();
+        nwa.add_transition(29, neg(3), 30, w_all.clone()).unwrap();
+        nwa.add_transition(30, neg(5), 31, w_all.clone()).unwrap();
+        nwa.add_transition(31, neg(10), 32, w_all.clone()).unwrap();
+        nwa.states[32].final_weight = Some(w_all.clone());
+
+        // Path 5: 0 --eps--> 19 --9--> 4 --eps--> 33 --7--> 34 --neg(7)--> 35 --neg(5)--> 36 --neg(10)--> 37 (Final)
+        nwa.add_transition(33, 7, 34, w_all.clone()).unwrap();
+        nwa.add_transition(34, neg(7), 35, w_all.clone()).unwrap();
+        nwa.add_transition(35, neg(5), 36, w_all.clone()).unwrap();
+        nwa.add_transition(36, neg(10), 37, w_all.clone()).unwrap();
+        nwa.states[37].final_weight = Some(w_all.clone());
+
+        println!("Constructed NWA:\n{}", nwa);
+
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+        println!("Determinized DWA:\n{}", dwa);
+
+        let word = vec![9, 3, neg(3), neg(5), neg(10)];
+        let weight = dwa.eval_word_weight(&word);
+        // The word [9, 3, neg(3), neg(5), neg(10)] should be accepted by Path 4.
+        assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
+    }
+
+    #[test]
+    fn test_determinize_minimal_failing_nwa_rustfst() {
+        fn neg(x: i16) -> i16 {
+            i16::MIN + x
+        }
+
+        let mut nwa = NWA::new();
+        for _ in 0..33 { nwa.states.add_state(); }
+
+        nwa.add_epsilon(0, 19, Weight::all());
+        nwa.add_transition(19, 9, 4, Weight::all()).unwrap();
+        nwa.add_epsilon(4, 28, Weight::all());
+        nwa.add_transition(28, 3, 29, Weight::all()).unwrap();
+        nwa.add_transition(29, neg(3), 30, Weight::all()).unwrap();
+        nwa.add_transition(30, neg(5), 31, Weight::all()).unwrap();
+        nwa.add_transition(31, neg(10), 32, Weight::all()).unwrap();
+        nwa.states[32].final_weight = Some(Weight::all());
+
+        let dwa = nwa.determinize_to_dwa_with_rustfst();
+        let word = vec![9, 3, neg(3), neg(5), neg(10)];
+        let weight = dwa.eval_word_weight(&word);
 
         assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
     }
