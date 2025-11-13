@@ -117,18 +117,17 @@ fn build_template_nwa_from_characterization(
             let s1 = nwa.states.add_state();
             let s2 = nwa.states.add_state();
             let s3 = nwa.states.add_state();
-            let s4 = nwa.states.add_state();
 
-            // src --(eps)--> s0 --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
+            // src --(eps)--> s0 --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(loop -shift)--> s3 (final)
             nwa.add_epsilon(src_nt_state, s0, w_all.clone());
             nwa.add_transition(s0, pos_revealed, s1, w_all.clone())?;
             nwa.add_transition(s1, neg_revealed, s2, w_all.clone())?;
-            nwa.add_transition(s2, neg_revealed, s3, w_all.clone())?;
-            nwa.add_transition(s3, neg_goto, s4, w_all.clone())?;
-            nwa.add_transition(s4, neg_shift, s4, w_all.clone())?;
-            nwa.states[s4].final_weight = Some(w_all.clone());
+            nwa.add_transition(s2, neg_goto, s3, w_all.clone())?;
+            nwa.add_transition(s3, neg_shift, s3, w_all.clone())?;
+            nwa.states[s3].final_weight = Some(w_all.clone());
         }
     }
+
 
     Ok(nwa)
 }
