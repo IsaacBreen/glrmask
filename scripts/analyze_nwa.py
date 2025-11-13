@@ -2,29 +2,30 @@
 import json
 import sys
 import glob
+import os
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Optional, List, Dict, Tuple
+from typing import Any, Optional, List, Dict, Tuple, Set
+
+# We use automata-lib for NFA/DFA operations
+try:
+    from automata.fa.nfa import NFA
+    from automata.fa.dfa import DFA
+except ImportError:
+    print("Error: 'automata-lib' not found. Please install it using 'pip install automata-lib'", file=sys.stderr)
+    sys.exit(1)
 
 # A dedicated symbol for default transitions when converting to rustfst.
-# Using a high value to reduce collision probability with real symbols.
+# We keep this definition to correctly parse the NWA JSON structure.
 DEFAULT_TRANSITION_SYMBOL = 0xFFFE
 
-# Try to import rustfst, but don't fail if it's not there.
-try:
-    from rustfst import VectorFst, Tr
-    from rustfst.weight import weight_one, weight_zero
-    from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
-    RUSTFST_AVAILABLE = True
-except ImportError:
-    RUSTFST_AVAILABLE = False
-    VectorFst, DeterminizeConfig, DeterminizeType = None, None, None # for type hinting
-
+# --- NWA Data Structures (Kept for JSON parsing) ---
 
 # Type aliases for clarity based on Rust types
 Weight = Any
 NWAStateID = int
 Symbol = int  # i16 in Rust
+
 
 @dataclass
 class NWAState:
@@ -34,10 +35,12 @@ class NWAState:
     transitions: Dict[str, List[Tuple[NWAStateID, Weight]]]
     epsilons: List[Tuple[NWAStateID, Weight]]
 
+
 @dataclass
 class NWABody:
     """Represents the body of an NWA, containing the start state."""
     start_state: NWAStateID
+
 
 @dataclass
 class NWA:
@@ -67,6 +70,9 @@ class NWA:
     def num_states(self) -> int:
         return len(self.states)
 
+
+# --- Analysis Functions (Simplified) ---
+
 def analyze_weight(weight: Weight, weight_stats: dict):
     """Updates weight statistics based on a given weight object."""
     if weight == "ALL":
@@ -75,6 +81,7 @@ def analyze_weight(weight: Weight, weight_stats: dict):
         weight_stats['empty_count'] += 1
     else:
         weight_stats['complex_count'] += 1
+
 
 def get_nwa_stats(nwa: NWA) -> dict:
     """
@@ -87,11 +94,6 @@ def get_nwa_stats(nwa: NWA) -> dict:
         'num_epsilon_transitions': 0,
         'num_labeled_transitions': 0,
         'num_default_transitions': 0,
-        'labeled_transitions_per_state': defaultdict(int),
-        'epsilon_transitions_per_state': defaultdict(int),
-        'default_transitions_per_state': defaultdict(int),
-        'outgoing_degree_per_state': defaultdict(int),
-        'incoming_degree_per_state': defaultdict(int),
         'weight_stats': {
             'all_count': 0,
             'empty_count': 0,
@@ -107,36 +109,24 @@ def get_nwa_stats(nwa: NWA) -> dict:
         # Epsilon transitions
         eps_count = len(state.epsilons)
         stats['num_epsilon_transitions'] += eps_count
-        stats['epsilon_transitions_per_state'][i] = eps_count
-        stats['outgoing_degree_per_state'][i] += eps_count
         for target, weight in state.epsilons:
-            stats['incoming_degree_per_state'][target] += 1
             analyze_weight(weight, stats['weight_stats'])
 
         # Labeled transitions
-        labeled_count = 0
-        for _label, targets in state.transitions.items():
-            labeled_count += len(targets)
+        for label_str, targets in state.transitions.items():
+            label = int(label_str)
+            if label == DEFAULT_TRANSITION_SYMBOL:
+                stats['num_default_transitions'] += len(targets)
+            else:
+                stats['num_labeled_transitions'] += len(targets)
+
             for target, weight in targets:
-                stats['incoming_degree_per_state'][target] += 1
                 analyze_weight(weight, stats['weight_stats'])
-        stats['num_labeled_transitions'] += labeled_count
-        stats['labeled_transitions_per_state'][i] = labeled_count
-        stats['outgoing_degree_per_state'][i] += labeled_count
 
-    # Default transitions are now inside 'transitions' with a special key
-    default_key = str(DEFAULT_TRANSITION_SYMBOL)
-    for i, state in enumerate(nwa.states):
-        if default_key in state.transitions:
-            default_targets = state.transitions[default_key]
-            default_count = len(default_targets)
-            stats['num_default_transitions'] += default_count
-            stats['default_transitions_per_state'][i] += default_count
-            # This was already counted in labeled_transitions, so we adjust
-            stats['num_labeled_transitions'] -= default_count
-            stats['labeled_transitions_per_state'][i] -= default_count
-
+    total_transitions = stats['num_epsilon_transitions'] + stats['num_labeled_transitions'] + stats['num_default_transitions']
+    stats['total_transitions'] = total_transitions
     return stats
+
 
 def print_nwa_stats(stats: dict):
     """
@@ -148,18 +138,19 @@ def print_nwa_stats(stats: dict):
     print(f"Number of final states: {stats['num_final_states']}")
     print("\n--- Transitions ---")
     print(f"Total epsilon transitions: {stats['num_epsilon_transitions']}")
-    print(f"Total labeled transitions: {stats['num_labeled_transitions']}")
+    print(f"Total labeled transitions (explicit): {stats['num_labeled_transitions']}")
     print(f"Total default transitions: {stats['num_default_transitions']}")
-    
-    total_transitions = stats['num_epsilon_transitions'] + stats['num_labeled_transitions'] + stats['num_default_transitions']
+
+    total_transitions = stats['total_transitions']
     print(f"Total transitions: {total_transitions}")
     if stats['num_states'] > 0:
         print(f"Average outgoing degree: {total_transitions / stats['num_states']:.2f}")
 
-    print("\n--- Weight Statistics ---")
+    print("\n--- Weight Statistics (Ignored for NFA conversion) ---")
     print(f"  'ALL' weights: {stats['weight_stats']['all_count']}")
     print(f"  Empty weights: {stats['weight_stats']['empty_count']}")
     print(f"  Complex weights: {stats['weight_stats']['complex_count']}")
+
 
 def load_nwa(filepath: str) -> NWA:
     """
@@ -169,89 +160,100 @@ def load_nwa(filepath: str) -> NWA:
         data = json.load(f)
     return NWA.from_dict(data)
 
-def convert_weight(weight: Any) -> Optional[float]:
+
+# --- NFA Conversion using automata-lib ---
+
+def convert_nwa_to_nfa_automata(nwa: NWA) -> NFA:
     """
-    Converts a JSON weight representation to a float for the tropical semiring.
-    - "ALL" -> 0.0 (identity)
-    - [] (empty set) -> None (annihilator, signals to skip transition)
-    - Complex set -> 1.0 (a constant cost)
+    Converts the NWA structure into a standard NFA (ignoring weights).
+    Default transitions (0xFFFE) are expanded to cover all non-explicitly
+    handled symbols.
     """
-    if weight == "ALL":
-        return weight_one()  # 0.0
-    if isinstance(weight, list):
-        if not weight:
-            return None  # Empty set, skip this transition/final weight
-        else:
-            return 1.0  # Constant cost for any non-trivial weight
-    return None
 
-def create_rustfst_from_nwa(nwa: NWA) -> Optional['VectorFst']:
-    f"""
-    Creates a rustfst.VectorFst from an NWA object.
+    # 1. Collect all symbols
+    all_symbols: Set[int] = set()
+    for state in nwa.states:
+        for label_str in state.transitions:
+            label = int(label_str)
+            if label != 0 and label != DEFAULT_TRANSITION_SYMBOL:
+                all_symbols.add(label)
 
-    Note: This is a partial conversion.
-    - Weights (SimpleBitset) are converted to simple float costs.
-    - Default transitions are mapped to a dedicated symbol ({DEFAULT_TRANSITION_SYMBOL}), ignoring their exception lists.
-    """
-    if not RUSTFST_AVAILABLE:
-        print("rustfst library not found. Cannot create FST.", file=sys.stderr)
-        return None
+    # 2. Prepare NFA components
+    states = set(range(nwa.num_states()))
+    # automata-lib requires symbols to be strings or integers, we use integers
+    input_symbols = all_symbols
+    initial_state = nwa.body.start_state
 
-    print("\n--- Creating rustfst.VectorFst from NWA ---")
-    print("WARNING: This is a partial conversion. Weights are simplified, and default transitions are mapped to a single symbol.")
+    # Final states are any state with a non-None final_weight
+    final_states = {i for i, state in enumerate(nwa.states) if state.final_weight is not None}
 
-    fst = VectorFst()
-    state_map = {}  # NWAStateID -> FST state ID
+    # Transitions: {state: {symbol: {target_states}}}
+    transitions: Dict[int, Dict[int, Set[int]]] = defaultdict(lambda: defaultdict(set))
 
-    # Create states
-    for i in range(nwa.num_states()):
-        state_map[i] = fst.add_state()
-
-    # Set start state
-    if nwa.body.start_state < nwa.num_states():
-        fst.set_start(state_map[nwa.body.start_state])
-
-    # Add transitions and final states
+    # 3. Process transitions
     for i, state in enumerate(nwa.states):
-        from_id = state_map[i]
 
-        # Final state
-        if state.final_weight is not None:
-            w = convert_weight(state.final_weight)
-            if w is not None:
-                fst.set_final(from_id, w)
+        # Identify explicitly handled symbols in this state
+        explicit_symbols: Set[int] = set()
+        default_targets: Optional[Set[int]] = None
 
-        # Epsilon transitions
-        for target, weight_obj in state.epsilons:
-            w = convert_weight(weight_obj)
-            if w is not None:
-                to_id = state_map[target]
-                fst.add_tr(from_id, Tr(0, 0, w, to_id))
-
-        # Labeled transitions
+        # First pass: Collect explicit transitions and default targets
         for label_str, targets in state.transitions.items():
             label = int(label_str)
-            for target, weight_obj in targets:
-                w = convert_weight(weight_obj)
-                if w is not None:
-                    to_id = state_map[target]
-                    fst.add_tr(from_id, Tr(label, label, w, to_id))
+            target_ids = {t[0] for t in targets}  # Ignore weights
 
-    print("FST created successfully (partially).")
-    return fst
+            if label == DEFAULT_TRANSITION_SYMBOL:
+                default_targets = target_ids
+                continue
+
+            # Standard labeled transition
+            transitions[i][label].update(target_ids)
+            if label != 0:
+                explicit_symbols.add(label)
+
+        # Epsilon transitions (from the dedicated list)
+        if state.epsilons:
+            eps_targets = {t[0] for t in state.epsilons}
+            transitions[i][0].update(eps_targets)  # Use 0 for epsilon in automata-lib
+
+        # Second pass: Expand default transitions
+        if default_targets:
+            # Symbols covered by default = All_Symbols - Explicit_Symbols
+            default_symbols = input_symbols - explicit_symbols
+
+            for symbol in default_symbols:
+                transitions[i][symbol].update(default_targets)
+
+    # Convert transitions to the format required by automata-lib (no defaultdict)
+    nfa_transitions = {
+        state: {
+            symbol: targets
+            for symbol, targets in symbol_map.items()
+        }
+        for state, symbol_map in transitions.items()
+    }
+
+    return NFA(
+        states=states,
+        input_symbols=input_symbols,
+        transitions=nfa_transitions,
+        initial_state=initial_state,
+        final_states=final_states
+    )
+
+
+# --- Main Execution ---
 
 if __name__ == "__main__":
     filepath = None
     if len(sys.argv) > 2:
         print(f"Usage: python {sys.argv[0]} [<path_to_nwa_dump.json>]")
         sys.exit(1)
-    
+
     if len(sys.argv) == 2:
         filepath = sys.argv[1]
-    else: # len(sys.argv) == 1
+    else:  # len(sys.argv) == 1
         try:
-            # Search for dump files in the current directory and parent directory
-            # to handle being run from project root or from scripts/
             search_paths = ['./nwa_dump_*.json', '../nwa_dump_*.json']
             dump_files = []
             for path in search_paths:
@@ -260,8 +262,7 @@ if __name__ == "__main__":
             if not dump_files:
                 print("No NWA dump file provided and no 'nwa_dump_*.json' files found in current or parent directory.")
                 sys.exit(1)
-            
-            import os
+
             filepath = max(dump_files, key=os.path.getmtime)
             print(f"No path provided. Using most recent dump file: {filepath}")
         except Exception as e:
@@ -273,89 +274,36 @@ if __name__ == "__main__":
         stats = get_nwa_stats(nwa)
         print_nwa_stats(stats)
 
-        fst = create_rustfst_from_nwa(nwa)
-        if fst:
-            print("\n--- rustfst.VectorFst Summary (initial) ---")
-            print(f"Number of states: {fst.num_states()}")
-            if fst.start() is not None:
-                print(f"Start state: {fst.start()}")
-                num_arcs = 0
-                for s in fst.states():
-                    num_arcs += fst.num_trs(s)
-                print(f"Number of arcs: {num_arcs}")
-            else:
-                print("No start state.")
+        print("\n--- Converting NWA to standard NFA (ignoring weights) ---")
+        nfa = convert_nwa_to_nfa_automata(nwa)
 
-            print("\n--- Connecting FST (removing dead ends) ---")
-            try:
-                fst.connect()
-                print("Connect successful.")
-                print("\n--- rustfst.VectorFst Summary (after connect) ---")
-                print(f"Number of states: {fst.num_states()}")
-                if fst.start() is not None:
-                    print(f"Start state: {fst.start()}")
-                    num_arcs = 0
-                    for s in fst.states():
-                        num_arcs += fst.num_trs(s)
-                    print(f"Number of arcs: {num_arcs}")
-                else:
-                    print("No start state.")
-            except ValueError as e:
-                print(f"Connect failed: {e}", file=sys.stderr)
+        print("NFA created successfully.")
+        print(f"NFA States: {len(nfa.states)}")
+        print(f"NFA Input Symbols: {len(nfa.input_symbols)}")
 
-            print("\n--- Topologically sorting FST ---")
-            try:
-                fst.top_sort()
-                print("Topological sort successful.")
-            except ValueError as e:
-                print(f"Topological sort failed: {e}", file=sys.stderr)
-                print("The FST may contain cycles, which can make determinization difficult.", file=sys.stderr)
+        # Calculate NFA transitions count
+        nfa_arcs = sum(len(targets) for symbol_map in nfa.transitions.values() for targets in symbol_map.values())
+        print(f"NFA Transitions (after default expansion): {nfa_arcs}")
 
-            print("\n--- Removing epsilon transitions ---")
-            try:
-                fst.rm_epsilon()
-                print("Epsilon removal successful.")
-                print("\n--- rustfst.VectorFst Summary (after rm_epsilon) ---")
-                print(f"Number of states: {fst.num_states()}")
-                if fst.start() is not None:
-                    print(f"Start state: {fst.start()}")
-                    num_arcs = 0
-                    for s in fst.states():
-                        num_arcs += fst.num_trs(s)
-                    print(f"Number of arcs: {num_arcs}")
-                else:
-                    print("No start state.")
-            except ValueError as e:
-                print(f"Epsilon removal failed: {e}", file=sys.stderr)
+        print("\n--- Determinizing NFA using automata-lib ---")
 
-            print("\n--- Sorting arcs by input label ---")
-            try:
-                fst.tr_sort()  # Default is sort by input label
-                print("Arc sorting successful.")
-            except ValueError as e:
-                print(f"Arc sorting failed: {e}", file=sys.stderr)
+        # Determinization handles epsilon removal implicitly
+        dfa = nfa.to_dfa()
 
-            print("\n--- Determinizing FST ---")
-            try:
-                # Disambiguation is often needed when weights are simplified
-                config = DeterminizeConfig(DeterminizeType.DETERMINIZE_DISAMBIGUATE)
-                det_fst = fst.determinize(config)
-                print("Determinization successful.")
-                print("\n--- rustfst.VectorFst Summary (after determinization) ---")
-                print(f"Number of states: {det_fst.num_states()}")
-                if det_fst.start() is not None:
-                    print(f"Start state: {det_fst.start()}")
-                    num_arcs = 0
-                    for s in det_fst.states():
-                        num_arcs += det_fst.num_trs(s)
-                    print(f"Number of arcs: {num_arcs}")
-                else:
-                    print("No start state.")
-            except ValueError as e:
-                print(f"Determinization failed: {e}", file=sys.stderr)
+        print("Determinization successful.")
+        print("\n--- DFA Summary ---")
+        print(f"DFA States: {len(dfa.states)}")
+
+        # Calculate DFA transitions count
+        dfa_arcs = sum(len(targets) for symbol_map in dfa.transitions.values() for targets in symbol_map.values())
+        print(f"DFA Transitions: {dfa_arcs}")
+
     except FileNotFoundError:
         print(f"Error: File not found at {filepath}", file=sys.stderr)
         sys.exit(1)
     except json.JSONDecodeError:
         print(f"Error: Could not decode JSON from {filepath}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"An unexpected error occurred during processing: {e}", file=sys.stderr)
         sys.exit(1)
