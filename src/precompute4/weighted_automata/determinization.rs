@@ -437,7 +437,7 @@ impl NWA {
             return dwa;
         }
 
-        const STATE_LIMIT: usize = 10000;
+        const STATE_LIMIT: usize = 100000;
 
         eprintln!(
             "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
