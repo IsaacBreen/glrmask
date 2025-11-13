@@ -135,9 +135,14 @@ impl NWA {
 
         for (i, st) in dwa.states.0.iter().enumerate() {
             nwa.states[i].final_weight = st.final_weight.clone();
+            let exceptions: BTreeSet<i16> = st.transitions.keys().copied().filter(|&k| k != DEFAULT_TRANSITION_SYMBOL).collect();
             for (lbl, to) in &st.transitions {
                 let w = st.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
-                nwa.states.add_transition(i, *lbl, *to, w).unwrap();
+                if *lbl == DEFAULT_TRANSITION_SYMBOL {
+                    nwa.states.add_default_transition(i, *to, w, exceptions.clone()).unwrap();
+                } else {
+                    nwa.states.add_transition(i, *lbl, *to, w).unwrap();
+                }
             }
         }
         nwa
