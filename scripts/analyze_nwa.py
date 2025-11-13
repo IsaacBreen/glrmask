@@ -4,6 +4,7 @@ import os
 import time
 import random
 import copy
+import multiprocessing
 from dataclasses import dataclass, asdict
 from typing import Any, Optional, List, Dict, Tuple
 
@@ -14,19 +15,20 @@ except ImportError:
     print("Error: 'rustfst' not found. Please install it.", file=sys.stderr)
     sys.exit(1)
 
-# --- NWA Data Structures ---
-Weight = Any  # Placeholder for weight type
-NWAStateID = int
+
+# --- NWA Data Structures (Identical to previous script) ---
 
 @dataclass
 class NWAState:
-    final_weight: Optional[Weight]
-    transitions: Dict[str, List[Tuple[NWAStateID, Weight]]]
-    epsilons: List[Tuple[NWAStateID, Weight]]
+    final_weight: Optional[Any]
+    transitions: Dict[str, List[Tuple[int, Any]]]
+    epsilons: List[Tuple[int, Any]]
+
 
 @dataclass
 class NWABody:
-    start_state: NWAStateID
+    start_state: int
+
 
 @dataclass
 class NWA:
@@ -46,11 +48,9 @@ class NWA:
         return NWA(body=body, states=states)
 
     def to_dict(self) -> dict:
-        """Converts the NWA object back to a serializable dictionary."""
         return asdict(self)
 
     def num_transitions(self) -> int:
-        """Counts the total number of transitions in the NWA."""
         count = 0
         for state in self.states:
             count += len(state.epsilons)
@@ -58,35 +58,74 @@ class NWA:
                 count += len(targets)
         return count
 
+
 def load_nwa(filepath: str) -> NWA:
-    """Loads an NWA from a JSON file."""
     with open(filepath, 'r') as f:
         data = json.load(f)
     return NWA.from_dict(data)
 
-# --- Core Timed Determinization Function ---
 
-def time_determinization(nwa: NWA) -> float:
-    """Converts an NWA to a RustFST object and times its determinization."""
-    fst = VectorFst()
-    for _ in range(len(nwa.states)):
-        fst.add_state()
-    fst.set_start(nwa.body.start_state)
+# --- Core Determinization Function (to be run in a separate process) ---
 
-    for i, state in enumerate(nwa.states):
-        if state.final_weight is not None:
-            fst.set_final(i, 0.0)
-        for label_str, targets in state.transitions.items():
-            label = int(label_str)
-            for target_id, _ in targets:
-                fst.add_tr(i, Tr(label, label, 0.0, target_id))
-        for target_id, _ in state.epsilons:
-            fst.add_tr(i, Tr(0, 0, 0.0, target_id))
+def determinize_worker(nwa_dict: dict, result_queue: multiprocessing.Queue):
+    """This function runs in a separate process to avoid blocking."""
+    try:
+        nwa = NWA.from_dict(nwa_dict)
+        fst = VectorFst()
+        for _ in range(len(nwa.states)):
+            fst.add_state()
+        fst.set_start(nwa.body.start_state)
+
+        for i, state in enumerate(nwa.states):
+            if state.final_weight is not None:
+                fst.set_final(i, 0.0)
+            for label_str, targets in state.transitions.items():
+                label = int(label_str)
+                for target_id, _ in targets:
+                    fst.add_tr(i, Tr(label, label, 0.0, target_id))
+            for target_id, _ in state.epsilons:
+                fst.add_tr(i, Tr(0, 0, 0.0, target_id))
+
+        # The actual determinization call
+        _ = fst.determinize()
+
+        result_queue.put(True)  # Signal success
+    except Exception as e:
+        # If any error occurs in the subprocess, signal failure
+        result_queue.put(False)
+
+
+def time_determinization_with_timeout(nwa: NWA, timeout: float) -> Optional[float]:
+    """
+    Runs determinization in a subprocess with a timeout.
+    Returns duration if it completes, None if it times out or fails.
+    """
+    result_queue = multiprocessing.Queue()
+    process = multiprocessing.Process(target=determinize_worker, args=(nwa.to_dict(), result_queue))
 
     start_time = time.monotonic()
-    _ = fst.determinize()
+    process.start()
+    process.join(timeout)
     end_time = time.monotonic()
-    return end_time - start_time
+
+    if process.is_alive():
+        # Process is still running, so it timed out
+        process.terminate()
+        process.join()
+        return None
+
+    # Process finished, check if it was successful
+    try:
+        success = result_queue.get_nowait()
+        if success:
+            return end_time - start_time
+        else:
+            # Worker process had an error
+            return None
+    except Exception:
+        # Queue was empty or process crashed without putting a result
+        return None
+
 
 # --- Main Pruning Logic ---
 
@@ -96,78 +135,76 @@ if __name__ == "__main__":
         sys.exit(1)
 
     filepath = sys.argv[1]
-    output_filepath = "minimized_nwa_dump.json"
-    DETERMINIZE_THRESHOLD_S = 0.100  # 100 ms
+    output_filepath = "minimized_hanging_nwa.json"
+    # Set a reasonable timeout. If it takes longer than this, we assume it's hanging.
+    DETERMINIZE_TIMEOUT_S = 0.1
 
     print(f"Loading original NWA from: {filepath}")
     original_nwa = load_nwa(filepath)
     original_transitions = original_nwa.num_transitions()
     print(f"Original NWA has {len(original_nwa.states)} states and {original_transitions} transitions.")
 
-    print("\n--- Establishing Baseline Performance ---")
-    baseline_duration = time_determinization(original_nwa)
-    print(f"Initial determinization time: {baseline_duration:.4f} seconds.")
+    print("\n--- Establishing Baseline Behavior ---")
+    baseline_duration = time_determinization_with_timeout(original_nwa, DETERMINIZE_TIMEOUT_S)
 
-    if baseline_duration < DETERMINIZE_THRESHOLD_S:
-        print("Baseline is already faster than the threshold. Nothing to do.")
-        sys.exit(0)
+    if baseline_duration is not None:
+        print(f"Baseline determinization finished in {baseline_duration:.4f} seconds.")
+        if baseline_duration < DETERMINIZE_TIMEOUT_S:
+            print("Baseline is not hanging. This script is for finding hanging cases.")
+            sys.exit(0)
+    else:
+        print(f"Baseline determinization timed out after {DETERMINIZE_TIMEOUT_S} seconds (as expected).")
 
-    # This will be our working copy that we shrink over time
     minimized_nwa = copy.deepcopy(original_nwa)
 
     # --- Create a master list of all transitions to try removing ---
-    # Format: (state_idx, 'epsilon'/'labeled', transition_key, target_idx)
     all_transitions_to_try = []
     for i, state in enumerate(minimized_nwa.states):
-        for j in range(len(state.epsilons)):
-            all_transitions_to_try.append((i, 'epsilon', j))
+        for j, epsilon_target in enumerate(state.epsilons):
+            all_transitions_to_try.append(('epsilon', i, epsilon_target))
         for label_str, targets in state.transitions.items():
-            for j in range(len(targets)):
-                all_transitions_to_try.append((i, 'labeled', label_str, j))
+            for j, labeled_target in enumerate(targets):
+                all_transitions_to_try.append(('labeled', i, label_str, labeled_target))
 
     random.shuffle(all_transitions_to_try)
     print(f"\n--- Starting Pruning Process: {len(all_transitions_to_try)} candidates to check ---")
 
-    # We need to iterate by index because the list of transitions inside the NWA will shrink
-    for idx, (state_idx, trans_type, key) in enumerate(all_transitions_to_try):
-
-        # Create a temporary copy to test the removal
+    for idx, trans_info in enumerate(all_transitions_to_try):
         candidate_nwa = copy.deepcopy(minimized_nwa)
 
-        # Find and remove the specific transition in the candidate
+        # Remove the specific transition in the candidate
+        trans_type = trans_info[0]
+        state_idx = trans_info[1]
+
         removed = False
         if trans_type == 'epsilon':
-            # Find the epsilon transition by its original index
-            original_epsilon = original_nwa.states[state_idx].epsilons[key]
-            if original_epsilon in candidate_nwa.states[state_idx].epsilons:
-                candidate_nwa.states[state_idx].epsilons.remove(original_epsilon)
+            target_to_remove = trans_info[2]
+            if target_to_remove in candidate_nwa.states[state_idx].epsilons:
+                candidate_nwa.states[state_idx].epsilons.remove(target_to_remove)
                 removed = True
-        else: # 'labeled'
-            label_str = key
-            target_idx = all_transitions_to_try[idx][3]
-            original_labeled = original_nwa.states[state_idx].transitions[label_str][target_idx]
+        else:  # 'labeled'
+            label_str = trans_info[2]
+            target_to_remove = trans_info[3]
             if label_str in candidate_nwa.states[state_idx].transitions and \
-               original_labeled in candidate_nwa.states[state_idx].transitions[label_str]:
-                candidate_nwa.states[state_idx].transitions[label_str].remove(original_labeled)
-                # Clean up empty list
+                    target_to_remove in candidate_nwa.states[state_idx].transitions[label_str]:
+                candidate_nwa.states[state_idx].transitions[label_str].remove(target_to_remove)
                 if not candidate_nwa.states[state_idx].transitions[label_str]:
                     del candidate_nwa.states[state_idx].transitions[label_str]
                 removed = True
 
         if not removed:
-            # This transition was already removed as part of a previous successful prune
             continue
 
-        duration = time_determinization(candidate_nwa)
+        duration = time_determinization_with_timeout(candidate_nwa, DETERMINIZE_TIMEOUT_S)
 
         progress = f"[{idx + 1}/{len(all_transitions_to_try)}]"
-        if duration >= DETERMINIZE_THRESHOLD_S:
-            # SUCCESS: It's still slow, so the removal was safe.
+        if duration is None:
+            # SUCCESS: It's still hanging/timing out, so the removal was safe.
             minimized_nwa = candidate_nwa
-            print(f"{progress} ✅ Prune SUCCESSFUL. Time: {duration:.4f}s. New transition count: {minimized_nwa.num_transitions()}")
+            print(f"{progress} ✅ Prune SUCCESSFUL. Still hangs. New transition count: {minimized_nwa.num_transitions()}")
         else:
             # FAILURE: It's fast now, so this transition was critical.
-            print(f"{progress} ❌ Prune FAILED. Time: {duration:.4f}s. Reverting.")
+            print(f"{progress} ❌ Prune FAILED. Finished in {duration:.4f}s. Reverting.")
 
     # --- Final Report ---
     print("\n--- Pruning Complete ---")
@@ -178,7 +215,7 @@ if __name__ == "__main__":
     reduction_pct = (reduction / original_transitions * 100) if original_transitions > 0 else 0
     print(f"Removed {reduction} transitions ({reduction_pct:.2f}% reduction).")
 
-    print(f"\nSaving minimized NWA to: {output_filepath}")
+    print(f"\nSaving minimized hanging NWA to: {output_filepath}")
     with open(output_filepath, 'w') as f:
         json.dump(minimized_nwa.to_dict(), f, indent=2)
 
