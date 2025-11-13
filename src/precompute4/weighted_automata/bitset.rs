@@ -406,20 +406,13 @@ where
         #[derive(Serialize)]
         #[serde(untagged)]
         enum RangeRepr {
-            Single(usize),
             Range((usize, usize)),
         }
 
         if self.is_all {
             Repr::All("ALL").serialize(serializer)
         } else {
-            let ranges: Vec<RangeRepr> = self.rsb.ranges().map(|r| {
-                if r.start() == r.end() {
-                    RangeRepr::Single(*r.start())
-                } else {
-                    RangeRepr::Range((*r.start(), *r.end()))
-                }
-            }).collect();
+            let ranges: Vec<RangeRepr> = self.rsb.ranges().map(|r| RangeRepr::Range((*r.start(), *r.end()))).collect();
             Repr::Ranges(ranges).serialize(serializer)
         }
     }
@@ -442,7 +435,6 @@ impl<'de> Deserialize<'de> for SimpleBitset {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum RangeRepr {
-            Single(usize),
             Range((usize, usize)),
         }
 
@@ -456,7 +448,6 @@ impl<'de> Deserialize<'de> for SimpleBitset {
             }
             Repr::Ranges(ranges) => {
                 let rsb = RangeSetBlaze::from_iter(ranges.into_iter().map(|rr| match rr {
-                    RangeRepr::Single(i) => i..=i,
                     RangeRepr::Range((s, e)) => s..=e,
                 }));
                 Ok(SimpleBitset::from_rsb_inner(rsb))

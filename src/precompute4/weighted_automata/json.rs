@@ -4,7 +4,7 @@
 #![allow(clippy::needless_borrow)]
 
 use super::bitset::SimpleBitset;
-use super::common::{I16Map, StateID, Weight};
+use super::common::{StateID, Weight};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
@@ -31,47 +31,27 @@ impl JSONConvertible for SimpleBitset {
     }
 }
 
-impl<T: JSONConvertible> JSONConvertible for I16Map<T> {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = BTreeMap::new();
-        obj.insert("exceptions".to_string(), self.exceptions.to_json());
-        obj.insert("default".to_string(), self.default.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        let mut obj = node.into_object()?;
-        let exceptions =
-            BTreeMap::<i16, T>::from_json(obj.remove("exceptions").ok_or("Missing 'exceptions' field")?)?;
-        let default = Option::<T>::from_json(obj.remove("default").ok_or("Missing 'default' field")?)?;
-        Ok(I16Map { exceptions, default })
-    }
-}
-
 impl JSONConvertible for DWAState {
     fn to_json(&self) -> JSONNode {
         let mut obj = BTreeMap::new();
         obj.insert("transitions".to_string(), self.transitions.to_json());
         obj.insert("final_weight".to_string(), self.final_weight.to_json());
-        obj.insert("trans_weight_default".to_string(), self.trans_weight_default.to_json());
-        obj.insert("trans_weights_exceptions".to_string(), self.trans_weights_exceptions.to_json());
+        obj.insert("trans_weights".to_string(), self.trans_weights.to_json());
         obj.insert("state_weight".to_string(), self.state_weight.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
         let transitions =
-            I16Map::<StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
+            BTreeMap::<i16, StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
         let final_weight =
             Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing 'final_weight' field")?)?;
-        let trans_weight_default = Option::<Weight>::from_json(
-            obj.remove("trans_weight_default").ok_or("Missing 'trans_weight_default' field")?,
-        )?;
-        let trans_weights_exceptions = BTreeMap::<i16, Weight>::from_json(
-            obj.remove("trans_weights_exceptions").ok_or("Missing 'trans_weights_exceptions' field")?,
+        let trans_weights = BTreeMap::<i16, Weight>::from_json(
+            obj.remove("trans_weights").ok_or("Missing 'trans_weights' field")?,
         )?;
         let state_weight =
             Option::<Weight>::from_json(obj.remove("state_weight").ok_or("Missing 'state_weight' field")?)?;
-        Ok(DWAState { transitions, final_weight, trans_weight_default, trans_weights_exceptions, state_weight })
+        Ok(DWAState { transitions, final_weight, trans_weights, state_weight })
     }
 }
 

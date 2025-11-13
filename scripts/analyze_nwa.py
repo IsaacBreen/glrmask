@@ -1,7 +1,6 @@
 # scripts/analyze_nwa.py
 import json
 import sys
-import os
 import glob
 from collections import defaultdict
 from dataclasses import dataclass
@@ -16,11 +15,10 @@ try:
     from rustfst import VectorFst, Tr
     from rustfst.weight import weight_one, weight_zero
     from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
-    from rustfst.algorithms.minimize import MinimizeConfig
     RUSTFST_AVAILABLE = True
 except ImportError:
     RUSTFST_AVAILABLE = False
-    VectorFst, DeterminizeConfig, DeterminizeType, MinimizeConfig = None, None, None, None # for type hinting
+    VectorFst, DeterminizeConfig, DeterminizeType = None, None, None # for type hinting
 
 
 # Type aliases for clarity based on Rust types
@@ -29,20 +27,12 @@ NWAStateID = int
 Symbol = int  # i16 in Rust
 
 @dataclass
-class NWADefaultTransition:
-    """Represents a default transition in an NWA."""
-    target: NWAStateID
-    weight: Weight
-    exceptions: List[Symbol]
-
-@dataclass
 class NWAState:
     """Represents a single state in an NWA."""
     final_weight: Optional[Weight]
     # In JSON, the keys of the transitions map are strings.
     transitions: Dict[str, List[Tuple[NWAStateID, Weight]]]
     epsilons: List[Tuple[NWAStateID, Weight]]
-    default: List[NWADefaultTransition]
 
 @dataclass
 class NWABody:
@@ -66,12 +56,10 @@ class NWA:
         states_data = data['states']
         states = []
         for s_data in states_data:
-            default_trans = [NWADefaultTransition(**d) for d in s_data.get('default', [])]
             state = NWAState(
                 final_weight=s_data.get('final_weight'),
                 transitions=s_data.get('transitions', {}),
-                epsilons=[tuple(e) for e in s_data.get('epsilons', [])],
-                default=default_trans
+                epsilons=[tuple(e) for e in s_data.get('epsilons', [])]
             )
             states.append(state)
         return NWA(body=body, states=states)
@@ -136,16 +124,17 @@ def get_nwa_stats(nwa: NWA) -> dict:
         stats['labeled_transitions_per_state'][i] = labeled_count
         stats['outgoing_degree_per_state'][i] += labeled_count
 
-        # Default transitions
-        default_count = len(state.default)
-        stats['num_default_transitions'] += default_count
-        stats['default_transitions_per_state'][i] = default_count
-        stats['outgoing_degree_per_state'][i] += default_count
-        for default_trans in state.default:
-            target = default_trans.target
-            weight = default_trans.weight
-            stats['incoming_degree_per_state'][target] += 1
-            analyze_weight(weight, stats['weight_stats'])
+    # Default transitions are now inside 'transitions' with a special key
+    default_key = str(DEFAULT_TRANSITION_SYMBOL)
+    for i, state in enumerate(nwa.states):
+        if default_key in state.transitions:
+            default_targets = state.transitions[default_key]
+            default_count = len(default_targets)
+            stats['num_default_transitions'] += default_count
+            stats['default_transitions_per_state'][i] += default_count
+            # This was already counted in labeled_transitions, so we adjust
+            stats['num_labeled_transitions'] -= default_count
+            stats['labeled_transitions_per_state'][i] -= default_count
 
     return stats
 
@@ -248,14 +237,6 @@ def create_rustfst_from_nwa(nwa: NWA) -> Optional['VectorFst']:
                     to_id = state_map[target]
                     fst.add_tr(from_id, Tr(label, label, w, to_id))
 
-        # Default transitions are mapped to a dedicated symbol
-        for default_trans in state.default:
-            w = convert_weight(default_trans.weight)
-            if w is not None:
-                to_id = state_map[default_trans.target]
-                # The 'exceptions' list is ignored.
-                fst.add_tr(from_id, Tr(DEFAULT_TRANSITION_SYMBOL, DEFAULT_TRANSITION_SYMBOL, w, to_id))
-
     print("FST created successfully (partially).")
     return fst
 
@@ -280,6 +261,7 @@ if __name__ == "__main__":
                 print("No NWA dump file provided and no 'nwa_dump_*.json' files found in current or parent directory.")
                 sys.exit(1)
             
+            import os
             filepath = max(dump_files, key=os.path.getmtime)
             print(f"No path provided. Using most recent dump file: {filepath}")
         except Exception as e:
@@ -292,39 +274,25 @@ if __name__ == "__main__":
         print_nwa_stats(stats)
 
         fst = create_rustfst_from_nwa(nwa)
-        fst: VectorFst
-        print("\n--- rustfst.VectorFst Summary (before determinization) ---")
-        print(f"Number of states: {fst.num_states()}")
-        if fst.start() is not None:
-            print(f"Start state: {fst.start()}")
-            num_arcs = 0
-            for s in fst.states():
-                num_arcs += fst.num_trs(s)
-            print(f"Number of arcs: {num_arcs}")
-        else:
-            print("No start state.")
-
-        print("\n--- Determinizing FST ---")
-        try:
-            # Disambiguation is often needed when weights are simplified
-            config = DeterminizeConfig(DeterminizeType.DETERMINIZE_DISAMBIGUATE)
-            det_fst = fst.determinize(config)
-            print("Determinization successful.")
-            print("\n--- rustfst.VectorFst Summary (after determinization) ---")
-            print(f"Number of states: {det_fst.num_states()}")
-            if det_fst.start() is not None:
-                print(f"Start state: {det_fst.start()}")
+        if fst:
+            print("\n--- rustfst.VectorFst Summary (before determinization) ---")
+            print(f"Number of states: {fst.num_states()}")
+            if fst.start() is not None:
+                print(f"Start state: {fst.start()}")
                 num_arcs = 0
-                for s in det_fst.states():
-                    num_arcs += det_fst.num_trs(s)
+                for s in fst.states():
+                    num_arcs += fst.num_trs(s)
                 print(f"Number of arcs: {num_arcs}")
+            else:
+                print("No start state.")
 
-                print("\n--- Minimizing FST ---")
-                # Since the FST is deterministic, we don't need to allow non-determinism.
-                min_config = MinimizeConfig(allow_nondet=False)
-                det_fst.minimize(min_config) # In-place operation
-                print("Minimization successful.")
-                print("\n--- rustfst.VectorFst Summary (after minimization) ---")
+            print("\n--- Determinizing FST ---")
+            try:
+                # Disambiguation is often needed when weights are simplified
+                config = DeterminizeConfig(DeterminizeType.DETERMINIZE_DISAMBIGUATE)
+                det_fst = fst.determinize(config)
+                print("Determinization successful.")
+                print("\n--- rustfst.VectorFst Summary (after determinization) ---")
                 print(f"Number of states: {det_fst.num_states()}")
                 if det_fst.start() is not None:
                     print(f"Start state: {det_fst.start()}")
@@ -334,8 +302,8 @@ if __name__ == "__main__":
                     print(f"Number of arcs: {num_arcs}")
                 else:
                     print("No start state.")
-        except ValueError as e:
-            print(f"Determinization or Minimization failed: {e}", file=sys.stderr)
+            except ValueError as e:
+                print(f"Determinization failed: {e}", file=sys.stderr)
     except FileNotFoundError:
         print(f"Error: File not found at {filepath}", file=sys.stderr)
         sys.exit(1)

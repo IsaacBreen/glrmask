@@ -1,7 +1,7 @@
 // src/precompute4/conversion.rs
 use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
 use crate::datastructures::trie::Trie;
-use crate::precompute4::weighted_automata::{DWA, StateID, Weight};
+use crate::precompute4::weighted_automata::{DWA, StateID, Weight, DEFAULT_TRANSITION_SYMBOL};
 use crate::tokenizer::TokenizerStateID;
 use std::collections::BTreeMap;
 
@@ -17,7 +17,7 @@ pub fn dwa_to_precompute3(
     // For each, we start a new Trie3 conversion.
     let start_dwa_state = &dwa.states[dwa.body.start_state];
 
-    for (&char_code, &target_dwa_id) in &start_dwa_state.transitions.exceptions {
+    for (&char_code, &target_dwa_id) in &start_dwa_state.transitions {
         let mut weight = start_dwa_state.get_weight(char_code).cloned().unwrap();
         if let Some(state_weight) = &start_dwa_state.state_weight {
             weight &= state_weight;
@@ -80,15 +80,16 @@ fn convert_dwa_subgraph(
 
         let mut handled_exceptions = StateIDBV::zeros();
 
-        for (&char_code, &target_dwa_id) in &dwa_state.transitions.exceptions {
+        for (&char_code, &target_dwa_id) in &dwa_state.transitions {
+            if char_code == DEFAULT_TRANSITION_SYMBOL { continue; }
             if char_code < 0 {
-                eprint!("All exceptions: {:?}", dwa_state.transitions.exceptions.keys());
+                eprint!("All exceptions: {:?}", dwa_state.transitions.keys());
                 panic!("Encountered negative transition code {} during conversion. Please run negative-resolution pass before conversion.", char_code);
             }
             let parser_state_id = char_code as usize;
             handled_exceptions.insert(parser_state_id);
 
-            let mut weight = dwa_state.trans_weights_exceptions.get(&char_code).cloned().unwrap_or_else(Weight::zeros);
+            let mut weight = dwa_state.trans_weights.get(&char_code).cloned().unwrap_or_else(Weight::zeros);
             if dwa_id == start_dwa_id {
                 weight &= &start_weight;
             }
@@ -104,8 +105,8 @@ fn convert_dwa_subgraph(
             }
         }
 
-        if let Some(target_dwa_id) = dwa_state.transitions.default {
-            let mut weight = dwa_state.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::zeros);
+        if let Some(&target_dwa_id) = dwa_state.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+            let mut weight = dwa_state.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL).cloned().unwrap_or_else(Weight::zeros);
             if dwa_id == start_dwa_id {
                 weight &= &start_weight;
             }

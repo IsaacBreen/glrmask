@@ -14,6 +14,6 @@ pub mod tuple_merger;
 mod test_determinization;
 
 pub use self::bitset::SimpleBitset;
-pub use self::common::{format_i16_char, format_pos_code, format_word, I16Map, NWAStateID, StateID, Weight};
+pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID, StateID, Weight, DEFAULT_TRANSITION_SYMBOL};
 pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
-pub use self::nwa::{NWABody, NWABuildError, NWADefaultTransition, NWAState, NWAStates, NWA};
+pub use self::nwa::{NWABody, NWABuildError, NWAState, NWAStates, NWA};

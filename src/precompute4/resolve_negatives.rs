@@ -1,4 +1,4 @@
-use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
+use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight, DEFAULT_TRANSITION_SYMBOL};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, VecDeque};
@@ -54,7 +54,7 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
 
 pub fn remove_negative_transitions(nwa: &mut NWA) {
     for st in &mut nwa.states.0 {
-        st.transitions.retain(|k, _| *k >= 0);
+        st.transitions.retain(|k, _| *k >= 0 || *k == DEFAULT_TRANSITION_SYMBOL);
     }
 }
 
@@ -128,7 +128,7 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
     // Each `a --neg(c)--> b` starts a search at `b` for a matching `c`.
     for a in 0..n {
         for (label, targets) in &states[a].transitions {
-            if *label < 0 {
+            if *label < 0 && *label != DEFAULT_TRANSITION_SYMBOL {
                 let c = label.wrapping_sub(i16::MIN);
                 for (b, w_ab) in targets {
                     if *b >= n { continue; }
@@ -182,9 +182,9 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
                 if *t < n { check_cancellations(*t, w_st, &mut worklist); }
             }
         }
-        for def in &states[s].default {
-            if !def.exceptions.contains(&c) && def.target < n {
-                check_cancellations(def.target, &def.weight, &mut worklist);
+        if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+            for (target, weight) in default_targets {
+                check_cancellations(*target, weight, &mut worklist);
             }
         }
 
@@ -225,7 +225,7 @@ fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
         }
         // Negative edges
         for (label, targets) in &states[u].transitions {
-            if *label < 0 {
+            if *label < 0 && *label != DEFAULT_TRANSITION_SYMBOL {
                 for (v, w) in targets {
                     if *v < n { rev[*v].push((u, w.clone())); }
                 }

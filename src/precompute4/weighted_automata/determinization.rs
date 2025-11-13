@@ -29,7 +29,7 @@ use chrono::Local;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use super::common::{NWAStateID, Weight};
+use super::common::{NWAStateID, Weight, DEFAULT_TRANSITION_SYMBOL};
 use super::dwa::{DWA, DWABuildError};
 use super::nwa::{NWA, NWAStates};
 
@@ -99,12 +99,9 @@ fn collect_exception_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTr
         if is_zero(cw) {
             continue;
         }
-        for (lbl, _) in nwa_states[*sid].transitions.iter() {
-            labels.insert(*lbl);
-        }
-        for def in &nwa_states[*sid].default {
-            for ex in &def.exceptions {
-                labels.insert(*ex);
+        for &lbl in nwa_states[*sid].transitions.keys() {
+            if lbl != DEFAULT_TRANSITION_SYMBOL {
+                labels.insert(lbl);
             }
         }
     }
@@ -119,14 +116,16 @@ fn next_subset_for_others(nwa_states: &NWAStates, closure: &ClosureMap) -> Weigh
             continue;
         }
         let st = &nwa_states[*sid];
-        for def in &st.default {
-            let cand = weight_intersection(cw, &def.weight);
-            if is_zero(&cand) {
-                continue;
+        if let Some(default_targets) = st.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+            for (target, weight) in default_targets {
+                let cand = weight_intersection(cw, weight);
+                if is_zero(&cand) {
+                    continue;
+                }
+                next.entry(*target)
+                    .and_modify(|w| weight_union_in_place(w, &cand))
+                    .or_insert(cand);
             }
-            next.entry(def.target)
-                .and_modify(|w| weight_union_in_place(w, &cand))
-                .or_insert(cand);
         }
     }
     next.retain(|_, w| !is_zero(w));
@@ -146,6 +145,7 @@ fn next_subset_for_label(
         }
         let st = &nwa_states[*sid];
         if let Some(targets) = st.transitions.get(&ch) {
+            // Explicit transition for 'ch' exists: use it.
             for (to, w_edge) in targets {
                 let cand = weight_intersection(cw, w_edge);
                 if is_zero(&cand) {
@@ -155,17 +155,16 @@ fn next_subset_for_label(
                     .and_modify(|w| weight_union_in_place(w, &cand))
                     .or_insert(cand);
             }
-        } else {
-            for def in &st.default {
-                if !def.exceptions.contains(&ch) {
-                    let cand = weight_intersection(cw, &def.weight);
-                    if is_zero(&cand) {
-                        continue;
-                    }
-                    next.entry(def.target)
-                        .and_modify(|w| weight_union_in_place(w, &cand))
-                        .or_insert(cand);
+        } else if let Some(default_targets) = st.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+            // No explicit transition for 'ch': use default.
+            for (target, weight) in default_targets {
+                let cand = weight_intersection(cw, weight);
+                if is_zero(&cand) {
+                    continue;
                 }
+                next.entry(*target)
+                    .and_modify(|w| weight_union_in_place(w, &cand))
+                    .or_insert(cand);
             }
         }
     }
@@ -320,7 +319,7 @@ impl<'a> Determinizer<'a> {
             let to_ch_id = self.register_state(sub_ch);
             let need_exception = match default_target_id {
                 None => true,
-                Some(def_id) => def_id != to_ch_id || w_ch != others_weight,
+                Some(def_id) => to_ch_id != def_id || w_ch != others_weight,
             };
             if need_exception {
                 let _ = self
@@ -347,7 +346,7 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     }
 
     let start = nwa.body.start_state;
-    if !nwa.states[start].transitions.is_empty() || !nwa.states[start].default.is_empty() {
+    if !nwa.states[start].transitions.is_empty() {
         return None;
     }
 
@@ -362,7 +361,7 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         }
         let st = &nwa.states[*sid];
 
-        if !st.epsilons.is_empty() || !st.default.is_empty() {
+        if !st.epsilons.is_empty() {
             return None;
         }
         for (_lbl, vec_targets) in st.transitions.iter() {

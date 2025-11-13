@@ -3,9 +3,9 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
+use super::common::{StateID, Weight, STOCHASTIC_DEBUG, DEFAULT_TRANSITION_SYMBOL};
 use super::dwa::DWA;
-use super::nwa::{NWABody, NWADefaultTransition, NWAStates, NWA};
+use super::nwa::{NWABody, NWAStates, NWA};
 use crate::precompute4::weighted_automata::NWAStateID;
 use std::collections::{BTreeSet, VecDeque};
 
@@ -34,12 +34,8 @@ impl DWA {
                 return Weight::zeros();
             }
             let st = &self.states[s];
-            if let Some(&t) = st.transitions.get(ch) {
-                if let Some(w) = st.get_weight(ch) {
-                    acc &= w;
-                } else {
-                    return Weight::zeros();
-                }
+            if let Some((t, w)) = st.get_transition(ch) {
+                acc &= w;
                 if acc.is_empty() {
                     return Weight::zeros();
                 }
@@ -130,7 +126,6 @@ impl DWA {
 impl NWA {
     /// Convert a DWA to a NWA:
     /// - DWA labeled transitions -> NWA labeled transitions (same label, same weight)
-    /// - DWA default transitions -> NWA default transitions (weight of default)
     /// - Final weights preserved
     pub fn from_dwa(dwa: &DWA) -> Self {
         let mut nwa = NWA::new();
@@ -140,20 +135,8 @@ impl NWA {
 
         for (i, st) in dwa.states.0.iter().enumerate() {
             nwa.states[i].final_weight = st.final_weight.clone();
-            // Default -> NWA default
-            if let Some(to) = st.transitions.default {
-                // Assume ALL if weight is missing, though this should not happen with current DWA builders.
-                let w = st.trans_weight_default.as_ref().cloned().unwrap_or_else(Weight::all);
-                let exceptions = st.transitions.exceptions.keys().copied().collect();
-                nwa.states.0[i].default.push(NWADefaultTransition {
-                    target: to,
-                    weight: w,
-                    exceptions,
-                });
-            }
-            // Labeled
-            for (lbl, to) in &st.transitions.exceptions {
-                let w = st.trans_weights_exceptions.get(lbl).cloned().unwrap_or_else(Weight::all);
+            for (lbl, to) in &st.transitions {
+                let w = st.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
                 nwa.states.add_transition(i, *lbl, *to, w).unwrap();
             }
         }
@@ -211,12 +194,6 @@ impl NWA {
                         visited[*v] = true;
                         q.push_back(*v);
                     }
-                }
-            }
-            for def in &states[u].default {
-                if def.target < states.len() && !visited[def.target] {
-                    visited[def.target] = true;
-                    q.push_back(def.target);
                 }
             }
         }

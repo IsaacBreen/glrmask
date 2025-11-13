@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{format_pos_code, I16Map, StateID, Weight};
+use super::common::{format_pos_code, StateID, Weight, DEFAULT_TRANSITION_SYMBOL};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Deref, Index, IndexMut};
@@ -11,7 +11,6 @@ use std::ops::{Deref, Index, IndexMut};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DWABuildError {
     TransitionAlreadyExists { from: StateID, on: i16 },
-    DefaultTransitionAlreadyExists { from: StateID },
     StateOutOfBounds { state: StateID },
 }
 
@@ -21,9 +20,6 @@ impl Display for DWABuildError {
             DWABuildError::TransitionAlreadyExists { from, on } => {
                 write!(f, "Transition from state {} on code {} already exists", from, on)
             }
-            DWABuildError::DefaultTransitionAlreadyExists { from } => {
-                write!(f, "Default transition from state {} already exists", from)
-            }
             DWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
         }
     }
@@ -31,17 +27,22 @@ impl Display for DWABuildError {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWAState {
-    pub transitions: I16Map<StateID>,
+    pub transitions: BTreeMap<i16, StateID>,
     pub final_weight: Option<Weight>,
-    pub trans_weight_default: Option<Weight>,
-    pub trans_weights_exceptions: BTreeMap<i16, Weight>,
+    pub trans_weights: BTreeMap<i16, Weight>,
     /// Optional state-entry weight (intersected upon entering the state).
     pub state_weight: Option<Weight>,
 }
 
 impl DWAState {
+    pub fn get_transition(&self, ch: i16) -> Option<(StateID, &Weight)> {
+        self.transitions.get(&ch).or_else(|| self.transitions.get(&DEFAULT_TRANSITION_SYMBOL)).and_then(|to| {
+            self.trans_weights.get(&ch).or_else(|| self.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL)).map(|w| (*to, w))
+        })
+    }
+
     pub fn get_weight(&self, ch: i16) -> Option<&Weight> {
-        self.trans_weights_exceptions.get(&ch).or(self.trans_weight_default.as_ref())
+        self.trans_weights.get(&ch).or_else(|| self.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL))
     }
 
     /// Intersects all weights in this state with the given weight.
@@ -60,11 +61,7 @@ impl DWAState {
             }
         }
 
-        if let Some(twd) = &mut self.trans_weight_default {
-            *twd &= weight;
-        }
-
-        for w in self.trans_weights_exceptions.values_mut() {
+        for w in self.trans_weights.values_mut() {
             *w &= weight;
         }
     }
@@ -85,32 +82,18 @@ impl DWAState {
             }
         }
 
-        if let Some(twd) = &mut self.trans_weight_default {
-            *twd -= weight;
-        }
-
-        for w in self.trans_weights_exceptions.values_mut() {
+        for w in self.trans_weights.values_mut() {
             *w -= weight;
         }
     }
 
     /// Iterator over all outgoing edges:
-    /// - Default edge appears as (None, target, weight)
-    /// - Exception edges appear as (Some(label), target, weight)
+    /// - Edges appear as (label, target, weight)
     #[inline]
-    pub fn iter_edges(&self) -> impl Iterator<Item = (Option<i16>, StateID, &Weight)> {
-        let def_iter = self
-            .transitions
-            .default
-            .and_then(|to| self.trans_weight_default.as_ref().map(move |w| (to, w)))
-            .into_iter()
-            .map(|(to, w)| (None, to, w));
-        let ex_iter = self
-            .transitions
-            .exceptions
+    pub fn iter_edges(&self) -> impl Iterator<Item = (i16, StateID, &Weight)> {
+        self.transitions
             .iter()
-            .filter_map(|(ch, to)| self.trans_weights_exceptions.get(ch).map(|w| (Some(*ch), *to, w)));
-        def_iter.chain(ex_iter)
+            .filter_map(move |(ch, to)| self.trans_weights.get(ch).map(|w| (*ch, *to, w)))
     }
 }
 
@@ -178,27 +161,17 @@ impl DWAStates {
         while let Some((old_id, new_id)) = q.pop_front() {
             let old_state_clone = self[old_id].clone();
 
-            // Remap default transition
-            if let Some(old_target) = old_state_clone.transitions.default {
+            // Remap transitions
+            let mut new_transitions = BTreeMap::new();
+            for (ch, &old_target) in &old_state_clone.transitions {
                 let new_target_id = *remap.entry(old_target).or_insert_with(|| {
                     let new_id = self.add_existing_state(self[old_target].clone());
                     q.push_back((old_target, new_id));
                     new_id
                 });
-                self[new_id].transitions.default = Some(new_target_id);
+                new_transitions.insert(*ch, new_target_id);
             }
-
-            // Remap exception transitions
-            let mut new_exceptions = BTreeMap::new();
-            for (ch, &old_target) in &old_state_clone.transitions.exceptions {
-                let new_target_id = *remap.entry(old_target).or_insert_with(|| {
-                    let new_id = self.add_existing_state(self[old_target].clone());
-                    q.push_back((old_target, new_id));
-                    new_id
-                });
-                new_exceptions.insert(*ch, new_target_id);
-            }
-            self[new_id].transitions.exceptions = new_exceptions;
+            self[new_id].transitions = new_transitions;
         }
         (new_start_id, remap)
     }
@@ -219,16 +192,7 @@ impl DWAStates {
         while let Some((old_id, new_id)) = q.pop_front() {
             let old_state_clone = other_states[old_id].clone();
 
-            if let Some(old_target) = old_state_clone.transitions.default {
-                let new_target_id = *remap.entry(old_target).or_insert_with(|| {
-                    let new_id = self.add_existing_state(other_states[old_target].clone());
-                    q.push_back((old_target, new_id));
-                    new_id
-                });
-                self[new_id].transitions.default = Some(new_target_id);
-            }
-
-            self[new_id].transitions.exceptions = old_state_clone.transitions.exceptions.iter().map(|(ch, &old_target)| {
+            self[new_id].transitions = old_state_clone.transitions.iter().map(|(ch, &old_target)| {
                 let new_target_id = *remap.entry(old_target).or_insert_with(|| {
                     let new_id = self.add_existing_state(other_states[old_target].clone());
                     q.push_back((old_target, new_id));
@@ -236,6 +200,7 @@ impl DWAStates {
                 });
                 (*ch, new_target_id)
             }).collect();
+            self[new_id].trans_weights = old_state_clone.trans_weights;
         }
         (new_start_id, remap)
     }
@@ -293,11 +258,11 @@ impl DWA {
             return Err(DWABuildError::StateOutOfBounds { state: to });
         }
         let from_state = &mut self.states[from];
-        if from_state.transitions.exceptions.contains_key(&on) {
+        if from_state.transitions.contains_key(&on) {
             return Err(DWABuildError::TransitionAlreadyExists { from, on });
         }
-        from_state.transitions.exceptions.insert(on, to);
-        from_state.trans_weights_exceptions.insert(on, weight);
+        from_state.transitions.insert(on, to);
+        from_state.trans_weights.insert(on, weight);
         Ok(())
     }
 
@@ -307,19 +272,7 @@ impl DWA {
         to: StateID,
         weight: Weight,
     ) -> Result<(), DWABuildError> {
-        if from >= self.states.len() {
-            return Err(DWABuildError::StateOutOfBounds { state: from });
-        }
-        if to >= self.states.len() {
-            return Err(DWABuildError::StateOutOfBounds { state: to });
-        }
-        let from_state = &mut self.states[from];
-        if from_state.transitions.default.is_some() {
-            return Err(DWABuildError::DefaultTransitionAlreadyExists { from });
-        }
-        from_state.transitions.default = Some(to);
-        from_state.trans_weight_default = Some(weight);
-        Ok(())
+        self.add_transition(from, DEFAULT_TRANSITION_SYMBOL, to, weight)
     }
 }
 
@@ -361,17 +314,18 @@ impl DWA {
         let mut num_default_transitions = 0;
 
         for state in &self.states.0 {
-            num_exceptions += state.transitions.exceptions.len();
+            num_exceptions += state.transitions.len();
             if state.final_weight.is_some() {
                 num_final_states += 1;
             }
-            if state.transitions.default.is_some() {
+            if state.transitions.contains_key(&DEFAULT_TRANSITION_SYMBOL) {
                 num_default_transitions += 1;
             }
         }
 
-        let num_transitions = num_exceptions + num_default_transitions;
-        let avg_exceptions_per_state = num_exceptions as f64 / num_states as f64;
+        let num_transitions = num_exceptions;
+        let num_exceptions_only = num_exceptions - num_default_transitions;
+        let avg_exceptions_per_state = num_exceptions_only as f64 / num_states as f64;
 
         DWAStats {
             num_states,
@@ -391,27 +345,28 @@ impl Display for DWA {
             if let Some(sw) = &state.state_weight {
                 writeln!(f, "    state_weight: {}", sw)?;
             }
-            if let Some(to) = &state.transitions.default {
-                if let Some(w) = &state.trans_weight_default {
-                    writeln!(f, "    * -> {} (trans_weight: {})", to, w)?;
-                } else {
-                    writeln!(f, "    * -> {}", to)?;
-                }
-            }
             if let Some(w) = &state.final_weight {
                 writeln!(f, "    final_weight: {}", w)?;
             }
-            for (on, to) in &state.transitions.exceptions {
-                let char_repr = if *on >= 0 {
-                    format_pos_code(*on)
+            for (on, to) in &state.transitions {
+                if *on == DEFAULT_TRANSITION_SYMBOL {
+                    if let Some(w) = state.trans_weights.get(on) {
+                        writeln!(f, "    * -> {} (trans_weight: {})", to, w)?;
+                    } else {
+                        writeln!(f, "    * -> {}", to)?;
+                    }
                 } else {
-                    let decoded_id = on.wrapping_sub(i16::MIN);
-                    format!("neg({})", decoded_id)
-                };
-                if let Some(w) = state.trans_weights_exceptions.get(on) {
-                    writeln!(f, "    {} -> {} (trans_weight: {})", char_repr, to, w)?;
-                } else {
-                    writeln!(f, "    {} -> {}", char_repr, to)?;
+                    let char_repr = if *on >= 0 {
+                        format_pos_code(*on)
+                    } else {
+                        let decoded_id = on.wrapping_sub(i16::MIN);
+                        format!("neg({})", decoded_id)
+                    };
+                    if let Some(w) = state.trans_weights.get(on) {
+                        writeln!(f, "    {} -> {} (trans_weight: {})", char_repr, to, w)?;
+                    } else {
+                        writeln!(f, "    {} -> {}", char_repr, to)?;
+                    }
                 }
             }
         }

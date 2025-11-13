@@ -6,7 +6,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
 use crate::precompute4::utils;
-use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight};
+use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight, DEFAULT_TRANSITION_SYMBOL};
 use crate::constraint::LLMTokenBV;
 use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
@@ -78,7 +78,7 @@ fn build_template_nwa_from_characterization(
 
         for i in 0..len {
             let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
-            nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
+            nwa.states.add_transition(from, DEFAULT_TRANSITION_SYMBOL, to, w_all.clone())?;
             from = to;
         }
     }
@@ -102,7 +102,7 @@ fn build_template_nwa_from_characterization(
 
             for i in 0..len {
                 let to = if i == len - 1 { dst_nt_state } else { nwa.states.add_state() };
-                nwa.add_default_transition(from, to, w_all.clone(), BTreeSet::new())?;
+                nwa.states.add_transition(from, DEFAULT_TRANSITION_SYMBOL, to, w_all.clone())?;
                 from = to;
             }
         }
@@ -123,8 +123,9 @@ fn build_template_nwa_from_characterization(
             nwa.add_epsilon(src_nt_state, s0, w_all.clone());
             nwa.add_transition(s0, pos_revealed, s1, w_all.clone())?;
             nwa.add_transition(s1, neg_revealed, s2, w_all.clone())?;
-            nwa.add_transition(s2, neg_goto, s3, w_all.clone())?;
-            nwa.add_transition(s3, neg_shift, s4, w_all.clone())?;
+            nwa.add_transition(s2, neg_revealed, s3, w_all.clone())?;
+            nwa.add_transition(s3, neg_goto, s4, w_all.clone())?;
+            nwa.add_transition(s4, neg_shift, s4, w_all.clone())?;
             nwa.states[s4].final_weight = Some(w_all.clone());
         }
     }
@@ -186,40 +187,9 @@ fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
                     }
                 }
             }
-
-            // Default transitions
-            for def in &mut state.default {
-                let old_w = def.weight.clone();
-                def.weight -= &final_weight;
-                if def.weight != old_w {
-                    changed = true;
-                }
-            }
         }
     }
     changed
-}
-
-// Helper: collect final states of a DWA
-fn collect_final_states(dwa: &DWA) -> BTreeSet<usize> {
-    let mut finals = BTreeSet::new();
-    for (i, st) in dwa.states.0.iter().enumerate() {
-        if st.final_weight.is_some() {
-            finals.insert(i);
-        }
-    }
-    finals
-}
-
-// Helper: join_map for concatenation: map each left final to the right's start.
-fn join_map_final_to_start(left: &DWA, right: &DWA) -> BTreeMap<usize, BTreeSet<usize>> {
-    let left_final_states = collect_final_states(left);
-    let right_start = right.body.start_state;
-    let mut join_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for lf in left_final_states {
-        join_map.insert(lf, BTreeSet::from([right_start]));
-    }
-    join_map
 }
 
 // Public API: precompute4 using NWA-first approach, determinize at the end.
