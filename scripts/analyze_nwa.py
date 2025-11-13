@@ -382,26 +382,9 @@ def print_dwa_stats(dwa_data: dict):
     if num_transitions > 0 or num_final > 0:
         weight_intervals = list(dwa_data["transitions"].values()) + list(dwa_data["final_states"].values())
 
-        try:
-            # DEFINITIVE FIX: The property is .atomic, which returns an iterator.
-            num_atomic_intervals = sum(len(list(w.atomic)) for w in weight_intervals)
-            print(f"Complexity: The weights are described by {num_atomic_intervals} distinct atomic intervals.")
-        except TypeError as e:
-            # This block will catch the error and provide a much better debug message.
-            print("\n--- DEBUG: Error during final statistics calculation ---")
-            print(f"Encountered a TypeError: {e}")
-            print("This usually means a property like '.is_atomic' (a boolean) was used instead of '.atomic' (an iterator).")
-            # Let's inspect the first problematic weight interval to be sure.
-            for w in weight_intervals:
-                # Check if the .atomic property is iterable. If not, it's the problem.
-                if not hasattr(w.atomic, '__iter__'):
-                    print(f"Problematic item found: {w}")
-                    print(f"  - Type of item: {type(w)}")
-                    print(f"  - Value of item.atomic: {w.atomic}")
-                    print(f"  - Type of item.atomic: {type(w.atomic)}")
-                    print("Please ensure the property name is '.atomic' and not '.is_atomic' or another boolean property.")
-                    break
-            print("--- End Debug ---")
+        # DEFINITIVE FIX: Iterate directly over the interval object `w` to get its atomic components.
+        num_atomic_intervals = sum(len(list(w)) for w in weight_intervals)
+        print(f"Complexity: The weights are described by {num_atomic_intervals} distinct atomic intervals.")
 
 
 # --- PASS FUNCTIONS ---
