@@ -5,7 +5,7 @@ import glob
 import os
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Optional, List, Dict, Tuple, Set
+from typing import Any, Optional, List, Dict, Tuple, Set, Union
 
 # We use automata-lib for NFA/DFA operations
 try:
@@ -170,7 +170,7 @@ def convert_nwa_to_nfa_automata(nwa: NWA) -> NFA:
     handled symbols.
     """
 
-    # 1. Collect all symbols
+    # 1. Collect all symbols, excluding 0 which is reserved for epsilon.
     all_symbols: Set[int] = set()
     for state in nwa.states:
         for label_str in state.transitions:
@@ -180,7 +180,6 @@ def convert_nwa_to_nfa_automata(nwa: NWA) -> NFA:
 
     # 2. Prepare NFA components
     states = set(range(nwa.num_states()))
-    # automata-lib requires symbols to be strings or integers, we use integers
     input_symbols = all_symbols
     initial_state = nwa.body.start_state
 
@@ -188,12 +187,12 @@ def convert_nwa_to_nfa_automata(nwa: NWA) -> NFA:
     final_states = {i for i, state in enumerate(nwa.states) if state.final_weight is not None}
 
     # Transitions: {state: {symbol: {target_states}}}
-    transitions: Dict[int, Dict[int, Set[int]]] = defaultdict(lambda: defaultdict(set))
+    # The symbol can be an int or the empty string '' for epsilon
+    transitions: Dict[int, Dict[Union[int, str], Set[int]]] = defaultdict(lambda: defaultdict(set))
 
     # 3. Process transitions
     for i, state in enumerate(nwa.states):
 
-        # Identify explicitly handled symbols in this state
         explicit_symbols: Set[int] = set()
         default_targets: Optional[Set[int]] = None
 
@@ -206,21 +205,23 @@ def convert_nwa_to_nfa_automata(nwa: NWA) -> NFA:
                 default_targets = target_ids
                 continue
 
+            if label == 0:
+                # This is an epsilon transition, map to empty string ''
+                transitions[i][''].update(target_ids)
+                continue
+
             # Standard labeled transition
             transitions[i][label].update(target_ids)
-            if label != 0:
-                explicit_symbols.add(label)
+            explicit_symbols.add(label)
 
-        # Epsilon transitions (from the dedicated list)
+        # Epsilon transitions from the dedicated `epsilons` list
         if state.epsilons:
             eps_targets = {t[0] for t in state.epsilons}
-            transitions[i][0].update(eps_targets)  # Use 0 for epsilon in automata-lib
+            transitions[i][''].update(eps_targets)
 
         # Second pass: Expand default transitions
         if default_targets:
-            # Symbols covered by default = All_Symbols - Explicit_Symbols
             default_symbols = input_symbols - explicit_symbols
-
             for symbol in default_symbols:
                 transitions[i][symbol].update(default_targets)
 
@@ -287,8 +288,8 @@ if __name__ == "__main__":
 
         print("\n--- Determinizing NFA using automata-lib ---")
 
-        # Determinization handles epsilon removal implicitly
-        dfa = nfa.to_dfa()
+        # Correct way to determinize: use the DFA class method
+        dfa = DFA.from_nfa(nfa)
 
         print("Determinization successful.")
         print("\n--- DFA Summary ---")
