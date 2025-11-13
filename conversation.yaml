@@ -17046,10 +17046,11 @@ local_system:
           from rustfst import VectorFst, Tr
           from rustfst.weight import weight_one, weight_zero
           from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
+          from rustfst.algorithms.minimize import MinimizeConfig
           RUSTFST_AVAILABLE = True
       except ImportError:
           RUSTFST_AVAILABLE = False
-          VectorFst, DeterminizeConfig, DeterminizeType = None, None, None # for type hinting
+          VectorFst, DeterminizeConfig, DeterminizeType, MinimizeConfig = None, None, None, None # for type hinting
 
 
       # Type aliases for clarity based on Rust types
@@ -17321,36 +17322,52 @@ local_system:
               print_nwa_stats(stats)
 
               fst = create_rustfst_from_nwa(nwa)
-              if fst:
-                  print("\n--- rustfst.VectorFst Summary (before determinization) ---")
-                  print(f"Number of states: {fst.num_states()}")
-                  if fst.start() is not None:
-                      print(f"Start state: {fst.start()}")
-                      num_arcs = 0
-                      for s in fst.states():
-                          num_arcs += fst.num_trs(s)
-                      print(f"Number of arcs: {num_arcs}")
-                  else:
-                      print("No start state.")
+              fst: VectorFst
+              print("\n--- rustfst.VectorFst Summary (before determinization) ---")
+              print(f"Number of states: {fst.num_states()}")
+              if fst.start() is not None:
+                  print(f"Start state: {fst.start()}")
+                  num_arcs = 0
+                  for s in fst.states():
+                      num_arcs += fst.num_trs(s)
+                  print(f"Number of arcs: {num_arcs}")
+              else:
+                  print("No start state.")
 
-                  print("\n--- Determinizing FST ---")
-                  try:
-                      # Disambiguation is often needed when weights are simplified
-                      config = DeterminizeConfig(DeterminizeType.DETERMINIZE_DISAMBIGUATE)
-                      det_fst = fst.determinize(config)
-                      print("Determinization successful.")
-                      print("\n--- rustfst.VectorFst Summary (after determinization) ---")
-                      print(f"Number of states: {det_fst.num_states()}")
-                      if det_fst.start() is not None:
-                          print(f"Start state: {det_fst.start()}")
-                          num_arcs = 0
+              print("\n--- Determinizing FST ---")
+              try:
+                  # Disambiguation is often needed when weights are simplified
+                  config = DeterminizeConfig(DeterminizeType.DETERMINIZE_DISAMBIGUATE)
+                  det_fst = fst.determinize(config)
+                  print("Determinization successful.")
+                  print("\n--- rustfst.VectorFst Summary (after determinization) ---")
+                  print(f"Number of states: {det_fst.num_states()}")
+                  if det_fst.start() is not None:
+                      print(f"Start state: {det_fst.start()}")
+                      num_arcs = 0
                           for s in det_fst.states():
                               num_arcs += det_fst.num_trs(s)
                           print(f"Number of arcs: {num_arcs}")
+
+                          print("\n--- Minimizing FST ---")
+                          # Since the FST is deterministic, we don't need to allow non-determinism.
+                          min_config = MinimizeConfig(allow_nondet=False)
+                          det_fst.minimize(min_config) # In-place operation
+                          print("Minimization successful.")
+                          print("\n--- rustfst.VectorFst Summary (after minimization) ---")
+                          print(f"Number of states: {det_fst.num_states()}")
+                          if det_fst.start() is not None:
+                              print(f"Start state: {det_fst.start()}")
+                              num_arcs = 0
+                              for s in det_fst.states():
+                                  num_arcs += det_fst.num_trs(s)
+                              print(f"Number of arcs: {num_arcs}")
+                          else:
+                              print("No start state.")
                       else:
                           print("No start state.")
                   except ValueError as e:
-                      print(f"Determinization failed: {e}", file=sys.stderr)
+                      print(f"Determinization or Minimization failed: {e}", file=sys.stderr)
           except FileNotFoundError:
               print(f"Error: File not found at {filepath}", file=sys.stderr)
               sys.exit(1)
@@ -28296,5 +28313,694 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Add functionality to create a partial
       rustfst.VectorFst from an analyzed NWA structure and determinize it"'
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/arcsort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/compose.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/connect.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/invert.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/map.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/minimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/project.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/push.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/reverse.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/rm_final_epsilon.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/shortestpath.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/supported_algorithms.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/bench_all_detailed.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/bench_all.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/bench_composition.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/constants.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/utils.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/compose.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/concat.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/connect.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/determinize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/inversion.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/isomorphic.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/minimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/optimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/project.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/randgen.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/replace.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/reverse.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/rm_epsilon.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/shortest_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/top_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/tr_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/tr_unique.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/union.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/drawing_config.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/ffi_utils.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/fst/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/fst/const_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/fst/vector_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/iterators.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/string_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/string_paths_iterator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/symbol_table.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/tr.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/trs.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/weight.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_acceptor.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_compose.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_concat.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_connect.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_determinize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_inversion.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_isomorphic.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_minimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_optimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_project.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_randgen.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_replace.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_reverse.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_rm_epsilon.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_shortest_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_top_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_tr_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_tr_unique.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_transducer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_union.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_iterator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_string_paths_iterator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_symt.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_tr.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_trs.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/scripts/update_python_doc_structure.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/bitset.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of scripts/analyze_nwa.py since previous turn:
+      ```diff
+      --- original version of scripts/analyze_nwa.py
+      +++ current version of scripts/analyze_nwa.py
+      @@ -291,36 +291,36 @@
+               print_nwa_stats(stats)
+       
+               fst = create_rustfst_from_nwa(nwa)
+      -        if fst:
+      -            print("\n--- rustfst.VectorFst Summary (before determinization) ---")
+      -            print(f"Number of states: {fst.num_states()}")
+      -            if fst.start() is not None:
+      -                print(f"Start state: {fst.start()}")
+      +        fst: VectorFst
+      +        print("\n--- rustfst.VectorFst Summary (before determinization) ---")
+      +        print(f"Number of states: {fst.num_states()}")
+      +        if fst.start() is not None:
+      +            print(f"Start state: {fst.start()}")
+      +            num_arcs = 0
+      +            for s in fst.states():
+      +                num_arcs += fst.num_trs(s)
+      +            print(f"Number of arcs: {num_arcs}")
+      +        else:
+      +            print("No start state.")
+      +
+      +        print("\n--- Determinizing FST ---")
+      +        try:
+      +            # Disambiguation is often needed when weights are simplified
+      +            config = DeterminizeConfig(DeterminizeType.DETERMINIZE_DISAMBIGUATE)
+      +            det_fst = fst.determinize(config)
+      +            print("Determinization successful.")
+      +            print("\n--- rustfst.VectorFst Summary (after determinization) ---")
+      +            print(f"Number of states: {det_fst.num_states()}")
+      +            if det_fst.start() is not None:
+      +                print(f"Start state: {det_fst.start()}")
+                       num_arcs = 0
+      -                for s in fst.states():
+      -                    num_arcs += fst.num_trs(s)
+      +                for s in det_fst.states():
+      +                    num_arcs += det_fst.num_trs(s)
+                       print(f"Number of arcs: {num_arcs}")
+                   else:
+                       print("No start state.")
+      -
+      -            print("\n--- Determinizing FST ---")
+      -            try:
+      -                # Disambiguation is often needed when weights are simplified
+      -                config = DeterminizeConfig(DeterminizeType.DETERMINIZE_DISAMBIGUATE)
+      -                det_fst = fst.determinize(config)
+      -                print("Determinization successful.")
+      -                print("\n--- rustfst.VectorFst Summary (after determinization) ---")
+      -                print(f"Number of states: {det_fst.num_states()}")
+      -                if det_fst.start() is not None:
+      -                    print(f"Start state: {det_fst.start()}")
+      -                    num_arcs = 0
+      -                    for s in det_fst.states():
+      -                        num_arcs += det_fst.num_trs(s)
+      -                    print(f"Number of arcs: {num_arcs}")
+      -                else:
+      -                    print("No start state.")
+      -            except ValueError as e:
+      -                print(f"Determinization failed: {e}", file=sys.stderr)
+      +        except ValueError as e:
+      +            print(f"Determinization failed: {e}", file=sys.stderr)
+           except FileNotFoundError:
+               print(f"Error: File not found at {filepath}", file=sys.stderr)
+               sys.exit(1)
+
+      ```
+    metadata:
+  - user: And minimize.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to add minimization to the script, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `scripts/analyze_nwa.py`**.
+
+      2.  **Update `rustfst` imports**: In the `try...except` block for `rustfst` imports, add `MinimizeConfig` to the list of imported classes and their corresponding stubs.
+
+          ```python
+          # In the try block, add the new import:
+          from rustfst.algorithms.minimize import MinimizeConfig
+          
+          # In the except block, add the new stub:
+          VectorFst, DeterminizeConfig, DeterminizeType, MinimizeConfig = None, None, None, None # for type hinting
+          ```
+
+      3.  **Update the main execution block**: In the `if __name__ == "__main__":` block, locate the `try` block where determinization happens.
+          *   After printing the summary for the determinized FST, add a new section to perform minimization.
+          *   Create an instance of `MinimizeConfig`. Since the FST is now deterministic, `allow_nondet` can be set to `False`.
+          *   Call `det_fst.minimize()`. This is an in-place operation.
+          *   Print a final summary for the FST after it has been minimized.
+          *   Update the `except` block's error message to include minimization.
+
+      ### Git Diff
+
+      Here is the git diff for the changes described above.
+
+      ```diff
+      --- a/scripts/analyze_nwa.py
+      +++ b/scripts/analyze_nwa.py
+      @@ -12,10 +12,11 @@
+       try:
+           from rustfst import VectorFst, Tr
+           from rustfst.weight import weight_one, weight_zero
+           from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
+      +    from rustfst.algorithms.minimize import MinimizeConfig
+           RUSTFST_AVAILABLE = True
+       except ImportError:
+           RUSTFST_AVAILABLE = False
+      -    VectorFst, DeterminizeConfig, DeterminizeType = None, None, None # for type hinting
+      +    VectorFst, DeterminizeConfig, DeterminizeType, MinimizeConfig = None, None, None, None # for type hinting
+       
+       
+       # Type aliases for clarity based on Rust types
+      @@ -253,11 +254,26 @@
+                           for s in det_fst.states():
+                               num_arcs += det_fst.num_trs(s)
+                           print(f"Number of arcs: {num_arcs}")
+      +
+      +                    print("\n--- Minimizing FST ---")
+      +                    # Since the FST is deterministic, we don't need to allow non-determinism.
+      +                    min_config = MinimizeConfig(allow_nondet=False)
+      +                    det_fst.minimize(min_config) # In-place operation
+      +                    print("Minimization successful.")
+      +                    print("\n--- rustfst.VectorFst Summary (after minimization) ---")
+      +                    print(f"Number of states: {det_fst.num_states()}")
+      +                    if det_fst.start() is not None:
+      +                        print(f"Start state: {det_fst.start()}")
+      +                        num_arcs = 0
+      +                        for s in det_fst.states():
+      +                            num_arcs += det_fst.num_trs(s)
+      +                        print(f"Number of arcs: {num_arcs}")
+      +                    else:
+      +                        print("No start state.")
+                       else:
+                           print("No start state.")
+                   except ValueError as e:
+      -                print(f"Determinization failed: {e}", file=sys.stderr)
+      +                print(f"Determinization or Minimization failed: {e}", file=sys.stderr)
+           except FileNotFoundError:
+               print(f"Error: File not found at {filepath}", file=sys.stderr)
+               sys.exit(1)
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/analyze_nwa.py
+      Applying patch to 'scripts/analyze_nwa.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/analyze_nwa.py.
+    metadata:
+  - user: 'Changes committed with message: "Implement weight conversion and chain
+      determinize/minimize for rustfst FST creation"'
     metadata:
 ...

@@ -16,10 +16,11 @@ try:
     from rustfst import VectorFst, Tr
     from rustfst.weight import weight_one, weight_zero
     from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
+    from rustfst.algorithms.minimize import MinimizeConfig
     RUSTFST_AVAILABLE = True
 except ImportError:
     RUSTFST_AVAILABLE = False
-    VectorFst, DeterminizeConfig, DeterminizeType = None, None, None # for type hinting
+    VectorFst, DeterminizeConfig, DeterminizeType, MinimizeConfig = None, None, None, None # for type hinting
 
 
 # Type aliases for clarity based on Rust types
@@ -314,13 +315,29 @@ if __name__ == "__main__":
             if det_fst.start() is not None:
                 print(f"Start state: {det_fst.start()}")
                 num_arcs = 0
-                for s in det_fst.states():
-                    num_arcs += det_fst.num_trs(s)
-                print(f"Number of arcs: {num_arcs}")
-            else:
-                print("No start state.")
-        except ValueError as e:
-            print(f"Determinization failed: {e}", file=sys.stderr)
+                    for s in det_fst.states():
+                        num_arcs += det_fst.num_trs(s)
+                    print(f"Number of arcs: {num_arcs}")
+
+                    print("\n--- Minimizing FST ---")
+                    # Since the FST is deterministic, we don't need to allow non-determinism.
+                    min_config = MinimizeConfig(allow_nondet=False)
+                    det_fst.minimize(min_config) # In-place operation
+                    print("Minimization successful.")
+                    print("\n--- rustfst.VectorFst Summary (after minimization) ---")
+                    print(f"Number of states: {det_fst.num_states()}")
+                    if det_fst.start() is not None:
+                        print(f"Start state: {det_fst.start()}")
+                        num_arcs = 0
+                        for s in det_fst.states():
+                            num_arcs += det_fst.num_trs(s)
+                        print(f"Number of arcs: {num_arcs}")
+                    else:
+                        print("No start state.")
+                else:
+                    print("No start state.")
+            except ValueError as e:
+                print(f"Determinization or Minimization failed: {e}", file=sys.stderr)
     except FileNotFoundError:
         print(f"Error: File not found at {filepath}", file=sys.stderr)
         sys.exit(1)
