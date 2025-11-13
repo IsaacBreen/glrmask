@@ -1,10 +1,12 @@
+#!/usr/bin/env python
 import json
 import sys
 import os
 import time
 import random
 import multiprocessing
-from collections import Counter
+import argparse
+from collections import Counter, defaultdict
 
 # We use rustfst for high-performance FST operations.
 try:
@@ -23,7 +25,37 @@ except ImportError:
     sys.exit(1)
 
 
-# --- Core Determinization Function (unchanged) ---
+# --- CORE UTILITIES ---
+
+def load_nwa_data(filepath: str) -> dict:
+    """Loads and parses the NWA JSON file into a structured dictionary."""
+    print(f"Loading NWA from: {filepath}")
+    with open(filepath, 'r') as f:
+        nwa_data = json.load(f)
+
+    num_states = len(nwa_data['states'])
+    start_state = nwa_data['body']['start_state']
+    final_states = {i for i, s in enumerate(nwa_data['states']) if s.get('final_weight') is not None}
+
+    all_transitions = set()
+    for i, state in enumerate(nwa_data['states']):
+        for target_id, _ in state.get('epsilons', []):
+            all_transitions.add((i, 0, target_id))  # Epsilon is label 0
+        for label_str, targets in state.get('transitions', {}).items():
+            label = int(label_str)
+            for target_id, _ in targets:
+                all_transitions.add((i, label, target_id))
+
+    print(f"Original NWA has {num_states} states and {len(all_transitions)} unique transitions.")
+    return {
+        "num_states": num_states,
+        "start_state": start_state,
+        "final_states": final_states,
+        "transitions": all_transitions,
+        "raw_data": nwa_data
+    }
+
+
 def determinize_worker(
         num_states: int, start_state: int, final_states: set, transitions: set, result_queue: multiprocessing.Queue
 ):
@@ -54,189 +86,217 @@ def time_determinization_with_timeout(
     if process.is_alive():
         process.terminate()
         process.join()
-        return True
+        return True  # Timed out
     try:
-        return not result_queue.get_nowait()
+        return not result_queue.get_nowait()  # False if determinization succeeded
     except Exception:
-        return False
+        return False  # Also false if it crashed but finished quickly
 
 
-# --- MODIFIED: Reusable Graph Analysis Function ---
-def analyze_graph_structure(G: nx.DiGraph, graph_name: str):
-    """
-    Performs and prints a detailed structural analysis of a given NetworkX graph.
-    Focuses on non-trivial cycles (SCCs of size > 1).
-    """
-    print(f"\n--- Analyzing {graph_name} Graph Structure ---")
+# --- ANALYSIS FUNCTIONS (used by passes) ---
 
-    if G.number_of_nodes() == 0:
-        print("Graph is empty. No analysis to perform.")
-        return
-
-    print(f"The graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
-
-    # Degree Analysis
+def print_graph_stats(G: nx.DiGraph):
+    """Prints high-level stats for a graph."""
+    print(f"\nThe graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
     in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
     out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
-
-    print("\nTop 10 States by In-Degree (Hubs for Fan-In):")
-    for node, degree in in_degrees[:10]:
+    print("\nTop 5 States by In-Degree (Hubs for Fan-In):")
+    for node, degree in in_degrees[:5]:
         print(f"  - State {node}: {degree} incoming edges")
-
-    print("\nTop 10 States by Out-Degree (Hubs for Fan-Out):")
-    for node, degree in out_degrees[:10]:
+    print("\nTop 5 States by Out-Degree (Hubs for Fan-Out):")
+    for node, degree in out_degrees[:5]:
         print(f"  - State {node}: {degree} outgoing edges")
-
-    # Weakly Connected Components (WCC)
     wccs = list(nx.weakly_connected_components(G))
     print(f"\nFound {len(wccs)} Weakly Connected Component(s).")
     if wccs:
-        largest_wcc = max(wccs, key=len)
-        print(f"  - Largest WCC contains {len(largest_wcc)} nodes.")
+        print(f"  - Largest WCC contains {len(max(wccs, key=len))} nodes.")
 
-    # --- MODIFIED SCC ANALYSIS ---
-    # Find all SCCs, then filter to focus on actual cycles (size > 1)
+
+def print_scc_analysis(G: nx.DiGraph, transitions: set):
+    """Prints detailed analysis of cycles (SCCs > 1)."""
     all_sccs = list(nx.strongly_connected_components(G))
     cycles_sccs = [scc for scc in all_sccs if len(scc) > 1]
-
     print(f"\nFound {len(all_sccs)} Strongly Connected Component(s) (SCCs).")
-    print(f"  - {len(all_sccs) - len(cycles_sccs)} are trivial (size 1 nodes not in a cycle).")
+    print(f"  - {len(all_sccs) - len(cycles_sccs)} are trivial (size 1).")
     print(f"  - {len(cycles_sccs)} are non-trivial cycles (size > 1).")
 
-    # Only proceed with detailed cycle analysis if there are any
-    if cycles_sccs:
-        cycles_sccs.sort(key=len) # Sort by size for analysis
-
-        scc_size_counts = Counter(len(c) for c in cycles_sccs)
-        print("\n  - Cycle Size Distribution (Top 5 most common):")
-        for size, count in scc_size_counts.most_common(5):
-            print(f"    - {count} cycles of size {size}")
-
-        print("\n  - Examples of Smallest Cycles (SCCs > 1):")
-        for i, scc in enumerate(cycles_sccs[:5]):
-            nodes = list(scc)
-            nodes_str = str(nodes[:10]) + ('...' if len(nodes) > 10 else '')
-            print(f"    - Cycle #{i+1} (size {len(scc)}): {nodes_str}")
-
-        print("\n  - Summary of Largest Cycles (SCCs > 1):")
-        for i, scc in enumerate(cycles_sccs[-5:]):
-            print(f"    - Largest Cycle #{5-i} has size {len(scc)}")
-    else:
-        # If there are no cycles, the graph is a DAG
+    if not cycles_sccs:
         print("  - The graph is a Directed Acyclic Graph (DAG).")
-    # --- END OF MODIFIED SCC ANALYSIS ---
+        return
+
+    source_to_transitions = defaultdict(list)
+    for source, label, dest in transitions:
+        source_to_transitions[source].append((label, dest))
+    cycles_sccs.sort(key=len)
+    print("\nExamples of Smallest Cycles with internal edges:")
+    MAX_EDGES_TO_SHOW = 10
+    for i, scc in enumerate(cycles_sccs[:5]):
+        scc_nodes = set(scc)
+        print(f"    - Cycle #{i + 1} (size {len(scc_nodes)}): Nodes {list(scc_nodes)}")
+        internal_edges = [
+            f"{src} --({lbl})--> {dst}"
+            for src in scc_nodes if src in source_to_transitions
+            for lbl, dst in source_to_transitions[src] if dst in scc_nodes
+        ]
+        for edge_str in internal_edges[:MAX_EDGES_TO_SHOW]:
+            print(f"      - {edge_str}")
+        if len(internal_edges) > MAX_EDGES_TO_SHOW:
+            print(f"      - ... and {len(internal_edges) - MAX_EDGES_TO_SHOW} more internal edges")
 
 
-# --- Main Analysis Logic ---
+# --- PASS FUNCTIONS ---
 
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print(f"Usage: python {sys.argv[0]} <path_to_nwa_dump.json>")
-        sys.exit(1)
+def run_stats_pass(args):
+    """Executes the 'stats' pass."""
+    print("--- Running Stats Pass ---")
+    nwa = load_nwa_data(args.filepath)
+    G = nx.DiGraph()
+    G.add_nodes_from(range(nwa["num_states"]))
+    G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
+    print_graph_stats(G)
 
-    filepath = sys.argv[1]
-    DETERMINIZE_TIMEOUT_S = 1.0
 
-    print(f"Loading original NWA from: {filepath}")
-    with open(filepath, 'r') as f:
-        nwa_data = json.load(f)
+def run_scc_pass(args):
+    """Executes the 'scc' pass."""
+    print("--- Running SCC/Cycle Analysis Pass ---")
+    nwa = load_nwa_data(args.filepath)
+    G = nx.DiGraph()
+    G.add_nodes_from(range(nwa["num_states"]))
+    G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
+    print_scc_analysis(G, nwa["transitions"])
 
-    num_states = len(nwa_data['states'])
-    start_state = nwa_data['body']['start_state']
-    final_states = {i for i, s in enumerate(nwa_data['states']) if s.get('final_weight') is not None}
 
-    all_transitions = set()
-    for i, state in enumerate(nwa_data['states']):
-        for target_id, _ in state.get('epsilons', []):
-            all_transitions.add((i, 0, target_id))
-        for label_str, targets in state.get('transitions', {}).items():
-            label = int(label_str)
-            for target_id, _ in targets:
-                all_transitions.add((i, label, target_id))
+def run_determinize_pass(args):
+    """Executes the 'determinize' pass."""
+    print(f"--- Running Determinization Pass (Timeout: {args.timeout}s) ---")
+    nwa = load_nwa_data(args.filepath)
+    print("\nAttempting to determinize the full NWA...")
+    timed_out = time_determinization_with_timeout(
+        nwa["num_states"], nwa["start_state"], nwa["final_states"], nwa["transitions"], args.timeout
+    )
+    if timed_out:
+        print(f"RESULT: ❌ Timed out after {args.timeout} seconds.")
+    else:
+        print("RESULT: ✅ Determinization finished within the time limit.")
 
-    print(f"Original NWA has {num_states} states and {len(all_transitions)} unique transitions.")
 
-    # --- Initial Graph Analysis ---
-    G_initial = nx.DiGraph()
-    G_initial.add_nodes_from(range(num_states))
-    G_initial.add_edges_from([(source, dest) for source, label, dest in all_transitions])
-    analyze_graph_structure(G_initial, "Initial")
+def run_show_states_pass(args):
+    """Executes the 'show-states' pass."""
+    print("--- Running Show States Pass ---")
+    nwa = load_nwa_data(args.filepath)
+    print(f"\nShowing data for states: {args.states}")
+    for state_id in args.states:
+        print(f"\n--- State {state_id} ---")
+        if 0 <= state_id < nwa["num_states"]:
+            print(json.dumps(nwa["raw_data"]["states"][state_id], indent=2))
+        else:
+            print(f"Error: State ID {state_id} is out of bounds (0-{nwa['num_states'] - 1}).")
+
+
+def run_prune_pass(args):
+    """Executes the 'prune' pass."""
+    print(f"--- Running Pruning Pass (Timeout: {args.timeout}s) ---")
+    nwa = load_nwa_data(args.filepath)
 
     print("\n--- Establishing Baseline Behavior ---")
-    if not time_determinization_with_timeout(num_states, start_state, final_states, all_transitions, DETERMINIZE_TIMEOUT_S):
-        print(f"Baseline determinization finished within {DETERMINIZE_TIMEOUT_S}s. This script is for hanging cases.")
-        sys.exit(0)
+    if not time_determinization_with_timeout(nwa["num_states"], nwa["start_state"], nwa["final_states"], nwa["transitions"], args.timeout):
+        print(f"Baseline determinization finished within {args.timeout}s. Pruning is not needed.")
+        return
     else:
-        print(f"Baseline determinization timed out after {DETERMINIZE_TIMEOUT_S}s (as expected).")
+        print(f"Baseline determinization timed out after {args.timeout}s (as expected).")
 
-    # --- Iterative Pruning with Adaptive Chunk Sizes ---
     print("\n--- Iterative Pruning ---")
-
-    essential_transitions = all_transitions.copy()
-
-    # Define the schedule of chunk sizes to try, from large to small
+    essential_transitions = nwa["transitions"].copy()
     total_trans_count = len(essential_transitions)
     chunk_sizes = [
-        total_trans_count // 5,
-        total_trans_count // 10,
-        total_trans_count // 50,
-        1000,
-        100,
-        10,
-        1
+        total_trans_count // 5, total_trans_count // 10, total_trans_count // 50,
+        1000, 100, 10, 1
     ]
 
-    for chunk_size in chunk_sizes:
-        if chunk_size <= 0: continue
-
+    for chunk_size in [c for c in chunk_sizes if c > 0]:
         print(f"\n--- PASS with Chunk Size: {chunk_size} ---")
-
         untested = list(essential_transitions)
         random.shuffle(untested)
-
         potentially_essential = set()
-
         chunks = [untested[i:i + chunk_size] for i in range(0, len(untested), chunk_size)]
 
         for i, chunk in enumerate(chunks):
             candidate_transitions = essential_transitions - set(chunk)
             progress = f"[Chunk {i + 1}/{len(chunks)}]"
-
-            if time_determinization_with_timeout(num_states, start_state, final_states, candidate_transitions, DETERMINIZE_TIMEOUT_S):
+            if time_determinization_with_timeout(
+                    nwa["num_states"],
+                    nwa["start_state"],
+                    nwa["final_states"],
+                    candidate_transitions,
+                    args.timeout
+                    ):
                 essential_transitions = candidate_transitions
                 print(f"{progress} ✅ Chunk removed. New count: {len(essential_transitions)}")
             else:
                 potentially_essential.update(chunk)
                 print(f"{progress} ❌ Chunk is essential. Keeping for next pass.")
 
-        essential_transitions = potentially_essential
-        print(f"--- End of Pass. {len(essential_transitions)} candidates remain. ---")
-        if chunk_size == 1 and len(essential_transitions) == len(untested):
+        if len(potentially_essential) == len(essential_transitions) and chunk_size == 1:
             print("No further reduction possible. Halting.")
             break
+        essential_transitions = potentially_essential
+        print(f"--- End of Pass. {len(essential_transitions)} candidates remain. ---")
 
     print(f"\n--- Pruning Complete ---")
     print(f"Found a core of {len(essential_transitions)} transitions that causes the hang.")
 
-    # --- Analyze the Final Core Graph using NetworkX ---
+    print("\n--- Analysis of Final Core Graph ---")
     G_final = nx.DiGraph()
-    G_final.add_nodes_from(range(num_states))
-    G_final.add_edges_from([(source, dest) for source, label, dest in essential_transitions])
+    G_final.add_nodes_from(range(nwa["num_states"]))
+    G_final.add_edges_from([(s, d) for s, l, d in essential_transitions])
+    print_graph_stats(G_final)
+    print_scc_analysis(G_final, essential_transitions)
 
-    analyze_graph_structure(G_final, "Final Core")
 
-    if G_final.number_of_nodes() > 0:
-        degree_sequence = sorted([d for n, d in G_final.degree()], reverse=True)
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-        ax1.plot(degree_sequence, 'b-', marker='o')
-        ax1.set_title("Degree Rank Plot (Final Core Graph)")
-        ax1.set_ylabel("Degree")
-        ax1.set_xlabel("Rank")
-        ax2.loglog(degree_sequence, 'b-', marker='o')
-        ax2.set_title("Degree Rank Plot (log-log scale)")
-        ax2.set_ylabel("Degree")
-        ax2.set_xlabel("Rank")
-        fig.tight_layout()
-        plot_filename = "degree_distribution_final.png"
-        plt.savefig(plot_filename)
-        print(f"\nSaved final degree distribution plot to '{plot_filename}'.")
+# --- MAIN CLI ---
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="An analysis tool for NWA (Nested Word Automata) JSON dumps.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
+
+    # --- Stats Pass ---
+    parser_stats = subparsers.add_parser("stats", help="Show high-level graph statistics (degrees, components).")
+    parser_stats.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_stats.set_defaults(func=run_stats_pass)
+
+    # --- SCC Pass ---
+    parser_scc = subparsers.add_parser("scc", help="Show detailed analysis of cycles (SCCs > 1) with edge labels.")
+    parser_scc.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_scc.set_defaults(func=run_scc_pass)
+
+    # --- Determinize Pass ---
+    parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA with a timeout.")
+    parser_det.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_det.add_argument("--timeout", type=float, default=10.0, help="Timeout in seconds for the determinization attempt.")
+    parser_det.set_defaults(func=run_determinize_pass)
+
+    # --- Show States Pass ---
+    parser_show = subparsers.add_parser("show-states", help="Print the raw JSON data for specific state IDs.")
+    parser_show.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_show.add_argument("states", type=int, nargs='+', help="One or more state IDs to display.")
+    parser_show.set_defaults(func=run_show_states_pass)
+
+    # --- Prune Pass ---
+    parser_prune = subparsers.add_parser(
+        "prune",
+        help="Iteratively prune transitions to find the core set causing determinization to hang."
+        )
+    parser_prune.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_prune.add_argument(
+        "--timeout",
+        type=float,
+        default=1.0,
+        help="Timeout in seconds for each determinization check during pruning."
+        )
+    parser_prune.set_defaults(func=run_prune_pass)
+
+    args = parser.parse_args()
+    args.func(args)
