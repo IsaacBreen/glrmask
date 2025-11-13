@@ -10,10 +10,10 @@
 
 use crate::r#macro::is_debug_level_enabled;
 use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
-use super::dwa::{DWABody, DWAState, DWAStates, DWA, DEFAULT_TRANSITION_SYMBOL};
+use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use crate::precompute4::test_weighted_automata;
-use crate::precompute4::weighted_automata::NWAStateID;
+use crate::precompute4::weighted_automata::{NWAStateID, DEFAULT_TRANSITION_SYMBOL};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::cell::Cell;
@@ -670,21 +670,25 @@ impl NWA {
         let mut in_worklist = vec![false; n];
 
         // Precompute reverse adjacency list.
-        let mut rev_adj: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
+        let mut rev_adj: Vec<Vec<NWAStateID>> = vec![vec![]; n];
         for i in 0..n {
             let st = &self.states[i];
-            for (target, weight) in &st.epsilons {
+            for (target, _) in &st.epsilons {
                 if *target < n {
-                    rev_adj[*target].push((i, weight.clone()));
+                    rev_adj[*target].push(i);
                 }
             }
             for (_, targets) in &st.transitions {
-                for (target, weight) in targets {
+                for (target, _) in targets {
                     if *target < n {
-                        rev_adj[*target].push((*target, weight.clone()));
+                        rev_adj[*target].push(i);
                     }
                 }
             }
+        }
+        for preds in &mut rev_adj {
+            preds.sort_unstable();
+            preds.dedup();
         }
 
         // Initialize d and worklist with final states.
@@ -693,7 +697,7 @@ impl NWA {
                 if !fw.is_empty() {
                     d[i] = fw.clone();
                     // Add predecessors of final states to the worklist.
-                    for &(p, _) in &rev_adj[i] {
+                    for &p in &rev_adj[i] {
                         if !in_worklist[p] {
                             worklist.push_back(p);
                             in_worklist[p] = true;
@@ -723,7 +727,7 @@ impl NWA {
 
             if !new_d_p.is_subset_of(&d[p]) {
                 d[p] |= &new_d_p;
-                for &(pred, _) in &rev_adj[p] {
+                for &pred in &rev_adj[p] {
                     if !in_worklist[pred] {
                         worklist.push_back(pred);
                         in_worklist[pred] = true;
@@ -825,7 +829,7 @@ impl NWA {
         } else {
             None
         };
- 
+
         let mut changed_overall = false;
         let mut passes = 0;
         loop {
@@ -834,7 +838,7 @@ impl NWA {
             let mut changed_this_iteration = false;
 
             // --- Structural Simplification Passes ---
-            run_pass_macro!(self, &pb, "normalize", &mut changed_this_iteration, self.normalize_edges_inplace());
+            run_pass_macro!(self, &pb, "normalize", &mut changed_this_iteration, self.states.normalize_edges_inplace());
             run_pass_macro!(self, &pb, "dedup labeled", &mut changed_this_iteration, self.dedup_labeled_edges());
             run_pass_macro!(self, &pb, "dedup epsilons", &mut changed_this_iteration, self.dedup_epsilon_edges());
             run_pass_macro!(self, &pb, "unify final states", &mut changed_this_iteration, self.unify_final_states());
@@ -1124,7 +1128,35 @@ fn prune_dead_ends(&mut self) -> bool {
         }
         changed
     }
+}
 
+impl NWAStates {
+    /// Normalize in-place:
+    /// - Remove empty-weight edges (ε, labeled, and default)
+    /// - Drop labeled transitions that are identical to the default (same target and weight)
+    fn normalize_edges_inplace(&mut self) -> bool {
+        let mut changed = false;
+        for st in &mut self.0 {
+            // Remove empty-weight epsilons
+            let before_eps = st.epsilons.len();
+            st.epsilons.retain(|(_, w)| !w.is_empty());
+            if st.epsilons.len() != before_eps { changed = true; }
+
+            // Remove empty-weight labeled transitions
+            let before_lbl = st.transitions.len();
+            st.transitions.values_mut().for_each(|targets| targets.retain(|(_, w)| !w.is_empty()));
+            st.transitions.retain(|_, targets| !targets.is_empty());
+            if st.transitions.len() != before_lbl { changed = true; }
+
+            // NOTE: The old logic for removing labeled transitions identical to default is now simpler
+            // as there is only one kind of default transition. However, since an NWA can have multiple
+            // default transitions, we leave this logic to the DWA simplification.
+        }
+        changed
+    }
+}
+
+impl NWA {
     /// Deduplicate epsilon edges to the same target by unioning their weights.
     fn dedup_epsilon_edges(&mut self) -> bool {
         let mut changed = false;
@@ -1391,7 +1423,7 @@ fn prune_dead_ends(&mut self) -> bool {
 
         self.states.0 = new_states;
         self.body.start_state = *pid_to_new.get(&part[self.body.start_state]).expect("missing start class");
-        let _ = self.normalize_edges_inplace();
+        let _ = self.states.normalize_edges_inplace();
         let _ = self.dedup_epsilon_edges();
 
         true
