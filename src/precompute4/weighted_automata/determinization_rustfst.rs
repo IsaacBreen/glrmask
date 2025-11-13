@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::io::Write;
+use std::ops::{BitAndAssign, BitOrAssign};
+use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Default, Eq, Hash, Serialize, Deserialize)]
 pub struct BitsetWeight(pub Weight);

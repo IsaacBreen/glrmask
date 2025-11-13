@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
+use crate::precompute4::weighted_automata::DWA;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NWABuildError {
