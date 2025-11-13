@@ -1,16 +1,75 @@
 local_system:
   attached_files:
+    - Cargo.toml
     - src/precompute4/weighted_automata/mod.rs
+    - src/precompute4/weighted_automata/bitset.rs
     - src/precompute4/weighted_automata/dwa.rs
     - src/precompute4/weighted_automata/nwa.rs
     - src/precompute4/weighted_automata/common.rs
     - src/precompute4/weighted_automata/ops.rs
     - /Users/isaacbreen/Projects2/obsidian/grammars25/Mohri - Weighted Automata Algorithms.md
-    - src/precompute4/weighted_automata/test_determinization.rs
     - src/precompute4/weighted_automata/determinization.rs
   conversation_file:
   compile_command:
   initial_file_contents:
+    Cargo.toml: |
+      # This line needs to come before anything else in Cargo.toml
+      #cargo-features = ["codegen-backend"]
+
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2021"
+
+      [dependencies]
+      hashbrown = "0.14"
+      smallvec = "1.13"
+      indicatif = "0.17"
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      clap = { version = "4.5.4", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.3.0" }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      profiler_macro = { path = "profiler_macro" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+      similar = "2.7.0"
+      pretty_assertions = "1.4.1"
+      once_cell = "1.21.3"
+      lru = "0.16.0"
+      parking_lot = "0.12.5"
+      flate2 = "1.1.2"
+      im = "15.1.0"
+      indoc = "2.0.6"
+      rustc-hash = "1.1.0"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      #codegen-backend = "cranelift"
+      debug = true
+      #opt-level = 1
+
+      [features]
+      no_pbar = []
+      pbar = []
+
+      [[bin]]
+      name = "grammar-compiler"
+      path = "src/bin/grammar_compiler.rs"
     src/precompute4/weighted_automata/mod.rs: |
       // src/precompute4/weighted_automata/mod.rs
 
@@ -31,6 +90,398 @@ local_system:
       pub use self::common::{format_i16_char, format_pos_code, format_word, I16Map, NWAStateID, StateID, Weight};
       pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
       pub use self::nwa::{NWABody, NWABuildError, NWADefaultTransition, NWAState, NWAStates, NWA};
+    src/precompute4/weighted_automata/bitset.rs: |
+      // src/precompute4/weighted_automata/bitset.rs
+
+      #![allow(dead_code)]
+      #![allow(clippy::needless_borrow)]
+
+      use range_set_blaze::RangeSetBlaze;
+      use std::fmt::{Debug, Display, Formatter};
+      use std::hash::{Hash, Hasher};
+      use std::iter::FromIterator;
+      use std::ops::{
+          BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub, SubAssign,
+      };
+
+      // SimpleBitset: a RangeSetBlaze with cached fingerprint and fast "is_all" flag.
+      // - fp is a content fingerprint used only for hashing; Eq remains content-based via rsb.
+      // - is_all tracks whether it is the universe (0..=usize::MAX), enabling fast short-circuits.
+      #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Default)]
+      pub struct SimpleBitset {
+          pub(crate) rsb: RangeSetBlaze<usize>,
+          pub(crate) fp: u64,
+          is_all: bool,
+      }
+
+      // Fingerprint utilities
+      pub(crate) const FP_ZERO: u64 = 0x9E37_79B9_7F4A_7C15;
+      const FP_ALL: u64 = 0xD6E8_FEB8_6659_FD93;
+      pub(crate) const FP_K1: u64 = 0xC2B2_AE3D_27D4_EB4F;
+      pub(crate) const FP_K2: u64 = 0x1656_67B1_F3E1_5A6D;
+      const FP_K3: u64 = 0x9E37_79B1_1F37_9B97;
+
+      #[inline]
+      pub(crate) fn mix3(a: u64, b: u64, c: u64) -> u64 {
+          let mut x = a ^ b.wrapping_mul(FP_K1);
+          x = x.rotate_left(27) ^ c.wrapping_mul(FP_K2);
+          x ^= x >> 33;
+          x = x.wrapping_mul(FP_K3);
+          x ^ (x >> 29)
+      }
+
+      #[inline]
+      fn calc_is_all_and_fp(rsb: &RangeSetBlaze<usize>) -> (bool, u64) {
+          let mut it = rsb.ranges();
+          if let Some(first) = it.next() {
+              if *first.start() == 0 && *first.end() == usize::MAX && it.next().is_none() {
+                  return (true, FP_ALL);
+              }
+              let mut fp = mix3(
+                  FP_ZERO,
+                  *first.start() as u64,
+                  (*first.end() as u64).wrapping_mul(FP_K1),
+              );
+              for r in it {
+                  let s = *r.start() as u64;
+                  let e = *r.end() as u64;
+                  fp = mix3(fp, s.wrapping_mul(FP_K2), e.wrapping_mul(FP_K3));
+              }
+              (false, fp)
+          } else {
+              (false, FP_ZERO)
+          }
+      }
+
+      #[inline]
+      fn universe_rsb() -> RangeSetBlaze<usize> {
+          RangeSetBlaze::from_iter([0usize..=usize::MAX])
+      }
+
+      impl SimpleBitset {
+          #[inline]
+          fn from_rsb_inner(rsb: RangeSetBlaze<usize>) -> Self {
+              let (is_all, fp) = calc_is_all_and_fp(&rsb);
+              SimpleBitset { rsb, fp, is_all }
+          }
+
+          #[inline]
+          fn update_cached(&mut self) {
+              let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
+              self.is_all = is_all;
+              self.fp = fp;
+          }
+
+          pub fn zeros() -> Self {
+              SimpleBitset { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false }
+          }
+          pub fn all() -> Self {
+              SimpleBitset { rsb: universe_rsb(), fp: FP_ALL, is_all: true }
+          }
+          pub fn from_item(item: usize) -> Self {
+              SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter([item]))
+          }
+          pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self {
+              SimpleBitset::from_rsb_inner(rsb)
+          }
+          pub fn len(&self) -> usize {
+              self.rsb.len().try_into().unwrap_or(usize::MAX)
+          }
+          pub fn is_empty(&self) -> bool {
+              self.rsb.is_empty()
+          }
+          pub fn is_disjoint(&self, other: &SimpleBitset) -> bool {
+              if self.is_empty() || other.is_empty() {
+                  return true;
+              }
+              if self.is_all_fast() || other.is_all_fast() {
+                  return false;
+              }
+              (&self.rsb & &other.rsb).is_empty()
+          }
+          pub fn contains(&self, index: usize) -> bool {
+              self.rsb.contains(index)
+          }
+          pub fn max_item(&self) -> Option<usize> {
+              self.rsb.iter().last()
+          }
+          /// Iterate over items, truncated by `max` to prevent accidental ALL iteration.
+          pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> {
+              (&self.rsb & &RangeSetBlaze::from_iter([0..=max])).into_iter()
+          }
+          #[inline]
+          fn with_new_rsb_and_op(_lhs: &SimpleBitset, _rhs: &SimpleBitset, rsb: RangeSetBlaze<usize>, _op_tag: u64) -> SimpleBitset {
+              let (is_all, fp) = calc_is_all_and_fp(&rsb);
+              SimpleBitset { rsb, fp, is_all }
+          }
+          #[inline]
+          fn with_new_rsb_unary(_src: &SimpleBitset, rsb: RangeSetBlaze<usize>, _op_tag: u64) -> SimpleBitset {
+              let (is_all, fp) = calc_is_all_and_fp(&rsb);
+              SimpleBitset { rsb, fp, is_all }
+          }
+          #[inline]
+          pub fn is_all_fast(&self) -> bool { self.is_all }
+
+          #[inline]
+          pub fn is_subset_of(&self, rhs: &SimpleBitset) -> bool {
+              (self & rhs) == *self
+          }
+
+          pub fn complement(&self) -> SimpleBitset {
+              if self.is_empty() { return SimpleBitset::all(); }
+              if self.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &universe_rsb() - &self.rsb;
+              SimpleBitset::with_new_rsb_unary(self, rsb, 0xD3)
+          }
+
+          pub fn insert(&mut self, item: usize) {
+              if self.is_all_fast() { return; }
+              self.rsb.insert(item);
+              self.update_cached();
+          }
+
+          pub fn add(&mut self, item: usize) {
+              self.insert(item);
+          }
+
+          pub fn remove(&mut self, item: usize) {
+              if self.is_empty() { return; }
+              if self.is_all_fast() {
+                  self.rsb = universe_rsb();
+              }
+              self.rsb.remove(item);
+              self.update_cached();
+          }
+
+          pub fn set(&mut self, item: usize, value: bool) {
+              if value {
+                  self.insert(item);
+              } else {
+                  self.remove(item);
+              }
+          }
+
+          pub fn clear(&mut self) {
+              self.rsb.clear();
+              self.fp = FP_ZERO;
+              self.is_all = false;
+          }
+
+          pub fn clip_to_range(&mut self, min: usize, max: usize) {
+              if self.is_empty() { return; }
+              if self.is_all_fast() {
+                  self.rsb = universe_rsb();
+              }
+              let clip_rsb = RangeSetBlaze::from_iter([min..=max]);
+              self.rsb = &self.rsb & &clip_rsb;
+              self.update_cached();
+          }
+
+          pub fn clip_min(&mut self, min: usize) {
+              self.clip_to_range(min, usize::MAX);
+          }
+
+          pub fn clip_max(&mut self, max: usize) {
+              self.clip_to_range(0, max);
+          }
+      }
+
+      impl Hash for SimpleBitset {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              state.write_u64(self.fp);
+          }
+      }
+
+      impl Debug for SimpleBitset {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              if self.is_all_fast() {
+                  write!(f, "SimpleBitset(ALL)")
+              } else {
+                  Debug::fmt(&self.rsb, f)
+              }
+          }
+      }
+
+      impl Display for SimpleBitset {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              if self.is_all_fast() {
+                  return write!(f, "ALL");
+              }
+              write!(f, "[")?;
+              let mut ranges = self.rsb.ranges().peekable();
+              while let Some(range) = ranges.next() {
+                  if range.start() == range.end() {
+                      write!(f, "{}", range.start())?;
+                  } else {
+                      write!(f, "{}..={}", range.start(), range.end())?;
+                  }
+                  if ranges.peek().is_some() {
+                      write!(f, ", ")?;
+                  }
+              }
+              write!(f, "]")
+          }
+      }
+
+      impl FromIterator<usize> for SimpleBitset {
+          fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
+              SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter(iter))
+          }
+      }
+
+      impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
+          fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
+              SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter(iter))
+          }
+      }
+
+      // Borrowed bit-ops
+      impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
+              if self.is_empty() || rhs.is_empty() {
+                  return SimpleBitset::zeros();
+              }
+              if self.is_all_fast() { return rhs.clone(); }
+              if rhs.is_all_fast() { return self.clone(); }
+              let rsb = &self.rsb & &rhs.rsb;
+              SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xA1)
+          }
+      }
+      impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
+              if self.is_all_fast() || rhs.is_all_fast() {
+                  return SimpleBitset::all();
+              }
+              if self.is_empty() { return rhs.clone(); }
+              if rhs.is_empty() { return self.clone(); }
+              let rsb = &self.rsb | &rhs.rsb;
+              SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xB1)
+          }
+      }
+
+      // Assign ops (borrowed RHS)
+      impl BitAndAssign<&SimpleBitset> for SimpleBitset {
+          fn bitand_assign(&mut self, rhs: &SimpleBitset) {
+              if self.is_empty() { return; }
+              if rhs.is_empty() {
+                  *self = SimpleBitset::zeros();
+                  return;
+              }
+              if rhs.is_all_fast() { return; }
+              if self.is_all_fast() {
+                  *self = rhs.clone();
+                  return;
+              }
+              self.rsb = &self.rsb & &rhs.rsb;
+              self.update_cached();
+          }
+      }
+      impl BitOrAssign<&SimpleBitset> for SimpleBitset {
+          fn bitor_assign(&mut self, rhs: &SimpleBitset) {
+              if self.is_all_fast() || rhs.is_all_fast() {
+                  *self = SimpleBitset::all();
+                  return;
+              }
+              if rhs.is_empty() { return; }
+              if self.is_empty() {
+                  *self = rhs.clone();
+                  return;
+              }
+              self.rsb |= &rhs.rsb;
+              self.update_cached();
+          }
+      }
+
+      // Owned fallbacks via borrowed ops
+      impl BitAnd<SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: SimpleBitset) -> Self::Output {
+              (&self) & (&rhs)
+          }
+      }
+      impl BitOr<SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: SimpleBitset) -> Self::Output {
+              (&self) | (&rhs)
+          }
+      }
+      impl<'a> BitAnd<&'a SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
+              (&self) & rhs
+          }
+      }
+      impl<'a> BitOr<&'a SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
+              (&self) | rhs
+          }
+      }
+      impl<'a> BitAnd<SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: SimpleBitset) -> Self::Output {
+              self & (&rhs)
+          }
+      }
+      impl<'a> BitOr<SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: SimpleBitset) -> Self::Output {
+              self | (&rhs)
+          }
+      }
+
+      impl SubAssign<&SimpleBitset> for SimpleBitset {
+          fn sub_assign(&mut self, rhs: &SimpleBitset) {
+              if self.is_empty() || rhs.is_empty() { return; }
+              if self.is_all_fast() && rhs.is_all_fast() {
+                  *self = SimpleBitset::zeros();
+                  return;
+              }
+              self.rsb = &self.rsb - &rhs.rsb;
+              self.update_cached();
+          }
+      }
+      impl SubAssign<SimpleBitset> for SimpleBitset {
+          fn sub_assign(&mut self, rhs: SimpleBitset) {
+              *self -= &rhs
+          }
+      }
+      impl Sub<SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn sub(self, rhs: SimpleBitset) -> Self::Output {
+              (&self) - (&rhs)
+          }
+      }
+      impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn sub(self, rhs: &'a SimpleBitset) -> Self::Output {
+              if self.is_empty() || rhs.is_empty() { return self.clone(); }
+              if self.is_all_fast() && rhs.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &self.rsb - &rhs.rsb;
+              SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xC1)
+          }
+      }
+
+      impl Not for SimpleBitset {
+          type Output = SimpleBitset;
+          fn not(self) -> Self::Output {
+              if self.is_empty() { return SimpleBitset::all(); }
+              if self.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &universe_rsb() - &self.rsb;
+              SimpleBitset::with_new_rsb_unary(&self, rsb, 0xD1)
+          }
+      }
+      impl Not for &SimpleBitset {
+          type Output = SimpleBitset;
+          fn not(self) -> Self::Output {
+              if self.is_empty() { return SimpleBitset::all(); }
+              if self.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &universe_rsb() - &self.rsb;
+              SimpleBitset::with_new_rsb_unary(self, rsb, 0xD2)
+          }
+      }
     src/precompute4/weighted_automata/dwa.rs: |
       // src/precompute4/weighted_automata/dwa.rs
 
@@ -2580,127 +3031,7 @@ local_system:
       [^10]: It is however limited to the cases where the result of epsilon-removal is determinizable, that is cases where the determinization algorithm terminates, which, as we shall see later, does not always hold in the weighted case.
       [^11]: The notion of twins property was originally introduced for unweighted finite-state transducers by [15, 16] and was shown to be decidable. Polynomial-time algorithms were later given to test this property for functional transducers in time $O(|Q|(|Q|^2 + |E|^2)|\Delta|)$ by [58], $O(|Q|^4(|Q|^2 + |E|^2))$ by [11], and $O(|Q|^2(|Q|^2 + |E|^2))$ by [3], where $Q$ is the set of states of the input transducer, $E$ the set of its transitions and $\Delta$ the output alphabet.
       [^12]: An automaton is cycle-unambiguous if for any state $q$ and any string $x$ there exists at most one cycle at $q$ labeled with $x$.
-    src/precompute4/weighted_automata/test_determinization.rs: |-
-      #![cfg(test)]
-
-      use super::*;
-
-      #[test]
-      fn test_determinize_simple_divergence() {
-          let mut nwa = NWA::new(); // new() creates a start state 0
-          nwa.states.0.clear(); // but we'll manage states manually for clarity
-
-          // NWA for "ac" with weight A1 (0)
-          let s0 = nwa.states.add_state();
-          let s1 = nwa.states.add_state();
-          let s2 = nwa.states.add_state();
-          nwa.add_transition(s0, 'a' as i16, s1, Weight::all()).unwrap();
-          nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
-          nwa.states[s2].final_weight = Some(Weight::from_item(0));
-
-          // NWA for "bc" with weight A2 (1)
-          let s3 = nwa.states.add_state();
-          let s4 = nwa.states.add_state();
-          let s5 = nwa.states.add_state();
-          nwa.add_transition(s3, 'b' as i16, s4, Weight::all()).unwrap();
-          nwa.add_transition(s4, 'c' as i16, s5, Weight::all()).unwrap();
-          nwa.states[s5].final_weight = Some(Weight::from_item(1));
-
-          // Union them with a new start state
-          let start = nwa.states.add_state();
-          nwa.add_epsilon(start, s0, Weight::all());
-          nwa.add_epsilon(start, s3, Weight::all());
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-          println!("{}", nwa);
-          println!("{}", dwa);
-
-          // Check accepted words and their weights.
-          assert_eq!(
-              dwa.eval_word_weight(&['a' as i16, 'c' as i16]),
-              Weight::from_item(0)
-          );
-          assert_eq!(
-              dwa.eval_word_weight(&['b' as i16, 'c' as i16]),
-              Weight::from_item(1)
-          );
-          assert!(dwa.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&[]).is_empty());
-
-          // An efficient DWA should merge states with similar future behavior,
-          // resulting in a small automaton.
-          // Allowing for a sink state, we assert a small number.
-          assert!(
-              dwa.states.len() <= 4,
-              "Expected a small number of states for simple divergence, got {}",
-              dwa.states.len()
-          );
-      }
-
-      #[test]
-      fn test_determinize_hypercube_catastrophe() {
-          const N: usize = 4;
-          let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
-          let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
-
-          let mut nwa = NWA::new();
-          nwa.states.0.clear();
-
-          let mut component_starts = vec![];
-
-          for i in 0..N {
-              // L_i = words without alphabet[i]
-              let s = nwa.states.add_state();
-              component_starts.push(s);
-              nwa.states[s].final_weight = Some(atoms[i].clone());
-
-              for j in 0..N {
-                  if i == j {
-                      continue;
-                  }
-                  nwa.add_transition(s, alphabet[j], s, Weight::all()).unwrap();
-              }
-          }
-
-          let start = nwa.states.add_state();
-          for &s_comp in &component_starts {
-              nwa.add_epsilon(start, s_comp, Weight::all());
-          }
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-
-          // An efficient DWA construction should avoid the 2^N state explosion by
-          // encoding the history of seen characters within the accumulated weight,
-          // not in the state space.
-          assert!(
-              dwa.states.len() <= 2,
-              "Expected a very small DWA (1-2 states) for hypercube, but got {} states. State explosion was not avoided.",
-              dwa.states.len()
-          );
-
-          // Test some words
-          // word "ac" (chars 0 and 2) -> should not contain 1 or 3 ('b' or 'd'). Belongs to L1 and L3.
-          // Weight should be A1 | A3.
-          let word_ac = vec![alphabet[0], alphabet[2]];
-          let expected_weight_ac = &atoms[1] | &atoms[3];
-          assert_eq!(dwa.eval_word_weight(&word_ac), expected_weight_ac);
-
-          // word "abcd" -> contains all symbols. Should be rejected by all components.
-          let word_all = alphabet.clone();
-          assert!(dwa.eval_word_weight(&word_all).is_empty());
-
-          // empty word -> belongs to all languages.
-          let empty_word = vec![];
-          let mut expected_weight_empty = Weight::zeros();
-          for atom in &atoms {
-              expected_weight_empty |= atom;
-          }
-          assert_eq!(dwa.eval_word_weight(&empty_word), expected_weight_empty);
-      }
-    src/precompute4/weighted_automata/determinization.rs: |
+    src/precompute4/weighted_automata/determinization.rs: |-
       // src/precompute4/weighted_automata/determinization.rs
       //
       // Determinization of NWA -> DWA specialized to the Weight bitset semiring,
@@ -2724,13 +3055,6 @@ local_system:
       //   this equals
       //       ⋁_q ( B_q ∧ w(q,a1) ∧ ... ∧ w(q,ak) )
       //   which is exactly the NWA semantics for this class (each q "reads" the sequence in-place).
-      //
-      // Implementation notes about state identity canonicalization:
-      //   - Prior versions keyed determinized states by String built from Weight's Display.
-      //     If Weight's Display is non-canonical (e.g., unsorted iteration), equal states got
-      //     distinct keys, causing non-termination on cyclic inputs.
-      //   - We fix this by using Weight::canonical_string(), which is deterministic,
-      //     when building closure keys.
 
       #![allow(dead_code)]
       #![allow(clippy::needless_borrow)]
@@ -2758,29 +3082,6 @@ local_system:
       }
       fn is_zero(w: &Weight) -> bool {
           w.is_empty()
-      }
-
-      // Canonical key for Weight (deterministic)
-      fn weight_key(w: &Weight) -> String {
-          w.to_string()
-      }
-
-      // Create a canonical key for a weighted subset to identify states in a HashMap.
-      fn subset_key(sub: &WeightedSubset) -> String {
-          let mut s = String::new();
-          for (sid, w) in sub {
-              s.push_str(&format!("{}#{};", sid, weight_key(w)));
-          }
-          s
-      }
-
-      // Create a canonical key for a closure map used to identify determinized states.
-      fn closure_key(cl: &ClosureMap) -> String {
-          let mut s = String::new();
-          for (sid, w) in cl {
-              s.push_str(&format!("{}#{};", sid, weight_key(w)));
-          }
-          s
       }
 
       // Epsilon-closure from a weighted subset:
@@ -2919,12 +3220,8 @@ local_system:
           nwa: &NWA,
           closure: &ClosureMap,
       ) -> (Option<Weight>, Option<Weight>) {
-          let mut entry = Weight::zeros();
-          for w in closure.values() {
-              entry = entry | w.clone();
-          }
-          let entry_opt = if entry.is_empty() { None } else { Some(entry) };
-
+          // State-entry weights are not part of Mohri's determinization algorithm.
+          let entry_opt = None;
           let mut finalw = Weight::zeros();
           for (sid, cw) in closure {
               if let Some(fw) = &nwa.states[*sid].final_weight {
@@ -2942,10 +3239,10 @@ local_system:
 
       struct Determinizer<'a> {
           nwa: &'a NWA,
-          seen: HashMap<String, usize>,  // closure key -> DWA state id (canonical, deterministic)
-          subsets: Vec<WeightedSubset>,  // for each DWA id, its (raw) weighted subset
-          closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
-          queue: VecDeque<usize>,        // worklist of DWA ids
+          seen: HashMap<ClosureMap, usize>,
+          subsets: Vec<WeightedSubset>,
+          closures: Vec<ClosureMap>,
+          queue: VecDeque<usize>,
           dwa: DWA,
           mp: Option<MultiProgress>,
       }
@@ -2953,9 +3250,8 @@ local_system:
       impl<'a> Determinizer<'a> {
           fn new(nwa: &'a NWA, mp: Option<MultiProgress>) -> Self {
               let mut dwa = DWA::new();
-              // We'll manage our own state indexing; clear the auto-created state.
               dwa.states.0.clear();
-              dwa.body.start_state = 0; // placeholder; will be reset after first register_state
+              dwa.body.start_state = 0;
               Determinizer {
                   nwa,
                   seen: HashMap::new(),
@@ -2973,20 +3269,22 @@ local_system:
               for (sid, w) in subset {
                   if !is_zero(&w) { subset_clean.insert(sid, w); }
               }
-              // 2) Compute ε-closure; determinized state identity depends on closure
+              // 2) Compute ε-closure; determinized state identity depends on closure.
               let closure = epsilon_closure(&self.nwa.states, &subset_clean);
-              let key = closure_key(&closure);
-              if let Some(&id) = self.seen.get(&key) { return id; }
 
-              // 3) Create brand-new DWA state for this closure
+              // Use the closure object itself as the key.
+              if let Some(&id) = self.seen.get(&closure) {
+                  return id;
+              }
+
+              // 3) Create brand-new DWA state for this closure.
               let id = self.dwa.add_state();
 
-              // 4) Install state-entry and final weights from closure
-              let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
-              if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }
+              // 4) Install final weight from closure.
+              let (_entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
               if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
 
-              self.seen.insert(key, id);
+              self.seen.insert(closure.clone(), id);
               self.subsets.push(subset_clean);
               self.closures.push(closure);
               self.queue.push_back(id);
@@ -3013,14 +3311,12 @@ local_system:
                   None
               };
 
-              // exception labels are all explicit labels and default exceptions visible in closure
               let exception_labels = collect_exception_labels(&self.nwa.states, closure);
 
               if let Some(pb) = &labels_pb {
                   pb.set_length(exception_labels.len() as u64);
               }
 
-              // default "others"
               let others_subset = next_subset_for_others(&self.nwa.states, closure);
               let others_weight = union_over_values(&others_subset);
 
@@ -3042,7 +3338,6 @@ local_system:
                   pb.set_position(0);
               }
 
-              // install default if non-empty
               let mut default_target_id: Option<usize> = None;
               if !others_subset.is_empty() && !is_zero(&others_weight) {
                   let to_id = self.register_state(others_subset);
@@ -3085,10 +3380,7 @@ local_system:
           }
 
           let start = nwa.body.start_state;
-          if !nwa.states[start].transitions.is_empty() {
-              return None;
-          }
-          if !nwa.states[start].default.is_empty() {
+          if !nwa.states[start].transitions.is_empty() || !nwa.states[start].default.is_empty() {
               return None;
           }
 
@@ -3103,11 +3395,7 @@ local_system:
               }
               let st = &nwa.states[*sid];
 
-              // singleton: no ε-out, no defaults, all labeled loops to itself
-              if !st.epsilons.is_empty() {
-                  return None;
-              }
-              if !st.default.is_empty() {
+              if !st.epsilons.is_empty() || !st.default.is_empty() {
                   return None;
               }
               for (_lbl, vec_targets) in st.transitions.iter() {
@@ -3130,7 +3418,6 @@ local_system:
               return None;
           }
 
-          // Pairwise disjointness of base weights
           for i in 0..comps.len() {
               for j in (i + 1)..comps.len() {
                   if !(comps[i].1.clone() & comps[j].1.clone()).is_empty() {
@@ -3139,7 +3426,6 @@ local_system:
               }
           }
 
-          // Build per-label weights W[l] = ⋁_q ( base_q ∧ ⋁_{q -l-> q} w_edge )
           let mut label_to_weight: BTreeMap<i16, Weight> = BTreeMap::new();
           for (sid, base) in &comps {
               let st = &nwa.states[*sid];
@@ -3158,7 +3444,6 @@ local_system:
               }
           }
 
-          // Single DWA state with final F = ⋁ base_q and loops with weights W[l].
           let mut final_union = Weight::zeros();
           for (_sid, base) in &comps {
               final_union = final_union | base.clone();
@@ -3181,7 +3466,6 @@ local_system:
       impl NWA {
           /// Determinize the subgraph reachable from `self.body.start_state` into a DWA.
           pub fn determinize_to_dwa(&self) -> DWA {
-              // Fast-path: avoid blow-up for "singleton-loop union" cases
               if let Some(dwa) = try_build_singleton_loop_union(self) {
                   return dwa;
               }
@@ -3205,7 +3489,6 @@ local_system:
 
               let mut det = Determinizer::new(self, Some(mp));
 
-              // Start subset: { start_state -> 1 (Weight::all) }.
               let mut start_subset: WeightedSubset = WeightedSubset::new();
               start_subset.insert(self.body.start_state, Weight::all());
               let start_id = det.register_state(start_subset);
@@ -3227,6 +3510,64 @@ local_system:
           }
       }
   prev_file_contents:
+    Cargo.toml: |
+      # This line needs to come before anything else in Cargo.toml
+      #cargo-features = ["codegen-backend"]
+
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2021"
+
+      [dependencies]
+      hashbrown = "0.14"
+      smallvec = "1.13"
+      indicatif = "0.17"
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      clap = { version = "4.5.4", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.3.0", features = ["serde"] }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      profiler_macro = { path = "profiler_macro" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+      similar = "2.7.0"
+      pretty_assertions = "1.4.1"
+      once_cell = "1.21.3"
+      lru = "0.16.0"
+      parking_lot = "0.12.5"
+      flate2 = "1.1.2"
+      im = "15.1.0"
+      indoc = "2.0.6"
+      rustc-hash = "1.1.0"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      #codegen-backend = "cranelift"
+      debug = true
+      #opt-level = 1
+
+      [features]
+      no_pbar = []
+      pbar = []
+
+      [[bin]]
+      name = "grammar-compiler"
+      path = "src/bin/grammar_compiler.rs"
     src/precompute4/weighted_automata/mod.rs: |
       // src/precompute4/weighted_automata/mod.rs
 
@@ -3247,6 +3588,418 @@ local_system:
       pub use self::common::{format_i16_char, format_pos_code, format_word, I16Map, NWAStateID, StateID, Weight};
       pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
       pub use self::nwa::{NWABody, NWABuildError, NWADefaultTransition, NWAState, NWAStates, NWA};
+    src/precompute4/weighted_automata/bitset.rs: |
+      // src/precompute4/weighted_automata/bitset.rs
+
+      #![allow(dead_code)]
+      #![allow(clippy::needless_borrow)]
+
+      use range_set_blaze::RangeSetBlaze;
+      use serde::{Deserialize, Deserializer, Serialize, Serializer};
+      use std::fmt::{Debug, Display, Formatter};
+      use std::hash::{Hash, Hasher};
+      use std::iter::FromIterator;
+      use std::ops::{
+          BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub, SubAssign,
+      };
+
+      // SimpleBitset: a RangeSetBlaze with cached fingerprint and fast "is_all" flag.
+      // - fp is a content fingerprint used only for hashing; Eq remains content-based via rsb.
+      // - is_all tracks whether it is the universe (0..=usize::MAX), enabling fast short-circuits.
+      #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Default)]
+      pub struct SimpleBitset {
+          pub(crate) rsb: RangeSetBlaze<usize>,
+          pub(crate) fp: u64,
+          is_all: bool,
+      }
+
+      // Fingerprint utilities
+      pub(crate) const FP_ZERO: u64 = 0x9E37_79B9_7F4A_7C15;
+      const FP_ALL: u64 = 0xD6E8_FEB8_6659_FD93;
+      pub(crate) const FP_K1: u64 = 0xC2B2_AE3D_27D4_EB4F;
+      pub(crate) const FP_K2: u64 = 0x1656_67B1_F3E1_5A6D;
+      const FP_K3: u64 = 0x9E37_79B1_1F37_9B97;
+
+      #[inline]
+      pub(crate) fn mix3(a: u64, b: u64, c: u64) -> u64 {
+          let mut x = a ^ b.wrapping_mul(FP_K1);
+          x = x.rotate_left(27) ^ c.wrapping_mul(FP_K2);
+          x ^= x >> 33;
+          x = x.wrapping_mul(FP_K3);
+          x ^ (x >> 29)
+      }
+
+      #[inline]
+      fn calc_is_all_and_fp(rsb: &RangeSetBlaze<usize>) -> (bool, u64) {
+          let mut it = rsb.ranges();
+          if let Some(first) = it.next() {
+              if *first.start() == 0 && *first.end() == usize::MAX && it.next().is_none() {
+                  return (true, FP_ALL);
+              }
+              let mut fp = mix3(
+                  FP_ZERO,
+                  *first.start() as u64,
+                  (*first.end() as u64).wrapping_mul(FP_K1),
+              );
+              for r in it {
+                  let s = *r.start() as u64;
+                  let e = *r.end() as u64;
+                  fp = mix3(fp, s.wrapping_mul(FP_K2), e.wrapping_mul(FP_K3));
+              }
+              (false, fp)
+          } else {
+              (false, FP_ZERO)
+          }
+      }
+
+      #[inline]
+      fn universe_rsb() -> RangeSetBlaze<usize> {
+          RangeSetBlaze::from_iter([0usize..=usize::MAX])
+      }
+
+      impl SimpleBitset {
+          #[inline]
+          fn from_rsb_inner(rsb: RangeSetBlaze<usize>) -> Self {
+              let (is_all, fp) = calc_is_all_and_fp(&rsb);
+              SimpleBitset { rsb, fp, is_all }
+          }
+
+          #[inline]
+          fn update_cached(&mut self) {
+              let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
+              self.is_all = is_all;
+              self.fp = fp;
+          }
+
+          pub fn zeros() -> Self {
+              SimpleBitset { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false }
+          }
+          pub fn all() -> Self {
+              SimpleBitset { rsb: universe_rsb(), fp: FP_ALL, is_all: true }
+          }
+          pub fn from_item(item: usize) -> Self {
+              SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter([item]))
+          }
+          pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self {
+              SimpleBitset::from_rsb_inner(rsb)
+          }
+          pub fn len(&self) -> usize {
+              self.rsb.len().try_into().unwrap_or(usize::MAX)
+          }
+          pub fn is_empty(&self) -> bool {
+              self.rsb.is_empty()
+          }
+          pub fn is_disjoint(&self, other: &SimpleBitset) -> bool {
+              if self.is_empty() || other.is_empty() {
+                  return true;
+              }
+              if self.is_all_fast() || other.is_all_fast() {
+                  return false;
+              }
+              (&self.rsb & &other.rsb).is_empty()
+          }
+          pub fn contains(&self, index: usize) -> bool {
+              self.rsb.contains(index)
+          }
+          pub fn max_item(&self) -> Option<usize> {
+              self.rsb.iter().last()
+          }
+          /// Iterate over items, truncated by `max` to prevent accidental ALL iteration.
+          pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> {
+              (&self.rsb & &RangeSetBlaze::from_iter([0..=max])).into_iter()
+          }
+          #[inline]
+          fn with_new_rsb_and_op(_lhs: &SimpleBitset, _rhs: &SimpleBitset, rsb: RangeSetBlaze<usize>, _op_tag: u64) -> SimpleBitset {
+              let (is_all, fp) = calc_is_all_and_fp(&rsb);
+              SimpleBitset { rsb, fp, is_all }
+          }
+          #[inline]
+          fn with_new_rsb_unary(_src: &SimpleBitset, rsb: RangeSetBlaze<usize>, _op_tag: u64) -> SimpleBitset {
+              let (is_all, fp) = calc_is_all_and_fp(&rsb);
+              SimpleBitset { rsb, fp, is_all }
+          }
+          #[inline]
+          pub fn is_all_fast(&self) -> bool { self.is_all }
+
+          #[inline]
+          pub fn is_subset_of(&self, rhs: &SimpleBitset) -> bool {
+              (self & rhs) == *self
+          }
+
+          pub fn complement(&self) -> SimpleBitset {
+              if self.is_empty() { return SimpleBitset::all(); }
+              if self.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &universe_rsb() - &self.rsb;
+              SimpleBitset::with_new_rsb_unary(self, rsb, 0xD3)
+          }
+
+          pub fn insert(&mut self, item: usize) {
+              if self.is_all_fast() { return; }
+              self.rsb.insert(item);
+              self.update_cached();
+          }
+
+          pub fn add(&mut self, item: usize) {
+              self.insert(item);
+          }
+
+          pub fn remove(&mut self, item: usize) {
+              if self.is_empty() { return; }
+              if self.is_all_fast() {
+                  self.rsb = universe_rsb();
+              }
+              self.rsb.remove(item);
+              self.update_cached();
+          }
+
+          pub fn set(&mut self, item: usize, value: bool) {
+              if value {
+                  self.insert(item);
+              } else {
+                  self.remove(item);
+              }
+          }
+
+          pub fn clear(&mut self) {
+              self.rsb.clear();
+              self.fp = FP_ZERO;
+              self.is_all = false;
+          }
+
+          pub fn clip_to_range(&mut self, min: usize, max: usize) {
+              if self.is_empty() { return; }
+              if self.is_all_fast() {
+                  self.rsb = universe_rsb();
+              }
+              let clip_rsb = RangeSetBlaze::from_iter([min..=max]);
+              self.rsb = &self.rsb & &clip_rsb;
+              self.update_cached();
+          }
+
+          pub fn clip_min(&mut self, min: usize) {
+              self.clip_to_range(min, usize::MAX);
+          }
+
+          pub fn clip_max(&mut self, max: usize) {
+              self.clip_to_range(0, max);
+          }
+      }
+
+      impl Hash for SimpleBitset {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              state.write_u64(self.fp);
+          }
+      }
+
+      impl Debug for SimpleBitset {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              if self.is_all_fast() {
+                  write!(f, "SimpleBitset(ALL)")
+              } else {
+                  Debug::fmt(&self.rsb, f)
+              }
+          }
+      }
+
+      impl Display for SimpleBitset {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              if self.is_all_fast() {
+                  return write!(f, "ALL");
+              }
+              write!(f, "[")?;
+              let mut ranges = self.rsb.ranges().peekable();
+              while let Some(range) = ranges.next() {
+                  if range.start() == range.end() {
+                      write!(f, "{}", range.start())?;
+                  } else {
+                      write!(f, "{}..={}", range.start(), range.end())?;
+                  }
+                  if ranges.peek().is_some() {
+                      write!(f, ", ")?;
+                  }
+              }
+              write!(f, "]")
+          }
+      }
+
+      impl FromIterator<usize> for SimpleBitset {
+          fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
+              SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter(iter))
+          }
+      }
+
+      impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
+          fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
+              SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter(iter))
+          }
+      }
+
+      // Borrowed bit-ops
+      impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
+              if self.is_empty() || rhs.is_empty() {
+                  return SimpleBitset::zeros();
+              }
+              if self.is_all_fast() { return rhs.clone(); }
+              if rhs.is_all_fast() { return self.clone(); }
+              let rsb = &self.rsb & &rhs.rsb;
+              SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xA1)
+          }
+      }
+      impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
+              if self.is_all_fast() || rhs.is_all_fast() {
+                  return SimpleBitset::all();
+              }
+              if self.is_empty() { return rhs.clone(); }
+              if rhs.is_empty() { return self.clone(); }
+              let rsb = &self.rsb | &rhs.rsb;
+              SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xB1)
+          }
+      }
+
+      // Assign ops (borrowed RHS)
+      impl BitAndAssign<&SimpleBitset> for SimpleBitset {
+          fn bitand_assign(&mut self, rhs: &SimpleBitset) {
+              if self.is_empty() { return; }
+              if rhs.is_empty() {
+                  *self = SimpleBitset::zeros();
+                  return;
+              }
+              if rhs.is_all_fast() { return; }
+              if self.is_all_fast() {
+                  *self = rhs.clone();
+                  return;
+              }
+              self.rsb = &self.rsb & &rhs.rsb;
+              self.update_cached();
+          }
+      }
+      impl BitOrAssign<&SimpleBitset> for SimpleBitset {
+          fn bitor_assign(&mut self, rhs: &SimpleBitset) {
+              if self.is_all_fast() || rhs.is_all_fast() {
+                  *self = SimpleBitset::all();
+                  return;
+              }
+              if rhs.is_empty() { return; }
+              if self.is_empty() {
+                  *self = rhs.clone();
+                  return;
+              }
+              self.rsb |= &rhs.rsb;
+              self.update_cached();
+          }
+      }
+
+      // Owned fallbacks via borrowed ops
+      impl BitAnd<SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: SimpleBitset) -> Self::Output {
+              (&self) & (&rhs)
+          }
+      }
+      impl BitOr<SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: SimpleBitset) -> Self::Output {
+              (&self) | (&rhs)
+          }
+      }
+      impl<'a> BitAnd<&'a SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
+              (&self) & rhs
+          }
+      }
+      impl<'a> BitOr<&'a SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
+              (&self) | rhs
+          }
+      }
+      impl<'a> BitAnd<SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: SimpleBitset) -> Self::Output {
+              self & (&rhs)
+          }
+      }
+      impl<'a> BitOr<SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: SimpleBitset) -> Self::Output {
+              self | (&rhs)
+          }
+      }
+
+      impl SubAssign<&SimpleBitset> for SimpleBitset {
+          fn sub_assign(&mut self, rhs: &SimpleBitset) {
+              if self.is_empty() || rhs.is_empty() { return; }
+              if self.is_all_fast() && rhs.is_all_fast() {
+                  *self = SimpleBitset::zeros();
+                  return;
+              }
+              self.rsb = &self.rsb - &rhs.rsb;
+              self.update_cached();
+          }
+      }
+      impl SubAssign<SimpleBitset> for SimpleBitset {
+          fn sub_assign(&mut self, rhs: SimpleBitset) {
+              *self -= &rhs
+          }
+      }
+      impl Sub<SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn sub(self, rhs: SimpleBitset) -> Self::Output {
+              (&self) - (&rhs)
+          }
+      }
+      impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn sub(self, rhs: &'a SimpleBitset) -> Self::Output {
+              if self.is_empty() || rhs.is_empty() { return self.clone(); }
+              if self.is_all_fast() && rhs.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &self.rsb - &rhs.rsb;
+              SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xC1)
+          }
+      }
+
+      impl Not for SimpleBitset {
+          type Output = SimpleBitset;
+          fn not(self) -> Self::Output {
+              if self.is_empty() { return SimpleBitset::all(); }
+              if self.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &universe_rsb() - &self.rsb;
+              SimpleBitset::with_new_rsb_unary(&self, rsb, 0xD1)
+          }
+      }
+      impl Not for &SimpleBitset {
+          type Output = SimpleBitset;
+          fn not(self) -> Self::Output {
+              if self.is_empty() { return SimpleBitset::all(); }
+              if self.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &universe_rsb() - &self.rsb;
+              SimpleBitset::with_new_rsb_unary(self, rsb, 0xD2)
+          }
+      }
+
+      impl Serialize for SimpleBitset {
+          fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+          where
+              S: Serializer,
+          {
+              self.rsb.serialize(serializer)
+          }
+      }
+
+      impl<'de> Deserialize<'de> for SimpleBitset {
+          fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+          where
+              D: Deserializer<'de>,
+          {
+              let rsb = RangeSetBlaze::<usize>::deserialize(deserializer)?;
+              Ok(SimpleBitset::from_rsb_inner(rsb))
+          }
+      }
     src/precompute4/weighted_automata/dwa.rs: |
       // src/precompute4/weighted_automata/dwa.rs
 
@@ -3675,6 +4428,7 @@ local_system:
       #![allow(clippy::needless_borrow)]
 
       use super::common::{format_i16_char, NWAStateID, Weight};
+      use serde::{Deserialize, Serialize};
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
       use std::fmt::{self, Display, Formatter};
       use std::ops::{Index, IndexMut};
@@ -3693,7 +4447,7 @@ local_system:
       }
 
       /// A default transition in an NWA. It is taken for any symbol that is NOT in its `exceptions` set.
-      #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+      #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
       pub struct NWADefaultTransition {
           pub target: NWAStateID,
           pub weight: Weight,
@@ -3702,7 +4456,7 @@ local_system:
       /// - Non-epsilon transitions: unique target per input symbol.
       /// - Each transition carries a weight (Weight), which is intersected along the path; final states
       ///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
-      #[derive(Clone, Debug, Default, PartialEq, Eq)]
+      #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
       pub struct NWAState {
           pub final_weight: Option<Weight>,
           /// Non-epsilon transitions: multiple targets per input symbol are allowed.
@@ -3714,7 +4468,7 @@ local_system:
           pub default: Vec<NWADefaultTransition>,
       }
 
-      #[derive(Clone, Debug, Default)]
+      #[derive(Clone, Debug, Default, Serialize, Deserialize)]
       pub struct NWAStates(pub Vec<NWAState>);
 
       impl NWAStates {
@@ -3937,7 +4691,7 @@ local_system:
           }
       }
 
-      #[derive(Clone, Debug, Default, PartialEq, Eq)]
+      #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
       pub struct NWABody {
           pub start_state: NWAStateID,
       }
@@ -3948,7 +4702,7 @@ local_system:
           }
       }
 
-      #[derive(Clone, Debug, Default)]
+      #[derive(Clone, Debug, Default, Serialize, Deserialize)]
       pub struct NWA {
           pub states: NWAStates,
           pub body: NWABody,
@@ -5796,127 +6550,7 @@ local_system:
       [^10]: It is however limited to the cases where the result of epsilon-removal is determinizable, that is cases where the determinization algorithm terminates, which, as we shall see later, does not always hold in the weighted case.
       [^11]: The notion of twins property was originally introduced for unweighted finite-state transducers by [15, 16] and was shown to be decidable. Polynomial-time algorithms were later given to test this property for functional transducers in time $O(|Q|(|Q|^2 + |E|^2)|\Delta|)$ by [58], $O(|Q|^4(|Q|^2 + |E|^2))$ by [11], and $O(|Q|^2(|Q|^2 + |E|^2))$ by [3], where $Q$ is the set of states of the input transducer, $E$ the set of its transitions and $\Delta$ the output alphabet.
       [^12]: An automaton is cycle-unambiguous if for any state $q$ and any string $x$ there exists at most one cycle at $q$ labeled with $x$.
-    src/precompute4/weighted_automata/test_determinization.rs: |-
-      #![cfg(test)]
-
-      use super::*;
-
-      #[test]
-      fn test_determinize_simple_divergence() {
-          let mut nwa = NWA::new(); // new() creates a start state 0
-          nwa.states.0.clear(); // but we'll manage states manually for clarity
-
-          // NWA for "ac" with weight A1 (0)
-          let s0 = nwa.states.add_state();
-          let s1 = nwa.states.add_state();
-          let s2 = nwa.states.add_state();
-          nwa.add_transition(s0, 'a' as i16, s1, Weight::all()).unwrap();
-          nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
-          nwa.states[s2].final_weight = Some(Weight::from_item(0));
-
-          // NWA for "bc" with weight A2 (1)
-          let s3 = nwa.states.add_state();
-          let s4 = nwa.states.add_state();
-          let s5 = nwa.states.add_state();
-          nwa.add_transition(s3, 'b' as i16, s4, Weight::all()).unwrap();
-          nwa.add_transition(s4, 'c' as i16, s5, Weight::all()).unwrap();
-          nwa.states[s5].final_weight = Some(Weight::from_item(1));
-
-          // Union them with a new start state
-          let start = nwa.states.add_state();
-          nwa.add_epsilon(start, s0, Weight::all());
-          nwa.add_epsilon(start, s3, Weight::all());
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-          println!("{}", nwa);
-          println!("{}", dwa);
-
-          // Check accepted words and their weights.
-          assert_eq!(
-              dwa.eval_word_weight(&['a' as i16, 'c' as i16]),
-              Weight::from_item(0)
-          );
-          assert_eq!(
-              dwa.eval_word_weight(&['b' as i16, 'c' as i16]),
-              Weight::from_item(1)
-          );
-          assert!(dwa.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&[]).is_empty());
-
-          // An efficient DWA should merge states with similar future behavior,
-          // resulting in a small automaton.
-          // Allowing for a sink state, we assert a small number.
-          assert!(
-              dwa.states.len() <= 4,
-              "Expected a small number of states for simple divergence, got {}",
-              dwa.states.len()
-          );
-      }
-
-      #[test]
-      fn test_determinize_hypercube_catastrophe() {
-          const N: usize = 4;
-          let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
-          let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
-
-          let mut nwa = NWA::new();
-          nwa.states.0.clear();
-
-          let mut component_starts = vec![];
-
-          for i in 0..N {
-              // L_i = words without alphabet[i]
-              let s = nwa.states.add_state();
-              component_starts.push(s);
-              nwa.states[s].final_weight = Some(atoms[i].clone());
-
-              for j in 0..N {
-                  if i == j {
-                      continue;
-                  }
-                  nwa.add_transition(s, alphabet[j], s, Weight::all()).unwrap();
-              }
-          }
-
-          let start = nwa.states.add_state();
-          for &s_comp in &component_starts {
-              nwa.add_epsilon(start, s_comp, Weight::all());
-          }
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-
-          // An efficient DWA construction should avoid the 2^N state explosion by
-          // encoding the history of seen characters within the accumulated weight,
-          // not in the state space.
-          assert!(
-              dwa.states.len() <= 2,
-              "Expected a very small DWA (1-2 states) for hypercube, but got {} states. State explosion was not avoided.",
-              dwa.states.len()
-          );
-
-          // Test some words
-          // word "ac" (chars 0 and 2) -> should not contain 1 or 3 ('b' or 'd'). Belongs to L1 and L3.
-          // Weight should be A1 | A3.
-          let word_ac = vec![alphabet[0], alphabet[2]];
-          let expected_weight_ac = &atoms[1] | &atoms[3];
-          assert_eq!(dwa.eval_word_weight(&word_ac), expected_weight_ac);
-
-          // word "abcd" -> contains all symbols. Should be rejected by all components.
-          let word_all = alphabet.clone();
-          assert!(dwa.eval_word_weight(&word_all).is_empty());
-
-          // empty word -> belongs to all languages.
-          let empty_word = vec![];
-          let mut expected_weight_empty = Weight::zeros();
-          for atom in &atoms {
-              expected_weight_empty |= atom;
-          }
-          assert_eq!(dwa.eval_word_weight(&empty_word), expected_weight_empty);
-      }
-    src/precompute4/weighted_automata/determinization.rs: |
+    src/precompute4/weighted_automata/determinization.rs: |-
       // src/precompute4/weighted_automata/determinization.rs
       //
       // Determinization of NWA -> DWA specialized to the Weight bitset semiring,
@@ -5940,17 +6574,11 @@ local_system:
       //   this equals
       //       ⋁_q ( B_q ∧ w(q,a1) ∧ ... ∧ w(q,ak) )
       //   which is exactly the NWA semantics for this class (each q "reads" the sequence in-place).
-      //
-      // Implementation notes about state identity canonicalization:
-      //   - Prior versions keyed determinized states by String built from Weight's Display.
-      //     If Weight's Display is non-canonical (e.g., unsorted iteration), equal states got
-      //     distinct keys, causing non-termination on cyclic inputs.
-      //   - We fix this by using Weight::canonical_string(), which is deterministic,
-      //     when building closure keys.
 
       #![allow(dead_code)]
       #![allow(clippy::needless_borrow)]
 
+      use chrono::Local;
       use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -5974,35 +6602,6 @@ local_system:
       }
       fn is_zero(w: &Weight) -> bool {
           w.is_empty()
-      }
-
-      // Canonical key for Weight (deterministic)
-      fn weight_key(w: &Weight) -> String {
-          // Using w.to_string() is incorrect if the underlying implementation (e.g.,
-          // iterating over a hash map) is not deterministic. A non-canonical key
-          // prevents the determinizer from recognizing equivalent states, leading to
-          // state explosion and non-termination for cyclic NWAs.
-          let mut items: Vec<_> = w.iter().collect();
-          items.sort_unstable();
-          format!("{:?}", items)
-      }
-
-      // Create a canonical key for a weighted subset to identify states in a HashMap.
-      fn subset_key(sub: &WeightedSubset) -> String {
-          let mut s = String::new();
-          for (sid, w) in sub {
-              s.push_str(&format!("{}#{};", sid, weight_key(w)));
-          }
-          s
-      }
-
-      // Create a canonical key for a closure map used to identify determinized states.
-      fn closure_key(cl: &ClosureMap) -> String {
-          let mut s = String::new();
-          for (sid, w) in cl {
-              s.push_str(&format!("{}#{};", sid, weight_key(w)));
-          }
-          s
       }
 
       // Epsilon-closure from a weighted subset:
@@ -6141,11 +6740,7 @@ local_system:
           nwa: &NWA,
           closure: &ClosureMap,
       ) -> (Option<Weight>, Option<Weight>) {
-          // State-entry weights are not part of Mohri's determinization algorithm for
-          // standard weighted automata. Their inclusion was conceptually incorrect and
-          // could interfere with the DWA's semantics, even if idempotent operations
-          // masked immediate issues. The correct approach is to encode all necessary
-          // information in the DWA's state transitions and final weights.
+          // State-entry weights are not part of Mohri's determinization algorithm.
           let entry_opt = None;
           let mut finalw = Weight::zeros();
           for (sid, cw) in closure {
@@ -6164,10 +6759,10 @@ local_system:
 
       struct Determinizer<'a> {
           nwa: &'a NWA,
-          seen: HashMap<String, usize>,  // closure key -> DWA state id (canonical, deterministic)
-          subsets: Vec<WeightedSubset>,  // for each DWA id, its (raw) weighted subset
-          closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
-          queue: VecDeque<usize>,        // worklist of DWA ids
+          seen: HashMap<ClosureMap, usize>,
+          subsets: Vec<WeightedSubset>,
+          closures: Vec<ClosureMap>,
+          queue: VecDeque<usize>,
           dwa: DWA,
           mp: Option<MultiProgress>,
       }
@@ -6175,9 +6770,8 @@ local_system:
       impl<'a> Determinizer<'a> {
           fn new(nwa: &'a NWA, mp: Option<MultiProgress>) -> Self {
               let mut dwa = DWA::new();
-              // We'll manage our own state indexing; clear the auto-created state.
               dwa.states.0.clear();
-              dwa.body.start_state = 0; // placeholder; will be reset after first register_state
+              dwa.body.start_state = 0;
               Determinizer {
                   nwa,
                   seen: HashMap::new(),
@@ -6195,20 +6789,22 @@ local_system:
               for (sid, w) in subset {
                   if !is_zero(&w) { subset_clean.insert(sid, w); }
               }
-              // 2) Compute ε-closure; determinized state identity depends on closure
+              // 2) Compute ε-closure; determinized state identity depends on closure.
               let closure = epsilon_closure(&self.nwa.states, &subset_clean);
-              let key = closure_key(&closure);
-              if let Some(&id) = self.seen.get(&key) { return id; }
 
-              // 3) Create brand-new DWA state for this closure
+              // Use the closure object itself as the key.
+              if let Some(&id) = self.seen.get(&closure) {
+                  return id;
+              }
+
+              // 3) Create brand-new DWA state for this closure.
               let id = self.dwa.add_state();
 
-              // 4) Install state-entry and final weights from closure
-              // State-entry weights are not used in the standard determinization algorithm.
+              // 4) Install final weight from closure.
               let (_entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
               if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
 
-              self.seen.insert(key, id);
+              self.seen.insert(closure.clone(), id);
               self.subsets.push(subset_clean);
               self.closures.push(closure);
               self.queue.push_back(id);
@@ -6235,14 +6831,12 @@ local_system:
                   None
               };
 
-              // exception labels are all explicit labels and default exceptions visible in closure
               let exception_labels = collect_exception_labels(&self.nwa.states, closure);
 
               if let Some(pb) = &labels_pb {
                   pb.set_length(exception_labels.len() as u64);
               }
 
-              // default "others"
               let others_subset = next_subset_for_others(&self.nwa.states, closure);
               let others_weight = union_over_values(&others_subset);
 
@@ -6264,7 +6858,6 @@ local_system:
                   pb.set_position(0);
               }
 
-              // install default if non-empty
               let mut default_target_id: Option<usize> = None;
               if !others_subset.is_empty() && !is_zero(&others_weight) {
                   let to_id = self.register_state(others_subset);
@@ -6307,10 +6900,7 @@ local_system:
           }
 
           let start = nwa.body.start_state;
-          if !nwa.states[start].transitions.is_empty() {
-              return None;
-          }
-          if !nwa.states[start].default.is_empty() {
+          if !nwa.states[start].transitions.is_empty() || !nwa.states[start].default.is_empty() {
               return None;
           }
 
@@ -6325,11 +6915,7 @@ local_system:
               }
               let st = &nwa.states[*sid];
 
-              // singleton: no ε-out, no defaults, all labeled loops to itself
-              if !st.epsilons.is_empty() {
-                  return None;
-              }
-              if !st.default.is_empty() {
+              if !st.epsilons.is_empty() || !st.default.is_empty() {
                   return None;
               }
               for (_lbl, vec_targets) in st.transitions.iter() {
@@ -6352,7 +6938,6 @@ local_system:
               return None;
           }
 
-          // Pairwise disjointness of base weights
           for i in 0..comps.len() {
               for j in (i + 1)..comps.len() {
                   if !(comps[i].1.clone() & comps[j].1.clone()).is_empty() {
@@ -6361,7 +6946,6 @@ local_system:
               }
           }
 
-          // Build per-label weights W[l] = ⋁_q ( base_q ∧ ⋁_{q -l-> q} w_edge )
           let mut label_to_weight: BTreeMap<i16, Weight> = BTreeMap::new();
           for (sid, base) in &comps {
               let st = &nwa.states[*sid];
@@ -6380,7 +6964,6 @@ local_system:
               }
           }
 
-          // Single DWA state with final F = ⋁ base_q and loops with weights W[l].
           let mut final_union = Weight::zeros();
           for (_sid, base) in &comps {
               final_union = final_union | base.clone();
@@ -6403,10 +6986,11 @@ local_system:
       impl NWA {
           /// Determinize the subgraph reachable from `self.body.start_state` into a DWA.
           pub fn determinize_to_dwa(&self) -> DWA {
-              // Fast-path: avoid blow-up for "singleton-loop union" cases
               if let Some(dwa) = try_build_singleton_loop_union(self) {
                   return dwa;
               }
+
+              const STATE_LIMIT: usize = 10000;
 
               eprintln!(
                   "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
@@ -6427,7 +7011,6 @@ local_system:
 
               let mut det = Determinizer::new(self, Some(mp));
 
-              // Start subset: { start_state -> 1 (Weight::all) }.
               let mut start_subset: WeightedSubset = WeightedSubset::new();
               start_subset.insert(self.body.start_state, Weight::all());
               let start_id = det.register_state(start_subset);
@@ -6435,6 +7018,15 @@ local_system:
 
               let mut processed_count = 0;
               while let Some(sid) = det.queue.pop_front() {
+                  if det.seen.len() > STATE_LIMIT {
+                      let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+                      let filename = format!("nwa_dump_{}.json", timestamp);
+                      eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+                      let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+                      serde_json::to_writer_pretty(f, self).expect("Unable to write NWA to file");
+                      panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
+                  }
+
                   let total_states = det.seen.len();
                   main_pb.set_length(total_states as u64);
                   main_pb.set_position(processed_count as u64);
@@ -6491,6 +7083,69 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
+      ```text "Cargo.toml"
+      # This line needs to come before anything else in Cargo.toml
+      #cargo-features = ["codegen-backend"]
+
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2021"
+
+      [dependencies]
+      hashbrown = "0.14"
+      smallvec = "1.13"
+      indicatif = "0.17"
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      clap = { version = "4.5.4", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.3.0" }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      profiler_macro = { path = "profiler_macro" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+      similar = "2.7.0"
+      pretty_assertions = "1.4.1"
+      once_cell = "1.21.3"
+      lru = "0.16.0"
+      parking_lot = "0.12.5"
+      flate2 = "1.1.2"
+      im = "15.1.0"
+      indoc = "2.0.6"
+      rustc-hash = "1.1.0"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      #codegen-backend = "cranelift"
+      debug = true
+      #opt-level = 1
+
+      [features]
+      no_pbar = []
+      pbar = []
+
+      [[bin]]
+      name = "grammar-compiler"
+      path = "src/bin/grammar_compiler.rs"
+
+      ```
+    metadata:
+      filename: Cargo.toml
+  - user: |-
       ```rust "src/precompute4/weighted_automata/mod.rs"
       // src/precompute4/weighted_automata/mod.rs
 
@@ -6515,6 +7170,403 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata/mod.rs
+  - user: |-
+      ```rust "src/precompute4/weighted_automata/bitset.rs"
+      // src/precompute4/weighted_automata/bitset.rs
+
+      #![allow(dead_code)]
+      #![allow(clippy::needless_borrow)]
+
+      use range_set_blaze::RangeSetBlaze;
+      use std::fmt::{Debug, Display, Formatter};
+      use std::hash::{Hash, Hasher};
+      use std::iter::FromIterator;
+      use std::ops::{
+          BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub, SubAssign,
+      };
+
+      // SimpleBitset: a RangeSetBlaze with cached fingerprint and fast "is_all" flag.
+      // - fp is a content fingerprint used only for hashing; Eq remains content-based via rsb.
+      // - is_all tracks whether it is the universe (0..=usize::MAX), enabling fast short-circuits.
+      #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Default)]
+      pub struct SimpleBitset {
+          pub(crate) rsb: RangeSetBlaze<usize>,
+          pub(crate) fp: u64,
+          is_all: bool,
+      }
+
+      // Fingerprint utilities
+      pub(crate) const FP_ZERO: u64 = 0x9E37_79B9_7F4A_7C15;
+      const FP_ALL: u64 = 0xD6E8_FEB8_6659_FD93;
+      pub(crate) const FP_K1: u64 = 0xC2B2_AE3D_27D4_EB4F;
+      pub(crate) const FP_K2: u64 = 0x1656_67B1_F3E1_5A6D;
+      const FP_K3: u64 = 0x9E37_79B1_1F37_9B97;
+
+      #[inline]
+      pub(crate) fn mix3(a: u64, b: u64, c: u64) -> u64 {
+          let mut x = a ^ b.wrapping_mul(FP_K1);
+          x = x.rotate_left(27) ^ c.wrapping_mul(FP_K2);
+          x ^= x >> 33;
+          x = x.wrapping_mul(FP_K3);
+          x ^ (x >> 29)
+      }
+
+      #[inline]
+      fn calc_is_all_and_fp(rsb: &RangeSetBlaze<usize>) -> (bool, u64) {
+          let mut it = rsb.ranges();
+          if let Some(first) = it.next() {
+              if *first.start() == 0 && *first.end() == usize::MAX && it.next().is_none() {
+                  return (true, FP_ALL);
+              }
+              let mut fp = mix3(
+                  FP_ZERO,
+                  *first.start() as u64,
+                  (*first.end() as u64).wrapping_mul(FP_K1),
+              );
+              for r in it {
+                  let s = *r.start() as u64;
+                  let e = *r.end() as u64;
+                  fp = mix3(fp, s.wrapping_mul(FP_K2), e.wrapping_mul(FP_K3));
+              }
+              (false, fp)
+          } else {
+              (false, FP_ZERO)
+          }
+      }
+
+      #[inline]
+      fn universe_rsb() -> RangeSetBlaze<usize> {
+          RangeSetBlaze::from_iter([0usize..=usize::MAX])
+      }
+
+      impl SimpleBitset {
+          #[inline]
+          fn from_rsb_inner(rsb: RangeSetBlaze<usize>) -> Self {
+              let (is_all, fp) = calc_is_all_and_fp(&rsb);
+              SimpleBitset { rsb, fp, is_all }
+          }
+
+          #[inline]
+          fn update_cached(&mut self) {
+              let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
+              self.is_all = is_all;
+              self.fp = fp;
+          }
+
+          pub fn zeros() -> Self {
+              SimpleBitset { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false }
+          }
+          pub fn all() -> Self {
+              SimpleBitset { rsb: universe_rsb(), fp: FP_ALL, is_all: true }
+          }
+          pub fn from_item(item: usize) -> Self {
+              SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter([item]))
+          }
+          pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self {
+              SimpleBitset::from_rsb_inner(rsb)
+          }
+          pub fn len(&self) -> usize {
+              self.rsb.len().try_into().unwrap_or(usize::MAX)
+          }
+          pub fn is_empty(&self) -> bool {
+              self.rsb.is_empty()
+          }
+          pub fn is_disjoint(&self, other: &SimpleBitset) -> bool {
+              if self.is_empty() || other.is_empty() {
+                  return true;
+              }
+              if self.is_all_fast() || other.is_all_fast() {
+                  return false;
+              }
+              (&self.rsb & &other.rsb).is_empty()
+          }
+          pub fn contains(&self, index: usize) -> bool {
+              self.rsb.contains(index)
+          }
+          pub fn max_item(&self) -> Option<usize> {
+              self.rsb.iter().last()
+          }
+          /// Iterate over items, truncated by `max` to prevent accidental ALL iteration.
+          pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> {
+              (&self.rsb & &RangeSetBlaze::from_iter([0..=max])).into_iter()
+          }
+          #[inline]
+          fn with_new_rsb_and_op(_lhs: &SimpleBitset, _rhs: &SimpleBitset, rsb: RangeSetBlaze<usize>, _op_tag: u64) -> SimpleBitset {
+              let (is_all, fp) = calc_is_all_and_fp(&rsb);
+              SimpleBitset { rsb, fp, is_all }
+          }
+          #[inline]
+          fn with_new_rsb_unary(_src: &SimpleBitset, rsb: RangeSetBlaze<usize>, _op_tag: u64) -> SimpleBitset {
+              let (is_all, fp) = calc_is_all_and_fp(&rsb);
+              SimpleBitset { rsb, fp, is_all }
+          }
+          #[inline]
+          pub fn is_all_fast(&self) -> bool { self.is_all }
+
+          #[inline]
+          pub fn is_subset_of(&self, rhs: &SimpleBitset) -> bool {
+              (self & rhs) == *self
+          }
+
+          pub fn complement(&self) -> SimpleBitset {
+              if self.is_empty() { return SimpleBitset::all(); }
+              if self.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &universe_rsb() - &self.rsb;
+              SimpleBitset::with_new_rsb_unary(self, rsb, 0xD3)
+          }
+
+          pub fn insert(&mut self, item: usize) {
+              if self.is_all_fast() { return; }
+              self.rsb.insert(item);
+              self.update_cached();
+          }
+
+          pub fn add(&mut self, item: usize) {
+              self.insert(item);
+          }
+
+          pub fn remove(&mut self, item: usize) {
+              if self.is_empty() { return; }
+              if self.is_all_fast() {
+                  self.rsb = universe_rsb();
+              }
+              self.rsb.remove(item);
+              self.update_cached();
+          }
+
+          pub fn set(&mut self, item: usize, value: bool) {
+              if value {
+                  self.insert(item);
+              } else {
+                  self.remove(item);
+              }
+          }
+
+          pub fn clear(&mut self) {
+              self.rsb.clear();
+              self.fp = FP_ZERO;
+              self.is_all = false;
+          }
+
+          pub fn clip_to_range(&mut self, min: usize, max: usize) {
+              if self.is_empty() { return; }
+              if self.is_all_fast() {
+                  self.rsb = universe_rsb();
+              }
+              let clip_rsb = RangeSetBlaze::from_iter([min..=max]);
+              self.rsb = &self.rsb & &clip_rsb;
+              self.update_cached();
+          }
+
+          pub fn clip_min(&mut self, min: usize) {
+              self.clip_to_range(min, usize::MAX);
+          }
+
+          pub fn clip_max(&mut self, max: usize) {
+              self.clip_to_range(0, max);
+          }
+      }
+
+      impl Hash for SimpleBitset {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              state.write_u64(self.fp);
+          }
+      }
+
+      impl Debug for SimpleBitset {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              if self.is_all_fast() {
+                  write!(f, "SimpleBitset(ALL)")
+              } else {
+                  Debug::fmt(&self.rsb, f)
+              }
+          }
+      }
+
+      impl Display for SimpleBitset {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              if self.is_all_fast() {
+                  return write!(f, "ALL");
+              }
+              write!(f, "[")?;
+              let mut ranges = self.rsb.ranges().peekable();
+              while let Some(range) = ranges.next() {
+                  if range.start() == range.end() {
+                      write!(f, "{}", range.start())?;
+                  } else {
+                      write!(f, "{}..={}", range.start(), range.end())?;
+                  }
+                  if ranges.peek().is_some() {
+                      write!(f, ", ")?;
+                  }
+              }
+              write!(f, "]")
+          }
+      }
+
+      impl FromIterator<usize> for SimpleBitset {
+          fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
+              SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter(iter))
+          }
+      }
+
+      impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
+          fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
+              SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter(iter))
+          }
+      }
+
+      // Borrowed bit-ops
+      impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
+              if self.is_empty() || rhs.is_empty() {
+                  return SimpleBitset::zeros();
+              }
+              if self.is_all_fast() { return rhs.clone(); }
+              if rhs.is_all_fast() { return self.clone(); }
+              let rsb = &self.rsb & &rhs.rsb;
+              SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xA1)
+          }
+      }
+      impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
+              if self.is_all_fast() || rhs.is_all_fast() {
+                  return SimpleBitset::all();
+              }
+              if self.is_empty() { return rhs.clone(); }
+              if rhs.is_empty() { return self.clone(); }
+              let rsb = &self.rsb | &rhs.rsb;
+              SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xB1)
+          }
+      }
+
+      // Assign ops (borrowed RHS)
+      impl BitAndAssign<&SimpleBitset> for SimpleBitset {
+          fn bitand_assign(&mut self, rhs: &SimpleBitset) {
+              if self.is_empty() { return; }
+              if rhs.is_empty() {
+                  *self = SimpleBitset::zeros();
+                  return;
+              }
+              if rhs.is_all_fast() { return; }
+              if self.is_all_fast() {
+                  *self = rhs.clone();
+                  return;
+              }
+              self.rsb = &self.rsb & &rhs.rsb;
+              self.update_cached();
+          }
+      }
+      impl BitOrAssign<&SimpleBitset> for SimpleBitset {
+          fn bitor_assign(&mut self, rhs: &SimpleBitset) {
+              if self.is_all_fast() || rhs.is_all_fast() {
+                  *self = SimpleBitset::all();
+                  return;
+              }
+              if rhs.is_empty() { return; }
+              if self.is_empty() {
+                  *self = rhs.clone();
+                  return;
+              }
+              self.rsb |= &rhs.rsb;
+              self.update_cached();
+          }
+      }
+
+      // Owned fallbacks via borrowed ops
+      impl BitAnd<SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: SimpleBitset) -> Self::Output {
+              (&self) & (&rhs)
+          }
+      }
+      impl BitOr<SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: SimpleBitset) -> Self::Output {
+              (&self) | (&rhs)
+          }
+      }
+      impl<'a> BitAnd<&'a SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
+              (&self) & rhs
+          }
+      }
+      impl<'a> BitOr<&'a SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
+              (&self) | rhs
+          }
+      }
+      impl<'a> BitAnd<SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitand(self, rhs: SimpleBitset) -> Self::Output {
+              self & (&rhs)
+          }
+      }
+      impl<'a> BitOr<SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn bitor(self, rhs: SimpleBitset) -> Self::Output {
+              self | (&rhs)
+          }
+      }
+
+      impl SubAssign<&SimpleBitset> for SimpleBitset {
+          fn sub_assign(&mut self, rhs: &SimpleBitset) {
+              if self.is_empty() || rhs.is_empty() { return; }
+              if self.is_all_fast() && rhs.is_all_fast() {
+                  *self = SimpleBitset::zeros();
+                  return;
+              }
+              self.rsb = &self.rsb - &rhs.rsb;
+              self.update_cached();
+          }
+      }
+      impl SubAssign<SimpleBitset> for SimpleBitset {
+          fn sub_assign(&mut self, rhs: SimpleBitset) {
+              *self -= &rhs
+          }
+      }
+      impl Sub<SimpleBitset> for SimpleBitset {
+          type Output = SimpleBitset;
+          fn sub(self, rhs: SimpleBitset) -> Self::Output {
+              (&self) - (&rhs)
+          }
+      }
+      impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
+          type Output = SimpleBitset;
+          fn sub(self, rhs: &'a SimpleBitset) -> Self::Output {
+              if self.is_empty() || rhs.is_empty() { return self.clone(); }
+              if self.is_all_fast() && rhs.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &self.rsb - &rhs.rsb;
+              SimpleBitset::with_new_rsb_and_op(self, rhs, rsb, 0xC1)
+          }
+      }
+
+      impl Not for SimpleBitset {
+          type Output = SimpleBitset;
+          fn not(self) -> Self::Output {
+              if self.is_empty() { return SimpleBitset::all(); }
+              if self.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &universe_rsb() - &self.rsb;
+              SimpleBitset::with_new_rsb_unary(&self, rsb, 0xD1)
+          }
+      }
+      impl Not for &SimpleBitset {
+          type Output = SimpleBitset;
+          fn not(self) -> Self::Output {
+              if self.is_empty() { return SimpleBitset::all(); }
+              if self.is_all_fast() { return SimpleBitset::zeros(); }
+              let rsb = &universe_rsb() - &self.rsb;
+              SimpleBitset::with_new_rsb_unary(self, rsb, 0xD2)
+          }
+      }
+
+      ```
+    metadata:
+      filename: src/precompute4/weighted_automata/bitset.rs
   - user: |-
       ```rust "src/precompute4/weighted_automata/dwa.rs"
       // src/precompute4/weighted_automata/dwa.rs
@@ -9091,130 +10143,6 @@ messages:
       filename: /Users/isaacbreen/Projects2/obsidian/grammars25/Mohri - Weighted Automata
         Algorithms.md
   - user: |-
-      ```rust "src/precompute4/weighted_automata/test_determinization.rs"
-      #![cfg(test)]
-
-      use super::*;
-
-      #[test]
-      fn test_determinize_simple_divergence() {
-          let mut nwa = NWA::new(); // new() creates a start state 0
-          nwa.states.0.clear(); // but we'll manage states manually for clarity
-
-          // NWA for "ac" with weight A1 (0)
-          let s0 = nwa.states.add_state();
-          let s1 = nwa.states.add_state();
-          let s2 = nwa.states.add_state();
-          nwa.add_transition(s0, 'a' as i16, s1, Weight::all()).unwrap();
-          nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
-          nwa.states[s2].final_weight = Some(Weight::from_item(0));
-
-          // NWA for "bc" with weight A2 (1)
-          let s3 = nwa.states.add_state();
-          let s4 = nwa.states.add_state();
-          let s5 = nwa.states.add_state();
-          nwa.add_transition(s3, 'b' as i16, s4, Weight::all()).unwrap();
-          nwa.add_transition(s4, 'c' as i16, s5, Weight::all()).unwrap();
-          nwa.states[s5].final_weight = Some(Weight::from_item(1));
-
-          // Union them with a new start state
-          let start = nwa.states.add_state();
-          nwa.add_epsilon(start, s0, Weight::all());
-          nwa.add_epsilon(start, s3, Weight::all());
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-          println!("{}", nwa);
-          println!("{}", dwa);
-
-          // Check accepted words and their weights.
-          assert_eq!(
-              dwa.eval_word_weight(&['a' as i16, 'c' as i16]),
-              Weight::from_item(0)
-          );
-          assert_eq!(
-              dwa.eval_word_weight(&['b' as i16, 'c' as i16]),
-              Weight::from_item(1)
-          );
-          assert!(dwa.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
-          assert!(dwa.eval_word_weight(&[]).is_empty());
-
-          // An efficient DWA should merge states with similar future behavior,
-          // resulting in a small automaton.
-          // Allowing for a sink state, we assert a small number.
-          assert!(
-              dwa.states.len() <= 4,
-              "Expected a small number of states for simple divergence, got {}",
-              dwa.states.len()
-          );
-      }
-
-      #[test]
-      fn test_determinize_hypercube_catastrophe() {
-          const N: usize = 4;
-          let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
-          let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
-
-          let mut nwa = NWA::new();
-          nwa.states.0.clear();
-
-          let mut component_starts = vec![];
-
-          for i in 0..N {
-              // L_i = words without alphabet[i]
-              let s = nwa.states.add_state();
-              component_starts.push(s);
-              nwa.states[s].final_weight = Some(atoms[i].clone());
-
-              for j in 0..N {
-                  if i == j {
-                      continue;
-                  }
-                  nwa.add_transition(s, alphabet[j], s, Weight::all()).unwrap();
-              }
-          }
-
-          let start = nwa.states.add_state();
-          for &s_comp in &component_starts {
-              nwa.add_epsilon(start, s_comp, Weight::all());
-          }
-          nwa.body.start_state = start;
-
-          let dwa = nwa.determinize_to_dwa();
-
-          // An efficient DWA construction should avoid the 2^N state explosion by
-          // encoding the history of seen characters within the accumulated weight,
-          // not in the state space.
-          assert!(
-              dwa.states.len() <= 2,
-              "Expected a very small DWA (1-2 states) for hypercube, but got {} states. State explosion was not avoided.",
-              dwa.states.len()
-          );
-
-          // Test some words
-          // word "ac" (chars 0 and 2) -> should not contain 1 or 3 ('b' or 'd'). Belongs to L1 and L3.
-          // Weight should be A1 | A3.
-          let word_ac = vec![alphabet[0], alphabet[2]];
-          let expected_weight_ac = &atoms[1] | &atoms[3];
-          assert_eq!(dwa.eval_word_weight(&word_ac), expected_weight_ac);
-
-          // word "abcd" -> contains all symbols. Should be rejected by all components.
-          let word_all = alphabet.clone();
-          assert!(dwa.eval_word_weight(&word_all).is_empty());
-
-          // empty word -> belongs to all languages.
-          let empty_word = vec![];
-          let mut expected_weight_empty = Weight::zeros();
-          for atom in &atoms {
-              expected_weight_empty |= atom;
-          }
-          assert_eq!(dwa.eval_word_weight(&empty_word), expected_weight_empty);
-      }
-      ```
-    metadata:
-      filename: src/precompute4/weighted_automata/test_determinization.rs
-  - user: |-
       ```rust "src/precompute4/weighted_automata/determinization.rs"
       // src/precompute4/weighted_automata/determinization.rs
       //
@@ -9239,13 +10167,6 @@ messages:
       //   this equals
       //       ⋁_q ( B_q ∧ w(q,a1) ∧ ... ∧ w(q,ak) )
       //   which is exactly the NWA semantics for this class (each q "reads" the sequence in-place).
-      //
-      // Implementation notes about state identity canonicalization:
-      //   - Prior versions keyed determinized states by String built from Weight's Display.
-      //     If Weight's Display is non-canonical (e.g., unsorted iteration), equal states got
-      //     distinct keys, causing non-termination on cyclic inputs.
-      //   - We fix this by using Weight::canonical_string(), which is deterministic,
-      //     when building closure keys.
 
       #![allow(dead_code)]
       #![allow(clippy::needless_borrow)]
@@ -9273,29 +10194,6 @@ messages:
       }
       fn is_zero(w: &Weight) -> bool {
           w.is_empty()
-      }
-
-      // Canonical key for Weight (deterministic)
-      fn weight_key(w: &Weight) -> String {
-          w.to_string()
-      }
-
-      // Create a canonical key for a weighted subset to identify states in a HashMap.
-      fn subset_key(sub: &WeightedSubset) -> String {
-          let mut s = String::new();
-          for (sid, w) in sub {
-              s.push_str(&format!("{}#{};", sid, weight_key(w)));
-          }
-          s
-      }
-
-      // Create a canonical key for a closure map used to identify determinized states.
-      fn closure_key(cl: &ClosureMap) -> String {
-          let mut s = String::new();
-          for (sid, w) in cl {
-              s.push_str(&format!("{}#{};", sid, weight_key(w)));
-          }
-          s
       }
 
       // Epsilon-closure from a weighted subset:
@@ -9434,12 +10332,8 @@ messages:
           nwa: &NWA,
           closure: &ClosureMap,
       ) -> (Option<Weight>, Option<Weight>) {
-          let mut entry = Weight::zeros();
-          for w in closure.values() {
-              entry = entry | w.clone();
-          }
-          let entry_opt = if entry.is_empty() { None } else { Some(entry) };
-
+          // State-entry weights are not part of Mohri's determinization algorithm.
+          let entry_opt = None;
           let mut finalw = Weight::zeros();
           for (sid, cw) in closure {
               if let Some(fw) = &nwa.states[*sid].final_weight {
@@ -9457,10 +10351,10 @@ messages:
 
       struct Determinizer<'a> {
           nwa: &'a NWA,
-          seen: HashMap<String, usize>,  // closure key -> DWA state id (canonical, deterministic)
-          subsets: Vec<WeightedSubset>,  // for each DWA id, its (raw) weighted subset
-          closures: Vec<ClosureMap>,     // for each DWA id, its ε-closure
-          queue: VecDeque<usize>,        // worklist of DWA ids
+          seen: HashMap<ClosureMap, usize>,
+          subsets: Vec<WeightedSubset>,
+          closures: Vec<ClosureMap>,
+          queue: VecDeque<usize>,
           dwa: DWA,
           mp: Option<MultiProgress>,
       }
@@ -9468,9 +10362,8 @@ messages:
       impl<'a> Determinizer<'a> {
           fn new(nwa: &'a NWA, mp: Option<MultiProgress>) -> Self {
               let mut dwa = DWA::new();
-              // We'll manage our own state indexing; clear the auto-created state.
               dwa.states.0.clear();
-              dwa.body.start_state = 0; // placeholder; will be reset after first register_state
+              dwa.body.start_state = 0;
               Determinizer {
                   nwa,
                   seen: HashMap::new(),
@@ -9488,20 +10381,22 @@ messages:
               for (sid, w) in subset {
                   if !is_zero(&w) { subset_clean.insert(sid, w); }
               }
-              // 2) Compute ε-closure; determinized state identity depends on closure
+              // 2) Compute ε-closure; determinized state identity depends on closure.
               let closure = epsilon_closure(&self.nwa.states, &subset_clean);
-              let key = closure_key(&closure);
-              if let Some(&id) = self.seen.get(&key) { return id; }
 
-              // 3) Create brand-new DWA state for this closure
+              // Use the closure object itself as the key.
+              if let Some(&id) = self.seen.get(&closure) {
+                  return id;
+              }
+
+              // 3) Create brand-new DWA state for this closure.
               let id = self.dwa.add_state();
 
-              // 4) Install state-entry and final weights from closure
-              let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
-              if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }
+              // 4) Install final weight from closure.
+              let (_entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
               if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
 
-              self.seen.insert(key, id);
+              self.seen.insert(closure.clone(), id);
               self.subsets.push(subset_clean);
               self.closures.push(closure);
               self.queue.push_back(id);
@@ -9528,14 +10423,12 @@ messages:
                   None
               };
 
-              // exception labels are all explicit labels and default exceptions visible in closure
               let exception_labels = collect_exception_labels(&self.nwa.states, closure);
 
               if let Some(pb) = &labels_pb {
                   pb.set_length(exception_labels.len() as u64);
               }
 
-              // default "others"
               let others_subset = next_subset_for_others(&self.nwa.states, closure);
               let others_weight = union_over_values(&others_subset);
 
@@ -9557,7 +10450,6 @@ messages:
                   pb.set_position(0);
               }
 
-              // install default if non-empty
               let mut default_target_id: Option<usize> = None;
               if !others_subset.is_empty() && !is_zero(&others_weight) {
                   let to_id = self.register_state(others_subset);
@@ -9600,10 +10492,7 @@ messages:
           }
 
           let start = nwa.body.start_state;
-          if !nwa.states[start].transitions.is_empty() {
-              return None;
-          }
-          if !nwa.states[start].default.is_empty() {
+          if !nwa.states[start].transitions.is_empty() || !nwa.states[start].default.is_empty() {
               return None;
           }
 
@@ -9618,11 +10507,7 @@ messages:
               }
               let st = &nwa.states[*sid];
 
-              // singleton: no ε-out, no defaults, all labeled loops to itself
-              if !st.epsilons.is_empty() {
-                  return None;
-              }
-              if !st.default.is_empty() {
+              if !st.epsilons.is_empty() || !st.default.is_empty() {
                   return None;
               }
               for (_lbl, vec_targets) in st.transitions.iter() {
@@ -9645,7 +10530,6 @@ messages:
               return None;
           }
 
-          // Pairwise disjointness of base weights
           for i in 0..comps.len() {
               for j in (i + 1)..comps.len() {
                   if !(comps[i].1.clone() & comps[j].1.clone()).is_empty() {
@@ -9654,7 +10538,6 @@ messages:
               }
           }
 
-          // Build per-label weights W[l] = ⋁_q ( base_q ∧ ⋁_{q -l-> q} w_edge )
           let mut label_to_weight: BTreeMap<i16, Weight> = BTreeMap::new();
           for (sid, base) in &comps {
               let st = &nwa.states[*sid];
@@ -9673,7 +10556,6 @@ messages:
               }
           }
 
-          // Single DWA state with final F = ⋁ base_q and loops with weights W[l].
           let mut final_union = Weight::zeros();
           for (_sid, base) in &comps {
               final_union = final_union | base.clone();
@@ -9696,7 +10578,6 @@ messages:
       impl NWA {
           /// Determinize the subgraph reachable from `self.body.start_state` into a DWA.
           pub fn determinize_to_dwa(&self) -> DWA {
-              // Fast-path: avoid blow-up for "singleton-loop union" cases
               if let Some(dwa) = try_build_singleton_loop_union(self) {
                   return dwa;
               }
@@ -9720,7 +10601,6 @@ messages:
 
               let mut det = Determinizer::new(self, Some(mp));
 
-              // Start subset: { start_state -> 1 (Weight::all) }.
               let mut start_subset: WeightedSubset = WeightedSubset::new();
               start_subset.insert(self.body.start_state, Weight::all());
               let start_id = det.register_state(start_subset);
@@ -9741,7 +10621,6 @@ messages:
               det.dwa
           }
       }
-
       ```
     metadata:
       filename: src/precompute4/weighted_automata/determinization.rs
@@ -9757,7 +10636,10 @@ messages:
       AND it DOES terminate for NWA of similar size ot this - just 5k states, and they shouldn't be that complicated.
 
       Take my word for it: We're doing something wrong that's causing it to fail to terminate.
-      Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your output.
+
+      Here's what I want you to do. Don't try fix the problem. Instead, if we hit say 10k steps here, dump the input NWA to file and panic. Dump it in a way that makes it easy to analyse externally.
+      Then, write a Python script that loads it. Print some useful stats. I'll use this script in a REPL for my own analysis.
+      Do this.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9777,105 +10659,385 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. It appears you're encountering a state explosion problem during determinization, which manifests as a non-terminating process. This is a classic issue in automata theory, and in the context of weighted automata, it often points to subtle issues in how states are identified or how weights are handled.
+      Of course. Here are the instructions to add debugging output to your non-terminating determinization process, followed by the git diffs and the Python analysis script.
 
-      Based on a mathematical analysis of the provided code and the principles of weighted automata determinization from Mohri's work, I have two primary hypotheses for the non-termination:
+      ### Step-by-step Instructions
 
-      1.  **Non-Canonical State Keys:** The determinization algorithm relies on uniquely identifying states to know when it has encountered a previously seen configuration. A state in the determinized automaton corresponds to an epsilon-closure of a weighted subset of NWA states. Your code generates a string key for these closures to store them in a `HashMap`. If the string representation of a `Weight` (your bitset) is not canonical (i.e., two equal bitsets can produce different strings, perhaps due to unstable iteration order), the algorithm will fail to recognize equivalent states. For a cyclic NWA, this can lead to generating an infinite sequence of "new" DWA states that are actually duplicates, causing the process to never terminate. The implementation note in `determinization.rs` suggests awareness of this issue, but the code does not seem to reflect the fix.
+      1.  **Enable Serde for `range-set-blaze` in `Cargo.toml`**
 
-      2.  **Incorrect Use of State-Entry Weights:** The standard algorithm for determinizing an NWA into a DWA produces weights on transitions and final states only. Your implementation also calculates and assigns a `state_weight` to each DWA state. This is conceptually incorrect. The information about the weighted subset is fully captured by the DWA's state graph topology (i.e., which state you are in). Adding a `state_weight` that is also derived from this subset information is, at best, redundant. While the idempotency of your bitset intersection (`&`) might mask incorrect results in evaluation, this deviation from the proven algorithm complicates the semantics and could contribute to the state explosion by encoding path history into state properties in an unintended way.
+          In your `Cargo.toml` file, find the line for the `range-set-blaze` dependency and add the `serde` feature to it. This is necessary to allow `SimpleBitset` (which uses `RangeSetBlaze`) to be serialized.
 
-      I will provide fixes for both of these issues. The first is critical for termination. The second is a crucial correction to align the implementation with the standard, proven algorithm, ensuring correctness and simplifying the resulting automaton.
+          ```toml
+          range-set-blaze = { version = "0.3.0", features = ["serde"] }
+          ```
 
-      Here are the step-by-step instructions to apply the fixes:
+      2.  **Make `SimpleBitset` Serializable in `src/precompute4/weighted_automata/bitset.rs`**
 
-      ### Step-by-Step Instructions
+          To allow `Weight` (which is a `SimpleBitset`) to be serialized, you need to implement `serde::Serialize` and `serde::Deserialize`. We'll do this by serializing the underlying `RangeSetBlaze` and reconstructing the cached fields upon deserialization.
 
-      #### File: `src/precompute4/weighted_automata/determinization.rs`
+          a. Add the necessary `serde` imports at the top of the file:
+          ```rust
+          use serde::{Deserialize, Deserializer, Serialize, Serializer};
+          ```
 
-      1.  **Make `Weight` Keys Canonical:**
-          *   Locate the `weight_key` function.
-          *   Replace its current implementation (`w.to_string()`) with a new implementation that generates a canonical string. This is done by iterating over the elements of the `Weight` bitset, collecting them into a `Vec`, sorting the `Vec`, and then formatting it to a string. This ensures that any two `Weight` objects representing the same set of items will always produce the same key.
-          *   *Note: This change assumes that `Weight` (which is a `SimpleBitset`) provides an `iter()` method that yields its items. This is a standard feature for bitset implementations.*
+          b. Add the following `impl` blocks at the end of the file:
+          ```rust
+          impl Serialize for SimpleBitset {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: Serializer,
+              {
+                  self.rsb.serialize(serializer)
+              }
+          }
 
-      2.  **Remove State-Entry Weight Calculation:**
-          *   Locate the `compute_state_and_final_weights` function.
-          *   Remove the block of code that calculates the `entry` weight by unioning all weights in the closure.
-          *   Modify the function to always set `entry_opt` to `None`.
+          impl<'de> Deserialize<'de> for SimpleBitset {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: Deserializer<'de>,
+              {
+                  let rsb = RangeSetBlaze::<usize>::deserialize(deserializer)?;
+                  Ok(SimpleBitset::from_rsb_inner(rsb))
+              }
+          }
+          ```
 
-      3.  **Remove State-Entry Weight Assignment:**
-          *   Locate the `register_state` function.
-          *   Find the section commented as `// 4) Install state-entry and final weights from closure`.
-          *   Remove the line `if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }`.
-          *   You can also rename `entry_opt` to `_entry_opt` in the preceding line to indicate it is intentionally unused.
+      3.  **Add Serde Derives to NWA Structs in `src/precompute4/weighted_automata/nwa.rs`**
 
-      These changes will ensure that DWA states are correctly identified and that the generated DWA adheres to the standard model without superfluous state-entry weights.
+          Now, make the main NWA data structures serializable by adding `#[derive(Serialize, Deserialize)]`.
+
+          a. Add the `serde` import at the top of the file:
+          ```rust
+          use serde::{Deserialize, Serialize};
+          ```
+
+          b. Add `Serialize, Deserialize` to the `derive` macros for the following structs:
+          *   `NWADefaultTransition`
+          *   `NWAState`
+          *   `NWAStates`
+          *   `NWABody`
+          *   `NWA`
+
+          For example, `NWAState` will look like this:
+          ```rust
+          #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+          pub struct NWAState {
+              // ...
+          }
+          ```
+
+      4.  **Add the State Limit and Dump Logic in `src/precompute4/weighted_automata/determinization.rs`**
+
+          This is the core change. We'll modify the `determinize_to_dwa` function to check the number of states created. If it exceeds 10,000, we'll dump the input NWA to a JSON file and panic.
+
+          a. Add an import for `chrono` at the top of the file to generate a timestamped filename:
+          ```rust
+          use chrono::Local;
+          ```
+
+          b. Inside the `determinize_to_dwa` function, define a state limit constant:
+          ```rust
+          const STATE_LIMIT: usize = 10000;
+          ```
+
+          c. Inside the `while let Some(sid) = det.queue.pop_front()` loop, add the check, dump, and panic logic:
+          ```rust
+          if det.seen.len() > STATE_LIMIT {
+              let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+              let filename = format!("nwa_dump_{}.json", timestamp);
+              eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+              let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+              serde_json::to_writer_pretty(f, self).expect("Unable to write NWA to file");
+              panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
+          }
+          ```
+
+      5.  **Create the Python Analysis Script**
+
+          Create a new file named `analyze_nwa.py` in your project's root directory and add the following content. This script will load the dumped JSON file and print useful statistics about the NWA.
+
+          ```python
+          import json
+          import sys
+          from collections import defaultdict
+
+          def analyze_nwa(data):
+              """Analyzes the NWA data and prints statistics."""
+              states = data.get('states', {}).get('0', [])
+              body = data.get('body', {})
+              start_state = body.get('start_state')
+
+              num_states = len(states)
+              print(f"NWA Analysis:")
+              print(f"  - Total states: {num_states}")
+              print(f"  - Start state: {start_state}")
+
+              if not states:
+                  return
+
+              num_final_states = 0
+              total_epsilon_transitions = 0
+              total_labeled_transitions = 0
+              total_default_transitions = 0
+              
+              state_degrees = defaultdict(lambda: {'in': 0, 'out': 0})
+
+              for i, state in enumerate(states):
+                  if state.get('final_weight') is not None:
+                      num_final_states += 1
+                  
+                  epsilons = state.get('epsilons', [])
+                  total_epsilon_transitions += len(epsilons)
+                  state_degrees[i]['out'] += len(epsilons)
+                  for target, _ in epsilons:
+                      state_degrees[target]['in'] += 1
+
+                  transitions = state.get('transitions', {})
+                  labeled_count = sum(len(targets) for targets in transitions.values())
+                  total_labeled_transitions += labeled_count
+                  state_degrees[i]['out'] += labeled_count
+                  for _, targets in transitions.items():
+                      for target, _ in targets:
+                          state_degrees[target]['in'] += 1
+
+                  defaults = state.get('default', [])
+                  total_default_transitions += len(defaults)
+                  state_degrees[i]['out'] += len(defaults)
+                  for d in defaults:
+                      state_degrees[d['target']]['in'] += 1
+
+              print("\nTransitions:")
+              print(f"  - Epsilon transitions: {total_epsilon_transitions}")
+              print(f"  - Labeled transitions: {total_labeled_transitions}")
+              print(f"  - Default transitions: {total_default_transitions}")
+              print(f"  - Total transitions: {total_epsilon_transitions + total_labeled_transitions + total_default_transitions}")
+
+              print(f"\nStates:")
+              print(f"  - Final states: {num_final_states}")
+              
+              avg_out_degree = sum(d['out'] for d in state_degrees.values()) / num_states if num_states > 0 else 0
+              avg_in_degree = sum(d['in'] for d in state_degrees.values()) / num_states if num_states > 0 else 0
+              print(f"  - Average out-degree: {avg_out_degree:.2f}")
+              print(f"  - Average in-degree: {avg_in_degree:.2f}")
+
+              # Find states with high degree
+              sorted_out_degree = sorted(state_degrees.items(), key=lambda item: item[1]['out'], reverse=True)
+              print("\nTop 5 states by out-degree:")
+              for sid, degrees in sorted_out_degree[:5]:
+                  print(f"  - State {sid}: {degrees['out']} outgoing")
+
+              sorted_in_degree = sorted(state_degrees.items(), key=lambda item: item[1]['in'], reverse=True)
+              print("\nTop 5 states by in-degree:")
+              for sid, degrees in sorted_in_degree[:5]:
+                  print(f"  - State {sid}: {degrees['in']} incoming")
+
+
+          def main():
+              if len(sys.argv) != 2:
+                  print(f"Usage: python {sys.argv[0]} <nwa_dump.json>")
+                  sys.exit(1)
+
+              filepath = sys.argv[1]
+              try:
+                  with open(filepath, 'r') as f:
+                      nwa_data = json.load(f)
+                  analyze_nwa(nwa_data)
+              except FileNotFoundError:
+                  print(f"Error: File not found at {filepath}")
+                  sys.exit(1)
+              except json.JSONDecodeError:
+                  print(f"Error: Could not decode JSON from {filepath}")
+                  sys.exit(1)
+
+          if __name__ == "__main__":
+              main()
+          ```
 
       ### Git Diffs
 
-      Here are the git diffs corresponding to the instructions above.
+      Here are the git diffs corresponding to the changes described above.
 
       ```diff
+      diff --git a/Cargo.toml b/Cargo.toml
+      --- a/Cargo.toml
+      +++ b/Cargo.toml
+      @@ -10,7 +10,7 @@
+       serde = { version = "1.0.219", features = ["derive"] }
+       clap = { version = "4.5.4", features = ["derive"] }
+       serde_json = "1.0.107"
+       chrono = "0.4.41"
+       reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      -range-set-blaze = { version = "0.3.0" }
+      +range-set-blaze = { version = "0.3.0", features = ["serde"] }
+       
+       # Add the derive macro crate
+       json_convertible_derive = { path = "json_convertible_derive" }
+
+      ```
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/bitset.rs b/src/precompute4/weighted_automata/bitset.rs
+      --- a/src/precompute4/weighted_automata/bitset.rs
+      +++ b/src/precompute4/weighted_automata/bitset.rs
+      @@ -2,6 +2,7 @@
+       #![allow(clippy::needless_borrow)]
+       
+       use range_set_blaze::RangeSetBlaze;
+      +use serde::{Deserialize, Deserializer, Serialize, Serializer};
+       use std::fmt::{Debug, Display, Formatter};
+       use std::hash::{Hash, Hasher};
+       use std::iter::FromIterator;
+      @@ -442,3 +443,22 @@
+               SimpleBitset::with_new_rsb_unary(self, rsb, 0xD2)
+           }
+       }
+      +
+      +impl Serialize for SimpleBitset {
+      +    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+      +    where
+      +        S: Serializer,
+      +    {
+      +        self.rsb.serialize(serializer)
+      +    }
+      +}
+      +
+      +impl<'de> Deserialize<'de> for SimpleBitset {
+      +    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+      +    where
+      +        D: Deserializer<'de>,
+      +    {
+      +        let rsb = RangeSetBlaze::<usize>::deserialize(deserializer)?;
+      +        Ok(SimpleBitset::from_rsb_inner(rsb))
+      +    }
+      +}
+
+      ```
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
       --- a/src/precompute4/weighted_automata/determinization.rs
       +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -50,7 +50,12 @@
+      @@ -18,6 +18,7 @@
+       #![allow(dead_code)]
+       #![allow(clippy::needless_borrow)]
        
-       // Canonical key for Weight (deterministic)
-       fn weight_key(w: &Weight) -> String {
-      -    w.to_string()
-      +    // Using w.to_string() is incorrect if the underlying implementation (e.g.,
-      +    // iterating over a hash map) is not deterministic. A non-canonical key
-      +    // prevents the determinizer from recognizing equivalent states, leading to
-      +    // state explosion and non-termination for cyclic NWAs.
-      +    let mut items: Vec<_> = w.iter().collect();
-      +    items.sort_unstable();
-      +    format!("{:?}", items)
+      +use chrono::Local;
+       use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+       
+      @@ -411,6 +412,8 @@
+                   return dwa;
+               }
+       
+      +        const STATE_LIMIT: usize = 10000;
+      +
+               eprintln!(
+                   "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
+               );
+      @@ -435,6 +438,15 @@
+       
+               let mut processed_count = 0;
+               while let Some(sid) = det.queue.pop_front() {
+      +            if det.seen.len() > STATE_LIMIT {
+      +                let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+      +                let filename = format!("nwa_dump_{}.json", timestamp);
+      +                eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+      +                let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+      +                serde_json::to_writer_pretty(f, self).expect("Unable to write NWA to file");
+      +                panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
+      +            }
+      +
+                   let total_states = det.seen.len();
+                   main_pb.set_length(total_states as u64);
+                   main_pb.set_position(processed_count as u64);
+
+      ```
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/nwa.rs b/src/precompute4/weighted_automata/nwa.rs
+      --- a/src/precompute4/weighted_automata/nwa.rs
+      +++ b/src/precompute4/weighted_automata/nwa.rs
+      @@ -2,6 +2,7 @@
+       #![allow(clippy::needless_borrow)]
+       
+       use super::common::{format_i16_char, NWAStateID, Weight};
+      +use serde::{Deserialize, Serialize};
+       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+       use std::fmt::{self, Display, Formatter};
+       use std::ops::{Index, IndexMut};
+      @@ -19,7 +20,7 @@
        }
        
-       // Create a canonical key for a weighted subset to identify states in a HashMap.
-      @@ -213,13 +218,12 @@
-           nwa: &NWA,
-           closure: &ClosureMap,
-       ) -> (Option<Weight>, Option<Weight>) {
-      -    let mut entry = Weight::zeros();
-      -    for w in closure.values() {
-      -        entry = entry | w.clone();
-      -    }
-      -    let entry_opt = if entry.is_empty() { None } else { Some(entry) };
-      -
-      +    // State-entry weights are not part of Mohri's determinization algorithm for
-      +    // standard weighted automata. Their inclusion was conceptually incorrect and
-      +    // could interfere with the DWA's semantics, even if idempotent operations
-      +    // masked immediate issues. The correct approach is to encode all necessary
-      +    // information in the DWA's state transitions and final weights.
-      +    let entry_opt = None;
-           let mut finalw = Weight::zeros();
-           for (sid, cw) in closure {
-               if let Some(fw) = &nwa.states[*sid].final_weight {
-      @@ -263,9 +267,9 @@
-               let id = self.dwa.add_state();
+       /// A default transition in an NWA. It is taken for any symbol that is NOT in its `exceptions` set.
+      -#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+      +#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+       pub struct NWADefaultTransition {
+           pub target: NWAStateID,
+           pub weight: Weight,
+      @@ -28,7 +29,7 @@
+       /// - Non-epsilon transitions: unique target per input symbol.
+       /// - Each transition carries a weight (Weight), which is intersected along the path; final states
+       ///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
+      -#[derive(Clone, Debug, Default, PartialEq, Eq)]
+      +#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+       pub struct NWAState {
+           pub final_weight: Option<Weight>,
+           /// Non-epsilon transitions: multiple targets per input symbol are allowed.
+      @@ -40,7 +41,7 @@
+           pub default: Vec<NWADefaultTransition>,
+       }
        
-               // 4) Install state-entry and final weights from closure
-      -        let (entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
-      -        if let Some(w) = entry_opt { let _ = self.dwa.set_state_weight(id, w); }
-      +        // State-entry weights are not used in the standard determinization algorithm.
-      +        let (_entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
-               if let Some(w) = final_opt { let _ = self.dwa.set_final_weight(id, w); }
+      -#[derive(Clone, Debug, Default)]
+      +#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+       pub struct NWAStates(pub Vec<NWAState>);
        
-               self.seen.insert(key, id);
+       impl NWAStates {
+      @@ -241,7 +242,7 @@
+           }
+       }
+       
+      -#[derive(Clone, Debug, Default, PartialEq, Eq)]
+      +#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+       pub struct NWABody {
+           pub start_state: NWAStateID,
+       }
+      @@ -252,7 +253,7 @@
+           }
+       }
+       
+      -#[derive(Clone, Debug, Default)]
+      +#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+       pub struct NWA {
+           pub states: NWAStates,
+           pub body: NWABody,
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 4 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: Cargo.toml
+      Applying patch to 'Cargo.toml' using custom patcher...
+      Successfully applied patch and wrote to Cargo.toml.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/precompute4/weighted_automata/bitset.rs
+      Applying patch to 'src/precompute4/weighted_automata/bitset.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/bitset.rs.
+
+      --- Processing Diff Block 3 ---
       Identified target file: src/precompute4/weighted_automata/determinization.rs
       Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+
+      --- Processing Diff Block 4 ---
+      Identified target file: src/precompute4/weighted_automata/nwa.rs
+      Applying patch to 'src/precompute4/weighted_automata/nwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/nwa.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix determinization non-termination by
-      ensuring canonical weight keys and removing unused state-entry weights"'
+  - user: 'Changes committed with message: "Implement NWA serialization and add determinization
+      safety break with state limit dump"'
     metadata:
 ...

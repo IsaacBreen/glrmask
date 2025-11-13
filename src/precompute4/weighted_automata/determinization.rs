@@ -25,6 +25,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
+use chrono::Local;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -436,6 +437,8 @@ impl NWA {
             return dwa;
         }
 
+        const STATE_LIMIT: usize = 10000;
+
         eprintln!(
             "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
         );
@@ -462,6 +465,15 @@ impl NWA {
 
         let mut processed_count = 0;
         while let Some(sid) = det.queue.pop_front() {
+            if det.seen.len() > STATE_LIMIT {
+                let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+                let filename = format!("nwa_dump_{}.json", timestamp);
+                eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+                let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+                serde_json::to_writer_pretty(f, self).expect("Unable to write NWA to file");
+                panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
+            }
+
             let total_states = det.seen.len();
             main_pb.set_length(total_states as u64);
             main_pb.set_position(processed_count as u64);

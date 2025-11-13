@@ -4,6 +4,7 @@
 #![allow(clippy::needless_borrow)]
 
 use range_set_blaze::RangeSetBlaze;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
@@ -387,5 +388,24 @@ impl Not for &SimpleBitset {
         if self.is_all_fast() { return SimpleBitset::zeros(); }
         let rsb = &universe_rsb() - &self.rsb;
         SimpleBitset::with_new_rsb_unary(self, rsb, 0xD2)
+    }
+}
+
+impl Serialize for SimpleBitset {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.rsb.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SimpleBitset {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let rsb = RangeSetBlaze::<usize>::deserialize(deserializer)?;
+        Ok(SimpleBitset::from_rsb_inner(rsb))
     }
 }
