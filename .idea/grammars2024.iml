@@ -13,7 +13,7 @@
       <excludeFolder url="file://$MODULE_DIR$/llm_logs" />
       <excludeFolder url="file://$MODULE_DIR$/python/leveled_rs/target" />
     </content>
-    <orderEntry type="jdk" jdkName="py312" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="py313" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
