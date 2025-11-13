@@ -195,6 +195,12 @@ def run_determinize_pass(args):
         print("\nFST Statistics:")
         print_fst_stats(fst, "Initial FST")
 
+        fst = fst.rm_epsilon()
+        print_fst_stats(fst, "After removing epsilons")
+
+        fst = fst.connect()
+        print_fst_stats(fst, "After connecting")
+
         print("\nMinimizing...")
         fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
         print_fst_stats(fst, "After minimizing")
