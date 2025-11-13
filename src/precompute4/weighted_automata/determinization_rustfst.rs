@@ -4,7 +4,7 @@ use super::common::{StateID, Weight};
 use super::dwa::{DWA, DWABuildError};
 use super::nwa::NWA;
 use crate::precompute4::weighted_automata::bitset::SimpleBitset;
-use crate::precompute4::weighted_automata::NWAStateID;
+use crate::precompute4::weighted_automata::{NWAStateID, DEFAULT_TRANSITION_SYMBOL};
 use anyhow::Result;
 use nom::IResult;
 use rustfst::NomCustomError;
