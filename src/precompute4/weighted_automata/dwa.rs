@@ -36,9 +36,19 @@ pub struct DWAState {
 
 impl DWAState {
     pub fn get_transition(&self, ch: i16) -> Option<(StateID, &Weight)> {
-        self.transitions.get(&ch).or_else(|| self.transitions.get(&DEFAULT_TRANSITION_SYMBOL)).and_then(|to| {
-            self.trans_weights.get(&ch).or_else(|| self.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL)).map(|w| (*to, w))
-        })
+        // First, try to find an explicit transition for the character.
+        if let Some(to) = self.transitions.get(&ch) {
+            if let Some(w) = self.trans_weights.get(&ch) {
+                return Some((*to, w));
+            }
+        }
+        // If not found, fall back to the default transition.
+        if let Some(to) = self.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+            if let Some(w) = self.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL) {
+                return Some((*to, w));
+            }
+        }
+        None
     }
 
     pub fn get_weight(&self, ch: i16) -> Option<&Weight> {
