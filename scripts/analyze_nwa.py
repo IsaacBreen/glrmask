@@ -95,25 +95,18 @@ def prune_to_final_state_transitions(transitions: set, final_state_ids: set) -> 
     If a (source, label) pair has a transition to a final state,
     remove all transitions for that pair that go to non-final states.
     """
-    return transitions
     source_label_to_dests = defaultdict(set)
     for source, label, dest, weight in transitions:
         source_label_to_dests[(source, label)].add(dest)
 
-    transitions_to_remove = set()
+    new_transitions = set()
     for (source, label), dests in source_label_to_dests.items():
-        has_final_dest = any(d in final_state_ids for d in dests)
-        if has_final_dest:
-            # Mark for removal all transitions from (source, label) to non-final states
-            for d in dests:
-                if d not in final_state_ids:
-                    # Find all transitions with this (source, label, dest) to remove
-                    for s, l, dest_to_remove, w in transitions:
-                        if s == source and l == label and dest_to_remove == d:
-                            transitions_to_remove.add((s, l, dest_to_remove, w))
-
-    if transitions_to_remove:
-        print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
+        has_final_dest = P.empty()
+        for dest in dests:
+            if dest in final_state_ids:
+                has_final_dest |= P.singleton(dest)
+        if not has_final_dest.empty:
+            ...
 
     return transitions - transitions_to_remove
 
