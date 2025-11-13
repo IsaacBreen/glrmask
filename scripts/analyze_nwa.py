@@ -12,9 +12,9 @@ class NWA:
     """
     def __init__(self, data):
         self.start_state = data['body']['start_state']
-        # The states are wrapped in a newtype struct in Rust, which serializes
-        # to a single-element list containing the actual list of states.
-        self.states = data['states'][0]
+        # The `NWAStates` newtype in Rust serializes transparently as its inner Vec,
+        # so `data['states']` is the list of state objects.
+        self.states = data['states']
 
     def num_states(self):
         return len(self.states)
