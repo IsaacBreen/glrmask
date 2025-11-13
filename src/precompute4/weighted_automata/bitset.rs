@@ -408,7 +408,8 @@ where
         } else {
             let mut state = serializer.serialize_struct("SimpleBitset", 2)?;
             state.serialize_field("is_all", &false)?;
-            state.serialize_field("rsb", &self.rsb)?;
+            let ranges: Vec<_> = self.rsb.ranges().collect();
+            state.serialize_field("ranges", &ranges)?;
             state.end()
         }
     }
@@ -425,7 +426,7 @@ impl<'de> Deserialize<'de> for SimpleBitset {
         #[serde(field_identifier, rename_all = "snake_case")]
         enum Field {
             IsAll,
-            Rsb,
+            Ranges,
         }
 
         struct SimpleBitsetVisitor;
@@ -442,7 +443,7 @@ impl<'de> Deserialize<'de> for SimpleBitset {
                 V: MapAccess<'de>,
             {
                 let mut is_all = None;
-                let mut rsb = None;
+                let mut ranges: Option<Vec<std::ops::RangeInclusive<usize>>> = None;
                 while let Some(key) = map.next_key()? {
                     match key {
                         Field::IsAll => {
@@ -451,30 +452,31 @@ impl<'de> Deserialize<'de> for SimpleBitset {
                             }
                             is_all = Some(map.next_value()?);
                         }
-                        Field::Rsb => {
-                            if rsb.is_some() {
-                                return Err(de::Error::duplicate_field("rsb"));
+                        Field::Ranges => {
+                            if ranges.is_some() {
+                                return Err(de::Error::duplicate_field("ranges"));
                             }
-                            rsb = Some(map.next_value()?);
+                            ranges = Some(map.next_value()?);
                         }
                     }
                 }
                 let is_all: bool = is_all.ok_or_else(|| de::Error::missing_field("is_all"))?;
                 if is_all {
-                    if rsb.is_some() {
+                    if ranges.is_some() {
                         return Err(de::Error::custom(
-                            "field `rsb` is not allowed when `is_all` is true",
+                            "field `ranges` is not allowed when `is_all` is true",
                         ));
                     }
                     Ok(SimpleBitset::all())
                 } else {
-                    let rsb = rsb.unwrap_or_else(RangeSetBlaze::new);
+                    let ranges = ranges.unwrap_or_else(Vec::new);
+                    let rsb = RangeSetBlaze::from_iter(ranges);
                     Ok(SimpleBitset::from_rsb_inner(rsb))
                 }
             }
         }
 
-        const FIELDS: &'static [&'static str] = &["is_all", "rsb"];
+        const FIELDS: &'static [&'static str] = &["is_all", "ranges"];
         deserializer.deserialize_struct("SimpleBitset", FIELDS, SimpleBitsetVisitor)
     }
 }
