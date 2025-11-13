@@ -61,6 +61,59 @@ def time_determinization_with_timeout(
         return False
 
 
+# --- NEW: Reusable Graph Analysis Function ---
+def analyze_graph_structure(G: nx.DiGraph, graph_name: str):
+    """
+    Performs and prints a detailed structural analysis of a given NetworkX graph.
+    """
+    print(f"\n--- Analyzing {graph_name} Graph Structure ---")
+
+    if G.number_of_nodes() == 0:
+        print("Graph is empty. No analysis to perform.")
+        return
+
+    print(f"The graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
+
+    # Degree Analysis
+    in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
+    out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
+
+    print("\nTop 10 States by In-Degree (Hubs for Fan-In):")
+    for node, degree in in_degrees[:10]:
+        print(f"  - State {node}: {degree} incoming edges")
+
+    print("\nTop 10 States by Out-Degree (Hubs for Fan-Out):")
+    for node, degree in out_degrees[:10]:
+        print(f"  - State {node}: {degree} outgoing edges")
+
+    # Weakly Connected Components (WCC)
+    wccs = list(nx.weakly_connected_components(G))
+    print(f"\nFound {len(wccs)} Weakly Connected Component(s).")
+    if wccs:
+        largest_wcc = max(wccs, key=len)
+        print(f"  - Largest WCC contains {len(largest_wcc)} nodes.")
+
+    # Strongly Connected Components (SCC)
+    sccs = sorted(list(nx.strongly_connected_components(G)), key=len)
+    print(f"\nFound {len(sccs)} Strongly Connected Component(s) (SCCs).")
+    if sccs:
+        scc_size_counts = Counter(len(c) for c in sccs)
+        print("  - SCC Size Distribution (Top 5 most common):")
+        for size, count in scc_size_counts.most_common(5):
+            print(f"    - {count} SCCs of size {size}")
+
+        print("\n  - Examples of Smallest SCCs:")
+        for i, scc in enumerate(sccs[:5]):
+            nodes = list(scc)
+            # Truncate for readability if a "small" SCC is still large
+            nodes_str = str(nodes[:10]) + ('...' if len(nodes) > 10 else '')
+            print(f"    - SCC #{i+1} (size {len(scc)}): {nodes_str}")
+
+        print("\n  - Summary of Largest SCCs:")
+        for i, scc in enumerate(sccs[-5:]):
+            print(f"    - Largest SCC #{5-i} has size {len(scc)}")
+
+
 # --- Main Analysis Logic ---
 
 if __name__ == "__main__":
@@ -89,6 +142,13 @@ if __name__ == "__main__":
                 all_transitions.add((i, label, target_id))
 
     print(f"Original NWA has {num_states} states and {len(all_transitions)} unique transitions.")
+
+    # --- NEW: Initial Graph Analysis ---
+    G_initial = nx.DiGraph()
+    G_initial.add_nodes_from(range(num_states))
+    G_initial.add_edges_from([(source, dest) for source, label, dest in all_transitions])
+    analyze_graph_structure(G_initial, "Initial")
+    # --- End of Initial Analysis ---
 
     print("\n--- Establishing Baseline Behavior ---")
     if not time_determinization_with_timeout(num_states, start_state, final_states, all_transitions, DETERMINIZE_TIMEOUT_S):
@@ -152,31 +212,19 @@ if __name__ == "__main__":
     print(f"Found a core of {len(essential_transitions)} transitions that causes the hang.")
 
     # --- Analyze the Final Core Graph using NetworkX ---
-    print("\n--- Analyzing Final Core Graph Structure ---")
+    G_final = nx.DiGraph()
+    G_final.add_nodes_from(range(num_states))
+    G_final.add_edges_from([(source, dest) for source, label, dest in essential_transitions])
 
-    G = nx.DiGraph()
-    G.add_nodes_from(range(num_states))
-    G.add_edges_from([(source, dest) for source, label, dest in essential_transitions])
+    # Call the reusable analysis function on the final graph
+    analyze_graph_structure(G_final, "Final Core")
 
-    in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
-    out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
-
-    print("\nTop 10 States by In-Degree (Hubs for Fan-In):")
-    for node, degree in in_degrees[:10]:
-        print(f"  - State {node}: {degree} incoming transitions")
-
-    print("\nTop 10 States by Out-Degree (Hubs for Fan-Out):")
-    for node, degree in out_degrees[:10]:
-        print(f"  - State {node}: {degree} outgoing transitions")
-
-    if G.number_of_nodes() > 0:
-        largest_wcc = max(nx.weakly_connected_components(G), key=len)
-        print(f"\nLargest Weakly Connected Component contains {len(largest_wcc)} of {G.number_of_nodes()} nodes.")
-
-        degree_sequence = sorted([d for n, d in G.degree()], reverse=True)
+    # Plotting is specific to the final, smaller graph
+    if G_final.number_of_nodes() > 0:
+        degree_sequence = sorted([d for n, d in G_final.degree()], reverse=True)
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
         ax1.plot(degree_sequence, 'b-', marker='o')
-        ax1.set_title("Degree Rank Plot")
+        ax1.set_title("Degree Rank Plot (Final Core Graph)")
         ax1.set_ylabel("Degree")
         ax1.set_xlabel("Rank")
         ax2.loglog(degree_sequence, 'b-', marker='o')
