@@ -351,6 +351,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                     apply_cancellations(&mut sub_nwa);
                     apply_finality_fixpoint(&mut sub_nwa);
                     remove_negative_transitions(&mut sub_nwa);
+                    prune_continuations_from_final_states(&mut sub_nwa);
                     sub_nwa.simplify();
 
                     // Determinize, simplify, convert back
