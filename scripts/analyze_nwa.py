@@ -92,24 +92,44 @@ def load_nwa_data(filepath: str) -> dict:
 
 def prune_to_final_state_transitions(transitions: set, final_state_ids: set) -> set:
     """
-    If a (source, label) pair has a transition to a final state,
-    remove all transitions for that pair that go to non-final states.
+    For each (source, label) pair, if there are transitions to final states,
+    prune the weights of transitions to non-final states by subtracting the
+    union of weights of transitions to final states.
     """
-    source_label_to_dests = defaultdict(set)
-    for source, label, dest, weight in transitions:
-        source_label_to_dests[(source, label)].add(dest)
+    source_label_to_transitions = defaultdict(list)
+    for t in transitions:
+        source, label, _, _ = t
+        source_label_to_transitions[(source, label)].append(t)
 
     new_transitions = set()
-    for (source, label), dests in source_label_to_dests.items():
-        has_final_dest = P.empty()
-        for dest in dests:
-            if dest in final_state_ids:
-                has_final_dest |= P.singleton(dest)
-        if not has_final_dest.empty:
-            ...
+    for (source, label), trans_group in source_label_to_transitions.items():
+        final_trans = []
+        non_final_trans = []
+        for t in trans_group:
+            if t[2] in final_state_ids:
+                final_trans.append(t)
+            else:
+                non_final_trans.append(t)
 
-    return transitions - transitions_to_remove
+        if not final_trans:
+            # No transitions to a final state for this (source, label), so keep all non-final ones.
+            new_transitions.update(non_final_trans)
+        else:
+            # Keep all transitions to final states as they are.
+            new_transitions.update(final_trans)
 
+            # Calculate the union of weights for all transitions to final states.
+            final_weight_union = P.empty()
+            for _, _, _, weight in final_trans:
+                final_weight_union |= weight
+
+            # For non-final transitions, subtract the final_weight_union and keep if not empty.
+            for s, l, d, w in non_final_trans:
+                new_weight = w - final_weight_union
+                if not new_weight.empty:
+                    new_transitions.add((s, l, d, new_weight))
+
+    return new_transitions
 
 def determinize_worker(
         num_states: int, start_state: int, final_states: dict, transitions: set, result_queue: multiprocessing.Queue

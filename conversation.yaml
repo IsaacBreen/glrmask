@@ -14113,6 +14113,7 @@ local_system:
       import multiprocessing
       import argparse
       from collections import Counter, defaultdict
+      import portion as P
 
       from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
       from rustfst.algorithms.minimize import MinimizeConfig
@@ -14135,6 +14136,27 @@ local_system:
           sys.exit(1)
 
 
+      # --- NEW: Weight Parsing Utilities ---
+
+      # Special object for the "ALL" weight, assuming non-negative integers like Rust's usize
+      WEIGHT_ALL = P.closed(0, P.inf)
+
+      def parse_weight(data):
+          """Parses NWA weight JSON into a portion.Interval object."""
+          if data is None:
+              return P.empty()
+          if isinstance(data, str) and data == "ALL":
+              return WEIGHT_ALL
+          
+          interval = P.empty()
+          if isinstance(data, list):
+              for item in data:
+                  if isinstance(item, int):
+                      interval |= P.singleton(item)
+                  elif isinstance(item, list) and len(item) == 2:
+                      interval |= P.closed(item[0], item[1])
+          return interval
+
       # --- CORE UTILITIES (unchanged) ---
 
       def load_nwa_data(filepath: str) -> dict:
@@ -14145,16 +14167,24 @@ local_system:
 
           num_states = len(nwa_data['states'])
           start_state = nwa_data['body']['start_state']
-          final_states = {i for i, s in enumerate(nwa_data['states']) if s.get('final_weight') is not None}
+          final_states = {
+              i: parse_weight(s.get('final_weight'))
+              for i, s in enumerate(nwa_data['states'])
+              if s.get('final_weight') is not None and not parse_weight(s.get('final_weight')).empty
+          }
 
           all_transitions = set()
           for i, state in enumerate(nwa_data['states']):
-              for target_id, _ in state.get('epsilons', []):
-                  all_transitions.add((i, 0, target_id))  # Epsilon is label 0
+              for target_id, weight_data in state.get('epsilons', []):
+                  weight = parse_weight(weight_data)
+                  if not weight.empty:
+                      all_transitions.add((i, 0, target_id, weight))  # Epsilon is label 0
               for label_str, targets in state.get('transitions', {}).items():
                   label = int(label_str)
-                  for target_id, _ in targets:
-                      all_transitions.add((i, label, target_id))
+                  for target_id, weight_data in targets:
+                      weight = parse_weight(weight_data)
+                      if not weight.empty:
+                          all_transitions.add((i, label, target_id, weight))
 
           print(f"Original NWA has {num_states} states and {len(all_transitions)} unique transitions.")
           return {
@@ -14166,46 +14196,42 @@ local_system:
           }
 
 
-      def prune_to_final_state_transitions(transitions: set, final_states: set) -> set:
+      def prune_to_final_state_transitions(transitions: set, final_state_ids: set) -> set:
           """
           If a (source, label) pair has a transition to a final state,
           remove all transitions for that pair that go to non-final states.
           """
-          # NOTE: Doesn't work when we ignore weights (which we currently do)
-          return transitions
           source_label_to_dests = defaultdict(set)
-          for source, label, dest in transitions:
+          for source, label, dest, weight in transitions:
               source_label_to_dests[(source, label)].add(dest)
 
-          transitions_to_remove = set()
+          new_transitions = set()
           for (source, label), dests in source_label_to_dests.items():
-              has_final_dest = any(d in final_states for d in dests)
-              if has_final_dest:
-                  removals_for_pair = {(source, label, d) for d in dests}
-                  # Remove the first transition to a final state found
-                  for d in dests:
-                      if d in final_states:
-                          removals_for_pair.remove((source, label, d))
-                          break
-                  transitions_to_remove.update(removals_for_pair)
+              has_final_dest = P.empty()
+              for dest in dests:
+                  if dest in final_state_ids:
+                      has_final_dest |= P.singleton(dest)
+              if not has_final_dest.empty:
+                  ...
 
-          if transitions_to_remove:
-              print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
 
-          return transitions - transitions_to_remove
 
 
       def determinize_worker(
-              num_states: int, start_state: int, final_states: set, transitions: set, result_queue: multiprocessing.Queue
+              num_states: int, start_state: int, final_states: dict, transitions: set, result_queue: multiprocessing.Queue
       ):
           try:
-              transitions = prune_to_final_state_transitions(transitions, final_states)
+              transitions = prune_to_final_state_transitions(transitions, final_states.keys())
               fst = VectorFst()
               state_map = {i: fst.add_state() for i in range(num_states)}
               fst.set_start(state_map[start_state])
-              for state_id in final_states:
+              for state_id, weight in final_states.items():
+                  # FIXME: Using 0.0 for final weight as rustfst-python only supports float weights.
+                  # The actual weight is `weight`.
                   fst.set_final(state_map[state_id], 0.0)
-              for source, label, dest in transitions:
+              for source, label, dest, weight in transitions:
+                  # FIXME: Using 0.0 for transition weight as rustfst-python only supports float weights.
+                  # The actual weight is `weight`.
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
               print("Minimizing")
               fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
@@ -14217,7 +14243,7 @@ local_system:
 
 
       def time_determinization_with_timeout(
-              num_states: int, start_state: int, final_states: set, transitions: set, timeout: float
+              num_states: int, start_state: int, final_states: dict, transitions: set, timeout: float
       ) -> bool:
           if not transitions: return False
           result_queue = multiprocessing.Queue()
@@ -14244,7 +14270,7 @@ local_system:
           num_edges = G.number_of_edges()  # Unique (src, dst) pairs
 
           num_transitions = len(nwa_data['transitions'])
-          epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
+          epsilon_transitions = sum(1 for _, l, _, _ in nwa_data['transitions'] if l == 0)
           symbol_transitions = num_transitions - epsilon_transitions
 
           print("\n--- NWA Structure ---")
@@ -14286,7 +14312,7 @@ local_system:
               return
 
           source_to_transitions = defaultdict(list)
-          for source, label, dest in transitions:
+          for source, label, dest, weight in transitions:
               source_to_transitions[source].append((label, dest))
           cycles_sccs.sort(key=len)
           print("\nExamples of Smallest Cycles with internal edges:")
@@ -14295,7 +14321,7 @@ local_system:
               scc_nodes = set(scc)
               print(f"    - Cycle #{i + 1} (size {len(scc_nodes)}): Nodes {list(scc_nodes)}")
               internal_edges = [
-                  f"{src} --({lbl})--> {dst}"
+                  f"{src} --({lbl})--> {dst}" # Note: weight is ignored for brevity
                   for src in scc_nodes if src in source_to_transitions
                   for lbl, dst in source_to_transitions[src] if dst in scc_nodes
               ]
@@ -14319,7 +14345,7 @@ local_system:
           nwa = load_nwa_data(args.filepath)
           G = nx.DiGraph()
           G.add_nodes_from(range(nwa["num_states"]))
-          G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
+          G.add_edges_from([(s, d) for s, l, d, w in nwa["transitions"]])
           print_graph_stats(G, nwa)
 
 
@@ -14329,7 +14355,7 @@ local_system:
           nwa = load_nwa_data(args.filepath)
           G = nx.DiGraph()
           G.add_nodes_from(range(nwa["num_states"]))
-          G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
+          G.add_edges_from([(s, d) for s, l, d, w in nwa["transitions"]])
           print_scc_analysis(G, nwa["transitions"])
 
 
@@ -14339,13 +14365,17 @@ local_system:
           nwa = load_nwa_data(args.filepath)
           print("\nAttempting to determinize the full NWA...")
           try:
-              transitions = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
+              transitions = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"].keys())
               fst = VectorFst()
               state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
               fst.set_start(state_map[nwa["start_state"]])
-              for state_id in nwa["final_states"]:
+              for state_id, weight in nwa["final_states"].items():
+                  # FIXME: Using 0.0 for final weight as rustfst-python only supports float weights.
+                  # The actual weight is `weight`.
                   fst.set_final(state_map[state_id], 0.0)
-              for source, label, dest in transitions:
+              for source, label, dest, weight in transitions:
+                  # FIXME: Using 0.0 for transition weight as rustfst-python only supports float weights.
+                  # The actual weight is `weight`.
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
               print("\nFST Statistics:")
@@ -14374,7 +14404,8 @@ local_system:
               transitions_after_min = set()
               for s in fst.states():
                   for tr in fst.trs(s):
-                      transitions_after_min.add((s, tr.ilabel, tr.next_state))
+                      # FIXME: Weight is lost here, using a placeholder.
+                      transitions_after_min.add((s, tr.ilabel, tr.next_state, WEIGHT_ALL))
 
               pruned_transitions = prune_to_final_state_transitions(transitions_after_min, final_states_after_min)
 
@@ -14384,9 +14415,12 @@ local_system:
               if start_state_after_min is not None:
                   pruned_fst.set_start(state_map_after_min[start_state_after_min])
               for state_id in final_states_after_min:
+                  # FIXME: Weight is lost here.
                   pruned_fst.set_final(state_map_after_min[state_id], 0.0)
-              for source, label, dest in pruned_transitions:
-                  pruned_fst.add_tr(state_map_after_min[source], Tr(label, label, 0.0, state_map_after_min[dest]))
+              for source, label, dest, weight in pruned_transitions:
+                  if source in state_map_after_min and dest in state_map_after_min:
+                      # FIXME: Using 0.0 for transition weight.
+                      pruned_fst.add_tr(state_map_after_min[source], Tr(label, label, 0.0, state_map_after_min[dest]))
 
               fst = pruned_fst
               print_fst_stats(fst, "After second pruning")
@@ -14413,14 +14447,17 @@ local_system:
 
               state_data = nwa["raw_data"]["states"][state_id]
 
-              final_weight = state_data.get('final_weight')
-              print(f"Final State: {'Yes (weight: ' + str(final_weight) + ')' if final_weight is not None else 'No'}")
+              final_weight_data = state_data.get('final_weight')
+              final_weight = parse_weight(final_weight_data)
+              print(f"Final State: {'Yes' if not final_weight.empty else 'No'}")
+              if not final_weight.empty:
+                  print(f"  - Final Weight: {final_weight}")
 
               print("\nEpsilon Transitions (ε):")
               epsilons = state_data.get('epsilons', [])
               if epsilons:
                   for target_id, weight in epsilons:
-                      print(f"  - ε --> {target_id}  (weight: {weight})")
+                      print(f"  - ε --> {target_id}  (weight: {parse_weight(weight)})")
               else:
                   print("  - None")
 
@@ -14429,7 +14466,7 @@ local_system:
               if transitions:
                   for label_str, targets in sorted(transitions.items(), key=lambda item: int(item[0])):
                       for target_id, weight in targets:
-                          print(f"  - On symbol '{label_str}' --> {target_id}  (weight: {weight})")
+                          print(f"  - On symbol '{label_str}' --> {target_id}  (weight: {parse_weight(weight)})")
               else:
                   print("  - None")
 
@@ -14513,92 +14550,92 @@ local_system:
 
 
       def run_chunked_determinize_pass(args):
-          """
-          Executes the 'chunked-determinize' pass by incrementally building the FST.
-
-          This approach processes the NWA in chunks, unioning each new chunk with the
-          already-processed (and determinized) result, and then re-determinizing.
-          This can help manage memory and processing time for very large, complex NWAs.
-
-          Note: The language of the resulting FST is the union of the languages of
-          paths contained entirely within each chunk. This is not mathematically
-          equivalent to determinizing the NWA as a whole, but serves as a useful
-          heuristic for analysis when full determinization is intractable.
-          """
+          """Executes the 'chunked-determinize' pass."""
           print(f"--- Running Chunked Determinization Pass (Chunks: {args.chunks}) ---")
           nwa = load_nwa_data(args.filepath)
 
+          # Pre-prune transitions
           print("\nPruning transitions that cannot lead to a final state...")
-          transitions_pruned = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
+          transitions_pruned = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"].keys())
           print(f"Pruned {len(nwa['transitions']) - len(transitions_pruned)} transitions.")
 
+          # 1. Partition transitions
           all_transitions = list(transitions_pruned)
-          random.shuffle(all_transitions)
+          random.shuffle(all_transitions) # Shuffle to get reasonably balanced chunks
           if not all_transitions:
               print("No transitions left after pruning. Nothing to do.")
               return
 
-          chunk_size = (len(all_transitions) + args.chunks - 1) // args.chunks
+          chunk_size = (len(all_transitions) + args.chunks - 1) // args.chunks # Ceiling division
           transition_chunks = [all_transitions[i:i + chunk_size] for i in range(0, len(all_transitions), chunk_size)]
           print(f"\nPartitioned {len(all_transitions)} transitions into {len(transition_chunks)} chunks of up to {chunk_size} transitions each.")
 
-          # Process the first chunk to establish a baseline FST.
-          if not transition_chunks or not transition_chunks[0]:
-              print("No transitions to process.")
-              return
-
-          first_chunk = transition_chunks.pop(0)
-          print(f"\n--- Processing Chunk 1/{len(transition_chunks) + 1} ---")
-          current_fst = VectorFst()
-          state_map = {j: current_fst.add_state() for j in range(nwa["num_states"])}
-          if nwa["start_state"] is not None:
-              current_fst.set_start(state_map[nwa["start_state"]])
-          for state_id in nwa["final_states"]:
-              current_fst.set_final(state_map[state_id], 0.0)
-          for source, label, dest in first_chunk:
-              current_fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-          print_fst_stats(current_fst, "Chunk 1 Raw FST")
-
-          try:
-              current_fst = current_fst.rm_epsilon().connect().tr_unique().minimize(config=MinimizeConfig(allow_nondet=True)).determinize()
-              print_fst_stats(current_fst, "Optimized FST after Chunk 1")
-          except Exception as e:
-              print(f"❌ Error processing chunk 1: {e}. Halting.")
-              return
-
-          # Iteratively union with subsequent chunks and re-optimize
-          for i, chunk in enumerate(transition_chunks, 2):
-              print(f"\n--- Processing Chunk {i}/{len(transition_chunks) + 1} ---")
+          optimized_chunks = []
+          for i, chunk in enumerate(transition_chunks):
+              print(f"\n--- Processing Chunk {i+1}/{len(transition_chunks)} ---")
               if not chunk:
                   print("Skipping empty chunk.")
                   continue
-
               try:
-                  # Create an FST for the new chunk with original state numbering
-                  chunk_fst = VectorFst()
-                  state_map = {j: chunk_fst.add_state() for j in range(nwa["num_states"])}
-                  if nwa["start_state"] is not None:
-                      chunk_fst.set_start(state_map[nwa["start_state"]])
-                  for state_id in nwa["final_states"]:
-                      chunk_fst.set_final(state_map[state_id], 0.0)
-                  for source, label, dest in chunk:
-                      chunk_fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-                  print_fst_stats(chunk_fst, f"Chunk {i} Raw FST")
+                  # 2. Create FST for the chunk
+                  fst = VectorFst()
+                  # We need all states in each FST so transitions are valid
+                  state_map = {j: fst.add_state() for j in range(nwa["num_states"])}
+                  fst.set_start(state_map[nwa["start_state"]])
+                  for state_id, weight in nwa["final_states"].items():
+                      # FIXME: Using 0.0 for final weight.
+                      fst.set_final(state_map[state_id], 0.0)
+                  for source, label, dest, weight in chunk:
+                      # FIXME: Using 0.0 for transition weight.
+                      fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-                  # Union the already optimized FST with the new raw chunk
-                  current_fst = current_fst | chunk_fst
-                  print_fst_stats(current_fst, "Unioned FST (before optimization)")
+                  print_fst_stats(fst, f"Chunk {i+1} Initial FST")
 
-                  # Re-run the full optimization and determinization pipeline
-                  current_fst = current_fst.rm_epsilon().connect().tr_unique().minimize(config=MinimizeConfig(allow_nondet=True)).determinize()
-                  print_fst_stats(current_fst, f"Optimized FST after Chunk {i}")
+                  # 3. Optimize the chunk
+                  fst = fst.rm_epsilon()
+                  fst = fst.connect()
+                  fst = fst.tr_unique()
+                  fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
+                  fst = fst.determinize()
+                  print_fst_stats(fst, f"Chunk {i+1} Optimized FST")
+                  optimized_chunks.append(fst)
               except Exception as e:
-                  print(f"❌ Error processing union with chunk {i}: {e}. Halting.")
-                  return
+                  print(f"❌ Error processing chunk {i+1}: {e}. Skipping this chunk.")
 
-          print("\n--- Chunked Determinization Complete ---")
-          print_fst_stats(current_fst, "Final Result")
-          print("\nRESULT: ✅ Chunked determinization finished successfully.")
+          if not optimized_chunks:
+              print("\nRESULT: ❌ No chunks were successfully optimized. Halting.")
+              return
+
+          # 4. Union the optimized chunks
+          print("\n--- Combining Optimized Chunks ---")
+
+          # The `|` operator on VectorFst creates a copy, then unions. This is safe.
+          final_fst = optimized_chunks[0]
+          print_fst_stats(final_fst, "Combined FST (1 chunk)")
+          for i, next_fst in enumerate(optimized_chunks[1:], 2):
+              final_fst = final_fst | next_fst
+              print_fst_stats(final_fst, f"Combined FST ({i} chunks)")
+
+          # 5. Final optimization pass
+          print("\n--- Final Optimization Pass on Combined FST ---")
+          try:
+              print_fst_stats(final_fst, "Combined FST before final optimization")
+
+              # The full pipeline from the original determinize pass
+              final_fst = final_fst.rm_epsilon()
+              print_fst_stats(final_fst, "After rm_epsilon")
+              final_fst = final_fst.connect()
+              print_fst_stats(final_fst, "After connecting")
+              final_fst = final_fst.tr_unique()
+              print_fst_stats(final_fst, "After tr_unique")
+              final_fst = final_fst.minimize(config=MinimizeConfig(allow_nondet=True))
+              print_fst_stats(final_fst, "After minimizing")
+              final_fst = final_fst.determinize()
+              print_fst_stats(final_fst, "After determinizing")
+
+              print("\nRESULT: ✅ Chunked determinization finished successfully.")
+          except Exception as e:
+              print(f"\nRESULT: ❌ Final optimization failed with an error: {e}")
 
 
       # --- MAIN CLI ---
@@ -28738,30 +28775,44 @@ local_system:
 
       def prune_to_final_state_transitions(transitions: set, final_state_ids: set) -> set:
           """
-          If a (source, label) pair has a transition to a final state,
-          remove all transitions for that pair that go to non-final states.
+          For each (source, label) pair, if there are transitions to final states,
+          prune the weights of transitions to non-final states by subtracting the
+          union of weights of transitions to final states.
           """
-          source_label_to_dests = defaultdict(set)
-          for source, label, dest, weight in transitions:
-              source_label_to_dests[(source, label)].add(dest)
+          source_label_to_transitions = defaultdict(list)
+          for t in transitions:
+              source, label, _, _ = t
+              source_label_to_transitions[(source, label)].append(t)
 
-          transitions_to_remove = set()
-          for (source, label), dests in source_label_to_dests.items():
-              has_final_dest = any(d in final_state_ids for d in dests)
-              if has_final_dest:
-                  # Mark for removal all transitions from (source, label) to non-final states
-                  for d in dests:
-                      if d not in final_state_ids:
-                          # Find all transitions with this (source, label, dest) to remove
-                          for s, l, dest_to_remove, w in transitions:
-                              if s == source and l == label and dest_to_remove == d:
-                                  transitions_to_remove.add((s, l, dest_to_remove, w))
+          new_transitions = set()
+          for (source, label), trans_group in source_label_to_transitions.items():
+              final_trans = []
+              non_final_trans = []
+              for t in trans_group:
+                  if t[2] in final_state_ids:
+                      final_trans.append(t)
+                  else:
+                      non_final_trans.append(t)
 
-          if transitions_to_remove:
-              print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
+              if not final_trans:
+                  # No transitions to a final state for this (source, label), so keep all non-final ones.
+                  new_transitions.update(non_final_trans)
+              else:
+                  # Keep all transitions to final states as they are.
+                  new_transitions.update(final_trans)
 
-          return transitions - transitions_to_remove
+                  # Calculate the union of weights for all transitions to final states.
+                  final_weight_union = P.empty()
+                  for _, _, _, weight in final_trans:
+                      final_weight_union |= weight
 
+                  # For non-final transitions, subtract the final_weight_union and keep if not empty.
+                  for s, l, d, w in non_final_trans:
+                      new_weight = w - final_weight_union
+                      if not new_weight.empty:
+                          new_transitions.add((s, l, d, new_weight))
+
+          return new_transitions
 
       def determinize_worker(
               num_states: int, start_state: int, final_states: dict, transitions: set, result_queue: multiprocessing.Queue
@@ -43941,6 +43992,7 @@ messages:
       import multiprocessing
       import argparse
       from collections import Counter, defaultdict
+      import portion as P
 
       from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
       from rustfst.algorithms.minimize import MinimizeConfig
@@ -43963,6 +44015,27 @@ messages:
           sys.exit(1)
 
 
+      # --- NEW: Weight Parsing Utilities ---
+
+      # Special object for the "ALL" weight, assuming non-negative integers like Rust's usize
+      WEIGHT_ALL = P.closed(0, P.inf)
+
+      def parse_weight(data):
+          """Parses NWA weight JSON into a portion.Interval object."""
+          if data is None:
+              return P.empty()
+          if isinstance(data, str) and data == "ALL":
+              return WEIGHT_ALL
+          
+          interval = P.empty()
+          if isinstance(data, list):
+              for item in data:
+                  if isinstance(item, int):
+                      interval |= P.singleton(item)
+                  elif isinstance(item, list) and len(item) == 2:
+                      interval |= P.closed(item[0], item[1])
+          return interval
+
       # --- CORE UTILITIES (unchanged) ---
 
       def load_nwa_data(filepath: str) -> dict:
@@ -43973,16 +44046,24 @@ messages:
 
           num_states = len(nwa_data['states'])
           start_state = nwa_data['body']['start_state']
-          final_states = {i for i, s in enumerate(nwa_data['states']) if s.get('final_weight') is not None}
+          final_states = {
+              i: parse_weight(s.get('final_weight'))
+              for i, s in enumerate(nwa_data['states'])
+              if s.get('final_weight') is not None and not parse_weight(s.get('final_weight')).empty
+          }
 
           all_transitions = set()
           for i, state in enumerate(nwa_data['states']):
-              for target_id, _ in state.get('epsilons', []):
-                  all_transitions.add((i, 0, target_id))  # Epsilon is label 0
+              for target_id, weight_data in state.get('epsilons', []):
+                  weight = parse_weight(weight_data)
+                  if not weight.empty:
+                      all_transitions.add((i, 0, target_id, weight))  # Epsilon is label 0
               for label_str, targets in state.get('transitions', {}).items():
                   label = int(label_str)
-                  for target_id, _ in targets:
-                      all_transitions.add((i, label, target_id))
+                  for target_id, weight_data in targets:
+                      weight = parse_weight(weight_data)
+                      if not weight.empty:
+                          all_transitions.add((i, label, target_id, weight))
 
           print(f"Original NWA has {num_states} states and {len(all_transitions)} unique transitions.")
           return {
@@ -43994,46 +44075,42 @@ messages:
           }
 
 
-      def prune_to_final_state_transitions(transitions: set, final_states: set) -> set:
+      def prune_to_final_state_transitions(transitions: set, final_state_ids: set) -> set:
           """
           If a (source, label) pair has a transition to a final state,
           remove all transitions for that pair that go to non-final states.
           """
-          # NOTE: Doesn't work when we ignore weights (which we currently do)
-          return transitions
           source_label_to_dests = defaultdict(set)
-          for source, label, dest in transitions:
+          for source, label, dest, weight in transitions:
               source_label_to_dests[(source, label)].add(dest)
 
-          transitions_to_remove = set()
+          new_transitions = set()
           for (source, label), dests in source_label_to_dests.items():
-              has_final_dest = any(d in final_states for d in dests)
-              if has_final_dest:
-                  removals_for_pair = {(source, label, d) for d in dests}
-                  # Remove the first transition to a final state found
-                  for d in dests:
-                      if d in final_states:
-                          removals_for_pair.remove((source, label, d))
-                          break
-                  transitions_to_remove.update(removals_for_pair)
+              has_final_dest = P.empty()
+              for dest in dests:
+                  if dest in final_state_ids:
+                      has_final_dest |= P.singleton(dest)
+              if not has_final_dest.empty:
+                  ...
 
-          if transitions_to_remove:
-              print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
 
-          return transitions - transitions_to_remove
 
 
       def determinize_worker(
-              num_states: int, start_state: int, final_states: set, transitions: set, result_queue: multiprocessing.Queue
+              num_states: int, start_state: int, final_states: dict, transitions: set, result_queue: multiprocessing.Queue
       ):
           try:
-              transitions = prune_to_final_state_transitions(transitions, final_states)
+              transitions = prune_to_final_state_transitions(transitions, final_states.keys())
               fst = VectorFst()
               state_map = {i: fst.add_state() for i in range(num_states)}
               fst.set_start(state_map[start_state])
-              for state_id in final_states:
+              for state_id, weight in final_states.items():
+                  # FIXME: Using 0.0 for final weight as rustfst-python only supports float weights.
+                  # The actual weight is `weight`.
                   fst.set_final(state_map[state_id], 0.0)
-              for source, label, dest in transitions:
+              for source, label, dest, weight in transitions:
+                  # FIXME: Using 0.0 for transition weight as rustfst-python only supports float weights.
+                  # The actual weight is `weight`.
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
               print("Minimizing")
               fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
@@ -44045,7 +44122,7 @@ messages:
 
 
       def time_determinization_with_timeout(
-              num_states: int, start_state: int, final_states: set, transitions: set, timeout: float
+              num_states: int, start_state: int, final_states: dict, transitions: set, timeout: float
       ) -> bool:
           if not transitions: return False
           result_queue = multiprocessing.Queue()
@@ -44072,7 +44149,7 @@ messages:
           num_edges = G.number_of_edges()  # Unique (src, dst) pairs
 
           num_transitions = len(nwa_data['transitions'])
-          epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
+          epsilon_transitions = sum(1 for _, l, _, _ in nwa_data['transitions'] if l == 0)
           symbol_transitions = num_transitions - epsilon_transitions
 
           print("\n--- NWA Structure ---")
@@ -44114,7 +44191,7 @@ messages:
               return
 
           source_to_transitions = defaultdict(list)
-          for source, label, dest in transitions:
+          for source, label, dest, weight in transitions:
               source_to_transitions[source].append((label, dest))
           cycles_sccs.sort(key=len)
           print("\nExamples of Smallest Cycles with internal edges:")
@@ -44123,7 +44200,7 @@ messages:
               scc_nodes = set(scc)
               print(f"    - Cycle #{i + 1} (size {len(scc_nodes)}): Nodes {list(scc_nodes)}")
               internal_edges = [
-                  f"{src} --({lbl})--> {dst}"
+                  f"{src} --({lbl})--> {dst}" # Note: weight is ignored for brevity
                   for src in scc_nodes if src in source_to_transitions
                   for lbl, dst in source_to_transitions[src] if dst in scc_nodes
               ]
@@ -44147,7 +44224,7 @@ messages:
           nwa = load_nwa_data(args.filepath)
           G = nx.DiGraph()
           G.add_nodes_from(range(nwa["num_states"]))
-          G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
+          G.add_edges_from([(s, d) for s, l, d, w in nwa["transitions"]])
           print_graph_stats(G, nwa)
 
 
@@ -44157,7 +44234,7 @@ messages:
           nwa = load_nwa_data(args.filepath)
           G = nx.DiGraph()
           G.add_nodes_from(range(nwa["num_states"]))
-          G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
+          G.add_edges_from([(s, d) for s, l, d, w in nwa["transitions"]])
           print_scc_analysis(G, nwa["transitions"])
 
 
@@ -44167,13 +44244,17 @@ messages:
           nwa = load_nwa_data(args.filepath)
           print("\nAttempting to determinize the full NWA...")
           try:
-              transitions = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
+              transitions = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"].keys())
               fst = VectorFst()
               state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
               fst.set_start(state_map[nwa["start_state"]])
-              for state_id in nwa["final_states"]:
+              for state_id, weight in nwa["final_states"].items():
+                  # FIXME: Using 0.0 for final weight as rustfst-python only supports float weights.
+                  # The actual weight is `weight`.
                   fst.set_final(state_map[state_id], 0.0)
-              for source, label, dest in transitions:
+              for source, label, dest, weight in transitions:
+                  # FIXME: Using 0.0 for transition weight as rustfst-python only supports float weights.
+                  # The actual weight is `weight`.
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
               print("\nFST Statistics:")
@@ -44202,7 +44283,8 @@ messages:
               transitions_after_min = set()
               for s in fst.states():
                   for tr in fst.trs(s):
-                      transitions_after_min.add((s, tr.ilabel, tr.next_state))
+                      # FIXME: Weight is lost here, using a placeholder.
+                      transitions_after_min.add((s, tr.ilabel, tr.next_state, WEIGHT_ALL))
 
               pruned_transitions = prune_to_final_state_transitions(transitions_after_min, final_states_after_min)
 
@@ -44212,9 +44294,12 @@ messages:
               if start_state_after_min is not None:
                   pruned_fst.set_start(state_map_after_min[start_state_after_min])
               for state_id in final_states_after_min:
+                  # FIXME: Weight is lost here.
                   pruned_fst.set_final(state_map_after_min[state_id], 0.0)
-              for source, label, dest in pruned_transitions:
-                  pruned_fst.add_tr(state_map_after_min[source], Tr(label, label, 0.0, state_map_after_min[dest]))
+              for source, label, dest, weight in pruned_transitions:
+                  if source in state_map_after_min and dest in state_map_after_min:
+                      # FIXME: Using 0.0 for transition weight.
+                      pruned_fst.add_tr(state_map_after_min[source], Tr(label, label, 0.0, state_map_after_min[dest]))
 
               fst = pruned_fst
               print_fst_stats(fst, "After second pruning")
@@ -44241,14 +44326,17 @@ messages:
 
               state_data = nwa["raw_data"]["states"][state_id]
 
-              final_weight = state_data.get('final_weight')
-              print(f"Final State: {'Yes (weight: ' + str(final_weight) + ')' if final_weight is not None else 'No'}")
+              final_weight_data = state_data.get('final_weight')
+              final_weight = parse_weight(final_weight_data)
+              print(f"Final State: {'Yes' if not final_weight.empty else 'No'}")
+              if not final_weight.empty:
+                  print(f"  - Final Weight: {final_weight}")
 
               print("\nEpsilon Transitions (ε):")
               epsilons = state_data.get('epsilons', [])
               if epsilons:
                   for target_id, weight in epsilons:
-                      print(f"  - ε --> {target_id}  (weight: {weight})")
+                      print(f"  - ε --> {target_id}  (weight: {parse_weight(weight)})")
               else:
                   print("  - None")
 
@@ -44257,7 +44345,7 @@ messages:
               if transitions:
                   for label_str, targets in sorted(transitions.items(), key=lambda item: int(item[0])):
                       for target_id, weight in targets:
-                          print(f"  - On symbol '{label_str}' --> {target_id}  (weight: {weight})")
+                          print(f"  - On symbol '{label_str}' --> {target_id}  (weight: {parse_weight(weight)})")
               else:
                   print("  - None")
 
@@ -44341,92 +44429,92 @@ messages:
 
 
       def run_chunked_determinize_pass(args):
-          """
-          Executes the 'chunked-determinize' pass by incrementally building the FST.
-
-          This approach processes the NWA in chunks, unioning each new chunk with the
-          already-processed (and determinized) result, and then re-determinizing.
-          This can help manage memory and processing time for very large, complex NWAs.
-
-          Note: The language of the resulting FST is the union of the languages of
-          paths contained entirely within each chunk. This is not mathematically
-          equivalent to determinizing the NWA as a whole, but serves as a useful
-          heuristic for analysis when full determinization is intractable.
-          """
+          """Executes the 'chunked-determinize' pass."""
           print(f"--- Running Chunked Determinization Pass (Chunks: {args.chunks}) ---")
           nwa = load_nwa_data(args.filepath)
 
+          # Pre-prune transitions
           print("\nPruning transitions that cannot lead to a final state...")
-          transitions_pruned = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
+          transitions_pruned = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"].keys())
           print(f"Pruned {len(nwa['transitions']) - len(transitions_pruned)} transitions.")
 
+          # 1. Partition transitions
           all_transitions = list(transitions_pruned)
-          random.shuffle(all_transitions)
+          random.shuffle(all_transitions) # Shuffle to get reasonably balanced chunks
           if not all_transitions:
               print("No transitions left after pruning. Nothing to do.")
               return
 
-          chunk_size = (len(all_transitions) + args.chunks - 1) // args.chunks
+          chunk_size = (len(all_transitions) + args.chunks - 1) // args.chunks # Ceiling division
           transition_chunks = [all_transitions[i:i + chunk_size] for i in range(0, len(all_transitions), chunk_size)]
           print(f"\nPartitioned {len(all_transitions)} transitions into {len(transition_chunks)} chunks of up to {chunk_size} transitions each.")
 
-          # Process the first chunk to establish a baseline FST.
-          if not transition_chunks or not transition_chunks[0]:
-              print("No transitions to process.")
-              return
-
-          first_chunk = transition_chunks.pop(0)
-          print(f"\n--- Processing Chunk 1/{len(transition_chunks) + 1} ---")
-          current_fst = VectorFst()
-          state_map = {j: current_fst.add_state() for j in range(nwa["num_states"])}
-          if nwa["start_state"] is not None:
-              current_fst.set_start(state_map[nwa["start_state"]])
-          for state_id in nwa["final_states"]:
-              current_fst.set_final(state_map[state_id], 0.0)
-          for source, label, dest in first_chunk:
-              current_fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-          print_fst_stats(current_fst, "Chunk 1 Raw FST")
-
-          try:
-              current_fst = current_fst.rm_epsilon().connect().tr_unique().minimize(config=MinimizeConfig(allow_nondet=True)).determinize()
-              print_fst_stats(current_fst, "Optimized FST after Chunk 1")
-          except Exception as e:
-              print(f"❌ Error processing chunk 1: {e}. Halting.")
-              return
-
-          # Iteratively union with subsequent chunks and re-optimize
-          for i, chunk in enumerate(transition_chunks, 2):
-              print(f"\n--- Processing Chunk {i}/{len(transition_chunks) + 1} ---")
+          optimized_chunks = []
+          for i, chunk in enumerate(transition_chunks):
+              print(f"\n--- Processing Chunk {i+1}/{len(transition_chunks)} ---")
               if not chunk:
                   print("Skipping empty chunk.")
                   continue
-
               try:
-                  # Create an FST for the new chunk with original state numbering
-                  chunk_fst = VectorFst()
-                  state_map = {j: chunk_fst.add_state() for j in range(nwa["num_states"])}
-                  if nwa["start_state"] is not None:
-                      chunk_fst.set_start(state_map[nwa["start_state"]])
-                  for state_id in nwa["final_states"]:
-                      chunk_fst.set_final(state_map[state_id], 0.0)
-                  for source, label, dest in chunk:
-                      chunk_fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-                  print_fst_stats(chunk_fst, f"Chunk {i} Raw FST")
+                  # 2. Create FST for the chunk
+                  fst = VectorFst()
+                  # We need all states in each FST so transitions are valid
+                  state_map = {j: fst.add_state() for j in range(nwa["num_states"])}
+                  fst.set_start(state_map[nwa["start_state"]])
+                  for state_id, weight in nwa["final_states"].items():
+                      # FIXME: Using 0.0 for final weight.
+                      fst.set_final(state_map[state_id], 0.0)
+                  for source, label, dest, weight in chunk:
+                      # FIXME: Using 0.0 for transition weight.
+                      fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-                  # Union the already optimized FST with the new raw chunk
-                  current_fst = current_fst | chunk_fst
-                  print_fst_stats(current_fst, "Unioned FST (before optimization)")
+                  print_fst_stats(fst, f"Chunk {i+1} Initial FST")
 
-                  # Re-run the full optimization and determinization pipeline
-                  current_fst = current_fst.rm_epsilon().connect().tr_unique().minimize(config=MinimizeConfig(allow_nondet=True)).determinize()
-                  print_fst_stats(current_fst, f"Optimized FST after Chunk {i}")
+                  # 3. Optimize the chunk
+                  fst = fst.rm_epsilon()
+                  fst = fst.connect()
+                  fst = fst.tr_unique()
+                  fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
+                  fst = fst.determinize()
+                  print_fst_stats(fst, f"Chunk {i+1} Optimized FST")
+                  optimized_chunks.append(fst)
               except Exception as e:
-                  print(f"❌ Error processing union with chunk {i}: {e}. Halting.")
-                  return
+                  print(f"❌ Error processing chunk {i+1}: {e}. Skipping this chunk.")
 
-          print("\n--- Chunked Determinization Complete ---")
-          print_fst_stats(current_fst, "Final Result")
-          print("\nRESULT: ✅ Chunked determinization finished successfully.")
+          if not optimized_chunks:
+              print("\nRESULT: ❌ No chunks were successfully optimized. Halting.")
+              return
+
+          # 4. Union the optimized chunks
+          print("\n--- Combining Optimized Chunks ---")
+
+          # The `|` operator on VectorFst creates a copy, then unions. This is safe.
+          final_fst = optimized_chunks[0]
+          print_fst_stats(final_fst, "Combined FST (1 chunk)")
+          for i, next_fst in enumerate(optimized_chunks[1:], 2):
+              final_fst = final_fst | next_fst
+              print_fst_stats(final_fst, f"Combined FST ({i} chunks)")
+
+          # 5. Final optimization pass
+          print("\n--- Final Optimization Pass on Combined FST ---")
+          try:
+              print_fst_stats(final_fst, "Combined FST before final optimization")
+
+              # The full pipeline from the original determinize pass
+              final_fst = final_fst.rm_epsilon()
+              print_fst_stats(final_fst, "After rm_epsilon")
+              final_fst = final_fst.connect()
+              print_fst_stats(final_fst, "After connecting")
+              final_fst = final_fst.tr_unique()
+              print_fst_stats(final_fst, "After tr_unique")
+              final_fst = final_fst.minimize(config=MinimizeConfig(allow_nondet=True))
+              print_fst_stats(final_fst, "After minimizing")
+              final_fst = final_fst.determinize()
+              print_fst_stats(final_fst, "After determinizing")
+
+              print("\nRESULT: ✅ Chunked determinization finished successfully.")
+          except Exception as e:
+              print(f"\nRESULT: ❌ Final optimization failed with an error: {e}")
 
 
       # --- MAIN CLI ---
@@ -44499,9 +44587,9 @@ messages:
       ```
     metadata:
       filename: scripts/analyze_nwa.py
-  - user: Right now we're ignoring weights (bitsets) in the Python code. Fix this.
-      Parse the weights into a fast Python data structure (use a package - in Rust
-      we use range-set-blaze which is a range-set crate).
+  - user: Complete prune_to_final_state_transitions. It should prune weights by subtracting
+      from transitions that don't go to a final state the union over transitions that
+      *do* go there. If the remainder is empty, the transitions can be pruned.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -44521,353 +44609,123 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to make your Python analysis script aware of the bitset weights, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to complete the `prune_to_final_state_transitions` function, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Install the `portion` library**
+      1.  **Open the file `scripts/analyze_nwa.py`.**
 
-          First, you'll need to install the `portion` library, which is excellent for working with intervals and will be used to represent the bitset weights.
+      2.  **Locate the `prune_to_final_state_transitions` function.** It is currently incomplete.
 
-          ```bash
-          pip install portion
-          ```
+      3.  **Replace the entire function** with the following implementation. This new version correctly prunes transition weights according to the specified logic: for each `(source, label)` pair, it calculates the union of weights for all transitions going to a final state and subtracts this union from the weights of transitions going to non-final states.
 
-      2.  **Modify `scripts/analyze_nwa.py`**
+      ```python
+      def prune_to_final_state_transitions(transitions: set, final_state_ids: set) -> set:
+          """
+          For each (source, label) pair, if there are transitions to final states,
+          prune the weights of transitions to non-final states by subtracting the
+          union of weights of transitions to final states.
+          """
+          source_label_to_transitions = defaultdict(list)
+          for t in transitions:
+              source, label, _, _ = t
+              source_label_to_transitions[(source, label)].append(t)
 
-          Open the file `scripts/analyze_nwa.py` in your editor and apply the following changes to integrate weight parsing and handling throughout the script.
+          new_transitions = set()
+          for (source, label), trans_group in source_label_to_transitions.items():
+              final_trans = []
+              non_final_trans = []
+              for t in trans_group:
+                  if t[2] in final_state_ids:
+                      final_trans.append(t)
+                  else:
+                      non_final_trans.append(t)
 
-          a.  **Add Imports**: At the top of the file, add an import for the `portion` library.
+              if not final_trans:
+                  # No transitions to a final state for this (source, label), so keep all non-final ones.
+                  new_transitions.update(non_final_trans)
+              else:
+                  # Keep all transitions to final states as they are.
+                  new_transitions.update(final_trans)
 
-          b.  **Add Weight Parsing Logic**: After the imports, insert a new helper function, `parse_weight`, to convert the JSON representation of weights into `portion` interval objects. This function will handle the `"ALL"` string as well as lists of integers and ranges.
+                  # Calculate the union of weights for all transitions to final states.
+                  final_weight_union = P.empty()
+                  for _, _, _, weight in final_trans:
+                      final_weight_union |= weight
 
-          c.  **Update `load_nwa_data`**: Modify this function to use `parse_weight`. It will now:
-              *   Store `final_states` as a dictionary mapping state IDs to their parsed weight objects.
-              *   Store `transitions` as a set of 4-tuples: `(source, label, destination, weight)`.
-              *   Automatically filter out any transitions or final states that have an empty weight, as they are not semantically meaningful.
+                  # For non-final transitions, subtract the final_weight_union and keep if not empty.
+                  for s, l, d, w in non_final_trans:
+                      new_weight = w - final_weight_union
+                      if not new_weight.empty:
+                          new_transitions.add((s, l, d, new_weight))
 
-          d.  **Update `prune_to_final_state_transitions`**: The logic in this function was previously incorrect. It has been updated to correctly handle the new 4-tuple transition format and properly identify which transitions to prune based on final state reachability.
-
-          e.  **Update `determinize_worker`**: This function is at the core of the determinization logic. It will be updated to accept the new data structures containing weights.
-              *   **Important**: Since the `rustfst` Python bindings only support float weights, we cannot pass the `portion` objects directly. The code will be updated to acknowledge this limitation with `FIXME` comments at the points where `Tr` and `set_final` are called, using `0.0` as a placeholder.
-
-          f.  **Update Analysis Passes (`run_stats_pass`, `run_scc_pass`, `run_inspect_states_pass`)**: These functions will be updated to work with the new weighted data structures. Their output will be enhanced to include information about the weights, making them more informative.
-
-          g.  **Update Determinization-based Passes (`run_determinize_pass`, `run_prune_pass`, `run_chunked_determinize_pass`)**: These passes rely heavily on the determinization logic. They will be updated to correctly handle and pass around the new data structures containing weights. All tuple unpacking and FST creation loops will be adjusted accordingly.
+          return new_transitions
+      ```
 
       ### Git Diff
 
-      Here is the git diff for `scripts/analyze_nwa.py`. You can apply this patch directly to your file.
+      Here is the git diff to apply the change:
 
       ```diff
       --- a/scripts/analyze_nwa.py
       +++ b/scripts/analyze_nwa.py
-      @@ -6,6 +6,7 @@
-       import multiprocessing
-       import argparse
-       from collections import Counter, defaultdict
-      +import portion as P
+      @@ -99,23 +99,36 @@
        
-       from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
-       from rustfst.algorithms.minimize import MinimizeConfig
-      @@ -24,6 +25,26 @@
-           print("Please install them using: pip install networkx matplotlib", file=sys.stderr)
-           sys.exit(1)
-       
-      +
-      +# --- NEW: Weight Parsing Utilities ---
-      +
-      +# Special object for the "ALL" weight, assuming non-negative integers like Rust's usize
-      +WEIGHT_ALL = P.closed(0, P.inf)
-      +
-      +def parse_weight(data):
-      +    """Parses NWA weight JSON into a portion.Interval object."""
-      +    if data is None:
-      +        return P.empty()
-      +    if isinstance(data, str) and data == "ALL":
-      +        return WEIGHT_ALL
-      +    
-      +    interval = P.empty()
-      +    if isinstance(data, list):
-      +        for item in data:
-      +            if isinstance(item, int):
-      +                interval |= P.singleton(item)
-      +            elif isinstance(item, list) and len(item) == 2:
-      +                interval |= P.closed(item[0], item[1])
-      +    return interval
-       
-       # --- CORE UTILITIES (unchanged) ---
-       
-      @@ -34,20 +55,28 @@
-       
-           num_states = len(nwa_data['states'])
-           start_state = nwa_data['body']['start_state']
-      -    final_states = {i for i, s in enumerate(nwa_data['states']) if s.get('final_weight') is not None}
-      +    final_states = {
-      +        i: parse_weight(s.get('final_weight'))
-      +        for i, s in enumerate(nwa_data['states'])
-      +        if s.get('final_weight') is not None and not parse_weight(s.get('final_weight')).empty
-      +    }
-       
-           all_transitions = set()
-           for i, state in enumerate(nwa_data['states']):
-      -        for target_id, _ in state.get('epsilons', []):
-      -            all_transitions.add((i, 0, target_id))  # Epsilon is label 0
-      +        for target_id, weight_data in state.get('epsilons', []):
-      +            weight = parse_weight(weight_data)
-      +            if not weight.empty:
-      +                all_transitions.add((i, 0, target_id, weight))  # Epsilon is label 0
-               for label_str, targets in state.get('transitions', {}).items():
-                   label = int(label_str)
-      -            for target_id, _ in targets:
-      -                all_transitions.add((i, label, target_id))
-      +            for target_id, weight_data in targets:
-      +                weight = parse_weight(weight_data)
-      +                if not weight.empty:
-      +                    all_transitions.add((i, label, target_id, weight))
-       
-           print(f"Original NWA has {num_states} states and {len(all_transitions)} unique transitions.")
-           return {
-               "num_states": num_states,
-               "start_state": start_state,
-               "final_states": final_states,
-               "transitions": all_transitions,
-               "raw_data": nwa_data
-           }
-       
-       
-      -def prune_to_final_state_transitions(transitions: set, final_states: set) -> set:
-      +def prune_to_final_state_transitions(transitions: set, final_state_ids: set) -> set:
+       def prune_to_final_state_transitions(transitions: set, final_state_ids: set) -> set:
            """
-           If a (source, label) pair has a transition to a final state,
-           remove all transitions for that pair that go to non-final states.
+      -    If a (source, label) pair has a transition to a final state,
+      -    remove all transitions for that pair that go to non-final states.
+      +    For each (source, label) pair, if there are transitions to final states,
+      +    prune the weights of transitions to non-final states by subtracting the
+      +    union of weights of transitions to final states.
            """
-      -    # NOTE: Doesn't work when we ignore weights (which we currently do)
-      -    return transitions
-           source_label_to_dests = defaultdict(set)
-      -    for source, label, dest in transitions:
-      +    for source, label, dest, weight in transitions:
-               source_label_to_dests[(source, label)].add(dest)
+      -    source_label_to_dests = defaultdict(set)
+      -    for source, label, dest, weight in transitions:
+      -        source_label_to_dests[(source, label)].add(dest)
+      +    source_label_to_transitions = defaultdict(list)
+      +    for t in transitions:
+      +        source, label, _, _ = t
+      +        source_label_to_transitions[(source, label)].append(t)
        
-           transitions_to_remove = set()
-           for (source, label), dests in source_label_to_dests.items():
-      -        has_final_dest = any(d in final_states for d in dests)
-      +        has_final_dest = any(d in final_state_ids for d in dests)
-               if has_final_dest:
-      -            removals_for_pair = {(source, label, d) for d in dests}
-      -            # Remove the first transition to a final state found
-      +            # Mark for removal all transitions from (source, label) to non-final states
-                   for d in dests:
-      -                if d in final_states:
-      -                    removals_for_pair.remove((source, label, d))
-      -                    break
-      -            transitions_to_remove.update(removals_for_pair)
-      +                if d not in final_state_ids:
-      +                    # Find all transitions with this (source, label, dest) to remove
-      +                    for s, l, dest_to_remove, w in transitions:
-      +                        if s == source and l == label and dest_to_remove == d:
-      +                            transitions_to_remove.add((s, l, dest_to_remove, w))
+           new_transitions = set()
+      -    for (source, label), dests in source_label_to_dests.items():
+      -        has_final_dest = P.empty()
+      -        for dest in dests:
+      -            if dest in final_state_ids:
+      -                has_final_dest |= P.singleton(dest)
+      -        if not has_final_dest.empty:
+      -            ...
+      +    for (source, label), trans_group in source_label_to_transitions.items():
+      +        final_trans = []
+      +        non_final_trans = []
+      +        for t in trans_group:
+      +            if t[2] in final_state_ids:
+      +                final_trans.append(t)
+      +            else:
+      +                non_final_trans.append(t)
        
-           if transitions_to_remove:
-               print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
+      +        if not final_trans:
+      +            # No transitions to a final state for this (source, label), so keep all non-final ones.
+      +            new_transitions.update(non_final_trans)
+      +        else:
+      +            # Keep all transitions to final states as they are.
+      +            new_transitions.update(final_trans)
        
-           return transitions - transitions_to_remove
+      +            # Calculate the union of weights for all transitions to final states.
+      +            final_weight_union = P.empty()
+      +            for _, _, _, weight in final_trans:
+      +                final_weight_union |= weight
        
+      +            # For non-final transitions, subtract the final_weight_union and keep if not empty.
+      +            for s, l, d, w in non_final_trans:
+      +                new_weight = w - final_weight_union
+      +                if not new_weight.empty:
+      +                    new_transitions.add((s, l, d, new_weight))
+      +
+      +    return new_transitions
        
        def determinize_worker(
-      -        num_states: int, start_state: int, final_states: set, transitions: set, result_queue: multiprocessing.Queue
-      +        num_states: int, start_state: int, final_states: dict, transitions: set, result_queue: multiprocessing.Queue
-       ):
-           try:
-      -        transitions = prune_to_final_state_transitions(transitions, final_states)
-      +        transitions = prune_to_final_state_transitions(transitions, final_states.keys())
-               fst = VectorFst()
-               state_map = {i: fst.add_state() for i in range(num_states)}
-               fst.set_start(state_map[start_state])
-      -        for state_id in final_states:
-      -            fst.set_final(state_map[state_id], 0.0)
-      -        for source, label, dest in transitions:
-      -            fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-      +        for state_id, weight in final_states.items():
-      +            # FIXME: Using 0.0 for final weight as rustfst-python only supports float weights.
-      +            # The actual weight is `weight`.
-      +            fst.set_final(state_map[state_id], 0.0)
-      +        for source, label, dest, weight in transitions:
-      +            # FIXME: Using 0.0 for transition weight as rustfst-python only supports float weights.
-      +            # The actual weight is `weight`.
-      +            fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-               print("Minimizing")
-               fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
-               print("Determinizing")
-      @@ -97,7 +127,7 @@
-       
-       
-       def time_determinization_with_timeout(
-      -        num_states: int, start_state: int, final_states: set, transitions: set, timeout: float
-      +        num_states: int, start_state: int, final_states: dict, transitions: set, timeout: float
-       ) -> bool:
-           if not transitions: return False
-           result_queue = multiprocessing.Queue()
-      @@ -121,7 +151,7 @@
-           num_edges = G.number_of_edges()  # Unique (src, dst) pairs
-       
-           num_transitions = len(nwa_data['transitions'])
-      -    epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
-      +    epsilon_transitions = sum(1 for _, l, _, _ in nwa_data['transitions'] if l == 0)
-           symbol_transitions = num_transitions - epsilon_transitions
-       
-           print("\n--- NWA Structure ---")
-      @@ -156,7 +186,7 @@
-               return
-       
-           source_to_transitions = defaultdict(list)
-      -    for source, label, dest in transitions:
-      +    for source, label, dest, weight in transitions:
-               source_to_transitions[source].append((label, dest))
-           cycles_sccs.sort(key=len)
-           print("\nExamples of Smallest Cycles with internal edges:")
-      @@ -165,7 +195,7 @@
-               scc_nodes = set(scc)
-               print(f"    - Cycle #{i + 1} (size {len(scc_nodes)}): Nodes {list(scc_nodes)}")
-               internal_edges = [
-      -            f"{src} --({lbl})--> {dst}"
-      +            f"{src} --({lbl})--> {dst}" # Note: weight is ignored for brevity
-                   for src in scc_nodes if src in source_to_transitions
-                   for lbl, dst in source_to_transitions[src] if dst in scc_nodes
-               ]
-      @@ -187,7 +217,7 @@
-           """Executes the 'stats' pass."""
-           print("--- Running Stats Pass ---")
-           nwa = load_nwa_data(args.filepath)
-           G = nx.DiGraph()
-           G.add_nodes_from(range(nwa["num_states"]))
-      -    G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
-      +    G.add_edges_from([(s, d) for s, l, d, w in nwa["transitions"]])
-           print_graph_stats(G, nwa)
-       
-       
-      @@ -196,7 +226,7 @@
-           print("--- Running SCC/Cycle Analysis Pass ---")
-           nwa = load_nwa_data(args.filepath)
-           G = nx.DiGraph()
-           G.add_nodes_from(range(nwa["num_states"]))
-      -    G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
-      +    G.add_edges_from([(s, d) for s, l, d, w in nwa["transitions"]])
-           print_scc_analysis(G, nwa["transitions"])
-       
-       
-      @@ -205,15 +235,19 @@
-           print("--- Running Determinization Pass ---")
-           nwa = load_nwa_data(args.filepath)
-           print("\nAttempting to determinize the full NWA...")
-           try:
-      -        transitions = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
-      +        transitions = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"].keys())
-               fst = VectorFst()
-               state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
-               fst.set_start(state_map[nwa["start_state"]])
-      -        for state_id in nwa["final_states"]:
-      -            fst.set_final(state_map[state_id], 0.0)
-      -        for source, label, dest in transitions:
-      -            fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-      +        for state_id, weight in nwa["final_states"].items():
-      +            # FIXME: Using 0.0 for final weight as rustfst-python only supports float weights.
-      +            # The actual weight is `weight`.
-      +            fst.set_final(state_map[state_id], 0.0)
-      +        for source, label, dest, weight in transitions:
-      +            # FIXME: Using 0.0 for transition weight as rustfst-python only supports float weights.
-      +            # The actual weight is `weight`.
-      +            fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-       
-               print("\nFST Statistics:")
-               print_fst_stats(fst, "Initial FST")
-      @@ -236,20 +270,24 @@
-               final_states_after_min = {s for s in fst.states() if fst.is_final(s)}
-               transitions_after_min = set()
-               for s in fst.states():
-                   for tr in fst.trs(s):
-      -                transitions_after_min.add((s, tr.ilabel, tr.next_state))
-      -
-      -        pruned_transitions = prune_to_final_state_transitions(transitions_after_min, final_states_after_min)
-      +                # FIXME: Weight is lost here, using a placeholder.
-      +                transitions_after_min.add((s, tr.ilabel, tr.next_state, WEIGHT_ALL))
-      +
-      +        pruned_transitions = prune_to_final_state_transitions(transitions_after_min, final_states_after_min)
-       
-               # Rebuild FST from pruned transitions
-               pruned_fst = VectorFst()
-               state_map_after_min = {i: pruned_fst.add_state() for i in range(num_states_after_min)}
-               if start_state_after_min is not None:
-                   pruned_fst.set_start(state_map_after_min[start_state_after_min])
-               for state_id in final_states_after_min:
-      +            # FIXME: Weight is lost here.
-                   pruned_fst.set_final(state_map_after_min[state_id], 0.0)
-      -        for source, label, dest in pruned_transitions:
-      -            pruned_fst.add_tr(state_map_after_min[source], Tr(label, label, 0.0, state_map_after_min[dest]))
-      +        for source, label, dest, weight in pruned_transitions:
-      +            if source in state_map_after_min and dest in state_map_after_min:
-      +                # FIXME: Using 0.0 for transition weight.
-      +                pruned_fst.add_tr(state_map_after_min[source], Tr(label, label, 0.0, state_map_after_min[dest]))
-       
-               fst = pruned_fst
-               print_fst_stats(fst, "After second pruning")
-      @@ -275,21 +313,23 @@
-       
-               state_data = nwa["raw_data"]["states"][state_id]
-       
-      -        final_weight = state_data.get('final_weight')
-      -        print(f"Final State: {'Yes (weight: ' + str(final_weight) + ')' if final_weight is not None else 'No'}")
-      +        final_weight_data = state_data.get('final_weight')
-      +        final_weight = parse_weight(final_weight_data)
-      +        print(f"Final State: {'Yes' if not final_weight.empty else 'No'}")
-      +        if not final_weight.empty:
-      +            print(f"  - Final Weight: {final_weight}")
-       
-               print("\nEpsilon Transitions (ε):")
-               epsilons = state_data.get('epsilons', [])
-               if epsilons:
-                   for target_id, weight in epsilons:
-      -                print(f"  - ε --> {target_id}  (weight: {weight})")
-      +                print(f"  - ε --> {target_id}  (weight: {parse_weight(weight)})")
-               else:
-                   print("  - None")
-       
-               print("\nSymbol Transitions:")
-               transitions = state_data.get('transitions', {})
-               if transitions:
-                   for label_str, targets in sorted(transitions.items(), key=lambda item: int(item[0])):
-                       for target_id, weight in targets:
-      -                    print(f"  - On symbol '{label_str}' --> {target_id}  (weight: {weight})")
-      +                    print(f"  - On symbol '{label_str}' --> {target_id}  (weight: {parse_weight(weight)})")
-               else:
-                   print("  - None")
-       
-      @@ -363,7 +403,7 @@
-       
-           # Pre-prune transitions
-           print("\nPruning transitions that cannot lead to a final state...")
-      -    transitions_pruned = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
-      +    transitions_pruned = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"].keys())
-           print(f"Pruned {len(nwa['transitions']) - len(transitions_pruned)} transitions.")
-       
-           # 1. Partition transitions
-      @@ -386,10 +426,14 @@
-                   # We need all states in each FST so transitions are valid
-                   state_map = {j: fst.add_state() for j in range(nwa["num_states"])}
-                   fst.set_start(state_map[nwa["start_state"]])
-      -            for state_id in nwa["final_states"]:
-      -                fst.set_final(state_map[state_id], 0.0)
-      -            for source, label, dest in chunk:
-      -                fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-      +            for state_id, weight in nwa["final_states"].items():
-      +                # FIXME: Using 0.0 for final weight.
-      +                fst.set_final(state_map[state_id], 0.0)
-      +            for source, label, dest, weight in chunk:
-      +                # FIXME: Using 0.0 for transition weight.
-      +                fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-       
-                   print_fst_stats(fst, f"Chunk {i+1} Initial FST")
-       
+               num_states: int, start_state: int, final_states: dict, transitions: set, result_queue: multiprocessing.Queue
 
       ```
     metadata:
@@ -44880,7 +44738,7 @@ messages:
       Applying patch to 'scripts/analyze_nwa.py' using custom patcher...
       Successfully applied patch and wrote to scripts/analyze_nwa.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Integrate weight parsing and handling
-      for bitset weights in NWA analysis script"'
+  - user: 'Changes committed with message: "scripts/analyze_nwa: Implement prune_to_final_state_transitions
+      logic"'
     metadata:
 ...
