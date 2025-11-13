@@ -95,6 +95,7 @@ def prune_to_final_state_transitions(transitions: set, final_state_ids: set) -> 
     If a (source, label) pair has a transition to a final state,
     remove all transitions for that pair that go to non-final states.
     """
+    return transitions
     source_label_to_dests = defaultdict(set)
     for source, label, dest, weight in transitions:
         source_label_to_dests[(source, label)].add(dest)
