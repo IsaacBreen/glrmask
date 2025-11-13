@@ -8,6 +8,7 @@ import multiprocessing
 import argparse
 from collections import Counter, defaultdict
 
+# (Import statements for rustfst and networkx remain the same)
 # We use rustfst for high-performance FST operations.
 try:
     from rustfst import VectorFst, Tr
@@ -25,7 +26,7 @@ except ImportError:
     sys.exit(1)
 
 
-# --- CORE UTILITIES ---
+# --- CORE UTILITIES (unchanged) ---
 
 def load_nwa_data(filepath: str) -> dict:
     """Loads and parses the NWA JSON file into a structured dictionary."""
@@ -93,7 +94,7 @@ def time_determinization_with_timeout(
         return False  # Also false if it crashed but finished quickly
 
 
-# --- ANALYSIS FUNCTIONS (used by passes) ---
+# --- ANALYSIS FUNCTIONS (unchanged) ---
 
 def print_graph_stats(G: nx.DiGraph):
     """Prints high-level stats for a graph."""
@@ -180,17 +181,53 @@ def run_determinize_pass(args):
         print("RESULT: ✅ Determinization finished within the time limit.")
 
 
-def run_show_states_pass(args):
-    """Executes the 'show-states' pass."""
-    print("--- Running Show States Pass ---")
+# --- NEW AND MODIFIED PASSES FOR STATE INSPECTION ---
+
+def run_inspect_states_pass(args):
+    """Executes the 'inspect-states' pass for pretty-printing."""
+    print("--- Running Inspect States Pass ---")
     nwa = load_nwa_data(args.filepath)
-    print(f"\nShowing data for states: {args.states}")
+    print(f"\nInspecting data for states: {args.states}")
     for state_id in args.states:
-        print(f"\n--- State {state_id} ---")
-        if 0 <= state_id < nwa["num_states"]:
-            print(json.dumps(nwa["raw_data"]["states"][state_id], indent=2))
-        else:
+        print(f"\n{'=' * 10} State {state_id} {'=' * 10}")
+        if not (0 <= state_id < nwa["num_states"]):
             print(f"Error: State ID {state_id} is out of bounds (0-{nwa['num_states'] - 1}).")
+            continue
+
+        state_data = nwa["raw_data"]["states"][state_id]
+
+        final_weight = state_data.get('final_weight')
+        print(f"Final State: {'Yes (weight: ' + str(final_weight) + ')' if final_weight is not None else 'No'}")
+
+        print("\nEpsilon Transitions (ε):")
+        epsilons = state_data.get('epsilons', [])
+        if epsilons:
+            for target_id, metadata in epsilons:
+                print(f"  - ε --> {target_id}  (metadata: {metadata})")
+        else:
+            print("  - None")
+
+        print("\nSymbol Transitions:")
+        transitions = state_data.get('transitions', {})
+        if transitions:
+            for label_str, targets in sorted(transitions.items(), key=lambda item: int(item[0])):
+                for target_id, metadata in targets:
+                    print(f"  - On symbol '{label_str}' --> {target_id}  (metadata: {metadata})")
+        else:
+            print("  - None")
+
+
+def run_dump_states_pass(args):
+    """Executes the 'dump-states' pass for raw JSON output."""
+    # Note: No "--- Running Pass ---" print to keep output clean for piping
+    nwa = load_nwa_data(args.filepath)
+    for state_id in args.states:
+        if 0 <= state_id < nwa["num_states"]:
+            # Print compact, single-line JSON
+            print(json.dumps(nwa["raw_data"]["states"][state_id], separators=(',', ':')))
+        else:
+            # Print error to stderr to not pollute stdout
+            print(f"Error: State ID {state_id} is out of bounds (0-{nwa['num_states'] - 1}).", file=sys.stderr)
 
 
 def run_prune_pass(args):
@@ -278,11 +315,17 @@ if __name__ == "__main__":
     parser_det.add_argument("--timeout", type=float, default=10.0, help="Timeout in seconds for the determinization attempt.")
     parser_det.set_defaults(func=run_determinize_pass)
 
-    # --- Show States Pass ---
-    parser_show = subparsers.add_parser("show-states", help="Print the raw JSON data for specific state IDs.")
-    parser_show.add_argument("filepath", help="Path to the nwa_dump.json file.")
-    parser_show.add_argument("states", type=int, nargs='+', help="One or more state IDs to display.")
-    parser_show.set_defaults(func=run_show_states_pass)
+    # --- MODIFIED: Inspect States Pass (Pretty) ---
+    parser_inspect = subparsers.add_parser("inspect-states", help="Pretty-print a human-readable summary for specific state IDs.")
+    parser_inspect.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_inspect.add_argument("states", type=int, nargs='+', help="One or more state IDs to display.")
+    parser_inspect.set_defaults(func=run_inspect_states_pass)
+
+    # --- NEW: Dump States Pass (Raw) ---
+    parser_dump = subparsers.add_parser("dump-states", help="Print the raw, compact JSON data for specific state IDs.")
+    parser_dump.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_dump.add_argument("states", type=int, nargs='+', help="One or more state IDs to display.")
+    parser_dump.set_defaults(func=run_dump_states_pass)
 
     # --- Prune Pass ---
     parser_prune = subparsers.add_parser(
