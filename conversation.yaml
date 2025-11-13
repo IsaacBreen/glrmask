@@ -8,6 +8,7 @@ local_system:
     - src/precompute4/weighted_automata/common.rs
     - src/precompute4/weighted_automata/ops.rs
     - src/precompute4/weighted_automata/determinization.rs
+    - scripts/analyze_nwa.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -2118,7 +2119,7 @@ local_system:
                       let filename = format!("nwa_dump_{}.json", timestamp);
                       eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
                       let f = std::fs::File::create(&filename).expect("Unable to create dump file");
-                      serde_json::to_writer_pretty(f, self).expect("Unable to write NWA to file");
+                      serde_json::to_writer(f, self).expect("Unable to write NWA to file");
                       panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
                   }
 
@@ -2135,6 +2136,165 @@ local_system:
               det.dwa
           }
       }
+    scripts/analyze_nwa.py: |
+      # scripts/analyze_nwa.py
+      import json
+      import sys
+      import os
+      import glob
+      from collections import defaultdict
+
+      class NWA:
+          """
+          A class to load and analyze a Non-deterministic Weighted Automaton (NWA)
+          from a JSON dump file.
+          """
+          def __init__(self, data):
+              self.start_state = data['body']['start_state']
+              # The `NWAStates` newtype in Rust serializes transparently as its inner Vec,
+              # so `data['states']` is the list of state objects.
+              self.states = data['states']
+
+          def num_states(self):
+              return len(self.states)
+
+          def get_stats(self):
+              """
+              Computes various statistics about the NWA.
+              """
+              stats = {
+                  'num_states': self.num_states(),
+                  'start_state': self.start_state,
+                  'num_final_states': 0,
+                  'num_epsilon_transitions': 0,
+                  'num_labeled_transitions': 0,
+                  'num_default_transitions': 0,
+                  'labeled_transitions_per_state': defaultdict(int),
+                  'epsilon_transitions_per_state': defaultdict(int),
+                  'default_transitions_per_state': defaultdict(int),
+                  'outgoing_degree_per_state': defaultdict(int),
+                  'incoming_degree_per_state': defaultdict(int),
+                  'weight_stats': {
+                      'all_count': 0,
+                      'empty_count': 0,
+                      'complex_count': 0,
+                  }
+              }
+
+              for i, state in enumerate(self.states):
+                  if state['final_weight'] is not None:
+                      stats['num_final_states'] += 1
+                      self._analyze_weight(state['final_weight'], stats['weight_stats'])
+
+                  # Epsilon transitions
+                  eps_count = len(state['epsilons'])
+                  stats['num_epsilon_transitions'] += eps_count
+                  stats['epsilon_transitions_per_state'][i] = eps_count
+                  stats['outgoing_degree_per_state'][i] += eps_count
+                  for target, weight in state['epsilons']:
+                      stats['incoming_degree_per_state'][target] += 1
+                      self._analyze_weight(weight, stats['weight_stats'])
+
+                  # Labeled transitions
+                  labeled_count = 0
+                  for _label, targets in state['transitions'].items():
+                      labeled_count += len(targets)
+                      for target, weight in targets:
+                          stats['incoming_degree_per_state'][target] += 1
+                          self._analyze_weight(weight, stats['weight_stats'])
+                  stats['num_labeled_transitions'] += labeled_count
+                  stats['labeled_transitions_per_state'][i] = labeled_count
+                  stats['outgoing_degree_per_state'][i] += labeled_count
+
+                  # Default transitions
+                  default_count = len(state['default'])
+                  stats['num_default_transitions'] += default_count
+                  stats['default_transitions_per_state'][i] = default_count
+                  stats['outgoing_degree_per_state'][i] += default_count
+                  for default_trans in state['default']:
+                      target = default_trans['target']
+                      weight = default_trans['weight']
+                      stats['incoming_degree_per_state'][target] += 1
+                      self._analyze_weight(weight, stats['weight_stats'])
+
+              return stats
+
+          def _analyze_weight(self, weight, weight_stats):
+              if weight == "ALL":
+                  weight_stats['all_count'] += 1
+              elif isinstance(weight, list) and not weight:
+                  weight_stats['empty_count'] += 1
+              else:
+                  weight_stats['complex_count'] += 1
+
+          def print_stats(self):
+              """
+              Prints a summary of the NWA statistics to the console.
+              """
+              stats = self.get_stats()
+              print("--- NWA Statistics ---")
+              print(f"Number of states: {stats['num_states']}")
+              print(f"Start state: {stats['start_state']}")
+              print(f"Number of final states: {stats['num_final_states']}")
+              print("\n--- Transitions ---")
+              print(f"Total epsilon transitions: {stats['num_epsilon_transitions']}")
+              print(f"Total labeled transitions: {stats['num_labeled_transitions']}")
+              print(f"Total default transitions: {stats['num_default_transitions']}")
+              
+              total_transitions = stats['num_epsilon_transitions'] + stats['num_labeled_transitions'] + stats['num_default_transitions']
+              print(f"Total transitions: {total_transitions}")
+              if stats['num_states'] > 0:
+                  print(f"Average outgoing degree: {total_transitions / stats['num_states']:.2f}")
+
+              print("\n--- Weight Statistics ---")
+              print(f"  'ALL' weights: {stats['weight_stats']['all_count']}")
+              print(f"  Empty weights: {stats['weight_stats']['empty_count']}")
+              print(f"  Complex weights: {stats['weight_stats']['complex_count']}")
+
+      def load_nwa(filepath):
+          """
+          Loads an NWA from a JSON file.
+          """
+          with open(filepath, 'r') as f:
+              data = json.load(f)
+          return NWA(data)
+
+      if __name__ == "__main__":
+          filepath = None
+          if len(sys.argv) > 2:
+              print(f"Usage: python {sys.argv[0]} [<path_to_nwa_dump.json>]")
+              sys.exit(1)
+          
+          if len(sys.argv) == 2:
+              filepath = sys.argv[1]
+          else: # len(sys.argv) == 1
+              try:
+                  # Search for dump files in the current directory and parent directory
+                  # to handle being run from project root or from scripts/
+                  search_paths = ['./nwa_dump_*.json', '../nwa_dump_*.json']
+                  dump_files = []
+                  for path in search_paths:
+                      dump_files.extend(glob.glob(path))
+
+                  if not dump_files:
+                      print("No NWA dump file provided and no 'nwa_dump_*.json' files found in current or parent directory.")
+                      sys.exit(1)
+                  
+                  filepath = max(dump_files, key=os.path.getmtime)
+                  print(f"No path provided. Using most recent dump file: {filepath}")
+              except Exception as e:
+                  print(f"Error finding most recent dump file: {e}", file=sys.stderr)
+                  sys.exit(1)
+
+          try:
+              nwa = load_nwa(filepath)
+              nwa.print_stats()
+          except FileNotFoundError:
+              print(f"Error: File not found at {filepath}", file=sys.stderr)
+              sys.exit(1)
+          except json.JSONDecodeError:
+              print(f"Error: Could not decode JSON from {filepath}", file=sys.stderr)
+              sys.exit(1)
   prev_file_contents:
     Cargo.toml: |
       # This line needs to come before anything else in Cargo.toml
@@ -4260,6 +4420,210 @@ local_system:
               det.dwa
           }
       }
+    scripts/analyze_nwa.py: |
+      # scripts/analyze_nwa.py
+      import json
+      import sys
+      import os
+      import glob
+      from collections import defaultdict
+      from dataclasses import dataclass
+      from typing import Any, Optional, List, Dict, Tuple
+
+      # Type aliases for clarity based on Rust types
+      Weight = Any
+      NWAStateID = int
+      Symbol = int  # i16 in Rust
+
+      @dataclass
+      class NWADefaultTransition:
+          """Represents a default transition in an NWA."""
+          target: NWAStateID
+          weight: Weight
+          exceptions: List[Symbol]
+
+      @dataclass
+      class NWAState:
+          """Represents a single state in an NWA."""
+          final_weight: Optional[Weight]
+          # In JSON, the keys of the transitions map are strings.
+          transitions: Dict[str, List[Tuple[NWAStateID, Weight]]]
+          epsilons: List[Tuple[NWAStateID, Weight]]
+          default: List[NWADefaultTransition]
+
+      @dataclass
+      class NWABody:
+          """Represents the body of an NWA, containing the start state."""
+          start_state: NWAStateID
+
+      @dataclass
+      class NWA:
+          """
+          Represents a Non-deterministic Weighted Automaton (NWA), loaded from a JSON dump.
+          """
+          body: NWABody
+          states: List[NWAState]
+
+          @staticmethod
+          def from_dict(data: dict) -> 'NWA':
+              """Creates an NWA instance from a dictionary (parsed from JSON)."""
+              body = NWABody(**data['body'])
+              # The `NWAStates` newtype in Rust serializes transparently as its inner Vec,
+              # so `data['states']` is the list of state objects.
+              states_data = data['states']
+              states = []
+              for s_data in states_data:
+                  default_trans = [NWADefaultTransition(**d) for d in s_data.get('default', [])]
+                  state = NWAState(
+                      final_weight=s_data.get('final_weight'),
+                      transitions=s_data.get('transitions', {}),
+                      epsilons=[tuple(e) for e in s_data.get('epsilons', [])],
+                      default=default_trans
+                  )
+                  states.append(state)
+              return NWA(body=body, states=states)
+
+          def num_states(self) -> int:
+              return len(self.states)
+
+      def analyze_weight(weight: Weight, weight_stats: dict):
+          """Updates weight statistics based on a given weight object."""
+          if weight == "ALL":
+              weight_stats['all_count'] += 1
+          elif isinstance(weight, list) and not weight:
+              weight_stats['empty_count'] += 1
+          else:
+              weight_stats['complex_count'] += 1
+
+      def get_nwa_stats(nwa: NWA) -> dict:
+          """
+          Computes various statistics about the NWA.
+          """
+          stats = {
+              'num_states': nwa.num_states(),
+              'start_state': nwa.body.start_state,
+              'num_final_states': 0,
+              'num_epsilon_transitions': 0,
+              'num_labeled_transitions': 0,
+              'num_default_transitions': 0,
+              'labeled_transitions_per_state': defaultdict(int),
+              'epsilon_transitions_per_state': defaultdict(int),
+              'default_transitions_per_state': defaultdict(int),
+              'outgoing_degree_per_state': defaultdict(int),
+              'incoming_degree_per_state': defaultdict(int),
+              'weight_stats': {
+                  'all_count': 0,
+                  'empty_count': 0,
+                  'complex_count': 0,
+              }
+          }
+
+          for i, state in enumerate(nwa.states):
+              if state.final_weight is not None:
+                  stats['num_final_states'] += 1
+                  analyze_weight(state.final_weight, stats['weight_stats'])
+
+              # Epsilon transitions
+              eps_count = len(state.epsilons)
+              stats['num_epsilon_transitions'] += eps_count
+              stats['epsilon_transitions_per_state'][i] = eps_count
+              stats['outgoing_degree_per_state'][i] += eps_count
+              for target, weight in state.epsilons:
+                  stats['incoming_degree_per_state'][target] += 1
+                  analyze_weight(weight, stats['weight_stats'])
+
+              # Labeled transitions
+              labeled_count = 0
+              for _label, targets in state.transitions.items():
+                  labeled_count += len(targets)
+                  for target, weight in targets:
+                      stats['incoming_degree_per_state'][target] += 1
+                      analyze_weight(weight, stats['weight_stats'])
+              stats['num_labeled_transitions'] += labeled_count
+              stats['labeled_transitions_per_state'][i] = labeled_count
+              stats['outgoing_degree_per_state'][i] += labeled_count
+
+              # Default transitions
+              default_count = len(state.default)
+              stats['num_default_transitions'] += default_count
+              stats['default_transitions_per_state'][i] = default_count
+              stats['outgoing_degree_per_state'][i] += default_count
+              for default_trans in state.default:
+                  target = default_trans.target
+                  weight = default_trans.weight
+                  stats['incoming_degree_per_state'][target] += 1
+                  analyze_weight(weight, stats['weight_stats'])
+
+          return stats
+
+      def print_nwa_stats(stats: dict):
+          """
+          Prints a summary of the NWA statistics to the console.
+          """
+          print("--- NWA Statistics ---")
+          print(f"Number of states: {stats['num_states']}")
+          print(f"Start state: {stats['start_state']}")
+          print(f"Number of final states: {stats['num_final_states']}")
+          print("\n--- Transitions ---")
+          print(f"Total epsilon transitions: {stats['num_epsilon_transitions']}")
+          print(f"Total labeled transitions: {stats['num_labeled_transitions']}")
+          print(f"Total default transitions: {stats['num_default_transitions']}")
+          
+          total_transitions = stats['num_epsilon_transitions'] + stats['num_labeled_transitions'] + stats['num_default_transitions']
+          print(f"Total transitions: {total_transitions}")
+          if stats['num_states'] > 0:
+              print(f"Average outgoing degree: {total_transitions / stats['num_states']:.2f}")
+
+          print("\n--- Weight Statistics ---")
+          print(f"  'ALL' weights: {stats['weight_stats']['all_count']}")
+          print(f"  Empty weights: {stats['weight_stats']['empty_count']}")
+          print(f"  Complex weights: {stats['weight_stats']['complex_count']}")
+
+      def load_nwa(filepath: str) -> NWA:
+          """
+          Loads an NWA from a JSON file.
+          """
+          with open(filepath, 'r') as f:
+              data = json.load(f)
+          return NWA.from_dict(data)
+
+      if __name__ == "__main__":
+          filepath = None
+          if len(sys.argv) > 2:
+              print(f"Usage: python {sys.argv[0]} [<path_to_nwa_dump.json>]")
+              sys.exit(1)
+          
+          if len(sys.argv) == 2:
+              filepath = sys.argv[1]
+          else: # len(sys.argv) == 1
+              try:
+                  # Search for dump files in the current directory and parent directory
+                  # to handle being run from project root or from scripts/
+                  search_paths = ['./nwa_dump_*.json', '../nwa_dump_*.json']
+                  dump_files = []
+                  for path in search_paths:
+                      dump_files.extend(glob.glob(path))
+
+                  if not dump_files:
+                      print("No NWA dump file provided and no 'nwa_dump_*.json' files found in current or parent directory.")
+                      sys.exit(1)
+                  
+                  filepath = max(dump_files, key=os.path.getmtime)
+                  print(f"No path provided. Using most recent dump file: {filepath}")
+              except Exception as e:
+                  print(f"Error finding most recent dump file: {e}", file=sys.stderr)
+                  sys.exit(1)
+
+          try:
+              nwa = load_nwa(filepath)
+              stats = get_nwa_stats(nwa)
+              print_nwa_stats(stats)
+          except FileNotFoundError:
+              print(f"Error: File not found at {filepath}", file=sys.stderr)
+              sys.exit(1)
+          except json.JSONDecodeError:
+              print(f"Error: Could not decode JSON from {filepath}", file=sys.stderr)
+              sys.exit(1)
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -6445,7 +6809,7 @@ messages:
                       let filename = format!("nwa_dump_{}.json", timestamp);
                       eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
                       let f = std::fs::File::create(&filename).expect("Unable to create dump file");
-                      serde_json::to_writer_pretty(f, self).expect("Unable to write NWA to file");
+                      serde_json::to_writer(f, self).expect("Unable to write NWA to file");
                       panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
                   }
 
@@ -6465,7 +6829,172 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata/determinization.rs
-  - user: Make it so serde doesn't use indentation
+  - user: |-
+      ```python "scripts/analyze_nwa.py"
+      # scripts/analyze_nwa.py
+      import json
+      import sys
+      import os
+      import glob
+      from collections import defaultdict
+
+      class NWA:
+          """
+          A class to load and analyze a Non-deterministic Weighted Automaton (NWA)
+          from a JSON dump file.
+          """
+          def __init__(self, data):
+              self.start_state = data['body']['start_state']
+              # The `NWAStates` newtype in Rust serializes transparently as its inner Vec,
+              # so `data['states']` is the list of state objects.
+              self.states = data['states']
+
+          def num_states(self):
+              return len(self.states)
+
+          def get_stats(self):
+              """
+              Computes various statistics about the NWA.
+              """
+              stats = {
+                  'num_states': self.num_states(),
+                  'start_state': self.start_state,
+                  'num_final_states': 0,
+                  'num_epsilon_transitions': 0,
+                  'num_labeled_transitions': 0,
+                  'num_default_transitions': 0,
+                  'labeled_transitions_per_state': defaultdict(int),
+                  'epsilon_transitions_per_state': defaultdict(int),
+                  'default_transitions_per_state': defaultdict(int),
+                  'outgoing_degree_per_state': defaultdict(int),
+                  'incoming_degree_per_state': defaultdict(int),
+                  'weight_stats': {
+                      'all_count': 0,
+                      'empty_count': 0,
+                      'complex_count': 0,
+                  }
+              }
+
+              for i, state in enumerate(self.states):
+                  if state['final_weight'] is not None:
+                      stats['num_final_states'] += 1
+                      self._analyze_weight(state['final_weight'], stats['weight_stats'])
+
+                  # Epsilon transitions
+                  eps_count = len(state['epsilons'])
+                  stats['num_epsilon_transitions'] += eps_count
+                  stats['epsilon_transitions_per_state'][i] = eps_count
+                  stats['outgoing_degree_per_state'][i] += eps_count
+                  for target, weight in state['epsilons']:
+                      stats['incoming_degree_per_state'][target] += 1
+                      self._analyze_weight(weight, stats['weight_stats'])
+
+                  # Labeled transitions
+                  labeled_count = 0
+                  for _label, targets in state['transitions'].items():
+                      labeled_count += len(targets)
+                      for target, weight in targets:
+                          stats['incoming_degree_per_state'][target] += 1
+                          self._analyze_weight(weight, stats['weight_stats'])
+                  stats['num_labeled_transitions'] += labeled_count
+                  stats['labeled_transitions_per_state'][i] = labeled_count
+                  stats['outgoing_degree_per_state'][i] += labeled_count
+
+                  # Default transitions
+                  default_count = len(state['default'])
+                  stats['num_default_transitions'] += default_count
+                  stats['default_transitions_per_state'][i] = default_count
+                  stats['outgoing_degree_per_state'][i] += default_count
+                  for default_trans in state['default']:
+                      target = default_trans['target']
+                      weight = default_trans['weight']
+                      stats['incoming_degree_per_state'][target] += 1
+                      self._analyze_weight(weight, stats['weight_stats'])
+
+              return stats
+
+          def _analyze_weight(self, weight, weight_stats):
+              if weight == "ALL":
+                  weight_stats['all_count'] += 1
+              elif isinstance(weight, list) and not weight:
+                  weight_stats['empty_count'] += 1
+              else:
+                  weight_stats['complex_count'] += 1
+
+          def print_stats(self):
+              """
+              Prints a summary of the NWA statistics to the console.
+              """
+              stats = self.get_stats()
+              print("--- NWA Statistics ---")
+              print(f"Number of states: {stats['num_states']}")
+              print(f"Start state: {stats['start_state']}")
+              print(f"Number of final states: {stats['num_final_states']}")
+              print("\n--- Transitions ---")
+              print(f"Total epsilon transitions: {stats['num_epsilon_transitions']}")
+              print(f"Total labeled transitions: {stats['num_labeled_transitions']}")
+              print(f"Total default transitions: {stats['num_default_transitions']}")
+              
+              total_transitions = stats['num_epsilon_transitions'] + stats['num_labeled_transitions'] + stats['num_default_transitions']
+              print(f"Total transitions: {total_transitions}")
+              if stats['num_states'] > 0:
+                  print(f"Average outgoing degree: {total_transitions / stats['num_states']:.2f}")
+
+              print("\n--- Weight Statistics ---")
+              print(f"  'ALL' weights: {stats['weight_stats']['all_count']}")
+              print(f"  Empty weights: {stats['weight_stats']['empty_count']}")
+              print(f"  Complex weights: {stats['weight_stats']['complex_count']}")
+
+      def load_nwa(filepath):
+          """
+          Loads an NWA from a JSON file.
+          """
+          with open(filepath, 'r') as f:
+              data = json.load(f)
+          return NWA(data)
+
+      if __name__ == "__main__":
+          filepath = None
+          if len(sys.argv) > 2:
+              print(f"Usage: python {sys.argv[0]} [<path_to_nwa_dump.json>]")
+              sys.exit(1)
+          
+          if len(sys.argv) == 2:
+              filepath = sys.argv[1]
+          else: # len(sys.argv) == 1
+              try:
+                  # Search for dump files in the current directory and parent directory
+                  # to handle being run from project root or from scripts/
+                  search_paths = ['./nwa_dump_*.json', '../nwa_dump_*.json']
+                  dump_files = []
+                  for path in search_paths:
+                      dump_files.extend(glob.glob(path))
+
+                  if not dump_files:
+                      print("No NWA dump file provided and no 'nwa_dump_*.json' files found in current or parent directory.")
+                      sys.exit(1)
+                  
+                  filepath = max(dump_files, key=os.path.getmtime)
+                  print(f"No path provided. Using most recent dump file: {filepath}")
+              except Exception as e:
+                  print(f"Error finding most recent dump file: {e}", file=sys.stderr)
+                  sys.exit(1)
+
+          try:
+              nwa = load_nwa(filepath)
+              nwa.print_stats()
+          except FileNotFoundError:
+              print(f"Error: File not found at {filepath}", file=sys.stderr)
+              sys.exit(1)
+          except json.JSONDecodeError:
+              print(f"Error: Could not decode JSON from {filepath}", file=sys.stderr)
+              sys.exit(1)
+
+      ```
+    metadata:
+      filename: scripts/analyze_nwa.py
+  - user: Use dataclasses for everything in scripts/analyze_nwa.py to make it much
+      clearer without reference to the original Rust code.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -6485,42 +7014,425 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      To disable indentation in the JSON output produced by `serde`, you need to switch from `serde_json::to_writer_pretty` to `serde_json::to_writer`. Here are the step-by-step instructions to make this change.
+      Of course. Here are the step-by-step instructions to refactor your Python script to use dataclasses, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/precompute4/weighted_automata/determinization.rs`**.
+      Here are the edits for `scripts/analyze_nwa.py`:
 
-      2.  Navigate to the `determinize_to_dwa` method within the `impl NWA` block.
+      1.  **Add Imports**: At the top of the file, add imports for `dataclasses` and `typing` to support the new data structures.
 
-      3.  Inside the `while let Some(sid) = det.queue.pop_front()` loop, locate the following line of code:
-          ```rust
-          serde_json::to_writer_pretty(f, self).expect("Unable to write NWA to file");
+          ```python
+          from dataclasses import dataclass
+          from typing import Any, Optional, List, Dict, Tuple
           ```
 
-      4.  Change this line to use `serde_json::to_writer` instead, which writes JSON without any extra whitespace:
-          ```rust
-          serde_json::to_writer(f, self).expect("Unable to write NWA to file");
+      2.  **Define Dataclasses**: Before the original `NWA` class, define a set of dataclasses that mirror the structure of your NWA data from the JSON dump. This makes the data structure explicit. Also, add type aliases for better readability.
+
+          ```python
+          # Type aliases for clarity based on Rust types
+          Weight = Any
+          NWAStateID = int
+          Symbol = int  # i16 in Rust
+          
+          @dataclass
+          class NWADefaultTransition:
+              """Represents a default transition in an NWA."""
+              target: NWAStateID
+              weight: Weight
+              exceptions: List[Symbol]
+          
+          @dataclass
+          class NWAState:
+              """Represents a single state in an NWA."""
+              final_weight: Optional[Weight]
+              # In JSON, the keys of the transitions map are strings.
+              transitions: Dict[str, List[Tuple[NWAStateID, Weight]]]
+              epsilons: List[Tuple[NWAStateID, Weight]]
+              default: List[NWADefaultTransition]
+          
+          @dataclass
+          class NWABody:
+              """Represents the body of an NWA, containing the start state."""
+              start_state: NWAStateID
           ```
 
-      This change will ensure that the dumped NWA file is compact and not indented.
+      3.  **Replace `NWA` Class**: Replace the existing `NWA` class with a new dataclass. This new class will include a `from_dict` static method to parse the raw dictionary from `json.load` into the nested dataclass structure.
+
+          ```python
+          @dataclass
+          class NWA:
+              """
+              Represents a Non-deterministic Weighted Automaton (NWA), loaded from a JSON dump.
+              """
+              body: NWABody
+              states: List[NWAState]
+          
+              @staticmethod
+              def from_dict(data: dict) -> 'NWA':
+                  """Creates an NWA instance from a dictionary (parsed from JSON)."""
+                  body = NWABody(**data['body'])
+                  # The `NWAStates` newtype in Rust serializes transparently as its inner Vec,
+                  # so `data['states']` is the list of state objects.
+                  states_data = data['states']
+                  states = []
+                  for s_data in states_data:
+                      default_trans = [NWADefaultTransition(**d) for d in s_data.get('default', [])]
+                      state = NWAState(
+                          final_weight=s_data.get('final_weight'),
+                          transitions=s_data.get('transitions', {}),
+                          epsilons=[tuple(e) for e in s_data.get('epsilons', [])],
+                          default=default_trans
+                      )
+                      states.append(state)
+                  return NWA(body=body, states=states)
+          
+              def num_states(self) -> int:
+                  return len(self.states)
+          ```
+
+      4.  **Create Standalone Analysis Functions**: Convert the methods from the old `NWA` class (`_analyze_weight`, `get_stats`, `print_stats`) into standalone functions. This separates the data representation from the analysis logic.
+
+          ```python
+          def analyze_weight(weight: Weight, weight_stats: dict):
+              """Updates weight statistics based on a given weight object."""
+              if weight == "ALL":
+                  weight_stats['all_count'] += 1
+              elif isinstance(weight, list) and not weight:
+                  weight_stats['empty_count'] += 1
+              else:
+                  weight_stats['complex_count'] += 1
+          
+          def get_nwa_stats(nwa: NWA) -> dict:
+              """
+              Computes various statistics about the NWA.
+              """
+              stats = {
+                  'num_states': nwa.num_states(),
+                  'start_state': nwa.body.start_state,
+                  # ... (rest of the stats dictionary initialization)
+              }
+          
+              for i, state in enumerate(nwa.states):
+                  if state.final_weight is not None:
+                      stats['num_final_states'] += 1
+                      analyze_weight(state.final_weight, stats['weight_stats'])
+          
+                  # Epsilon transitions
+                  eps_count = len(state.epsilons)
+                  # ... (rest of the logic, using `state.epsilons`, `state.transitions`, etc.)
+          
+              return stats
+          
+          def print_nwa_stats(stats: dict):
+              """
+              Prints a summary of the NWA statistics to the console.
+              """
+              # ... (this function's body is the same as the old print_stats)
+          ```
+
+      5.  **Update `load_nwa`**: Modify the `load_nwa` function to call `NWA.from_dict` to perform the parsing.
+
+          ```python
+          def load_nwa(filepath: str) -> NWA:
+              """
+              Loads an NWA from a JSON file.
+              """
+              with open(filepath, 'r') as f:
+                  data = json.load(f)
+              return NWA.from_dict(data)
+          ```
+
+      6.  **Update Main Execution Block**: In the `if __name__ == "__main__"` block, update the logic to call the new standalone functions.
+
+          ```python
+          if __name__ == "__main__":
+              # ... (file path logic is unchanged)
+              try:
+                  nwa = load_nwa(filepath)
+                  stats = get_nwa_stats(nwa)
+                  print_nwa_stats(stats)
+              # ... (error handling is unchanged)
+          ```
 
       ### Git Diff
 
-      Here is the git diff for the change:
+      Here is the git diff to apply these changes to `scripts/analyze_nwa.py`.
 
       ```diff
-      --- a/src/precompute4/weighted_automata/determinization.rs
-      +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -522,7 +522,7 @@
-                       let filename = format!("nwa_dump_{}.json", timestamp);
-                       eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
-                       let f = std::fs::File::create(&filename).expect("Unable to create dump file");
-      -                serde_json::to_writer_pretty(f, self).expect("Unable to write NWA to file");
-      +                serde_json::to_writer(f, self).expect("Unable to write NWA to file");
-                       panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
-                   }
+      --- a/scripts/analyze_nwa.py
+      +++ b/scripts/analyze_nwa.py
+      @@ -4,118 +4,166 @@
+       import os
+       import glob
+       from collections import defaultdict
+      +from dataclasses import dataclass
+      +from typing import Any, Optional, List, Dict, Tuple
        
+      -class NWA:
+      -    """
+      -    A class to load and analyze a Non-deterministic Weighted Automaton (NWA)
+      -    from a JSON dump file.
+      -    """
+      -    def __init__(self, data):
+      -        self.start_state = data['body']['start_state']
+      +# Type aliases for clarity based on Rust types
+      +Weight = Any
+      +NWAStateID = int
+      +Symbol = int  # i16 in Rust
+      +
+      +@dataclass
+      +class NWADefaultTransition:
+      +    """Represents a default transition in an NWA."""
+      +    target: NWAStateID
+      +    weight: Weight
+      +    exceptions: List[Symbol]
+      +
+      +@dataclass
+      +class NWAState:
+      +    """Represents a single state in an NWA."""
+      +    final_weight: Optional[Weight]
+      +    # In JSON, the keys of the transitions map are strings.
+      +    transitions: Dict[str, List[Tuple[NWAStateID, Weight]]]
+      +    epsilons: List[Tuple[NWAStateID, Weight]]
+      +    default: List[NWADefaultTransition]
+      +
+      +@dataclass
+      +class NWABody:
+      +    """Represents the body of an NWA, containing the start state."""
+      +    start_state: NWAStateID
+      +
+      +@dataclass
+      +class NWA:
+      +    """
+      +    Represents a Non-deterministic Weighted Automaton (NWA), loaded from a JSON dump.
+      +    """
+      +    body: NWABody
+      +    states: List[NWAState]
+      +
+      +    @staticmethod
+      +    def from_dict(data: dict) -> 'NWA':
+      +        """Creates an NWA instance from a dictionary (parsed from JSON)."""
+      +        body = NWABody(**data['body'])
+               # The `NWAStates` newtype in Rust serializes transparently as its inner Vec,
+               # so `data['states']` is the list of state objects.
+      -        self.states = data['states']
+      +        states_data = data['states']
+      +        states = []
+      +        for s_data in states_data:
+      +            default_trans = [NWADefaultTransition(**d) for d in s_data.get('default', [])]
+      +            state = NWAState(
+      +                final_weight=s_data.get('final_weight'),
+      +                transitions=s_data.get('transitions', {}),
+      +                epsilons=[tuple(e) for e in s_data.get('epsilons', [])],
+      +                default=default_trans
+      +            )
+      +            states.append(state)
+      +        return NWA(body=body, states=states)
+       
+      -    def num_states(self):
+      +    def num_states(self) -> int:
+               return len(self.states)
+       
+      -    def get_stats(self):
+      -        """
+      -        Computes various statistics about the NWA.
+      -        """
+      -        stats = {
+      -            'num_states': self.num_states(),
+      -            'start_state': self.start_state,
+      -            'num_final_states': 0,
+      -            'num_epsilon_transitions': 0,
+      -            'num_labeled_transitions': 0,
+      -            'num_default_transitions': 0,
+      -            'labeled_transitions_per_state': defaultdict(int),
+      -            'epsilon_transitions_per_state': defaultdict(int),
+      -            'default_transitions_per_state': defaultdict(int),
+      -            'outgoing_degree_per_state': defaultdict(int),
+      -            'incoming_degree_per_state': defaultdict(int),
+      -            'weight_stats': {
+      -                'all_count': 0,
+      -                'empty_count': 0,
+      -                'complex_count': 0,
+      -            }
+      +def analyze_weight(weight: Weight, weight_stats: dict):
+      +    """Updates weight statistics based on a given weight object."""
+      +    if weight == "ALL":
+      +        weight_stats['all_count'] += 1
+      +    elif isinstance(weight, list) and not weight:
+      +        weight_stats['empty_count'] += 1
+      +    else:
+      +        weight_stats['complex_count'] += 1
+      +
+      +def get_nwa_stats(nwa: NWA) -> dict:
+      +    """
+      +    Computes various statistics about the NWA.
+      +    """
+      +    stats = {
+      +        'num_states': nwa.num_states(),
+      +        'start_state': nwa.body.start_state,
+      +        'num_final_states': 0,
+      +        'num_epsilon_transitions': 0,
+      +        'num_labeled_transitions': 0,
+      +        'num_default_transitions': 0,
+      +        'labeled_transitions_per_state': defaultdict(int),
+      +        'epsilon_transitions_per_state': defaultdict(int),
+      +        'default_transitions_per_state': defaultdict(int),
+      +        'outgoing_degree_per_state': defaultdict(int),
+      +        'incoming_degree_per_state': defaultdict(int),
+      +        'weight_stats': {
+      +            'all_count': 0,
+      +            'empty_count': 0,
+      +            'complex_count': 0,
+               }
+      +    }
+       
+      -        for i, state in enumerate(self.states):
+      -            if state['final_weight'] is not None:
+      -                stats['num_final_states'] += 1
+      -                self._analyze_weight(state['final_weight'], stats['weight_stats'])
+      +    for i, state in enumerate(nwa.states):
+      +        if state.final_weight is not None:
+      +            stats['num_final_states'] += 1
+      +            analyze_weight(state.final_weight, stats['weight_stats'])
+       
+      -            # Epsilon transitions
+      -            eps_count = len(state['epsilons'])
+      -            stats['num_epsilon_transitions'] += eps_count
+      -            stats['epsilon_transitions_per_state'][i] = eps_count
+      -            stats['outgoing_degree_per_state'][i] += eps_count
+      -            for target, weight in state['epsilons']:
+      -                stats['incoming_degree_per_state'][target] += 1
+      -                self._analyze_weight(weight, stats['weight_stats'])
+      +        # Epsilon transitions
+      +        eps_count = len(state.epsilons)
+      +        stats['num_epsilon_transitions'] += eps_count
+      +        stats['epsilon_transitions_per_state'][i] = eps_count
+      +        stats['outgoing_degree_per_state'][i] += eps_count
+      +        for target, weight in state.epsilons:
+      +            stats['incoming_degree_per_state'][target] += 1
+      +            analyze_weight(weight, stats['weight_stats'])
+       
+      -            # Labeled transitions
+      -            labeled_count = 0
+      -            for _label, targets in state['transitions'].items():
+      -                labeled_count += len(targets)
+      -                for target, weight in targets:
+      -                    stats['incoming_degree_per_state'][target] += 1
+      -                    self._analyze_weight(weight, stats['weight_stats'])
+      -            stats['num_labeled_transitions'] += labeled_count
+      -            stats['labeled_transitions_per_state'][i] = labeled_count
+      -            stats['outgoing_degree_per_state'][i] += labeled_count
+      +        # Labeled transitions
+      +        labeled_count = 0
+      +        for _label, targets in state.transitions.items():
+      +            labeled_count += len(targets)
+      +            for target, weight in targets:
+      +                stats['incoming_degree_per_state'][target] += 1
+      +                analyze_weight(weight, stats['weight_stats'])
+      +        stats['num_labeled_transitions'] += labeled_count
+      +        stats['labeled_transitions_per_state'][i] = labeled_count
+      +        stats['outgoing_degree_per_state'][i] += labeled_count
+       
+      -            # Default transitions
+      -            default_count = len(state['default'])
+      -            stats['num_default_transitions'] += default_count
+      -            stats['default_transitions_per_state'][i] = default_count
+      -            stats['outgoing_degree_per_state'][i] += default_count
+      -            for default_trans in state['default']:
+      -                target = default_trans['target']
+      -                weight = default_trans['weight']
+      -                stats['incoming_degree_per_state'][target] += 1
+      -                self._analyze_weight(weight, stats['weight_stats'])
+      +        # Default transitions
+      +        default_count = len(state.default)
+      +        stats['num_default_transitions'] += default_count
+      +        stats['default_transitions_per_state'][i] = default_count
+      +        stats['outgoing_degree_per_state'][i] += default_count
+      +        for default_trans in state.default:
+      +            target = default_trans.target
+      +            weight = default_trans.weight
+      +            stats['incoming_degree_per_state'][target] += 1
+      +            analyze_weight(weight, stats['weight_stats'])
+       
+      -        return stats
+      +    return stats
+       
+      -    def _analyze_weight(self, weight, weight_stats):
+      -        if weight == "ALL":
+      -            weight_stats['all_count'] += 1
+      -        elif isinstance(weight, list) and not weight:
+      -            weight_stats['empty_count'] += 1
+      -        else:
+      -            weight_stats['complex_count'] += 1
+      +def print_nwa_stats(stats: dict):
+      +    """
+      +    Prints a summary of the NWA statistics to the console.
+      +    """
+      +    print("--- NWA Statistics ---")
+      +    print(f"Number of states: {stats['num_states']}")
+      +    print(f"Start state: {stats['start_state']}")
+      +    print(f"Number of final states: {stats['num_final_states']}")
+      +    print("\n--- Transitions ---")
+      +    print(f"Total epsilon transitions: {stats['num_epsilon_transitions']}")
+      +    print(f"Total labeled transitions: {stats['num_labeled_transitions']}")
+      +    print(f"Total default transitions: {stats['num_default_transitions']}")
+      +    
+      +    total_transitions = stats['num_epsilon_transitions'] + stats['num_labeled_transitions'] + stats['num_default_transitions']
+      +    print(f"Total transitions: {total_transitions}")
+      +    if stats['num_states'] > 0:
+      +        print(f"Average outgoing degree: {total_transitions / stats['num_states']:.2f}")
+       
+      -    def print_stats(self):
+      -        """
+      -        Prints a summary of the NWA statistics to the console.
+      -        """
+      -        stats = self.get_stats()
+      -        print("--- NWA Statistics ---")
+      -        print(f"Number of states: {stats['num_states']}")
+      -        print(f"Start state: {stats['start_state']}")
+      -        print(f"Number of final states: {stats['num_final_states']}")
+      -        print("\n--- Transitions ---")
+      -        print(f"Total epsilon transitions: {stats['num_epsilon_transitions']}")
+      -        print(f"Total labeled transitions: {stats['num_labeled_transitions']}")
+      -        print(f"Total default transitions: {stats['num_default_transitions']}")
+      -        
+      -        total_transitions = stats['num_epsilon_transitions'] + stats['num_labeled_transitions'] + stats['num_default_transitions']
+      -        print(f"Total transitions: {total_transitions}")
+      -        if stats['num_states'] > 0:
+      -            print(f"Average outgoing degree: {total_transitions / stats['num_states']:.2f}")
+      +    print("\n--- Weight Statistics ---")
+      +    print(f"  'ALL' weights: {stats['weight_stats']['all_count']}")
+      +    print(f"  Empty weights: {stats['weight_stats']['empty_count']}")
+      +    print(f"  Complex weights: {stats['weight_stats']['complex_count']}")
+       
+      -        print("\n--- Weight Statistics ---")
+      -        print(f"  'ALL' weights: {stats['weight_stats']['all_count']}")
+      -        print(f"  Empty weights: {stats['weight_stats']['empty_count']}")
+      -        print(f"  Complex weights: {stats['weight_stats']['complex_count']}")
+      -
+      -def load_nwa(filepath):
+      +def load_nwa(filepath: str) -> NWA:
+           """
+           Loads an NWA from a JSON file.
+           """
+           with open(filepath, 'r') as f:
+               data = json.load(f)
+      -    return NWA(data)
+      +    return NWA.from_dict(data)
+       
+       if __name__ == "__main__":
+           filepath = None
+      @@ -190,8 +238,9 @@
+       
+           try:
+               nwa = load_nwa(filepath)
+      -        nwa.print_stats()
+      +        stats = get_nwa_stats(nwa)
+      +        print_nwa_stats(stats)
+           except FileNotFoundError:
+               print(f"Error: File not found at {filepath}", file=sys.stderr)
+               sys.exit(1)
 
       ```
     metadata:
@@ -6529,11 +7441,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/weighted_automata/determinization.rs
-      Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
+      Identified target file: scripts/analyze_nwa.py
+      Applying patch to 'scripts/analyze_nwa.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/analyze_nwa.py.
     metadata:
-  - user: 'Changes committed with message: "determinization: Use to_writer instead
-      of to_writer_pretty for NWA dump"'
+  - user: 'Changes committed with message: "Refactor scripts/analyze_nwa.py to use
+      dataclasses for NWA structure representation"'
     metadata:
 ...
