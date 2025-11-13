@@ -1,6 +1,8 @@
 # scripts/analyze_nwa.py
 import json
 import sys
+import os
+import glob
 from collections import defaultdict
 
 class NWA:
@@ -119,11 +121,32 @@ def load_nwa(filepath):
     return NWA(data)
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print(f"Usage: python {sys.argv[0]} <path_to_nwa_dump.json>")
+    filepath = None
+    if len(sys.argv) > 2:
+        print(f"Usage: python {sys.argv[0]} [<path_to_nwa_dump.json>]")
         sys.exit(1)
     
-    filepath = sys.argv[1]
+    if len(sys.argv) == 2:
+        filepath = sys.argv[1]
+    else: # len(sys.argv) == 1
+        try:
+            # Search for dump files in the current directory and parent directory
+            # to handle being run from project root or from scripts/
+            search_paths = ['./nwa_dump_*.json', '../nwa_dump_*.json']
+            dump_files = []
+            for path in search_paths:
+                dump_files.extend(glob.glob(path))
+
+            if not dump_files:
+                print("No NWA dump file provided and no 'nwa_dump_*.json' files found in current or parent directory.")
+                sys.exit(1)
+            
+            filepath = max(dump_files, key=os.path.getmtime)
+            print(f"No path provided. Using most recent dump file: {filepath}")
+        except Exception as e:
+            print(f"Error finding most recent dump file: {e}", file=sys.stderr)
+            sys.exit(1)
+
     try:
         nwa = load_nwa(filepath)
         nwa.print_stats()
