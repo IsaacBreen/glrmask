@@ -9888,9 +9888,27 @@ local_system:
 
       # --- ANALYSIS FUNCTIONS (unchanged) ---
 
-      def print_graph_stats(G: nx.DiGraph):
+      def print_graph_stats(G: nx.DiGraph, nwa_data: dict):
           """Prints high-level stats for a graph."""
-          print(f"\nThe graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
+          num_nodes = G.number_of_nodes()
+          num_edges = G.number_of_edges()  # Unique (src, dst) pairs
+
+          num_transitions = len(nwa_data['transitions'])
+          epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
+          symbol_transitions = num_transitions - epsilon_transitions
+
+          print("\n--- NWA Structure ---")
+          print(f"Total States: {num_nodes}")
+          print(f"Start State: {nwa_data['start_state']}")
+          print(f"Final States: {len(nwa_data['final_states'])}")
+
+          print("\n--- Transitions ---")
+          print(f"Total Unique Transitions (src, label, dst): {num_transitions}")
+          print(f"  - Epsilon (ε) transitions: {epsilon_transitions}")
+          print(f"  - Symbol transitions: {symbol_transitions}")
+
+          print(f"\n--- Graph Connectivity ---")
+          print(f"The graph has {num_nodes} nodes and {num_edges} unique source-destination edges.")
           in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
           out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
           print("\nTop 5 States by In-Degree (Hubs for Fan-In):")
@@ -9952,7 +9970,7 @@ local_system:
           G = nx.DiGraph()
           G.add_nodes_from(range(nwa["num_states"]))
           G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
-          print_graph_stats(G)
+          print_graph_stats(G, nwa)
 
 
       def run_scc_pass(args):
@@ -10110,7 +10128,12 @@ local_system:
           G_final = nx.DiGraph()
           G_final.add_nodes_from(range(nwa["num_states"]))
           G_final.add_edges_from([(s, d) for s, l, d in essential_transitions])
-          print_graph_stats(G_final)
+          pruned_nwa_data = {
+              "start_state": nwa["start_state"],
+              "final_states": nwa["final_states"],
+              "transitions": essential_transitions,
+          }
+          print_graph_stats(G_final, pruned_nwa_data)
           print_scc_analysis(G_final, essential_transitions)
 
 
@@ -19896,10 +19919,34 @@ local_system:
           }
 
 
+      def prune_to_final_state_transitions(transitions: set, final_states: set) -> set:
+          """
+          If a (source, label) pair has a transition to a final state,
+          remove all transitions for that pair that go to non-final states.
+          """
+          source_label_to_dests = defaultdict(set)
+          for source, label, dest in transitions:
+              source_label_to_dests[(source, label)].add(dest)
+
+          transitions_to_remove = set()
+          for (source, label), dests in source_label_to_dests.items():
+              has_final_dest = any(d in final_states for d in dests)
+              if has_final_dest:
+                  for dest in dests:
+                      if dest not in final_states:
+                          transitions_to_remove.add((source, label, dest))
+
+          if transitions_to_remove:
+              print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
+
+          return transitions - transitions_to_remove
+
+
       def determinize_worker(
               num_states: int, start_state: int, final_states: set, transitions: set, result_queue: multiprocessing.Queue
       ):
           try:
+              transitions = prune_to_final_state_transitions(transitions, final_states)
               fst = VectorFst()
               state_map = {i: fst.add_state() for i in range(num_states)}
               fst.set_start(state_map[start_state])
@@ -20039,12 +20086,13 @@ local_system:
           nwa = load_nwa_data(args.filepath)
           print("\nAttempting to determinize the full NWA...")
           try:
+              transitions = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
               fst = VectorFst()
               state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
               fst.set_start(state_map[nwa["start_state"]])
               for state_id in nwa["final_states"]:
                   fst.set_final(state_map[state_id], 0.0)
-              for source, label, dest in nwa["transitions"]:
+              for source, label, dest in transitions:
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
               print("\nFST Statistics:")
@@ -30663,9 +30711,27 @@ messages:
 
       # --- ANALYSIS FUNCTIONS (unchanged) ---
 
-      def print_graph_stats(G: nx.DiGraph):
+      def print_graph_stats(G: nx.DiGraph, nwa_data: dict):
           """Prints high-level stats for a graph."""
-          print(f"\nThe graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
+          num_nodes = G.number_of_nodes()
+          num_edges = G.number_of_edges()  # Unique (src, dst) pairs
+
+          num_transitions = len(nwa_data['transitions'])
+          epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
+          symbol_transitions = num_transitions - epsilon_transitions
+
+          print("\n--- NWA Structure ---")
+          print(f"Total States: {num_nodes}")
+          print(f"Start State: {nwa_data['start_state']}")
+          print(f"Final States: {len(nwa_data['final_states'])}")
+
+          print("\n--- Transitions ---")
+          print(f"Total Unique Transitions (src, label, dst): {num_transitions}")
+          print(f"  - Epsilon (ε) transitions: {epsilon_transitions}")
+          print(f"  - Symbol transitions: {symbol_transitions}")
+
+          print(f"\n--- Graph Connectivity ---")
+          print(f"The graph has {num_nodes} nodes and {num_edges} unique source-destination edges.")
           in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
           out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
           print("\nTop 5 States by In-Degree (Hubs for Fan-In):")
@@ -30727,7 +30793,7 @@ messages:
           G = nx.DiGraph()
           G.add_nodes_from(range(nwa["num_states"]))
           G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
-          print_graph_stats(G)
+          print_graph_stats(G, nwa)
 
 
       def run_scc_pass(args):
@@ -30885,7 +30951,12 @@ messages:
           G_final = nx.DiGraph()
           G_final.add_nodes_from(range(nwa["num_states"]))
           G_final.add_edges_from([(s, d) for s, l, d in essential_transitions])
-          print_graph_stats(G_final)
+          pruned_nwa_data = {
+              "start_state": nwa["start_state"],
+              "final_states": nwa["final_states"],
+              "transitions": essential_transitions,
+          }
+          print_graph_stats(G_final, pruned_nwa_data)
           print_scc_analysis(G_final, essential_transitions)
 
 
@@ -30944,8 +31015,9 @@ messages:
       ```
     metadata:
       filename: scripts/analyze_nwa.py
-  - user: More stats in stats mode please. e.g. whhy the fk isn't there like number
-      of final states
+  - user: If there's a transition from a node A to a final node, remove all other
+      transitions with that symbol that go to other nodes. We only care about the
+      shortest paths.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -30965,142 +31037,129 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course! Here are the step-by-step instructions to add more statistics to the `stats` mode, followed by the corresponding git diff.
+      Based on your request to prune transitions to optimize for shortest paths to final states, I'll add a new pruning strategy to your analysis script. This strategy will remove transitions that lead to non-final states if, for the same source state and symbol, there's another transition that leads to a final state.
+
+      Here are the step-by-step instructions to modify `scripts/analyze_nwa.py`:
 
       ### Step-by-step Instructions
 
       1.  **Open `scripts/analyze_nwa.py`**.
 
-      2.  **Update the `print_graph_stats` function:**
-          -   Change the function signature from `def print_graph_stats(G: nx.DiGraph):` to `def print_graph_stats(G: nx.DiGraph, nwa_data: dict):`.
-          -   Replace the body of the function with the new implementation below, which calculates and prints more detailed statistics about the NWA structure and transitions.
+      2.  **Add a New Helper Function**: Insert the following Python function definition after the `load_nwa_data` function (around line 53). This function implements the new pruning logic.
 
           ```python
-          def print_graph_stats(G: nx.DiGraph, nwa_data: dict):
-              """Prints high-level stats for a graph."""
-              num_nodes = G.number_of_nodes()
-              num_edges = G.number_of_edges()  # Unique (src, dst) pairs
+          def prune_to_final_state_transitions(transitions: set, final_states: set) -> set:
+              """
+              If a (source, label) pair has a transition to a final state,
+              remove all transitions for that pair that go to non-final states.
+              """
+              source_label_to_dests = defaultdict(set)
+              for source, label, dest in transitions:
+                  source_label_to_dests[(source, label)].add(dest)
           
-              num_transitions = len(nwa_data['transitions'])
-              epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
-              symbol_transitions = num_transitions - epsilon_transitions
+              transitions_to_remove = set()
+              for (source, label), dests in source_label_to_dests.items():
+                  has_final_dest = any(d in final_states for d in dests)
+                  if has_final_dest:
+                      for dest in dests:
+                          if dest not in final_states:
+                              transitions_to_remove.add((source, label, dest))
           
-              print("\n--- NWA Structure ---")
-              print(f"Total States: {num_nodes}")
-              print(f"Start State: {nwa_data['start_state']}")
-              print(f"Final States: {len(nwa_data['final_states'])}")
+              if transitions_to_remove:
+                  print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
           
-              print("\n--- Transitions ---")
-              print(f"Total Unique Transitions (src, label, dst): {num_transitions}")
-              print(f"  - Epsilon (ε) transitions: {epsilon_transitions}")
-              print(f"  - Symbol transitions: {symbol_transitions}")
-          
-              print(f"\n--- Graph Connectivity ---")
-              print(f"The graph has {num_nodes} nodes and {num_edges} unique source-destination edges.")
-              in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
-              out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
-              print("\nTop 5 States by In-Degree (Hubs for Fan-In):")
-              for node, degree in in_degrees[:5]:
-                  print(f"  - State {node}: {degree} incoming edges")
-              print("\nTop 5 States by Out-Degree (Hubs for Fan-Out):")
-              for node, degree in out_degrees[:5]:
-                  print(f"  - State {node}: {degree} outgoing edges")
-              wccs = list(nx.weakly_connected_components(G))
-              print(f"\nFound {len(wccs)} Weakly Connected Component(s).")
-              if wccs:
-                  print(f"  - Largest WCC contains {len(max(wccs, key=len))} nodes.")
+              return transitions - transitions_to_remove
           ```
 
-      3.  **Update the `run_stats_pass` function:**
-          -   Find the line `print_graph_stats(G)`.
-          -   Change it to `print_graph_stats(G, nwa)` to pass the loaded NWA data to the updated stats function.
-
-      4.  **Update the `run_prune_pass` function:**
-          -   Near the end of the function, find the line `print_graph_stats(G_final)`.
-          -   Before this line, insert code to create a dictionary containing the stats for the pruned graph.
-          -   Update the call to pass this new dictionary. The block should look like this:
+      3.  **Update `determinize_worker`**: In the `determinize_worker` function, add a call to the new pruning function at the beginning of the `try` block (around line 80).
 
           ```python
-          pruned_nwa_data = {
-              "start_state": nwa["start_state"],
-              "final_states": nwa["final_states"],
-              "transitions": essential_transitions,
-          }
-          print_graph_stats(G_final, pruned_nwa_data)
+          def determinize_worker(
+                  num_states: int, start_state: int, final_states: set, transitions: set, result_queue: multiprocessing.Queue
+          ):
+              try:
+                  transitions = prune_to_final_state_transitions(transitions, final_states)
+                  fst = VectorFst()
+                  # ...
           ```
 
-      ### Git Diff
+      4.  **Update `run_determinize_pass`**: In the `run_determinize_pass` function, apply the same pruning logic before building the FST. Add the call to the new function and update the subsequent loop to use the pruned set of transitions (around line 202).
 
-      Here is the git diff for the changes:
+          *   **Before**:
+              ```python
+                  try:
+                      fst = VectorFst()
+                      # ...
+                      for source, label, dest in nwa["transitions"]:
+                          fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
+              ```
+          *   **After**:
+              ```python
+                  try:
+                      transitions = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
+                      fst = VectorFst()
+                      # ...
+                      for source, label, dest in transitions:
+                          fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
+              ```
+
+      ### Git Diffs
+
+      Here are the corresponding changes in `git diff` format.
 
       ```diff
       --- a/scripts/analyze_nwa.py
       +++ b/scripts/analyze_nwa.py
-      @@ -100,24 +100,37 @@
+      @@ -50,11 +50,34 @@
+           }
        
-       # --- ANALYSIS FUNCTIONS (unchanged) ---
        
-      -def print_graph_stats(G: nx.DiGraph):
-      +def print_graph_stats(G: nx.DiGraph, nwa_data: dict):
-           """Prints high-level stats for a graph."""
-      -    print(f"\nThe graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
-      +    num_nodes = G.number_of_nodes()
-      +    num_edges = G.number_of_edges()  # Unique (src, dst) pairs
+      +def prune_to_final_state_transitions(transitions: set, final_states: set) -> set:
+      +    """
+      +    If a (source, label) pair has a transition to a final state,
+      +    remove all transitions for that pair that go to non-final states.
+      +    """
+      +    source_label_to_dests = defaultdict(set)
+      +    for source, label, dest in transitions:
+      +        source_label_to_dests[(source, label)].add(dest)
       +
-      +    num_transitions = len(nwa_data['transitions'])
-      +    epsilon_transitions = sum(1 for _, l, _ in nwa_data['transitions'] if l == 0)
-      +    symbol_transitions = num_transitions - epsilon_transitions
+      +    transitions_to_remove = set()
+      +    for (source, label), dests in source_label_to_dests.items():
+      +        has_final_dest = any(d in final_states for d in dests)
+      +        if has_final_dest:
+      +            for dest in dests:
+      +                if dest not in final_states:
+      +                    transitions_to_remove.add((source, label, dest))
       +
-      +    print("\n--- NWA Structure ---")
-      +    print(f"Total States: {num_nodes}")
-      +    print(f"Start State: {nwa_data['start_state']}")
-      +    print(f"Final States: {len(nwa_data['final_states'])}")
+      +    if transitions_to_remove:
+      +        print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
       +
-      +    print("\n--- Transitions ---")
-      +    print(f"Total Unique Transitions (src, label, dst): {num_transitions}")
-      +    print(f"  - Epsilon (ε) transitions: {epsilon_transitions}")
-      +    print(f"  - Symbol transitions: {symbol_transitions}")
+      +    return transitions - transitions_to_remove
       +
-      +    print(f"\n--- Graph Connectivity ---")
-      +    print(f"The graph has {num_nodes} nodes and {num_edges} unique source-destination edges.")
-           in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
-           out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
-           print("\nTop 5 States by In-Degree (Hubs for Fan-In):")
-           for node, degree in in_degrees[:5]:
-               print(f"  - State {node}: {degree} incoming edges")
-           print("\nTop 5 States by Out-Degree (Hubs for Fan-Out):")
-           for node, degree in out_degrees[:5]:
-               print(f"  - State {node}: {degree} outgoing edges")
-           wccs = list(nx.weakly_connected_components(G))
-           print(f"\nFound {len(wccs)} Weakly Connected Component(s).")
-           if wccs:
-               print(f"  - Largest WCC contains {len(max(wccs, key=len))} nodes.")
+      +
+       def determinize_worker(
+               num_states: int, start_state: int, final_states: set, transitions: set, result_queue: multiprocessing.Queue
+       ):
+           try:
+      +        transitions = prune_to_final_state_transitions(transitions, final_states)
+               fst = VectorFst()
+               state_map = {i: fst.add_state() for i in range(num_states)}
+               fst.set_start(state_map[start_state])
+      @@ -198,13 +221,14 @@
+           nwa = load_nwa_data(args.filepath)
+           print("\nAttempting to determinize the full NWA...")
+           try:
+      +        transitions = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
+               fst = VectorFst()
+               state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
+               fst.set_start(state_map[nwa["start_state"]])
+               for state_id in nwa["final_states"]:
+                   fst.set_final(state_map[state_id], 0.0)
+      -        for source, label, dest in nwa["transitions"]:
+      +        for source, label, dest in transitions:
+                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
        
-       
-       def print_scc_analysis(G: nx.DiGraph, transitions: set):
-      @@ -161,7 +174,7 @@
-           G = nx.DiGraph()
-           G.add_nodes_from(range(nwa["num_states"]))
-           G.add_edges_from([(s, d) for s, l, d in nwa["transitions"]])
-      -    print_graph_stats(G)
-      +    print_graph_stats(G, nwa)
-       
-       
-       def run_scc_pass(args):
-      @@ -282,7 +295,12 @@
-           G_final = nx.DiGraph()
-           G_final.add_nodes_from(range(nwa["num_states"]))
-           G_final.add_edges_from([(s, d) for s, l, d in essential_transitions])
-      -    print_graph_stats(G_final)
-      +    pruned_nwa_data = {
-      +        "start_state": nwa["start_state"],
-      +        "final_states": nwa["final_states"],
-      +        "transitions": essential_transitions,
-      +    }
-      +    print_graph_stats(G_final, pruned_nwa_data)
-           print_scc_analysis(G_final, essential_transitions)
-       
-       
+               print("\nFST Statistics:")
 
       ```
     metadata:
@@ -31113,7 +31172,7 @@ messages:
       Applying patch to 'scripts/analyze_nwa.py' using custom patcher...
       Successfully applied patch and wrote to scripts/analyze_nwa.py.
     metadata:
-  - user: 'Changes committed with message: "Enhance stats mode in analyze_nwa.py with
-      detailed NWA structure and transition counts"'
+  - user: 'Changes committed with message: "feat: Add transition pruning based on
+      final state reachability in NWA analysis"'
     metadata:
 ...

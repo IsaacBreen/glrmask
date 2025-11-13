@@ -59,10 +59,34 @@ def load_nwa_data(filepath: str) -> dict:
     }
 
 
+def prune_to_final_state_transitions(transitions: set, final_states: set) -> set:
+    """
+    If a (source, label) pair has a transition to a final state,
+    remove all transitions for that pair that go to non-final states.
+    """
+    source_label_to_dests = defaultdict(set)
+    for source, label, dest in transitions:
+        source_label_to_dests[(source, label)].add(dest)
+
+    transitions_to_remove = set()
+    for (source, label), dests in source_label_to_dests.items():
+        has_final_dest = any(d in final_states for d in dests)
+        if has_final_dest:
+            for dest in dests:
+                if dest not in final_states:
+                    transitions_to_remove.add((source, label, dest))
+
+    if transitions_to_remove:
+        print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
+
+    return transitions - transitions_to_remove
+
+
 def determinize_worker(
         num_states: int, start_state: int, final_states: set, transitions: set, result_queue: multiprocessing.Queue
 ):
     try:
+        transitions = prune_to_final_state_transitions(transitions, final_states)
         fst = VectorFst()
         state_map = {i: fst.add_state() for i in range(num_states)}
         fst.set_start(state_map[start_state])
@@ -202,12 +226,13 @@ def run_determinize_pass(args):
     nwa = load_nwa_data(args.filepath)
     print("\nAttempting to determinize the full NWA...")
     try:
+        transitions = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
         fst = VectorFst()
         state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
         fst.set_start(state_map[nwa["start_state"]])
         for state_id in nwa["final_states"]:
             fst.set_final(state_map[state_id], 0.0)
-        for source, label, dest in nwa["transitions"]:
+        for source, label, dest in transitions:
             fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
         print("\nFST Statistics:")
