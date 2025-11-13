@@ -7,6 +7,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Optional, List, Dict, Tuple
 
+# A dedicated symbol for default transitions when converting to rustfst.
+# Using a high value to reduce collision probability with real symbols.
+DEFAULT_TRANSITION_SYMBOL = 0xFFFE
+
 # Try to import rustfst, but don't fail if it's not there.
 try:
     from rustfst import VectorFst, Tr
@@ -175,19 +179,19 @@ def load_nwa(filepath: str) -> NWA:
     return NWA.from_dict(data)
 
 def create_rustfst_from_nwa(nwa: NWA) -> Optional['VectorFst']:
-    """
+    f"""
     Creates a rustfst.VectorFst from an NWA object.
 
     Note: This is a partial conversion.
     - Weights (SimpleBitset) are not converted; a default weight is used.
-    - Default transitions are ignored.
+    - Default transitions are mapped to a dedicated symbol ({DEFAULT_TRANSITION_SYMBOL}), ignoring their exception lists.
     """
     if not RUSTFST_AVAILABLE:
         print("rustfst library not found. Cannot create FST.", file=sys.stderr)
         return None
 
     print("\n--- Creating rustfst.VectorFst from NWA ---")
-    print("WARNING: This is a partial conversion. Weights and default transitions are not fully supported.")
+    print("WARNING: This is a partial conversion. Weights are not converted, and default transitions are simplified to a single symbol.")
 
     fst = VectorFst()
     state_map = {}  # NWAStateID -> FST state ID
@@ -222,10 +226,12 @@ def create_rustfst_from_nwa(nwa: NWA) -> Optional['VectorFst']:
                 to_id = state_map[target]
                 # Using default weight
                 fst.add_tr(from_id, Tr(label, label, weight_one(), to_id))
-        
-        # Default transitions are ignored
-        if state.default:
-            print(f"WARNING: Ignoring {len(state.default)} default transition(s) from state {i}", file=sys.stderr)
+
+        # Default transitions are mapped to a dedicated symbol
+        for default_trans in state.default:
+            to_id = state_map[default_trans.target]
+            # Using default weight. The 'exceptions' list is ignored.
+            fst.add_tr(from_id, Tr(DEFAULT_TRANSITION_SYMBOL, DEFAULT_TRANSITION_SYMBOL, weight_one(), to_id))
 
     print("FST created successfully (partially).")
     return fst

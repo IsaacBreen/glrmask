@@ -89,7 +89,7 @@ local_system:
     - src/precompute4/weighted_automata/ops.rs
     - src/precompute4/weighted_automata/determinization.rs
     - scripts/analyze_nwa.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/__init__.py: ''
@@ -17037,6 +17037,10 @@ local_system:
       from dataclasses import dataclass
       from typing import Any, Optional, List, Dict, Tuple
 
+      # A dedicated symbol for default transitions when converting to rustfst.
+      # Using a high value to reduce collision probability with real symbols.
+      DEFAULT_TRANSITION_SYMBOL = 0xFFFE
+
       # Try to import rustfst, but don't fail if it's not there.
       try:
           from rustfst import VectorFst, Tr
@@ -17205,19 +17209,19 @@ local_system:
           return NWA.from_dict(data)
 
       def create_rustfst_from_nwa(nwa: NWA) -> Optional['VectorFst']:
-          """
+          f"""
           Creates a rustfst.VectorFst from an NWA object.
 
           Note: This is a partial conversion.
           - Weights (SimpleBitset) are not converted; a default weight is used.
-          - Default transitions are ignored.
+          - Default transitions are mapped to a dedicated symbol ({DEFAULT_TRANSITION_SYMBOL}), ignoring their exception lists.
           """
           if not RUSTFST_AVAILABLE:
               print("rustfst library not found. Cannot create FST.", file=sys.stderr)
               return None
 
           print("\n--- Creating rustfst.VectorFst from NWA ---")
-          print("WARNING: This is a partial conversion. Weights and default transitions are not fully supported.")
+          print("WARNING: This is a partial conversion. Weights are not converted, and default transitions are simplified to a single symbol.")
 
           fst = VectorFst()
           state_map = {}  # NWAStateID -> FST state ID
@@ -17252,10 +17256,12 @@ local_system:
                       to_id = state_map[target]
                       # Using default weight
                       fst.add_tr(from_id, Tr(label, label, weight_one(), to_id))
-              
-              # Default transitions are ignored
-              if state.default:
-                  print(f"WARNING: Ignoring {len(state.default)} default transition(s) from state {i}", file=sys.stderr)
+
+              # Default transitions are mapped to a dedicated symbol
+              for default_trans in state.default:
+                  to_id = state_map[default_trans.target]
+                  # Using default weight. The 'exceptions' list is ignored.
+                  fst.add_tr(from_id, Tr(DEFAULT_TRANSITION_SYMBOL, DEFAULT_TRANSITION_SYMBOL, weight_one(), to_id))
 
           print("FST created successfully (partially).")
           return fst
@@ -26654,6 +26660,638 @@ messages:
            except FileNotFoundError:
                print(f"Error: File not found at {filepath}", file=sys.stderr)
                sys.exit(1)
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/analyze_nwa.py
+      Applying patch to 'scripts/analyze_nwa.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/analyze_nwa.py.
+    metadata:
+  - user: 'Changes committed with message: "Add functionality to create a partial
+      rustfst.VectorFst from an analyzed NWA structure"'
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/arcsort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/compose.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/connect.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/invert.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/map.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/minimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/project.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/push.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/reverse.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/rm_final_epsilon.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/shortestpath.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/supported_algorithms.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/bench_all_detailed.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/bench_all.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/bench_composition.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/constants.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/utils.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/compose.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/concat.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/connect.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/determinize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/inversion.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/isomorphic.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/minimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/optimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/project.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/randgen.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/replace.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/reverse.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/rm_epsilon.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/shortest_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/top_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/tr_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/tr_unique.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/union.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/drawing_config.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/ffi_utils.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/fst/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/fst/const_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/fst/vector_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/iterators.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/string_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/string_paths_iterator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/symbol_table.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/tr.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/trs.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/weight.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_acceptor.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_compose.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_concat.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_connect.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_determinize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_inversion.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_isomorphic.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_minimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_optimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_project.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_randgen.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_replace.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_reverse.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_rm_epsilon.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_shortest_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_top_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_tr_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_tr_unique.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_transducer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_union.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_iterator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_string_paths_iterator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_symt.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_tr.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_trs.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/scripts/update_python_doc_structure.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/bitset.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/dwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/nwa.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/common.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/ops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/determinization.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of scripts/analyze_nwa.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Modify this to not *ingore* default transitions but to assign them to a
+      dedicated symbol.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to modify `scripts/analyze_nwa.py` to handle default transitions by assigning them to a dedicated symbol, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `scripts/analyze_nwa.py`**.
+
+      2.  **Define the dedicated symbol**: At the top of the file, after the `import` statements but before the `try...except` block for `rustfst`, add a constant to hold the integer label for default transitions.
+
+          ```python
+          # A dedicated symbol for default transitions when converting to rustfst.
+          # Using a high value to reduce collision probability with real symbols.
+          DEFAULT_TRANSITION_SYMBOL = 0xFFFE
+          ```
+
+      3.  **Update the `create_rustfst_from_nwa` function**:
+          *   First, modify the function's **docstring**. Change it to an f-string and update the description for default transitions to mention the new behavior and the dedicated symbol.
+          *   Next, update the **warning message** that the function prints to reflect that default transitions are now simplified, not ignored.
+          *   Finally, replace the code block at the end of the `for` loop that previously ignored default transitions. The new code will iterate through `state.default` and create a `rustfst.Tr` for each one using `DEFAULT_TRANSITION_SYMBOL` as the label.
+
+      ### Git Diff
+
+      Here is the git diff for the changes described above.
+
+      ```diff
+      --- a/scripts/analyze_nwa.py
+      +++ b/scripts/analyze_nwa.py
+      @@ -5,6 +5,11 @@
+       from collections import defaultdict
+       from dataclasses import dataclass
+       from typing import Any, Optional, List, Dict, Tuple
+      +
+      +# A dedicated symbol for default transitions when converting to rustfst.
+      +# Using a high value to reduce collision probability with real symbols.
+      +DEFAULT_TRANSITION_SYMBOL = 0xFFFE
+       
+       # Try to import rustfst, but don't fail if it's not there.
+       try:
+      @@ -157,22 +162,22 @@
+           return NWA.from_dict(data)
+       
+       def create_rustfst_from_nwa(nwa: NWA) -> Optional['VectorFst']:
+      -    """
+      +    f"""
+           Creates a rustfst.VectorFst from an NWA object.
+       
+           Note: This is a partial conversion.
+           - Weights (SimpleBitset) are not converted; a default weight is used.
+      -    - Default transitions are ignored.
+      +    - Default transitions are mapped to a dedicated symbol ({DEFAULT_TRANSITION_SYMBOL}), ignoring their exception lists.
+           """
+           if not RUSTFST_AVAILABLE:
+               print("rustfst library not found. Cannot create FST.", file=sys.stderr)
+               return None
+       
+           print("\n--- Creating rustfst.VectorFst from NWA ---")
+      -    print("WARNING: This is a partial conversion. Weights and default transitions are not fully supported.")
+      +    print("WARNING: This is a partial conversion. Weights are not converted, and default transitions are simplified to a single symbol.")
+       
+           fst = VectorFst()
+           state_map = {}  # NWAStateID -> FST state ID
+       
+           # Create states
+      @@ -205,10 +210,11 @@
+                       to_id = state_map[target]
+                       # Using default weight
+                       fst.add_tr(from_id, Tr(label, label, weight_one(), to_id))
+      -        
+      -        # Default transitions are ignored
+      -        if state.default:
+      -            print(f"WARNING: Ignoring {len(state.default)} default transition(s) from state {i}", file=sys.stderr)
+      +
+      +        # Default transitions are mapped to a dedicated symbol
+      +        for default_trans in state.default:
+      +            to_id = state_map[default_trans.target]
+      +            # Using default weight. The 'exceptions' list is ignored.
+      +            fst.add_tr(from_id, Tr(DEFAULT_TRANSITION_SYMBOL, DEFAULT_TRANSITION_SYMBOL, weight_one(), to_id))
+       
+           print("FST created successfully (partially).")
+           return fst
 
       ```
     metadata:
