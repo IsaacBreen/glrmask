@@ -156,6 +156,3 @@ if __name__ == "__main__":
     except json.JSONDecodeError:
         print(f"Error: Could not decode JSON from {filepath}", file=sys.stderr)
         sys.exit(1)
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}", file=sys.stderr)
-        sys.exit(1)
