@@ -275,7 +275,7 @@ if __name__ == "__main__":
 
         fst = create_rustfst_from_nwa(nwa)
         if fst:
-            print("\n--- rustfst.VectorFst Summary (before determinization) ---")
+            print("\n--- rustfst.VectorFst Summary (initial) ---")
             print(f"Number of states: {fst.num_states()}")
             if fst.start() is not None:
                 print(f"Start state: {fst.start()}")
@@ -285,6 +285,14 @@ if __name__ == "__main__":
                 print(f"Number of arcs: {num_arcs}")
             else:
                 print("No start state.")
+
+            print("\n--- Topologically sorting FST ---")
+            try:
+                fst.top_sort()
+                print("Topological sort successful.")
+            except ValueError as e:
+                print(f"Topological sort failed: {e}", file=sys.stderr)
+                print("The FST may contain cycles, which can make determinization difficult.", file=sys.stderr)
 
             print("\n--- Removing epsilon transitions ---")
             try:
@@ -302,6 +310,13 @@ if __name__ == "__main__":
                     print("No start state.")
             except ValueError as e:
                 print(f"Epsilon removal failed: {e}", file=sys.stderr)
+
+            print("\n--- Sorting arcs by input label ---")
+            try:
+                fst.tr_sort()  # Default is sort by input label
+                print("Arc sorting successful.")
+            except ValueError as e:
+                print(f"Arc sorting failed: {e}", file=sys.stderr)
 
             print("\n--- Determinizing FST ---")
             try:
