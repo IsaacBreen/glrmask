@@ -9795,6 +9795,8 @@ local_system:
       import argparse
       from collections import Counter, defaultdict
 
+      from rustfst.algorithms.minimize import MinimizeConfig
+
       # (Import statements for rustfst and networkx remain the same)
       # We use rustfst for high-performance FST operations.
       try:
@@ -9856,7 +9858,7 @@ local_system:
               for source, label, dest in transitions:
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
               print("Minimizing")
-              fst = fst.minimize()
+              fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
               print("Determinizing")
               fst = fst.determinize()
               result_queue.put(True)
@@ -9959,18 +9961,26 @@ local_system:
 
       def run_determinize_pass(args):
           """Executes the 'determinize' pass."""
-          print(f"--- Running Determinization Pass (Timeout: {args.timeout}s) ---")
+          print("--- Running Determinization Pass ---")
           nwa = load_nwa_data(args.filepath)
           print("\nAttempting to determinize the full NWA...")
-          timed_out = time_determinization_with_timeout(
-              nwa["num_states"], nwa["start_state"], nwa["final_states"], nwa["transitions"], args.timeout
-          )
-          if timed_out:
-              print(f"RESULT: ❌ Timed out after {args.timeout} seconds.")
-          else:
-              print("RESULT: ✅ Determinization finished within the time limit.")
+          try:
+              fst = VectorFst()
+              state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
+              fst.set_start(state_map[nwa["start_state"]])
+              for state_id in nwa["final_states"]:
+                  fst.set_final(state_map[state_id], 0.0)
+              for source, label, dest in nwa["transitions"]:
+                  fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-
+              print("Minimizing...")
+              fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
+              print("Determinizing...")
+              fst = fst.determinize()
+              print("RESULT: ✅ Determinization finished successfully.")
+              print(f"Resulting FST has {fst.num_states()} states.")
+          except Exception as e:
+              print(f"RESULT: ❌ Determinization failed with an error: {e}")
       # --- NEW AND MODIFIED PASSES FOR STATE INSPECTION ---
 
       def run_inspect_states_pass(args):
@@ -10100,9 +10110,8 @@ local_system:
           parser_scc.set_defaults(func=run_scc_pass)
 
           # --- Determinize Pass ---
-          parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA with a timeout.")
+          parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA.")
           parser_det.add_argument("filepath", help="Path to the nwa_dump.json file.")
-          parser_det.add_argument("--timeout", type=float, default=10.0, help="Timeout in seconds for the determinization attempt.")
           parser_det.set_defaults(func=run_determinize_pass)
 
           # --- MODIFIED: Inspect States Pass (Pretty) ---
@@ -19812,6 +19821,8 @@ local_system:
       import argparse
       from collections import Counter, defaultdict
 
+      from rustfst.algorithms.minimize import MinimizeConfig
+
       # (Import statements for rustfst and networkx remain the same)
       # We use rustfst for high-performance FST operations.
       try:
@@ -19873,7 +19884,7 @@ local_system:
               for source, label, dest in transitions:
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
               print("Minimizing")
-              fst = fst.minimize()
+              fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
               print("Determinizing")
               fst = fst.determinize()
               result_queue.put(True)
@@ -19951,6 +19962,12 @@ local_system:
               if len(internal_edges) > MAX_EDGES_TO_SHOW:
                   print(f"      - ... and {len(internal_edges) - MAX_EDGES_TO_SHOW} more internal edges")
 
+      def print_fst_stats(fst: VectorFst, message: str):
+          """Prints basic stats for a rustfst FST."""
+          num_states = fst.num_states()
+          num_arcs = sum(fst.num_trs(s) for s in fst.states())
+          print(f"  - {message}: {num_states} states, {num_arcs} arcs.")
+
 
       # --- PASS FUNCTIONS ---
 
@@ -19988,12 +20005,18 @@ local_system:
               for source, label, dest in nwa["transitions"]:
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-              print("Minimizing...")
-              fst = fst.minimize()
-              print("Determinizing...")
+              print("\nFST Statistics:")
+              print_fst_stats(fst, "Initial FST")
+
+              print("\nMinimizing...")
+              fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
+              print_fst_stats(fst, "After minimizing")
+
+              print("\nDeterminizing...")
               fst = fst.determinize()
-              print("RESULT: ✅ Determinization finished successfully.")
-              print(f"Resulting FST has {fst.num_states()} states.")
+              print_fst_stats(fst, "After determinizing")
+
+              print("\nRESULT: ✅ Determinization finished successfully.")
           except Exception as e:
               print(f"RESULT: ❌ Determinization failed with an error: {e}")
       # --- NEW AND MODIFIED PASSES FOR STATE INSPECTION ---
@@ -30488,6 +30511,8 @@ messages:
       import argparse
       from collections import Counter, defaultdict
 
+      from rustfst.algorithms.minimize import MinimizeConfig
+
       # (Import statements for rustfst and networkx remain the same)
       # We use rustfst for high-performance FST operations.
       try:
@@ -30549,7 +30574,7 @@ messages:
               for source, label, dest in transitions:
                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
               print("Minimizing")
-              fst = fst.minimize()
+              fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
               print("Determinizing")
               fst = fst.determinize()
               result_queue.put(True)
@@ -30652,18 +30677,26 @@ messages:
 
       def run_determinize_pass(args):
           """Executes the 'determinize' pass."""
-          print(f"--- Running Determinization Pass (Timeout: {args.timeout}s) ---")
+          print("--- Running Determinization Pass ---")
           nwa = load_nwa_data(args.filepath)
           print("\nAttempting to determinize the full NWA...")
-          timed_out = time_determinization_with_timeout(
-              nwa["num_states"], nwa["start_state"], nwa["final_states"], nwa["transitions"], args.timeout
-          )
-          if timed_out:
-              print(f"RESULT: ❌ Timed out after {args.timeout} seconds.")
-          else:
-              print("RESULT: ✅ Determinization finished within the time limit.")
+          try:
+              fst = VectorFst()
+              state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
+              fst.set_start(state_map[nwa["start_state"]])
+              for state_id in nwa["final_states"]:
+                  fst.set_final(state_map[state_id], 0.0)
+              for source, label, dest in nwa["transitions"]:
+                  fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-
+              print("Minimizing...")
+              fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
+              print("Determinizing...")
+              fst = fst.determinize()
+              print("RESULT: ✅ Determinization finished successfully.")
+              print(f"Resulting FST has {fst.num_states()} states.")
+          except Exception as e:
+              print(f"RESULT: ❌ Determinization failed with an error: {e}")
       # --- NEW AND MODIFIED PASSES FOR STATE INSPECTION ---
 
       def run_inspect_states_pass(args):
@@ -30793,9 +30826,8 @@ messages:
           parser_scc.set_defaults(func=run_scc_pass)
 
           # --- Determinize Pass ---
-          parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA with a timeout.")
+          parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA.")
           parser_det.add_argument("filepath", help="Path to the nwa_dump.json file.")
-          parser_det.add_argument("--timeout", type=float, default=10.0, help="Timeout in seconds for the determinization attempt.")
           parser_det.set_defaults(func=run_determinize_pass)
 
           # --- MODIFIED: Inspect States Pass (Pretty) ---
@@ -30829,8 +30861,7 @@ messages:
       ```
     metadata:
       filename: scripts/analyze_nwa.py
-  - user: Make it so the determinize CLI command doesn't use determinize_worker, another
-      process etc, and has no timeout.
+  - user: In determinize, print stats. e.g. after minimizing print stats too
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -30850,134 +30881,63 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to modify the `determinize` command, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add statistics printing to the determinization pass, followed by the corresponding git diff.
 
-      ### Step-by-step Instructions
+      ### Instructions
 
-      1.  **Open `scripts/analyze_nwa.py`**.
+      I will make the following changes to `scripts/analyze_nwa.py`:
 
-      2.  **Modify the `run_determinize_pass` function**.
-          Replace the existing `run_determinize_pass` function. The new version will perform determinization directly in the main process without a timeout, build the FST, minimize it, determinize it, and then report success or failure.
+      1.  **Add a helper function for FST statistics:**
+          In `scripts/analyze_nwa.py`, I'll introduce a new function called `print_fst_stats`. This function will take an FST object and a message, and it will print the number of states and arcs. I will place this function after the existing `print_scc_analysis` function.
 
-          *Delete* the following code block for the `run_determinize_pass` function:
-          ```python
-          def run_determinize_pass(args):
-              """Executes the 'determinize' pass."""
-              print(f"--- Running Determinization Pass (Timeout: {args.timeout}s) ---")
-              nwa = load_nwa_data(args.filepath)
-              print("\nAttempting to determinize the full NWA...")
-              timed_out = time_determinization_with_timeout(
-                  nwa["num_states"], nwa["start_state"], nwa["final_states"], nwa["transitions"], args.timeout
-              )
-              if timed_out:
-                  print(f"RESULT: ❌ Timed out after {args.timeout} seconds.")
-              else:
-                  print("RESULT: ✅ Determinization finished within the time limit.")
-          ```
-
-          *Insert* the following code in its place:
-          ```python
-          def run_determinize_pass(args):
-              """Executes the 'determinize' pass."""
-              print("--- Running Determinization Pass ---")
-              nwa = load_nwa_data(args.filepath)
-              print("\nAttempting to determinize the full NWA...")
-              try:
-                  fst = VectorFst()
-                  state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
-                  fst.set_start(state_map[nwa["start_state"]])
-                  for state_id in nwa["final_states"]:
-                      fst.set_final(state_map[state_id], 0.0)
-                  for source, label, dest in nwa["transitions"]:
-                      fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-          
-                  print("Minimizing...")
-                  fst = fst.minimize()
-                  print("Determinizing...")
-                  fst = fst.determinize()
-                  print("RESULT: ✅ Determinization finished successfully.")
-                  print(f"Resulting FST has {fst.num_states()} states.")
-              except Exception as e:
-                  print(f"RESULT: ❌ Determinization failed with an error: {e}")
-          ```
-
-      3.  **Update the command-line argument parser**.
-          In the `if __name__ == "__main__":` block at the end of the file, find the section for the `determinize` command. You will remove the `--timeout` argument and update the help text to reflect this change.
-
-          *Find this section*:
-          ```python
-              # --- Determinize Pass ---
-              parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA with a timeout.")
-              parser_det.add_argument("filepath", help="Path to the nwa_dump.json file.")
-              parser_det.add_argument("--timeout", type=float, default=10.0, help="Timeout in seconds for the determinization attempt.")
-              parser_det.set_defaults(func=run_determinize_pass)
-          ```
-
-          *Replace it with*:
-          ```python
-              # --- Determinize Pass ---
-              parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA.")
-              parser_det.add_argument("filepath", help="Path to the nwa_dump.json file.")
-              parser_det.set_defaults(func=run_determinize_pass)
-          ```
+      2.  **Update the determinization pass:**
+          In the `run_determinize_pass` function within `scripts/analyze_nwa.py`, I will update the `try` block to:
+          *   Call `print_fst_stats` to show the size of the FST immediately after it is created.
+          *   Call `print_fst_stats` again after the minimization step.
+          *   Call `print_fst_stats` a final time after the determinization step.
+          *   Adjust the surrounding print statements for better readability and remove a now-redundant line that reported only the final state count.
 
       ### Git Diff
-
-      Here is the git diff for the changes described above.
 
       ```diff
       --- a/scripts/analyze_nwa.py
       +++ b/scripts/analyze_nwa.py
-      @@ -141,18 +141,26 @@
+      @@ -160,6 +160,13 @@
+               if len(internal_edges) > MAX_EDGES_TO_SHOW:
+                   print(f"      - ... and {len(internal_edges) - MAX_EDGES_TO_SHOW} more internal edges")
        
-       def run_determinize_pass(args):
-           """Executes the 'determinize' pass."""
-      -    print(f"--- Running Determinization Pass (Timeout: {args.timeout}s) ---")
-      -    nwa = load_nwa_data(args.filepath)
-      -    print("\nAttempting to determinize the full NWA...")
-      -    timed_out = time_determinization_with_timeout(
-      -        nwa["num_states"], nwa["start_state"], nwa["final_states"], nwa["transitions"], args.timeout
-      -    )
-      -    if timed_out:
-      -        print(f"RESULT: ❌ Timed out after {args.timeout} seconds.")
-      -    else:
-      -        print("RESULT: ✅ Determinization finished within the time limit.")
-      -
-      -
-      +    print("--- Running Determinization Pass ---")
-      +    nwa = load_nwa_data(args.filepath)
-      +    print("\nAttempting to determinize the full NWA...")
-      +    try:
-      +        fst = VectorFst()
-      +        state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
-      +        fst.set_start(state_map[nwa["start_state"]])
-      +        for state_id in nwa["final_states"]:
-      +            fst.set_final(state_map[state_id], 0.0)
-      +        for source, label, dest in nwa["transitions"]:
-      +            fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
+      +def print_fst_stats(fst: VectorFst, message: str):
+      +    """Prints basic stats for a rustfst FST."""
+      +    num_states = fst.num_states()
+      +    num_arcs = sum(fst.num_trs(s) for s in fst.states())
+      +    print(f"  - {message}: {num_states} states, {num_arcs} arcs.")
       +
-      +        print("Minimizing...")
-      +        fst = fst.minimize()
-      +        print("Determinizing...")
-      +        fst = fst.determinize()
-      +        print("RESULT: ✅ Determinization finished successfully.")
-      +        print(f"Resulting FST has {fst.num_states()} states.")
-      +    except Exception as e:
-      +        print(f"RESULT: ❌ Determinization failed with an error: {e}")
+       
+       # --- PASS FUNCTIONS ---
+       
+      @@ -188,13 +195,19 @@
+               for source, label, dest in nwa["transitions"]:
+                   fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
+       
+      -        print("Minimizing...")
+      +        print("\nFST Statistics:")
+      +        print_fst_stats(fst, "Initial FST")
+      +
+      +        print("\nMinimizing...")
+               fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
+      -        print("Determinizing...")
+      +        print_fst_stats(fst, "After minimizing")
+      +
+      +        print("\nDeterminizing...")
+               fst = fst.determinize()
+      -        print("RESULT: ✅ Determinization finished successfully.")
+      -        print(f"Resulting FST has {fst.num_states()} states.")
+      +        print_fst_stats(fst, "After determinizing")
+      +
+      +        print("\nRESULT: ✅ Determinization finished successfully.")
+           except Exception as e:
+               print(f"RESULT: ❌ Determinization failed with an error: {e}")
        # --- NEW AND MODIFIED PASSES FOR STATE INSPECTION ---
-       
-       def run_inspect_states_pass(args):
-      @@ -258,10 +266,9 @@
-           parser_scc.set_defaults(func=run_scc_pass)
-       
-           # --- Determinize Pass ---
-      -    parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA with a timeout.")
-      +    parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA.")
-           parser_det.add_argument("filepath", help="Path to the nwa_dump.json file.")
-      -    parser_det.add_argument("--timeout", type=float, default=10.0, help="Timeout in seconds for the determinization attempt.")
-           parser_det.set_defaults(func=run_determinize_pass)
-       
-           # --- MODIFIED: Inspect States Pass (Pretty) ---
 
       ```
     metadata:
@@ -30990,7 +30950,7 @@ messages:
       Applying patch to 'scripts/analyze_nwa.py' using custom patcher...
       Successfully applied patch and wrote to scripts/analyze_nwa.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor determinize pass in analyze_nwa
-      to run without timeout and perform FST operations directly"'
+  - user: 'Changes committed with message: "Add FST statistics printing in determinization
+      pass"'
     metadata:
 ...

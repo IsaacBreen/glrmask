@@ -149,6 +149,12 @@ def print_scc_analysis(G: nx.DiGraph, transitions: set):
         if len(internal_edges) > MAX_EDGES_TO_SHOW:
             print(f"      - ... and {len(internal_edges) - MAX_EDGES_TO_SHOW} more internal edges")
 
+def print_fst_stats(fst: VectorFst, message: str):
+    """Prints basic stats for a rustfst FST."""
+    num_states = fst.num_states()
+    num_arcs = sum(fst.num_trs(s) for s in fst.states())
+    print(f"  - {message}: {num_states} states, {num_arcs} arcs.")
+
 
 # --- PASS FUNCTIONS ---
 
@@ -186,12 +192,18 @@ def run_determinize_pass(args):
         for source, label, dest in nwa["transitions"]:
             fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-        print("Minimizing...")
+        print("\nFST Statistics:")
+        print_fst_stats(fst, "Initial FST")
+
+        print("\nMinimizing...")
         fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
-        print("Determinizing...")
+        print_fst_stats(fst, "After minimizing")
+
+        print("\nDeterminizing...")
         fst = fst.determinize()
-        print("RESULT: ✅ Determinization finished successfully.")
-        print(f"Resulting FST has {fst.num_states()} states.")
+        print_fst_stats(fst, "After determinizing")
+
+        print("\nRESULT: ✅ Determinization finished successfully.")
     except Exception as e:
         print(f"RESULT: ❌ Determinization failed with an error: {e}")
 # --- NEW AND MODIFIED PASSES FOR STATE INSPECTION ---
