@@ -202,8 +202,8 @@ def run_inspect_states_pass(args):
         print("\nEpsilon Transitions (ε):")
         epsilons = state_data.get('epsilons', [])
         if epsilons:
-            for target_id, metadata in epsilons:
-                print(f"  - ε --> {target_id}  (metadata: {metadata})")
+            for target_id, weight in epsilons:
+                print(f"  - ε --> {target_id}  (weight: {weight})")
         else:
             print("  - None")
 
@@ -211,8 +211,8 @@ def run_inspect_states_pass(args):
         transitions = state_data.get('transitions', {})
         if transitions:
             for label_str, targets in sorted(transitions.items(), key=lambda item: int(item[0])):
-                for target_id, metadata in targets:
-                    print(f"  - On symbol '{label_str}' --> {target_id}  (metadata: {metadata})")
+                for target_id, weight in targets:
+                    print(f"  - On symbol '{label_str}' --> {target_id}  (weight: {weight})")
         else:
             print("  - None")
 
