@@ -8,6 +8,7 @@ import multiprocessing
 import argparse
 from collections import Counter, defaultdict
 
+from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
 from rustfst.algorithms.minimize import MinimizeConfig
 
 # (Import statements for rustfst and networkx remain the same)
@@ -100,7 +101,7 @@ def determinize_worker(
         print("Minimizing")
         fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
         print("Determinizing")
-        fst = fst.determinize()
+        fst = fst.determinize(config=DeterminizeConfig(det_type=DeterminizeType.DETERMINIZE_DISAMBIGUATE))
         result_queue.put(True)
     except Exception:
         result_queue.put(False)
