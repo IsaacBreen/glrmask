@@ -16,7 +16,8 @@ except ImportError:
     sys.exit(1)
 
 
-# --- NWA Data Structures (Identical to previous script) ---
+# --- NWA Data Structures ---
+# We only need these for the initial load. The pruning logic will use simpler structures.
 
 @dataclass
 class NWAState:
@@ -35,71 +36,46 @@ class NWA:
     body: NWABody
     states: List[NWAState]
 
-    @staticmethod
-    def from_dict(data: dict) -> 'NWA':
-        body = NWABody(**data['body'])
-        states = [
-            NWAState(
-                final_weight=s_data.get('final_weight'),
-                transitions=s_data.get('transitions', {}),
-                epsilons=[tuple(e) for e in s_data.get('epsilons', [])]
-            ) for s_data in data['states']
-        ]
-        return NWA(body=body, states=states)
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    def num_transitions(self) -> int:
-        count = 0
-        for state in self.states:
-            count += len(state.epsilons)
-            for targets in state.transitions.values():
-                count += len(targets)
-        return count
-
-
-def load_nwa(filepath: str) -> NWA:
-    with open(filepath, 'r') as f:
-        data = json.load(f)
-    return NWA.from_dict(data)
-
 
 # --- Core Determinization Function (to be run in a separate process) ---
 
-def determinize_worker(nwa_dict: dict, result_queue: multiprocessing.Queue):
-    """This function runs in a separate process to avoid blocking."""
+def determinize_worker(
+        num_states: int, start_state: int, final_states: set, transitions: set, result_queue: multiprocessing.Queue
+):
+    """
+    This worker function builds an FST from simple, pre-processed data structures.
+    It completely ignores weights.
+    """
     try:
-        nwa = NWA.from_dict(nwa_dict)
         fst = VectorFst()
-        state_map = {i: fst.add_state() for i in range(len(nwa.states))}
-        fst.set_start(state_map[nwa.body.start_state])
+        state_map = {i: fst.add_state() for i in range(num_states)}
+        fst.set_start(state_map[start_state])
 
-        for i, state in enumerate(nwa.states):
-            if state.final_weight is not None:
-                fst.set_final(state_map[i], 0.0)
-            for label_str, targets in state.transitions.items():
-                label = int(label_str)
-                for target_id, _ in targets:
-                    fst.add_tr(state_map[i], Tr(label, label, 0.0, state_map[target_id]))
-            for target_id, _ in state.epsilons:
-                fst.add_tr(state_map[i], Tr(0, 0, 0.0, state_map[target_id]))
+        for state_id in final_states:
+            fst.set_final(state_map[state_id], 0.0)
+
+        for source, label, dest in transitions:
+            fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
         _ = fst.determinize()
-        result_queue.put(True)
+        result_queue.put(True)  # Finished successfully
     except Exception:
-        result_queue.put(False)
+        result_queue.put(False)  # An error occurred
 
 
-def time_determinization_with_timeout(nwa: NWA, timeout: float) -> bool:
+def time_determinization_with_timeout(
+        num_states: int, start_state: int, final_states: set, transitions: set, timeout: float
+) -> bool:
     """
     Runs determinization in a subprocess.
-    Returns True if it HANGS (times out), False if it completes.
+    Returns True if it HANGS (times out), False if it completes or fails.
     """
-    if nwa.num_transitions() == 0: return False
+    if not transitions: return False
 
     result_queue = multiprocessing.Queue()
-    process = multiprocessing.Process(target=determinize_worker, args=(nwa.to_dict(), result_queue))
+    process = multiprocessing.Process(
+        target=determinize_worker, args=(num_states, start_state, final_states, transitions, result_queue)
+    )
 
     process.start()
     process.join(timeout)
@@ -110,30 +86,12 @@ def time_determinization_with_timeout(nwa: NWA, timeout: float) -> bool:
         return True  # Timed out -> HANGS
 
     try:
-        # If it finished, it doesn't hang
+        # If it finished, it doesn't hang.
+        # We check the result queue to see if it finished cleanly.
         return not result_queue.get_nowait()
     except Exception:
         # Crashed or queue empty, treat as not hanging
         return False
-
-
-def remove_transitions_from_nwa(nwa: NWA, transitions_to_remove: set) -> NWA:
-    """Creates a new NWA with a set of transitions removed."""
-    candidate_nwa = copy.deepcopy(nwa)
-    for trans in transitions_to_remove:
-        trans_type, state_idx, *rest = trans
-        if trans_type == 'epsilon':
-            target_to_remove = rest[0]
-            if target_to_remove in candidate_nwa.states[state_idx].epsilons:
-                candidate_nwa.states[state_idx].epsilons.remove(target_to_remove)
-        else:
-            label_str, target_to_remove = rest
-            if label_str in candidate_nwa.states[state_idx].transitions and \
-                    target_to_remove in candidate_nwa.states[state_idx].transitions[label_str]:
-                candidate_nwa.states[state_idx].transitions[label_str].remove(target_to_remove)
-                if not candidate_nwa.states[state_idx].transitions[label_str]:
-                    del candidate_nwa.states[state_idx].transitions[label_str]
-    return candidate_nwa
 
 
 # --- Main Pruning Logic ---
@@ -148,12 +106,29 @@ if __name__ == "__main__":
     DETERMINIZE_TIMEOUT_S = 1.0
 
     print(f"Loading original NWA from: {filepath}")
-    original_nwa = load_nwa(filepath)
-    original_transitions_count = original_nwa.num_transitions()
-    print(f"Original NWA has {len(original_nwa.states)} states and {original_transitions_count} transitions.")
+    with open(filepath, 'r') as f:
+        nwa_data = json.load(f)
+
+    # --- Extract a simple, hashable representation of the NWA graph ---
+    num_states = len(nwa_data['states'])
+    start_state = nwa_data['body']['start_state']
+    final_states = {i for i, s in enumerate(nwa_data['states']) if s.get('final_weight') is not None}
+
+    all_transitions = set()
+    for i, state in enumerate(nwa_data['states']):
+        for target_id, _ in state.get('epsilons', []):
+            # Epsilon is label 0
+            all_transitions.add((i, 0, target_id))
+        for label_str, targets in state.get('transitions', {}).items():
+            label = int(label_str)
+            for target_id, _ in targets:
+                all_transitions.add((i, label, target_id))
+
+    original_transitions_count = len(all_transitions)
+    print(f"Original NWA has {num_states} states and {original_transitions_count} unique transitions.")
 
     print("\n--- Establishing Baseline Behavior ---")
-    if not time_determinization_with_timeout(original_nwa, DETERMINIZE_TIMEOUT_S):
+    if not time_determinization_with_timeout(num_states, start_state, final_states, all_transitions, DETERMINIZE_TIMEOUT_S):
         print(f"Baseline determinization finished within {DETERMINIZE_TIMEOUT_S}s. This script is for hanging cases.")
         sys.exit(0)
     else:
@@ -162,92 +137,78 @@ if __name__ == "__main__":
     # --- PHASE 1: Adaptive Chunk Pruning ---
     print("\n--- PHASE 1: Adaptive Pruning ---")
 
-    # Get all transitions as a list of unique, hashable tuples
-    all_transitions = set()
-    for i, state in enumerate(original_nwa.states):
-        for epsilon_target in state.epsilons:
-            all_transitions.add(('epsilon', i, epsilon_target))
-        for label_str, targets in state.transitions.items():
-            for labeled_target in targets:
-                all_transitions.add(('labeled', i, label_str, labeled_target))
-
-    # `good_transitions` are ones we know are essential
-    # `untested_transitions` are ones we haven't checked yet
     good_transitions = set()
     untested_transitions = list(all_transitions)
     random.shuffle(untested_transitions)
 
     while len(untested_transitions) > 1:
-        # Try to remove half of the remaining untested transitions
         chunk_size = len(untested_transitions) // 2
         if chunk_size == 0: break
 
         chunk_to_test = set(untested_transitions[:chunk_size])
-
-        # The candidate NWA contains only the good transitions and the other half of untested ones
         transitions_to_keep = good_transitions.union(set(untested_transitions[chunk_size:]))
-        transitions_to_remove = all_transitions - transitions_to_keep
-        candidate_nwa = remove_transitions_from_nwa(original_nwa, transitions_to_remove)
 
         print(f"Testing removal of {len(chunk_to_test)} transitions... (Remaining untested: {len(untested_transitions)})")
 
-        if time_determinization_with_timeout(candidate_nwa, DETERMINIZE_TIMEOUT_S):
-            # SUCCESS: It still hangs. The chunk we removed was irrelevant.
-            # The new set of untested transitions is the half we kept.
+        if time_determinization_with_timeout(num_states, start_state, final_states, transitions_to_keep, DETERMINIZE_TIMEOUT_S):
             untested_transitions = untested_transitions[chunk_size:]
             print(f"  ✅ SUCCESS. Chunk was not essential. {len(untested_transitions)} candidates remain.")
         else:
-            # FAILURE: It became fast. A critical transition is in the chunk we removed.
-            # The chunk becomes the new set of untested transitions.
             good_transitions.update(set(untested_transitions[chunk_size:]))
             untested_transitions = untested_transitions[:chunk_size]
             print(f"  ❌ FAILURE. Chunk is essential. Narrowing search to {len(untested_transitions)} candidates.")
 
-    # At this point, `untested_transitions` contains the minimal set from phase 1
-    minimized_nwa = remove_transitions_from_nwa(original_nwa, all_transitions - good_transitions - set(untested_transitions))
+    essential_transitions = good_transitions.union(set(untested_transitions))
     print(f"\n--- PHASE 1 COMPLETE ---")
-    print(f"Reduced to {minimized_nwa.num_transitions()} candidate transitions.")
+    print(f"Reduced to {len(essential_transitions)} candidate transitions.")
 
     # --- PHASE 2: Fine Pruning (One-by-one) ---
     print(f"\n--- PHASE 2: Fine Pruning ---")
 
-    essential_transitions = list(minimized_nwa.to_dict()['states'])  # A bit of a hack to get current transitions
-
-    # Convert minimized_nwa to a list of transitions to test one-by-one
-    transitions_to_refine = []
-    for i, state in enumerate(minimized_nwa.states):
-        for epsilon_target in state.epsilons:
-            transitions_to_refine.append(('epsilon', i, epsilon_target))
-        for label_str, targets in state.transitions.items():
-            for labeled_target in targets:
-                transitions_to_refine.append(('labeled', i, label_str, labeled_target))
-
+    transitions_to_refine = list(essential_transitions)
     random.shuffle(transitions_to_refine)
 
     for idx, trans_to_remove in enumerate(transitions_to_refine):
-        # Don't test removing a transition if it's the last one
-        if minimized_nwa.num_transitions() <= 1: break
+        if len(essential_transitions) <= 1: break
 
-        candidate_nwa = remove_transitions_from_nwa(minimized_nwa, {trans_to_remove})
+        candidate_transitions = essential_transitions - {trans_to_remove}
         progress = f"[{idx + 1}/{len(transitions_to_refine)}]"
 
-        if time_determinization_with_timeout(candidate_nwa, DETERMINIZE_TIMEOUT_S):
-            minimized_nwa = candidate_nwa
-            print(f"{progress} ✅ Prune SUCCESSFUL. Still hangs. New transition count: {minimized_nwa.num_transitions()}")
+        if time_determinization_with_timeout(num_states, start_state, final_states, candidate_transitions, DETERMINIZE_TIMEOUT_S):
+            essential_transitions = candidate_transitions
+            print(f"{progress} ✅ Prune SUCCESSFUL. Still hangs. New transition count: {len(essential_transitions)}")
         else:
             print(f"{progress} ❌ Prune FAILED. Reverting.")
 
-    # --- Final Report ---
+    # --- Final Report and Save ---
     print("\n--- Pruning Complete ---")
-    final_transitions_count = minimized_nwa.num_transitions()
+    final_transitions_count = len(essential_transitions)
     print(f"Original transitions: {original_transitions_count}")
     print(f"Minimized transitions: {final_transitions_count}")
     reduction = original_transitions_count - final_transitions_count
     reduction_pct = (reduction / original_transitions_count * 100) if original_transitions_count > 0 else 0
     print(f"Removed {reduction} transitions ({reduction_pct:.2f}% reduction).")
 
+    # Reconstruct the NWA JSON from the minimal set of transitions
+    minimized_nwa_dict = {
+        "body": {"start_state": start_state},
+        "states": [{"transitions": {}, "epsilons": []} for _ in range(num_states)]
+    }
+    for i in final_states:
+        minimized_nwa_dict["states"][i]["final_weight"] = "ALL"  # Use a placeholder
+
+    for source, label, dest in essential_transitions:
+        # We add a dummy weight back in for format compatibility
+        if label == 0:
+            minimized_nwa_dict["states"][source]["epsilons"].append([dest, []])
+        else:
+            label_str = str(label)
+            if label_str not in minimized_nwa_dict["states"][source]["transitions"]:
+                minimized_nwa_dict["states"][source]["transitions"][label_str] = []
+            minimized_nwa_dict["states"][source]["transitions"][label_str].append([dest, []])
+
     print(f"\nSaving minimized NWA to: {output_filepath}")
     with open(output_filepath, 'w') as f:
-        json.dump(minimized_nwa.to_dict(), f, indent=2)
+        json.dump(minimized_nwa_dict, f, indent=2)
 
     print("\nProcess finished. You can now inspect the minimized NWA.")
