@@ -187,7 +187,7 @@ def run_determinize_pass(args):
             fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
         print("Minimizing...")
-        fst = fst.minimize()
+        fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
         print("Determinizing...")
         fst = fst.determinize()
         print("RESULT: ✅ Determinization finished successfully.")
