@@ -68,7 +68,9 @@ def determinize_worker(
             fst.set_final(state_map[state_id], 0.0)
         for source, label, dest in transitions:
             fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
+        print("Minimizing")
         fst = fst.minimize()
+        print("Determinizing")
         fst = fst.determinize()
         result_queue.put(True)
     except Exception:
