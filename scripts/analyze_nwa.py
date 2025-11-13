@@ -1,9 +1,9 @@
-# scripts/analyze_nwa.py
 import json
 import sys
 import glob
 import os
-from collections import defaultdict
+import time
+from collections import defaultdict, Counter
 from dataclasses import dataclass
 from typing import Any, Optional, List, Dict, Tuple, Set, Union
 
@@ -13,6 +13,13 @@ try:
     from automata.fa.dfa import DFA
 except ImportError:
     print("Error: 'automata-lib' not found. Please install it using 'pip install automata-lib'", file=sys.stderr)
+    sys.exit(1)
+
+# We use NetworkX for graph analysis, specifically for finding strongly connected components.
+try:
+    import networkx as nx
+except ImportError:
+    print("Error: 'networkx' not found. Please install it using 'pip install networkx'", file=sys.stderr)
     sys.exit(1)
 
 # A dedicated symbol for default transitions when converting to rustfst.
@@ -54,8 +61,6 @@ class NWA:
     def from_dict(data: dict) -> 'NWA':
         """Creates an NWA instance from a dictionary (parsed from JSON)."""
         body = NWABody(**data['body'])
-        # The `NWAStates` newtype in Rust serializes transparently as its inner Vec,
-        # so `data['states']` is the list of state objects.
         states_data = data['states']
         states = []
         for s_data in states_data:
@@ -73,16 +78,6 @@ class NWA:
 
 # --- Analysis Functions (Simplified) ---
 
-def analyze_weight(weight: Weight, weight_stats: dict):
-    """Updates weight statistics based on a given weight object."""
-    if weight == "ALL":
-        weight_stats['all_count'] += 1
-    elif isinstance(weight, list) and not weight:
-        weight_stats['empty_count'] += 1
-    else:
-        weight_stats['complex_count'] += 1
-
-
 def get_nwa_stats(nwa: NWA) -> dict:
     """
     Computes various statistics about the NWA.
@@ -94,34 +89,20 @@ def get_nwa_stats(nwa: NWA) -> dict:
         'num_epsilon_transitions': 0,
         'num_labeled_transitions': 0,
         'num_default_transitions': 0,
-        'weight_stats': {
-            'all_count': 0,
-            'empty_count': 0,
-            'complex_count': 0,
-        }
     }
 
     for i, state in enumerate(nwa.states):
         if state.final_weight is not None:
             stats['num_final_states'] += 1
-            analyze_weight(state.final_weight, stats['weight_stats'])
-
-        # Epsilon transitions
-        eps_count = len(state.epsilons)
-        stats['num_epsilon_transitions'] += eps_count
-        for target, weight in state.epsilons:
-            analyze_weight(weight, stats['weight_stats'])
-
-        # Labeled transitions
+        stats['num_epsilon_transitions'] += len(state.epsilons)
         for label_str, targets in state.transitions.items():
             label = int(label_str)
-            if label == DEFAULT_TRANSITION_SYMBOL:
+            if label == 0:  # Count transitions with label 0 as epsilons
+                stats['num_epsilon_transitions'] += len(targets)
+            elif label == DEFAULT_TRANSITION_SYMBOL:
                 stats['num_default_transitions'] += len(targets)
             else:
                 stats['num_labeled_transitions'] += len(targets)
-
-            for target, weight in targets:
-                analyze_weight(weight, stats['weight_stats'])
 
     total_transitions = stats['num_epsilon_transitions'] + stats['num_labeled_transitions'] + stats['num_default_transitions']
     stats['total_transitions'] = total_transitions
@@ -140,16 +121,10 @@ def print_nwa_stats(stats: dict):
     print(f"Total epsilon transitions: {stats['num_epsilon_transitions']}")
     print(f"Total labeled transitions (explicit): {stats['num_labeled_transitions']}")
     print(f"Total default transitions: {stats['num_default_transitions']}")
-
     total_transitions = stats['total_transitions']
     print(f"Total transitions: {total_transitions}")
     if stats['num_states'] > 0:
         print(f"Average outgoing degree: {total_transitions / stats['num_states']:.2f}")
-
-    print("\n--- Weight Statistics (Ignored for NFA conversion) ---")
-    print(f"  'ALL' weights: {stats['weight_stats']['all_count']}")
-    print(f"  Empty weights: {stats['weight_stats']['empty_count']}")
-    print(f"  Complex weights: {stats['weight_stats']['complex_count']}")
 
 
 def load_nwa(filepath: str) -> NWA:
@@ -161,85 +136,123 @@ def load_nwa(filepath: str) -> NWA:
     return NWA.from_dict(data)
 
 
-# --- NFA Conversion using automata-lib ---
+# --- NFA Conversion and Optimization ---
 
 def convert_nwa_to_nfa_automata(nwa: NWA) -> NFA:
     """
     Converts the NWA structure into a standard NFA (ignoring weights).
-    Default transitions (0xFFFE) are expanded to cover all non-explicitly
-    handled symbols.
     """
-
-    # 1. Collect all symbols, excluding 0 which is reserved for epsilon.
-    all_symbols: Set[int] = set()
-    for state in nwa.states:
-        for label_str in state.transitions:
-            label = int(label_str)
-            if label != 0 and label != DEFAULT_TRANSITION_SYMBOL:
-                all_symbols.add(label)
-
-    # 2. Prepare NFA components
     states = set(range(nwa.num_states()))
-    input_symbols = all_symbols
+    input_symbols = set()
     initial_state = nwa.body.start_state
-
-    # Final states are any state with a non-None final_weight
     final_states = {i for i, state in enumerate(nwa.states) if state.final_weight is not None}
-
-    # Transitions: {state: {symbol: {target_states}}}
-    # The symbol can be an int or the empty string '' for epsilon
     transitions: Dict[int, Dict[Union[int, str], Set[int]]] = defaultdict(lambda: defaultdict(set))
 
-    # 3. Process transitions
     for i, state in enumerate(nwa.states):
-
-        explicit_symbols: Set[int] = set()
-        default_targets: Optional[Set[int]] = None
-
-        # First pass: Collect explicit transitions and default targets
-        for label_str, targets in state.transitions.items():
-            label = int(label_str)
-            target_ids = {t[0] for t in targets}  # Ignore weights
-
-            if label == DEFAULT_TRANSITION_SYMBOL:
-                default_targets = target_ids
-                continue
-
-            if label == 0:
-                # This is an epsilon transition, map to empty string ''
-                transitions[i][''].update(target_ids)
-                continue
-
-            # Standard labeled transition
-            transitions[i][label].update(target_ids)
-            explicit_symbols.add(label)
-
-        # Epsilon transitions from the dedicated `epsilons` list
+        # Epsilon transitions from the dedicated list
         if state.epsilons:
             eps_targets = {t[0] for t in state.epsilons}
             transitions[i][''].update(eps_targets)
 
-        # Second pass: Expand default transitions
-        if default_targets:
-            default_symbols = input_symbols - explicit_symbols
-            for symbol in default_symbols:
-                transitions[i][symbol].update(default_symbols)
+        # Labeled transitions from the map
+        for label_str, targets in state.transitions.items():
+            label = int(label_str)
+            target_ids = {t[0] for t in targets}
 
-    # Convert transitions to the format required by automata-lib (no defaultdict)
-    nfa_transitions = {
-        state: {
-            symbol: targets
-            for symbol, targets in symbol_map.items()
-        }
-        for state, symbol_map in transitions.items()
-    }
+            # --- FIX IS HERE ---
+            # Treat label 0 as an epsilon transition for automata-lib
+            if label == 0:
+                transitions[i][''].update(target_ids)
+                continue
+            # --- END FIX ---
+
+            if label == DEFAULT_TRANSITION_SYMBOL:
+                # Ignoring default transitions for simplicity and speed.
+                continue
+
+            transitions[i][label].update(target_ids)
+            input_symbols.add(label)
 
     return NFA(
         states=states,
         input_symbols=input_symbols,
-        transitions=nfa_transitions,
+        transitions={k: dict(v) for k, v in transitions.items()},
         initial_state=initial_state,
         final_states=final_states
+    )
+
+
+def prune_unreachable_states(nfa: NFA) -> NFA:
+    """Removes states not reachable from the initial state."""
+    reachable_states = {nfa.initial_state}
+    queue = [nfa.initial_state]
+
+    head = 0
+    while head < len(queue):
+        current_state = queue[head]
+        head += 1
+        if current_state in nfa.transitions:
+            for symbol, targets in nfa.transitions[current_state].items():
+                for target_state in targets:
+                    if target_state not in reachable_states:
+                        reachable_states.add(target_state)
+                        queue.append(target_state)
+
+    # Filter transitions to only include those from reachable states to reachable states
+    filtered_transitions = {}
+    for state, trans in nfa.transitions.items():
+        if state in reachable_states:
+            filtered_transitions[state] = {
+                symbol: {target for target in targets if target in reachable_states}
+                for symbol, targets in trans.items()
+            }
+
+    return NFA(
+        states=reachable_states,
+        input_symbols=nfa.input_symbols,
+        transitions=filtered_transitions,
+        initial_state=nfa.initial_state,
+        final_states=nfa.final_states & reachable_states
+    )
+
+
+def remove_epsilon_transitions(nfa: NFA) -> NFA:
+    """Creates an equivalent NFA with no epsilon transitions."""
+    epsilon_closures = {}
+    for state in nfa.states:
+        closure = {state}
+        queue = [state]
+        head = 0
+        while head < len(queue):
+            q_state = queue[head]
+            head += 1
+            epsilon_targets = nfa.transitions.get(q_state, {}).get('', set())
+            for target in epsilon_targets:
+                if target not in closure:
+                    closure.add(target)
+                    queue.append(target)
+        epsilon_closures[state] = closure
+
+    new_transitions = defaultdict(lambda: defaultdict(set))
+    for u_state in nfa.states:
+        for v_state in epsilon_closures[u_state]:
+            for symbol, targets in nfa.transitions.get(v_state, {}).items():
+                if symbol == '':
+                    continue
+                for w_state in targets:
+                    new_transitions[u_state][symbol].update(epsilon_closures[w_state])
+
+    new_final_states = {
+        state for state in nfa.states
+        if not nfa.final_states.isdisjoint(epsilon_closures.get(state, set()))
+    }
+
+    return NFA(
+        states=nfa.states,
+        input_symbols=nfa.input_symbols,
+        transitions={k: dict(v) for k, v in new_transitions.items()},
+        initial_state=nfa.initial_state,
+        final_states=new_final_states
     )
 
 
@@ -253,21 +266,17 @@ if __name__ == "__main__":
 
     if len(sys.argv) == 2:
         filepath = sys.argv[1]
-    else:  # len(sys.argv) == 1
+    else:
         try:
             search_paths = ['./nwa_dump_*.json', '../nwa_dump_*.json']
-            dump_files = []
-            for path in search_paths:
-                dump_files.extend(glob.glob(path))
-
+            dump_files = [f for path in search_paths for f in glob.glob(path)]
             if not dump_files:
-                print("No NWA dump file provided and no 'nwa_dump_*.json' files found in current or parent directory.")
+                print("No NWA dump file provided and no 'nwa_dump_*.json' files found.")
                 sys.exit(1)
-
             filepath = max(dump_files, key=os.path.getmtime)
             print(f"No path provided. Using most recent dump file: {filepath}")
         except Exception as e:
-            print(f"Error finding most recent dump file: {e}", file=sys.stderr)
+            print(f"Error finding dump file: {e}", file=sys.stderr)
             sys.exit(1)
 
     try:
@@ -277,25 +286,41 @@ if __name__ == "__main__":
 
         print("\n--- Converting NWA to standard NFA (ignoring weights) ---")
         nfa = convert_nwa_to_nfa_automata(nwa)
+        print(f"Initial NFA States: {len(nfa.states)}")
+        nfa_arcs = sum(len(t) for s in nfa.transitions.values() for t in s.values())
+        print(f"Initial NFA Transitions: {nfa_arcs}")
 
-        print("NFA created successfully.")
-        print(f"NFA States: {len(nfa.states)}")
-        print(f"NFA Input Symbols: {len(nfa.input_symbols)}")
+        # --- ACCELERATION STRATEGY: PRE-PROCESSING ---
+        print("\n--- NFA Pre-processing for Acceleration ---")
 
-        # Calculate NFA transitions count
-        nfa_arcs = sum(len(targets) for symbol_map in nfa.transitions.values() for targets in symbol_map.values())
-        print(f"NFA Transitions (after default expansion): {nfa_arcs}")
+        # Step 1: Prune unreachable states
+        start_prune_time = time.monotonic()
+        nfa_pruned = prune_unreachable_states(nfa)
+        end_prune_time = time.monotonic()
+        print(f"1. Pruning unreachable states completed in {end_prune_time - start_prune_time:.4f} seconds.")
+        print(f"   - States reduced from {len(nfa.states)} to {len(nfa_pruned.states)}")
 
-        print("\n--- Determinizing NFA using automata-lib ---")
+        # Step 2: Remove all epsilon transitions
+        start_eps_time = time.monotonic()
+        nfa_optimized = remove_epsilon_transitions(nfa_pruned)
+        end_eps_time = time.monotonic()
+        print(f"2. Epsilon transition removal completed in {end_eps_time - start_eps_time:.4f} seconds.")
 
-        # Correct way to determinize: use the DFA class method
-        dfa = DFA.from_nfa(nfa)
+        opt_nfa_arcs = sum(len(t) for s in nfa_optimized.transitions.values() for t in s.values())
+        print(f"   - Optimized NFA has {len(nfa_optimized.states)} states and {opt_nfa_arcs} transitions (all non-epsilon).")
 
-        print("Determinization successful.")
+        # --- TIMED DETERMINIZATION ---
+        print("\n--- Determinizing OPTIMIZED NFA using automata-lib ---")
+
+        start_det_time = time.monotonic()
+        dfa = DFA.from_nfa(nfa_optimized)  # Determinize the simplified NFA
+        end_det_time = time.monotonic()
+
+        duration = end_det_time - start_det_time
+        print(f"Determinization successful in {duration:.4f} seconds.")
+
         print("\n--- DFA Summary ---")
         print(f"DFA States: {len(dfa.states)}")
-
-        # Correctly calculate DFA transitions count
         dfa_arcs = sum(len(symbol_map) for symbol_map in dfa.transitions.values())
         print(f"DFA Transitions: {dfa_arcs}")
 
@@ -306,5 +331,5 @@ if __name__ == "__main__":
         print(f"Error: Could not decode JSON from {filepath}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-        print(f"An unexpected error occurred during processing: {e}", file=sys.stderr)
+        print(f"An unexpected error occurred: {e}", file=sys.stderr)
         sys.exit(1)
