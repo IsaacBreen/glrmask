@@ -272,6 +272,10 @@ impl NWA {
     pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
         self.states.add_epsilon(from, to, w);
     }
+
+    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA {
+        super::determinization_rustfst::determinize_nwa_to_dwa(self)
+    }
 }
 
 impl Display for NWA {

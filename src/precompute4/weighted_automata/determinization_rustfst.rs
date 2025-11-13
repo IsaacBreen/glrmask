@@ -1,0 +1,260 @@
+// src/precompute4/weighted_automata/determinization_rustfst.rs
+
+use super::common::{StateID, Weight};
+use super::dwa::{DWA, DWABuildError};
+use super::nwa::NWA;
+use crate::precompute4::weighted_automata::bitset::SimpleBitset;
+use crate::precompute4::weighted_automata::NWAStateID;
+use anyhow::Result;
+use nom::IResult;
+use rustfst::parsers::NomCustomError;
+use rustfst::prelude::*;
+use rustfst::semirings::{
+    DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring,
+    WeightQuantize,
+};
+use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
+use std::collections::HashMap;
+use std::io::Write;
+
+#[derive(Clone, Debug, PartialEq, PartialOrd, Default, Eq, Hash, Serialize, Deserialize)]
+pub struct BitsetWeight(pub Weight);
+
+impl Semiring for BitsetWeight {
+    type Type = Weight;
+    type ReverseWeight = BitsetWeight;
+
+    fn zero() -> Self {
+        BitsetWeight(Weight::zeros())
+    }
+    fn one() -> Self {
+        BitsetWeight(Weight::all())
+    }
+    fn new(value: Self::Type) -> Self {
+        BitsetWeight(value)
+    }
+
+    fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
+        self.0.bitor_assign(&rhs.borrow().0);
+        Ok(())
+    }
+
+    fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
+        self.0.bitand_assign(&rhs.borrow().0);
+        Ok(())
+    }
+
+    fn approx_equal<P: Borrow<Self>>(&self, rhs: P, _delta: f32) -> bool {
+        self.0 == rhs.borrow().0
+    }
+
+    fn value(&self) -> &Self::Type {
+        &self.0
+    }
+    fn take_value(self) -> Self::Type {
+        self.0
+    }
+    fn set_value(&mut self, value: Self::Type) {
+        self.0 = value;
+    }
+    fn reverse(&self) -> Result<Self::ReverseWeight> {
+        Ok(self.clone())
+    }
+
+    fn properties() -> SemiringProperties {
+        SemiringProperties::LEFT_SEMIRING
+            | SemiringProperties::RIGHT_SEMIRING
+            | SemiringProperties::COMMUTATIVE
+            | SemiringProperties::IDEMPOTENT
+            | SemiringProperties::PATH
+    }
+}
+
+impl ReverseBack<BitsetWeight> for BitsetWeight {
+    fn reverse_back(&self) -> Result<BitsetWeight> {
+        Ok(self.clone())
+    }
+}
+
+impl WeaklyDivisibleSemiring for BitsetWeight {
+    fn divide_assign(&mut self, _rhs: &Self, _divide_type: DivideType) -> Result<()> {
+        // For a boolean algebra, division a/b is `a`. This is a no-op.
+        Ok(())
+    }
+}
+
+impl WeightQuantize for BitsetWeight {
+    fn quantize_assign(&mut self, _delta: f32) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl SerializableSemiring for BitsetWeight {
+    fn weight_type() -> String {
+        "bitset".to_string()
+    }
+
+    fn parse_binary(i: &[u8]) -> IResult<&[u8], Self, NomCustomError<&[u8]>> {
+        use nom::number::complete::le_u64;
+        let (mut i, num_ranges) = le_u64(i)?;
+        let mut ranges = Vec::with_capacity(num_ranges as usize);
+        for _ in 0..num_ranges {
+            let (next_i, start) = le_u64(i)?;
+            let (next_i, end) = le_u64(next_i)?;
+            ranges.push(start as usize..=end as usize);
+            i = next_i;
+        }
+        let rsb = range_set_blaze::RangeSetBlaze::from_iter(ranges);
+        Ok((i, BitsetWeight(Weight::from_rsb(rsb))))
+    }
+
+    fn write_binary<F: Write>(&self, file: &mut F) -> Result<()> {
+        use rustfst::parsers::write_bin_u64;
+        let ranges: Vec<_> = self.0.rsb.ranges().collect();
+        write_bin_u64(file, ranges.len() as u64)?;
+        for range in ranges {
+            write_bin_u64(file, *range.start() as u64)?;
+            write_bin_u64(file, *range.end() as u64)?;
+        }
+        Ok(())
+    }
+
+    fn parse_text(i: &str) -> IResult<&str, Self> {
+        use nom::combinator::map_res;
+        map_res(nom::combinator::rest, |s: &str| -> Result<BitsetWeight, _> {
+            serde_json::from_str::<Weight>(s)
+                .map(BitsetWeight)
+                .map_err(|e| e.to_string())
+        })(i)
+    }
+}
+
+impl std::fmt::Display for BitsetWeight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            serde_json::to_string(&self.0).unwrap_or_else(|_| "err".to_string())
+        )
+    }
+}
+
+fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
+    let mut fst = VectorFst::<BitsetWeight>::new();
+    let mut state_map = HashMap::<NWAStateID, StateId>::new();
+
+    for i in 0..nwa.states.len() {
+        let s = fst.add_state();
+        state_map.insert(i, s);
+    }
+
+    if !nwa.states.0.is_empty() {
+        fst.set_start(state_map[&nwa.body.start_state]).unwrap();
+    }
+
+    for (i, nwa_state) in nwa.states.0.iter().enumerate() {
+        let fst_state_id = state_map[&i];
+        if let Some(w) = &nwa_state.final_weight {
+            if !w.is_empty() {
+                fst.set_final(fst_state_id, BitsetWeight(w.clone()))
+                    .unwrap();
+            }
+        }
+
+        for (label, targets) in &nwa_state.transitions {
+            for (target, weight) in targets {
+                if !weight.is_empty() {
+                    fst.add_tr(
+                        fst_state_id,
+                        Tr::new(
+                            *label as Label,
+                            *label as Label,
+                            BitsetWeight(weight.clone()),
+                            state_map[target],
+                        ),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+
+        for (target, weight) in &nwa_state.epsilons {
+            if !weight.is_empty() {
+                fst.add_tr(
+                    fst_state_id,
+                    Tr::new(
+                        EPS_LABEL,
+                        EPS_LABEL,
+                        BitsetWeight(weight.clone()),
+                        state_map[target],
+                    ),
+                )
+                .unwrap();
+            }
+        }
+    }
+    fst
+}
+
+fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
+    let mut dwa = DWA::new();
+    dwa.states.0.clear();
+    let mut state_map = HashMap::<StateId, StateID>::new();
+
+    for i in 0..fst.num_states() {
+        let s = dwa.add_state();
+        state_map.insert(i as StateId, s);
+    }
+
+    if let Some(start) = fst.start() {
+        if let Some(mapped_start) = state_map.get(&start) {
+            dwa.body.start_state = *mapped_start;
+        }
+    }
+
+    for i in 0..fst.num_states() {
+        let fst_state_id = i as StateId;
+        if !state_map.contains_key(&fst_state_id) {
+            continue;
+        }
+        let dwa_state_id = state_map[&fst_state_id];
+
+        if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
+            if !w.0.is_empty() {
+                dwa.set_final_weight(dwa_state_id, w.0).unwrap();
+            }
+        }
+
+        for tr in fst.get_trs(fst_state_id).unwrap().trs() {
+            if !tr.weight.0.is_empty() {
+                if !state_map.contains_key(&tr.nextstate) {
+                    continue;
+                }
+                let res = dwa.add_transition(
+                    dwa_state_id,
+                    tr.ilabel as i16,
+                    state_map[&tr.nextstate],
+                    tr.weight.0.clone(),
+                );
+                if let Err(DWABuildError::TransitionAlreadyExists { from, on }) = res {
+                    let state = &mut dwa.states[from];
+                    if let Some(w) = state.trans_weights.get_mut(&on) {
+                        *w |= tr.weight.0.clone();
+                    }
+                } else if let Err(e) = res {
+                    panic!("Unexpected error converting VectorFst to DWA: {:?}", e);
+                }
+            }
+        }
+    }
+    dwa
+}
+
+pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
+    let fst = nwa_to_vector_fst(nwa);
+    let det_config =
+        DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeNonFunctional);
+    let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
+    vector_fst_to_dwa(&det_fst)
+}

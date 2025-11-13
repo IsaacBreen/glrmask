@@ -5,6 +5,7 @@
 pub mod bitset;
 pub mod common;
 pub mod determinization;
+pub mod determinization_rustfst;
 pub mod dwa;
 pub mod json;
 pub mod nwa;
