@@ -14,11 +14,12 @@ DEFAULT_TRANSITION_SYMBOL = 0xFFFE
 # Try to import rustfst, but don't fail if it's not there.
 try:
     from rustfst import VectorFst, Tr
-    from rustfst.weight import weight_one
+    from rustfst.weight import weight_one, weight_zero
+    from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
     RUSTFST_AVAILABLE = True
 except ImportError:
     RUSTFST_AVAILABLE = False
-    VectorFst = None # for type hinting
+    VectorFst, DeterminizeConfig, DeterminizeType = None, None, None # for type hinting
 
 
 # Type aliases for clarity based on Rust types
@@ -178,12 +179,28 @@ def load_nwa(filepath: str) -> NWA:
         data = json.load(f)
     return NWA.from_dict(data)
 
+def convert_weight(weight: Any) -> Optional[float]:
+    """
+    Converts a JSON weight representation to a float for the tropical semiring.
+    - "ALL" -> 0.0 (identity)
+    - [] (empty set) -> None (annihilator, signals to skip transition)
+    - Complex set -> 1.0 (a constant cost)
+    """
+    if weight == "ALL":
+        return weight_one()  # 0.0
+    if isinstance(weight, list):
+        if not weight:
+            return None  # Empty set, skip this transition/final weight
+        else:
+            return 1.0  # Constant cost for any non-trivial weight
+    return None
+
 def create_rustfst_from_nwa(nwa: NWA) -> Optional['VectorFst']:
     f"""
     Creates a rustfst.VectorFst from an NWA object.
 
     Note: This is a partial conversion.
-    - Weights (SimpleBitset) are not converted; a default weight is used.
+    - Weights (SimpleBitset) are converted to simple float costs.
     - Default transitions are mapped to a dedicated symbol ({DEFAULT_TRANSITION_SYMBOL}), ignoring their exception lists.
     """
     if not RUSTFST_AVAILABLE:
@@ -191,7 +208,7 @@ def create_rustfst_from_nwa(nwa: NWA) -> Optional['VectorFst']:
         return None
 
     print("\n--- Creating rustfst.VectorFst from NWA ---")
-    print("WARNING: This is a partial conversion. Weights are not converted, and default transitions are simplified to a single symbol.")
+    print("WARNING: This is a partial conversion. Weights are simplified, and default transitions are mapped to a single symbol.")
 
     fst = VectorFst()
     state_map = {}  # NWAStateID -> FST state ID
@@ -210,28 +227,33 @@ def create_rustfst_from_nwa(nwa: NWA) -> Optional['VectorFst']:
 
         # Final state
         if state.final_weight is not None:
-            # Using default weight as we can't represent SimpleBitset
-            fst.set_final(from_id, weight_one())
+            w = convert_weight(state.final_weight)
+            if w is not None:
+                fst.set_final(from_id, w)
 
         # Epsilon transitions
-        for target, _weight in state.epsilons:
-            to_id = state_map[target]
-            # Using default weight
-            fst.add_tr(from_id, Tr(0, 0, weight_one(), to_id))
+        for target, weight_obj in state.epsilons:
+            w = convert_weight(weight_obj)
+            if w is not None:
+                to_id = state_map[target]
+                fst.add_tr(from_id, Tr(0, 0, w, to_id))
 
         # Labeled transitions
         for label_str, targets in state.transitions.items():
             label = int(label_str)
-            for target, _weight in targets:
-                to_id = state_map[target]
-                # Using default weight
-                fst.add_tr(from_id, Tr(label, label, weight_one(), to_id))
+            for target, weight_obj in targets:
+                w = convert_weight(weight_obj)
+                if w is not None:
+                    to_id = state_map[target]
+                    fst.add_tr(from_id, Tr(label, label, w, to_id))
 
         # Default transitions are mapped to a dedicated symbol
         for default_trans in state.default:
-            to_id = state_map[default_trans.target]
-            # Using default weight. The 'exceptions' list is ignored.
-            fst.add_tr(from_id, Tr(DEFAULT_TRANSITION_SYMBOL, DEFAULT_TRANSITION_SYMBOL, weight_one(), to_id))
+            w = convert_weight(default_trans.weight)
+            if w is not None:
+                to_id = state_map[default_trans.target]
+                # The 'exceptions' list is ignored.
+                fst.add_tr(from_id, Tr(DEFAULT_TRANSITION_SYMBOL, DEFAULT_TRANSITION_SYMBOL, w, to_id))
 
     print("FST created successfully (partially).")
     return fst
@@ -270,7 +292,7 @@ if __name__ == "__main__":
 
         fst = create_rustfst_from_nwa(nwa)
         if fst:
-            print("\n--- rustfst.VectorFst Summary ---")
+            print("\n--- rustfst.VectorFst Summary (before determinization) ---")
             print(f"Number of states: {fst.num_states()}")
             if fst.start() is not None:
                 print(f"Start state: {fst.start()}")
@@ -280,6 +302,25 @@ if __name__ == "__main__":
                 print(f"Number of arcs: {num_arcs}")
             else:
                 print("No start state.")
+
+            print("\n--- Determinizing FST ---")
+            try:
+                # Disambiguation is often needed when weights are simplified
+                config = DeterminizeConfig(DeterminizeType.DETERMINIZE_DISAMBIGUATE)
+                det_fst = fst.determinize(config)
+                print("Determinization successful.")
+                print("\n--- rustfst.VectorFst Summary (after determinization) ---")
+                print(f"Number of states: {det_fst.num_states()}")
+                if det_fst.start() is not None:
+                    print(f"Start state: {det_fst.start()}")
+                    num_arcs = 0
+                    for s in det_fst.states():
+                        num_arcs += det_fst.num_trs(s)
+                    print(f"Number of arcs: {num_arcs}")
+                else:
+                    print("No start state.")
+            except ValueError as e:
+                print(f"Determinization failed: {e}", file=sys.stderr)
     except FileNotFoundError:
         print(f"Error: File not found at {filepath}", file=sys.stderr)
         sys.exit(1)
