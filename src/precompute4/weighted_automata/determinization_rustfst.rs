@@ -200,6 +200,11 @@ fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
 }
 
 fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
+    let fst_start = match fst.start() {
+        Some(s) => s,
+        None => return DWA::new(),
+    };
+
     let mut dwa = DWA::new();
     dwa.states.0.clear();
     let mut state_map = HashMap::<StateId, StateID>::new();
@@ -209,11 +214,7 @@ fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
         state_map.insert(i as StateId, s);
     }
 
-    if let Some(start) = fst.start() {
-        if let Some(mapped_start) = state_map.get(&start) {
-            dwa.body.start_state = *mapped_start;
-        }
-    }
+    dwa.body.start_state = state_map[&fst_start];
 
     for i in 0..fst.num_states() {
         let fst_state_id = i as StateId;
