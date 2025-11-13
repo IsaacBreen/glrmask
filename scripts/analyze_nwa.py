@@ -273,19 +273,19 @@ def get_atomic_intervals(nwa_data: dict) -> list[P.Interval]:
 
 def build_and_determinize_nfa(
         interval: P.Interval,
-        nwa_data: dict
+        simplified_nwa_structure: dict
 ) -> VectorFst | None:
     """
-    Builds a standard NFA for a representative weight and determinizes it.
-    Returns the determinized FST (DFA) or None on failure.
+    Builds a standard NFA from a pre-simplified structure for a given weight interval
+    and determinizes it. Returns the determinized FST (DFA) or None on failure.
     """
     test_weight = interval.lower
 
     active_transitions = {
-        (s, l, d) for s, l, d, w in nwa_data["transitions"] if test_weight in w
+        (s, l, d) for s, l, d, w in simplified_nwa_structure["transitions"] if test_weight in w
     }
     active_finals = {
-        s for s, w in nwa_data["final_states"].items() if test_weight in w
+        s for s, w in simplified_nwa_structure["final_states"].items() if test_weight in w
     }
 
     if not active_transitions and not active_finals:
@@ -293,19 +293,25 @@ def build_and_determinize_nfa(
 
     try:
         fst = VectorFst()
-        state_map = {i: fst.add_state() for i in range(nwa_data["num_states"])}
-        fst.set_start(state_map[nwa_data["start_state"]])
+        state_map = {i: fst.add_state() for i in simplified_nwa_structure["states"]}
+
+        if simplified_nwa_structure["start_state"] in state_map:
+            fst.set_start(state_map[simplified_nwa_structure["start_state"]])
+        else:
+            return None
 
         for state_id in active_finals:
-            fst.set_final(state_map[state_id], 0.0)
+            if state_id in state_map:
+                fst.set_final(state_map[state_id], 0.0)
 
         for source, label, dest in active_transitions:
-            fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
+            if source in state_map and dest in state_map:
+                fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-        fst = fst.rm_epsilon()
         fst = fst.connect()
-        fst = fst.tr_unique()
-        fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
+        if fst.num_states() == 0:
+            return None
+
         fst = fst.determinize()
         return fst
     except Exception:
@@ -595,18 +601,63 @@ def run_chunked_determinize_pass(args):
 
 def run_recompose_pass(args):
     """Executes the full decomposition, determinization, and recomposition pass."""
-    print("--- Running Recomposition Pass ---")
+    print("--- Running Recomposition Pass (Optimized Workflow) ---")
     nwa_data = load_nwa_data(args.filepath)
 
-    atomic_intervals = get_atomic_intervals(nwa_data)
+    print("\nStep 1: Building and simplifying the global NWA structure...")
+    global_fst = VectorFst()
+    state_map = {i: global_fst.add_state() for i in range(nwa_data["num_states"])}
+    global_fst.set_start(state_map[nwa_data["start_state"]])
+    for state_id in nwa_data["final_states"]:
+        global_fst.set_final(state_map[state_id], 0.0)
+    for s, l, d, _ in nwa_data["transitions"]:
+        global_fst.add_tr(state_map[s], Tr(l, l, 0.0, state_map[d]))
+
+    print_fst_stats(global_fst, "Initial global FST")
+
+    global_fst = global_fst.rm_epsilon()
+    print_fst_stats(global_fst, "After rm_epsilon")
+    global_fst = global_fst.connect()
+    print_fst_stats(global_fst, "After connect")
+    global_fst = global_fst.tr_unique()
+    print_fst_stats(global_fst, "After tr_unique")
+    global_fst = global_fst.minimize(config=MinimizeConfig(allow_nondet=True))
+    print_fst_stats(global_fst, "After minimize (still an NFA)")
+
+    print("\nStep 2: Extracting simplified structure and re-applying weights...")
+    simplified_states = list(global_fst.states())
+    if not simplified_states:
+        print("RESULT: ❌ The automaton is empty after initial simplification. Halting.")
+        return
+
+    surviving_states = set(simplified_states)
+    filtered_original_transitions = {
+        (s, l, d, w) for s, l, d, w in nwa_data["transitions"]
+        if s in surviving_states and d in surviving_states
+    }
+
+    simplified_nwa_structure = {
+        "states": surviving_states,
+        "start_state": global_fst.start(),
+        "final_states": {
+            s: w for s, w in nwa_data["final_states"].items() if s in surviving_states
+        },
+        "transitions": filtered_original_transitions
+    }
+
+    print(f"Simplified structure has {len(surviving_states)} states and {len(filtered_original_transitions)} transitions.")
+
+    print("\nStep 3: Decomposing simplified structure into atomic intervals...")
+    atomic_intervals = get_atomic_intervals(simplified_nwa_structure)
     if not atomic_intervals:
         print("No weight intervals found. Nothing to process.")
         return
 
+    print("\nStep 4: Determinizing an NFA for each interval...")
     determinized_dfas = {}
     pbar = tqdm(atomic_intervals, desc="Determinizing NFAs")
     for interval in pbar:
-        dfa = build_and_determinize_nfa(interval, nwa_data)
+        dfa = build_and_determinize_nfa(interval, simplified_nwa_structure)
         if dfa and dfa.num_states() > 0:
             determinized_dfas[interval] = dfa
     pbar.close()
@@ -617,7 +668,9 @@ def run_recompose_pass(args):
         print("RESULT: ❌ No NFAs could be determinized. Halting.")
         return
 
-    final_dwa = recompose_dwa(determinized_dfas, nwa_data["start_state"])
+    print("\nStep 5: Recomposing DFAs into a single DWA...")
+    final_dwa = recompose_dwa(determinized_dfas, simplified_nwa_structure["start_state"])
+
     print_dwa_stats(final_dwa)
     print("\nRESULT: ✅ Recomposition finished successfully.")
 
