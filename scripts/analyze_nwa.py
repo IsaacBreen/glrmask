@@ -207,10 +207,6 @@ def run_determinize_pass(args):
         fst = fst.tr_unique()
         print_fst_stats(fst, "After tr_unique")
 
-        print("\nOptimizing...")
-        fst = fst.optimize()
-        print_fst_stats(fst, "After optimizing")
-
         print("\nMinimizing...")
         fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
         print_fst_stats(fst, "After minimizing")
