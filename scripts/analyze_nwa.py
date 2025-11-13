@@ -101,7 +101,7 @@ def determinize_worker(
         print("Minimizing")
         fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
         print("Determinizing")
-        fst = fst.determinize(config=DeterminizeConfig(det_type=DeterminizeType.DETERMINIZE_DISAMBIGUATE))
+        fst = fst.determinize()
         result_queue.put(True)
     except Exception:
         result_queue.put(False)
