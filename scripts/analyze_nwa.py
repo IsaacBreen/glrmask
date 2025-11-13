@@ -203,6 +203,10 @@ def run_determinize_pass(args):
         fst = fst.connect()
         print_fst_stats(fst, "After connecting")
 
+        print("\ntr_unique...")
+        fst = fst.tr_unique()
+        print_fst_stats(fst, "After tr_unique")
+
         print("\nOptimizing...")
         fst = fst.optimize()
         print_fst_stats(fst, "After optimizing")
