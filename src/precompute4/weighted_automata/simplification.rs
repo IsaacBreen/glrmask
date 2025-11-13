@@ -871,6 +871,7 @@ impl NWA {
 
 impl NWA {
     fn run_pass(
+        &mut self,
         pb: &Option<ProgressBar>,
         msg: &str,
         changed_any: &mut bool,
@@ -879,11 +880,13 @@ impl NWA {
         if let Some(p) = pb {
             p.set_message(msg.to_string());
         }
+        let before_n = self.states.len();
         let now = Instant::now();
         let changed = pass();
         let elapsed = now.elapsed();
+        let after_n = self.states.len();
         if is_debug_level_enabled(3) {
-            eprintln!("NWA simplify pass '{}' took {:?} (changed: {})", msg, elapsed, changed);
+            eprintln!("NWA simplify pass '{}' ({} -> {}) took {:?} (changed: {})", msg, before_n, after_n, elapsed, changed);
         }
         if changed {
             *changed_any = true;
@@ -914,23 +917,23 @@ impl NWA {
             let mut changed_this_iteration = false;
 
             // --- Structural Simplification Passes ---
-            Self::run_pass(&pb, "normalize", &mut changed_this_iteration, || self.normalize_edges_inplace());
-            Self::run_pass(&pb, "dedup labeled", &mut changed_this_iteration, || self.dedup_labeled_edges());
-            Self::run_pass(&pb, "dedup epsilons", &mut changed_this_iteration, || self.dedup_epsilon_edges());
-            Self::run_pass(&pb, "unify defaults", &mut changed_this_iteration, || self.unify_default_transitions());
-            Self::run_pass(&pb, "unify final states", &mut changed_this_iteration, || self.unify_final_states());
-            Self::run_pass(&pb, "bypass ε-chains", &mut changed_this_iteration, || self.bypass_trivial_epsilon_chains());
-            Self::run_pass(&pb, "collapse SCCs", &mut changed_this_iteration, || self.collapse_all_weight_epsilon_sccs());
-            Self::run_pass(&pb, "prune unreachable", &mut changed_this_iteration, || self.prune_unreachable());
-            Self::run_pass(&pb, "prune dead ends", &mut changed_this_iteration, || self.prune_dead_ends());
-            Self::run_pass(&pb, "merge equivalent", &mut changed_this_iteration, || self.merge_equivalent_states_partition());
+            self.run_pass(&pb, "normalize", &mut changed_this_iteration, || self.normalize_edges_inplace());
+            self.run_pass(&pb, "dedup labeled", &mut changed_this_iteration, || self.dedup_labeled_edges());
+            self.run_pass(&pb, "dedup epsilons", &mut changed_this_iteration, || self.dedup_epsilon_edges());
+            self.run_pass(&pb, "unify defaults", &mut changed_this_iteration, || self.unify_default_transitions());
+            self.run_pass(&pb, "unify final states", &mut changed_this_iteration, || self.unify_final_states());
+            self.run_pass(&pb, "bypass ε-chains", &mut changed_this_iteration, || self.bypass_trivial_epsilon_chains());
+            self.run_pass(&pb, "collapse SCCs", &mut changed_this_iteration, || self.collapse_all_weight_epsilon_sccs());
+            self.run_pass(&pb, "prune unreachable", &mut changed_this_iteration, || self.prune_unreachable());
+            self.run_pass(&pb, "prune dead ends", &mut changed_this_iteration, || self.prune_dead_ends());
+            self.run_pass(&pb, "merge equivalent", &mut changed_this_iteration, || self.merge_equivalent_states_partition());
 
             if changed_this_iteration {
                 changed_overall = true;
             } else {
                 // Structure is stable. Try pushing weights to unlock more simplifications.
                 let mut pushed = false;
-                Self::run_pass(&pb, "push weights", &mut pushed, || self.push_weights());
+                self.run_pass(&pb, "push weights", &mut pushed, || self.push_weights());
                 if pushed {
                     changed_overall = true;
                     // Loop again to apply structural passes on the weight-pushed graph.
