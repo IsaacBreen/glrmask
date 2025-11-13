@@ -20054,6 +20054,23 @@ local_system:
                   else:
                       print("No start state.")
 
+                  print("\n--- Connecting FST (removing dead ends) ---")
+                  try:
+                      fst.connect()
+                      print("Connect successful.")
+                      print("\n--- rustfst.VectorFst Summary (after connect) ---")
+                      print(f"Number of states: {fst.num_states()}")
+                      if fst.start() is not None:
+                          print(f"Start state: {fst.start()}")
+                          num_arcs = 0
+                          for s in fst.states():
+                              num_arcs += fst.num_trs(s)
+                          print(f"Number of arcs: {num_arcs}")
+                      else:
+                          print("No start state.")
+                  except ValueError as e:
+                      print(f"Connect failed: {e}", file=sys.stderr)
+
                   print("\n--- Topologically sorting FST ---")
                   try:
                       fst.top_sort()
@@ -31725,5 +31742,781 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Add top_sort and tr_sort pre-processing
       steps before FST determinization in NWA analysis script"'
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/arcsort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/compose.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/connect.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/invert.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/map.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/minimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/project.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/push.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/reverse.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/rm_final_epsilon.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/shortestpath.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/algorithms/supported_algorithms.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/bench_all_detailed.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/bench_all.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/bench_composition.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/constants.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python-bench/rustfst_python_bench/utils.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/compose.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/concat.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/connect.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/determinize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/inversion.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/isomorphic.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/minimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/optimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/project.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/randgen.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/replace.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/reverse.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/rm_epsilon.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/shortest_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/top_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/tr_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/tr_unique.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/algorithms/union.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/drawing_config.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/ffi_utils.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/fst/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/fst/const_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/fst/vector_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/iterators.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/string_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/string_paths_iterator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/symbol_table.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/tr.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/trs.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/build/lib.macosx-11.0-arm64-cpython-313/rustfst/weight.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/compose.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/concat.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/connect.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/determinize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/inversion.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/isomorphic.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/minimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/optimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/project.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/randgen.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/replace.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/reverse.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/rm_epsilon.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/shortest_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/top_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/tr_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/tr_unique.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/algorithms/union.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/drawing_config.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/ffi_utils.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/fst/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/fst/const_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/fst/vector_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/iterators.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/string_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/string_paths_iterator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/symbol_table.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/tr.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/trs.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/rustfst/weight.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_acceptor.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_compose.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_concat.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_connect.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_determinize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_inversion.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_isomorphic.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_minimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_optimize.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_project.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_randgen.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_replace.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_reverse.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_rm_epsilon.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_shortest_path.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_top_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_tr_sort.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_tr_unique.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_transducer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/algorithms/test_union.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_fst.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_iterator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_string_paths_iterator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_symt.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_tr.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/rustfst-python/tests/test_trs.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/temp/rustfst/rustfst/scripts/update_python_doc_structure.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of scripts/analyze_nwa.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Still!
+    metadata:
+  - assistant: |-
+      It's clear this is a very complex FST. The fact that it still hangs after the standard pre-processing steps suggests we're dealing with a worst-case scenario for the determinization algorithm.
+
+      There is one more crucial pre-processing step we can add: `connect`. This operation trims the FST by removing any states and transitions that are not part of a successful path from a start state to a final state. If your NWA contains dead-end paths or states that are unreachable from the start, `connect` can significantly prune the graph *before* we attempt the more expensive operations like epsilon removal and determinization.
+
+      Let's add `connect()` as the very first step in our processing pipeline.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `scripts/analyze_nwa.py`**.
+
+      2.  **Locate the start of the FST processing pipeline**. Find the `if __name__ == "__main__":` block and the section where the FST is first created and summarized.
+
+      3.  **Insert the `connect` step**. Immediately after the initial FST summary block, and before the topological sort block, insert the following code to connect the FST and print a summary of the result.
+
+          In `scripts/analyze_nwa.py`, find this section:
+          ```python
+                  else:
+                      print("No start state.")
+
+                  print("\n--- Topologically sorting FST ---")
+          ```
+          And insert the new code block right after `print("No start state.")`:
+          ```python
+                  print("\n--- Connecting FST (removing dead ends) ---")
+                  try:
+                      fst.connect()
+                      print("Connect successful.")
+                      print("\n--- rustfst.VectorFst Summary (after connect) ---")
+                      print(f"Number of states: {fst.num_states()}")
+                      if fst.start() is not None:
+                          print(f"Start state: {fst.start()}")
+                          num_arcs = 0
+                          for s in fst.states():
+                              num_arcs += fst.num_trs(s)
+                          print(f"Number of arcs: {num_arcs}")
+                      else:
+                          print("No start state.")
+                  except ValueError as e:
+                      print(f"Connect failed: {e}", file=sys.stderr)
+          ```
+
+      The full pipeline of operations will now be: `connect`, `top_sort`, `rm_epsilon`, `tr_sort`, and finally `determinize`. This is a very robust sequence for preparing a complex FST. If determinization still hangs after this, the state explosion is likely unavoidable for this specific automaton.
+
+      ### Git Diffs
+
+      Here is the git diff for the change.
+
+      ```diff
+      --- a/scripts/analyze_nwa.py
+      +++ b/scripts/analyze_nwa.py
+      @@ -229,6 +229,23 @@
+                   else:
+                       print("No start state.")
+       
+      +            print("\n--- Connecting FST (removing dead ends) ---")
+      +            try:
+      +                fst.connect()
+      +                print("Connect successful.")
+      +                print("\n--- rustfst.VectorFst Summary (after connect) ---")
+      +                print(f"Number of states: {fst.num_states()}")
+      +                if fst.start() is not None:
+      +                    print(f"Start state: {fst.start()}")
+      +                    num_arcs = 0
+      +                    for s in fst.states():
+      +                        num_arcs += fst.num_trs(s)
+      +                    print(f"Number of arcs: {num_arcs}")
+      +                else:
+      +                    print("No start state.")
+      +            except ValueError as e:
+      +                print(f"Connect failed: {e}", file=sys.stderr)
+      +
+                   print("\n--- Topologically sorting FST ---")
+                   try:
+                       fst.top_sort()
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/analyze_nwa.py
+      Applying patch to 'scripts/analyze_nwa.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/analyze_nwa.py.
+    metadata:
+  - user: 'Changes committed with message: "Add connect, top_sort, rm_epsilon, and
+      tr_sort pre-processing steps before FST determinization in NWA analysis script"'
     metadata:
 ...

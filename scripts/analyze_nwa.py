@@ -286,6 +286,23 @@ if __name__ == "__main__":
             else:
                 print("No start state.")
 
+            print("\n--- Connecting FST (removing dead ends) ---")
+            try:
+                fst.connect()
+                print("Connect successful.")
+                print("\n--- rustfst.VectorFst Summary (after connect) ---")
+                print(f"Number of states: {fst.num_states()}")
+                if fst.start() is not None:
+                    print(f"Start state: {fst.start()}")
+                    num_arcs = 0
+                    for s in fst.states():
+                        num_arcs += fst.num_trs(s)
+                    print(f"Number of arcs: {num_arcs}")
+                else:
+                    print("No start state.")
+            except ValueError as e:
+                print(f"Connect failed: {e}", file=sys.stderr)
+
             print("\n--- Topologically sorting FST ---")
             try:
                 fst.top_sort()
