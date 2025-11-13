@@ -3,10 +3,8 @@ import sys
 import os
 import time
 import random
-import copy
 import multiprocessing
-from dataclasses import dataclass, asdict
-from typing import Any, Optional, List, Dict, Tuple
+from collections import Counter
 
 # We use rustfst for high-performance FST operations.
 try:
@@ -15,86 +13,55 @@ except ImportError:
     print("Error: 'rustfst' not found. Please install it.", file=sys.stderr)
     sys.exit(1)
 
-
-# --- NWA Data Structures ---
-# We only need these for the initial load. The pruning logic will use simpler structures.
-
-@dataclass
-class NWAState:
-    final_weight: Optional[Any]
-    transitions: Dict[str, List[Tuple[int, Any]]]
-    epsilons: List[Tuple[int, Any]]
-
-
-@dataclass
-class NWABody:
-    start_state: int
+# Use networkx for graph analysis
+try:
+    import networkx as nx
+    import matplotlib.pyplot as plt
+except ImportError:
+    print("Error: 'networkx' or 'matplotlib' not found.", file=sys.stderr)
+    print("Please install them using: pip install networkx matplotlib", file=sys.stderr)
+    sys.exit(1)
 
 
-@dataclass
-class NWA:
-    body: NWABody
-    states: List[NWAState]
-
-
-# --- Core Determinization Function (to be run in a separate process) ---
-
+# --- Core Determinization Function (unchanged) ---
 def determinize_worker(
         num_states: int, start_state: int, final_states: set, transitions: set, result_queue: multiprocessing.Queue
 ):
-    """
-    This worker function builds an FST from simple, pre-processed data structures.
-    It completely ignores weights.
-    """
     try:
         fst = VectorFst()
         state_map = {i: fst.add_state() for i in range(num_states)}
         fst.set_start(state_map[start_state])
-
         for state_id in final_states:
             fst.set_final(state_map[state_id], 0.0)
-
         for source, label, dest in transitions:
             fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-
         _ = fst.determinize()
-        result_queue.put(True)  # Finished successfully
+        result_queue.put(True)
     except Exception:
-        result_queue.put(False)  # An error occurred
+        result_queue.put(False)
 
 
 def time_determinization_with_timeout(
         num_states: int, start_state: int, final_states: set, transitions: set, timeout: float
 ) -> bool:
-    """
-    Runs determinization in a subprocess.
-    Returns True if it HANGS (times out), False if it completes or fails.
-    """
     if not transitions: return False
-
     result_queue = multiprocessing.Queue()
     process = multiprocessing.Process(
         target=determinize_worker, args=(num_states, start_state, final_states, transitions, result_queue)
     )
-
     process.start()
     process.join(timeout)
-
     if process.is_alive():
         process.terminate()
         process.join()
-        return True  # Timed out -> HANGS
-
+        return True
     try:
-        # If it finished, it doesn't hang.
-        # We check the result queue to see if it finished cleanly.
         return not result_queue.get_nowait()
     except Exception:
-        # Crashed or queue empty, treat as not hanging
         return False
 
 
-# --- Main Pruning Logic ---
+# --- Main Analysis Logic ---
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
@@ -102,14 +69,12 @@ if __name__ == "__main__":
         sys.exit(1)
 
     filepath = sys.argv[1]
-    output_filepath = "minimized_nwa_adaptive.json"
     DETERMINIZE_TIMEOUT_S = 1.0
 
     print(f"Loading original NWA from: {filepath}")
     with open(filepath, 'r') as f:
         nwa_data = json.load(f)
 
-    # --- Extract a simple, hashable representation of the NWA graph ---
     num_states = len(nwa_data['states'])
     start_state = nwa_data['body']['start_state']
     final_states = {i for i, s in enumerate(nwa_data['states']) if s.get('final_weight') is not None}
@@ -117,15 +82,13 @@ if __name__ == "__main__":
     all_transitions = set()
     for i, state in enumerate(nwa_data['states']):
         for target_id, _ in state.get('epsilons', []):
-            # Epsilon is label 0
             all_transitions.add((i, 0, target_id))
         for label_str, targets in state.get('transitions', {}).items():
             label = int(label_str)
             for target_id, _ in targets:
                 all_transitions.add((i, label, target_id))
 
-    original_transitions_count = len(all_transitions)
-    print(f"Original NWA has {num_states} states and {original_transitions_count} unique transitions.")
+    print(f"Original NWA has {num_states} states and {len(all_transitions)} unique transitions.")
 
     print("\n--- Establishing Baseline Behavior ---")
     if not time_determinization_with_timeout(num_states, start_state, final_states, all_transitions, DETERMINIZE_TIMEOUT_S):
@@ -134,81 +97,93 @@ if __name__ == "__main__":
     else:
         print(f"Baseline determinization timed out after {DETERMINIZE_TIMEOUT_S}s (as expected).")
 
-    # --- PHASE 1: Adaptive Chunk Pruning ---
-    print("\n--- PHASE 1: Adaptive Pruning ---")
+    # --- Iterative Pruning with Adaptive Chunk Sizes ---
+    print("\n--- Iterative Pruning ---")
 
-    good_transitions = set()
-    untested_transitions = list(all_transitions)
-    random.shuffle(untested_transitions)
+    essential_transitions = all_transitions.copy()
 
-    while len(untested_transitions) > 1:
-        chunk_size = len(untested_transitions) // 2
-        if chunk_size == 0: break
+    # Define the schedule of chunk sizes to try, from large to small
+    total_trans_count = len(essential_transitions)
+    chunk_sizes = [
+        total_trans_count // 5,
+        total_trans_count // 10,
+        total_trans_count // 50,
+        1000,
+        100,
+        10,
+        1
+    ]
 
-        chunk_to_test = set(untested_transitions[:chunk_size])
-        transitions_to_keep = good_transitions.union(set(untested_transitions[chunk_size:]))
+    for chunk_size in chunk_sizes:
+        if chunk_size <= 0: continue
 
-        print(f"Testing removal of {len(chunk_to_test)} transitions... (Remaining untested: {len(untested_transitions)})")
+        print(f"\n--- PASS with Chunk Size: {chunk_size} ---")
 
-        if time_determinization_with_timeout(num_states, start_state, final_states, transitions_to_keep, DETERMINIZE_TIMEOUT_S):
-            untested_transitions = untested_transitions[chunk_size:]
-            print(f"  ✅ SUCCESS. Chunk was not essential. {len(untested_transitions)} candidates remain.")
-        else:
-            good_transitions.update(set(untested_transitions[chunk_size:]))
-            untested_transitions = untested_transitions[:chunk_size]
-            print(f"  ❌ FAILURE. Chunk is essential. Narrowing search to {len(untested_transitions)} candidates.")
+        untested = list(essential_transitions)
+        random.shuffle(untested)
 
-    essential_transitions = good_transitions.union(set(untested_transitions))
-    print(f"\n--- PHASE 1 COMPLETE ---")
-    print(f"Reduced to {len(essential_transitions)} candidate transitions.")
+        potentially_essential = set()
 
-    # --- PHASE 2: Fine Pruning (One-by-one) ---
-    print(f"\n--- PHASE 2: Fine Pruning ---")
+        chunks = [untested[i:i + chunk_size] for i in range(0, len(untested), chunk_size)]
 
-    transitions_to_refine = list(essential_transitions)
-    random.shuffle(transitions_to_refine)
+        for i, chunk in enumerate(chunks):
+            # Try removing this chunk from the current set of essential transitions
+            candidate_transitions = essential_transitions - set(chunk)
 
-    for idx, trans_to_remove in enumerate(transitions_to_refine):
-        if len(essential_transitions) <= 1: break
+            progress = f"[Chunk {i + 1}/{len(chunks)}]"
 
-        candidate_transitions = essential_transitions - {trans_to_remove}
-        progress = f"[{idx + 1}/{len(transitions_to_refine)}]"
+            if time_determinization_with_timeout(num_states, start_state, final_states, candidate_transitions, DETERMINIZE_TIMEOUT_S):
+                # SUCCESS: The chunk was not essential. Commit the removal.
+                essential_transitions = candidate_transitions
+                print(f"{progress} ✅ Chunk removed. New count: {len(essential_transitions)}")
+            else:
+                # FAILURE: The chunk is essential. Add it to the set for the next pass.
+                potentially_essential.update(chunk)
+                print(f"{progress} ❌ Chunk is essential. Keeping for next pass.")
 
-        if time_determinization_with_timeout(num_states, start_state, final_states, candidate_transitions, DETERMINIZE_TIMEOUT_S):
-            essential_transitions = candidate_transitions
-            print(f"{progress} ✅ Prune SUCCESSFUL. Still hangs. New transition count: {len(essential_transitions)}")
-        else:
-            print(f"{progress} ❌ Prune FAILED. Reverting.")
+        # After a full pass, the new set of essential transitions is what we couldn't remove
+        essential_transitions = potentially_essential
+        print(f"--- End of Pass. {len(essential_transitions)} candidates remain. ---")
+        if chunk_size == 1 and len(essential_transitions) == len(untested):
+            print("No further reduction possible. Halting.")
+            break
 
-    # --- Final Report and Save ---
-    print("\n--- Pruning Complete ---")
-    final_transitions_count = len(essential_transitions)
-    print(f"Original transitions: {original_transitions_count}")
-    print(f"Minimized transitions: {final_transitions_count}")
-    reduction = original_transitions_count - final_transitions_count
-    reduction_pct = (reduction / original_transitions_count * 100) if original_transitions_count > 0 else 0
-    print(f"Removed {reduction} transitions ({reduction_pct:.2f}% reduction).")
+    print(f"\n--- Pruning Complete ---")
+    print(f"Found a core of {len(essential_transitions)} transitions that causes the hang.")
 
-    # Reconstruct the NWA JSON from the minimal set of transitions
-    minimized_nwa_dict = {
-        "body": {"start_state": start_state},
-        "states": [{"transitions": {}, "epsilons": []} for _ in range(num_states)]
-    }
-    for i in final_states:
-        minimized_nwa_dict["states"][i]["final_weight"] = "ALL"  # Use a placeholder
+    # --- Analyze the Final Core Graph using NetworkX ---
+    print("\n--- Analyzing Final Core Graph Structure ---")
 
-    for source, label, dest in essential_transitions:
-        # We add a dummy weight back in for format compatibility
-        if label == 0:
-            minimized_nwa_dict["states"][source]["epsilons"].append([dest, []])
-        else:
-            label_str = str(label)
-            if label_str not in minimized_nwa_dict["states"][source]["transitions"]:
-                minimized_nwa_dict["states"][source]["transitions"][label_str] = []
-            minimized_nwa_dict["states"][source]["transitions"][label_str].append([dest, []])
+    G = nx.DiGraph()
+    G.add_nodes_from(range(num_states))
+    G.add_edges_from([(source, dest) for source, label, dest in essential_transitions])
 
-    print(f"\nSaving minimized NWA to: {output_filepath}")
-    with open(output_filepath, 'w') as f:
-        json.dump(minimized_nwa_dict, f, indent=2)
+    in_degrees = sorted(G.in_degree(), key=lambda x: x[1], reverse=True)
+    out_degrees = sorted(G.out_degree(), key=lambda x: x[1], reverse=True)
 
-    print("\nProcess finished. You can now inspect the minimized NWA.")
+    print("\nTop 10 States by In-Degree (Hubs for Fan-In):")
+    for node, degree in in_degrees[:10]:
+        print(f"  - State {node}: {degree} incoming transitions")
+
+    print("\nTop 10 States by Out-Degree (Hubs for Fan-Out):")
+    for node, degree in out_degrees[:10]:
+        print(f"  - State {node}: {degree} outgoing transitions")
+
+    if G.number_of_nodes() > 0:
+        largest_wcc = max(nx.weakly_connected_components(G), key=len)
+        print(f"\nLargest Weakly Connected Component contains {len(largest_wcc)} of {G.number_of_nodes()} nodes.")
+
+        degree_sequence = sorted([d for n, d in G.degree()], reverse=True)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        ax1.plot(degree_sequence, 'b-', marker='o')
+        ax1.set_title("Degree Rank Plot")
+        ax1.set_ylabel("Degree")
+        ax1.set_xlabel("Rank")
+        ax2.loglog(degree_sequence, 'b-', marker='o')
+        ax2.set_title("Degree Rank Plot (log-log scale)")
+        ax2.set_ylabel("Degree")
+        ax2.set_xlabel("Rank")
+        fig.tight_layout()
+        plot_filename = "degree_distribution_final.png"
+        plt.savefig(plot_filename)
+        print(f"\nSaved final degree distribution plot to '{plot_filename}'.")
