@@ -229,11 +229,26 @@ fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
             }
         }
 
-        for tr in fst.get_trs(fst_state_id).unwrap().trs() {
-            if !tr.weight.0.is_empty() {
-                if !state_map.contains_key(&tr.nextstate) {
-                    continue;
-                }
+        let trs = fst.get_trs(fst_state_id).unwrap();
+        let mut default_trans: Option<Tr<BitsetWeight>> = None;
+        let mut exception_trans = Vec::new();
+
+        for tr in trs.trs() {
+            if tr.ilabel as i16 == DEFAULT_TRANSITION_SYMBOL {
+                default_trans = Some(tr.clone());
+            } else {
+                exception_trans.push(tr.clone());
+            }
+        }
+
+        if let Some(tr) = default_trans {
+            if !tr.weight.0.is_empty() && state_map.contains_key(&tr.nextstate) {
+                dwa.set_default_transition(dwa_state_id, state_map[&tr.nextstate], tr.weight.0.clone()).unwrap();
+            }
+        }
+
+        for tr in exception_trans {
+            if !tr.weight.0.is_empty() && state_map.contains_key(&tr.nextstate) {
                 let res = dwa.add_transition(
                     dwa_state_id,
                     tr.ilabel as i16,
