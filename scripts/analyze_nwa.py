@@ -73,13 +73,9 @@ def prune_to_final_state_transitions(transitions: set, final_states: set) -> set
     for (source, label), dests in source_label_to_dests.items():
         has_final_dest = any(d in final_states for d in dests)
         if has_final_dest:
-            removals_for_pair = {(source, label, d) for d in dests}
-            # Remove the first transition to a final state found
             for d in dests:
-                if d in final_states:
-                    removals_for_pair.remove((source, label, d))
-                    break
-            transitions_to_remove.update(removals_for_pair)
+                if d not in final_states:
+                    transitions_to_remove.add((source, label, d))
 
     if transitions_to_remove:
         print(f"Pruning {len(transitions_to_remove)} transitions based on reachability of a final state.")
@@ -258,6 +254,30 @@ def run_determinize_pass(args):
         print("\nMinimizing...")
         fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
         print_fst_stats(fst, "After minimizing")
+
+        print("\nPruning again before determinization...")
+        num_states_after_min = fst.num_states()
+        start_state_after_min = fst.start()
+        final_states_after_min = {s for s in fst.states() if fst.is_final(s)}
+        transitions_after_min = set()
+        for s in fst.states():
+            for tr in fst.trs(s):
+                transitions_after_min.add((s, tr.ilabel, tr.next_state))
+
+        pruned_transitions = prune_to_final_state_transitions(transitions_after_min, final_states_after_min)
+
+        # Rebuild FST from pruned transitions
+        pruned_fst = VectorFst()
+        state_map_after_min = {i: pruned_fst.add_state() for i in range(num_states_after_min)}
+        if start_state_after_min is not None:
+            pruned_fst.set_start(state_map_after_min[start_state_after_min])
+        for state_id in final_states_after_min:
+            pruned_fst.set_final(state_map_after_min[state_id], 0.0)
+        for source, label, dest in pruned_transitions:
+            pruned_fst.add_tr(state_map_after_min[source], Tr(label, label, 0.0, state_map_after_min[dest]))
+
+        fst = pruned_fst
+        print_fst_stats(fst, "After second pruning")
 
         print("\nDeterminizing...")
         fst = fst.determinize()
