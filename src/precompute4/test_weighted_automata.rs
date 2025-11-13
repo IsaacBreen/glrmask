@@ -1,4 +1,4 @@
-use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, I16Map, NWA, NWABuildError, Weight, format_word};
+use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word, DEFAULT_TRANSITION_SYMBOL};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
@@ -55,7 +55,7 @@ const BASE_ALPHABET: &[i16] = &[
 ];
 
 fn pick_default_char_for_state(st: &DWAState, rng: &mut SimpleRng) -> i16 {
-    let ex = &st.transitions.exceptions;
+    let ex = &st.transitions;
     // Try random from base alphabet
     if !BASE_ALPHABET.is_empty() {
         let mut idx = rng.gen_usize(BASE_ALPHABET.len());
@@ -118,8 +118,8 @@ impl DWA {
 
                 // Choose next character: one of the exception keys or a default-character if default exists.
                 let st = &self.states[s];
-                let mut choices: Vec<i16> = st.transitions.exceptions.keys().copied().collect();
-                let has_default = st.transitions.default.is_some();
+                let mut choices: Vec<i16> = st.transitions.keys().copied().filter(|&k| k != DEFAULT_TRANSITION_SYMBOL).collect();
+                let has_default = st.transitions.contains_key(&DEFAULT_TRANSITION_SYMBOL);
                 let total = choices.len() + if has_default { 1 } else { 0 };
                 if total == 0 {
                     // Dead-end; try to finalize or abort attempt.
@@ -138,7 +138,7 @@ impl DWA {
                     choices[pick]
                 };
 
-                let next = st.transitions.get(ch).copied();
+                let next = st.transitions.get(&ch).or_else(|| st.transitions.get(&DEFAULT_TRANSITION_SYMBOL)).copied();
                 if next.is_none() {
                     break;
                 }
@@ -308,19 +308,19 @@ fn test_dwa_builder() {
     assert_eq!(dwa.states[1].final_weight, Some(SimpleBitset::from_item(20)));
 
     dwa.add_transition(0, b'a' as i16, 1, SimpleBitset::from_item(30)).unwrap();
-    assert_eq!(*dwa.states[0].transitions.get(b'a' as i16).unwrap(), 1);
-    assert_eq!(*dwa.states[0].trans_weights_exceptions.get(&(b'a' as i16)).unwrap(), SimpleBitset::from_item(30));
+    assert_eq!(*dwa.states[0].transitions.get(&(b'a' as i16)).unwrap(), 1);
+    assert_eq!(*dwa.states[0].trans_weights.get(&(b'a' as i16)).unwrap(), SimpleBitset::from_item(30));
 
     // Test error cases
     let res = dwa.add_transition(0, b'a' as i16, 1, SimpleBitset::zeros());
     assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: 97 })));
 
     dwa.set_default_transition(0, 0, SimpleBitset::from_item(40)).unwrap();
-    assert_eq!(dwa.states[0].transitions.default, Some(0));
-    assert_eq!(dwa.states[0].trans_weight_default, Some(SimpleBitset::from_item(40)));
+    assert_eq!(dwa.states[0].transitions.get(&DEFAULT_TRANSITION_SYMBOL), Some(&0));
+    assert_eq!(dwa.states[0].trans_weights.get(&DEFAULT_TRANSITION_SYMBOL), Some(&SimpleBitset::from_item(40)));
 
     let res = dwa.set_default_transition(0, 0, SimpleBitset::zeros());
-    assert!(matches!(res, Err(DWABuildError::DefaultTransitionAlreadyExists { from: 0 })));
+    assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: DEFAULT_TRANSITION_SYMBOL })));
 
     let res = dwa.set_final_weight(10, SimpleBitset::zeros());
     assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
@@ -434,10 +434,10 @@ fn test_apply_weight() {
     assert_eq!(d.body.start_state, new_start);
     let new_start_state = &d.states[new_start];
     assert_eq!(new_start_state.final_weight, Some(Weight::from_item(6)));
-    assert_eq!(new_start_state.trans_weights_exceptions.get(&('a' as i16)), Some(&Weight::from_item(101)));
-    assert_eq!(new_start_state.trans_weight_default, Some(Weight::from_item(201)));
-    assert_eq!(new_start_state.transitions.exceptions.get(&('a' as i16)), Some(&s1));
-    assert_eq!(new_start_state.transitions.default, Some(0));
+    assert_eq!(new_start_state.trans_weights.get(&('a' as i16)), Some(&Weight::from_item(101)));
+    assert_eq!(new_start_state.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL), Some(&Weight::from_item(201)));
+    assert_eq!(new_start_state.transitions.get(&('a' as i16)), Some(&s1));
+    assert_eq!(new_start_state.transitions.get(&DEFAULT_TRANSITION_SYMBOL), Some(&0));
 }
 
 /// Helper that creates a DWA with a single transition on `ch` with a given
@@ -455,14 +455,6 @@ fn test_simple_bitset_iter_up_to_all() {
     let all = Weight::all();
     let vals: Vec<_> = all.iter_up_to(5).collect();
     assert_eq!(vals, vec![0, 1, 2, 3, 4, 5]);
-}
-
-#[test]
-fn test_i16map_get_prefers_exception() {
-    let mut m = I16Map::with_default(7);
-    m.exceptions.insert(3, 42);
-    assert_eq!(m.get(3), Some(&42));
-    assert_eq!(m.get(4), Some(&7));
 }
 
 #[test]
@@ -1918,8 +1910,8 @@ mod determinization_tests {
         let dwa = nwa.determinize_to_dwa();
         assert_eq!(dwa.states.len(), 1);
         assert!(dwa.states[dwa.body.start_state].final_weight.is_none());
-        assert!(dwa.states[dwa.body.start_state].transitions.default.is_none());
-        assert!(dwa.states[dwa.body.start_state].transitions.exceptions.is_empty());
+        assert!(!dwa.states[dwa.body.start_state].transitions.contains_key(&DEFAULT_TRANSITION_SYMBOL));
+        assert!(dwa.states[dwa.body.start_state].transitions.is_empty());
     }
 
     #[test]
