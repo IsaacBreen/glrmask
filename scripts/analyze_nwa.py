@@ -223,7 +223,7 @@ def convert_nwa_to_nfa_automata(nwa: NWA) -> NFA:
         if default_targets:
             default_symbols = input_symbols - explicit_symbols
             for symbol in default_symbols:
-                transitions[i][symbol].update(default_targets)
+                transitions[i][symbol].update(default_symbols)
 
     # Convert transitions to the format required by automata-lib (no defaultdict)
     nfa_transitions = {
@@ -295,8 +295,8 @@ if __name__ == "__main__":
         print("\n--- DFA Summary ---")
         print(f"DFA States: {len(dfa.states)}")
 
-        # Calculate DFA transitions count
-        dfa_arcs = sum(len(targets) for symbol_map in dfa.transitions.values() for targets in symbol_map.values())
+        # Correctly calculate DFA transitions count
+        dfa_arcs = sum(len(symbol_map) for symbol_map in dfa.transitions.values())
         print(f"DFA Transitions: {dfa_arcs}")
 
     except FileNotFoundError:
