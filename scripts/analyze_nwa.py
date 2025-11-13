@@ -61,10 +61,11 @@ def time_determinization_with_timeout(
         return False
 
 
-# --- NEW: Reusable Graph Analysis Function ---
+# --- MODIFIED: Reusable Graph Analysis Function ---
 def analyze_graph_structure(G: nx.DiGraph, graph_name: str):
     """
     Performs and prints a detailed structural analysis of a given NetworkX graph.
+    Focuses on non-trivial cycles (SCCs of size > 1).
     """
     print(f"\n--- Analyzing {graph_name} Graph Structure ---")
 
@@ -93,25 +94,37 @@ def analyze_graph_structure(G: nx.DiGraph, graph_name: str):
         largest_wcc = max(wccs, key=len)
         print(f"  - Largest WCC contains {len(largest_wcc)} nodes.")
 
-    # Strongly Connected Components (SCC)
-    sccs = sorted(list(nx.strongly_connected_components(G)), key=len)
-    print(f"\nFound {len(sccs)} Strongly Connected Component(s) (SCCs).")
-    if sccs:
-        scc_size_counts = Counter(len(c) for c in sccs)
-        print("  - SCC Size Distribution (Top 5 most common):")
+    # --- MODIFIED SCC ANALYSIS ---
+    # Find all SCCs, then filter to focus on actual cycles (size > 1)
+    all_sccs = list(nx.strongly_connected_components(G))
+    cycles_sccs = [scc for scc in all_sccs if len(scc) > 1]
+
+    print(f"\nFound {len(all_sccs)} Strongly Connected Component(s) (SCCs).")
+    print(f"  - {len(all_sccs) - len(cycles_sccs)} are trivial (size 1 nodes not in a cycle).")
+    print(f"  - {len(cycles_sccs)} are non-trivial cycles (size > 1).")
+
+    # Only proceed with detailed cycle analysis if there are any
+    if cycles_sccs:
+        cycles_sccs.sort(key=len) # Sort by size for analysis
+
+        scc_size_counts = Counter(len(c) for c in cycles_sccs)
+        print("\n  - Cycle Size Distribution (Top 5 most common):")
         for size, count in scc_size_counts.most_common(5):
-            print(f"    - {count} SCCs of size {size}")
+            print(f"    - {count} cycles of size {size}")
 
-        print("\n  - Examples of Smallest SCCs:")
-        for i, scc in enumerate(sccs[:5]):
+        print("\n  - Examples of Smallest Cycles (SCCs > 1):")
+        for i, scc in enumerate(cycles_sccs[:5]):
             nodes = list(scc)
-            # Truncate for readability if a "small" SCC is still large
             nodes_str = str(nodes[:10]) + ('...' if len(nodes) > 10 else '')
-            print(f"    - SCC #{i+1} (size {len(scc)}): {nodes_str}")
+            print(f"    - Cycle #{i+1} (size {len(scc)}): {nodes_str}")
 
-        print("\n  - Summary of Largest SCCs:")
-        for i, scc in enumerate(sccs[-5:]):
-            print(f"    - Largest SCC #{5-i} has size {len(scc)}")
+        print("\n  - Summary of Largest Cycles (SCCs > 1):")
+        for i, scc in enumerate(cycles_sccs[-5:]):
+            print(f"    - Largest Cycle #{5-i} has size {len(scc)}")
+    else:
+        # If there are no cycles, the graph is a DAG
+        print("  - The graph is a Directed Acyclic Graph (DAG).")
+    # --- END OF MODIFIED SCC ANALYSIS ---
 
 
 # --- Main Analysis Logic ---
@@ -143,12 +156,11 @@ if __name__ == "__main__":
 
     print(f"Original NWA has {num_states} states and {len(all_transitions)} unique transitions.")
 
-    # --- NEW: Initial Graph Analysis ---
+    # --- Initial Graph Analysis ---
     G_initial = nx.DiGraph()
     G_initial.add_nodes_from(range(num_states))
     G_initial.add_edges_from([(source, dest) for source, label, dest in all_transitions])
     analyze_graph_structure(G_initial, "Initial")
-    # --- End of Initial Analysis ---
 
     print("\n--- Establishing Baseline Behavior ---")
     if not time_determinization_with_timeout(num_states, start_state, final_states, all_transitions, DETERMINIZE_TIMEOUT_S):
@@ -187,21 +199,16 @@ if __name__ == "__main__":
         chunks = [untested[i:i + chunk_size] for i in range(0, len(untested), chunk_size)]
 
         for i, chunk in enumerate(chunks):
-            # Try removing this chunk from the current set of essential transitions
             candidate_transitions = essential_transitions - set(chunk)
-
             progress = f"[Chunk {i + 1}/{len(chunks)}]"
 
             if time_determinization_with_timeout(num_states, start_state, final_states, candidate_transitions, DETERMINIZE_TIMEOUT_S):
-                # SUCCESS: The chunk was not essential. Commit the removal.
                 essential_transitions = candidate_transitions
                 print(f"{progress} ✅ Chunk removed. New count: {len(essential_transitions)}")
             else:
-                # FAILURE: The chunk is essential. Add it to the set for the next pass.
                 potentially_essential.update(chunk)
                 print(f"{progress} ❌ Chunk is essential. Keeping for next pass.")
 
-        # After a full pass, the new set of essential transitions is what we couldn't remove
         essential_transitions = potentially_essential
         print(f"--- End of Pass. {len(essential_transitions)} candidates remain. ---")
         if chunk_size == 1 and len(essential_transitions) == len(untested):
@@ -216,10 +223,8 @@ if __name__ == "__main__":
     G_final.add_nodes_from(range(num_states))
     G_final.add_edges_from([(source, dest) for source, label, dest in essential_transitions])
 
-    # Call the reusable analysis function on the final graph
     analyze_graph_structure(G_final, "Final Core")
 
-    # Plotting is specific to the final, smaller graph
     if G_final.number_of_nodes() > 0:
         degree_sequence = sorted([d for n, d in G_final.degree()], reverse=True)
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
