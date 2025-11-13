@@ -407,92 +407,90 @@ def run_prune_pass(args):
 
 
 def run_chunked_determinize_pass(args):
-    """
-    Executes the 'chunked-determinize' pass by incrementally building the FST.
-
-    This approach processes the NWA in chunks, unioning each new chunk with the
-    already-processed (and determinized) result, and then re-determinizing.
-    This can help manage memory and processing time for very large, complex NWAs.
-
-    Note: The language of the resulting FST is the union of the languages of
-    paths contained entirely within each chunk. This is not mathematically
-    equivalent to determinizing the NWA as a whole, but serves as a useful
-    heuristic for analysis when full determinization is intractable.
-    """
+    """Executes the 'chunked-determinize' pass."""
     print(f"--- Running Chunked Determinization Pass (Chunks: {args.chunks}) ---")
     nwa = load_nwa_data(args.filepath)
 
+    # Pre-prune transitions
     print("\nPruning transitions that cannot lead to a final state...")
     transitions_pruned = prune_to_final_state_transitions(nwa["transitions"], nwa["final_states"])
     print(f"Pruned {len(nwa['transitions']) - len(transitions_pruned)} transitions.")
 
+    # 1. Partition transitions
     all_transitions = list(transitions_pruned)
-    random.shuffle(all_transitions)
+    random.shuffle(all_transitions) # Shuffle to get reasonably balanced chunks
     if not all_transitions:
         print("No transitions left after pruning. Nothing to do.")
         return
 
-    chunk_size = (len(all_transitions) + args.chunks - 1) // args.chunks
+    chunk_size = (len(all_transitions) + args.chunks - 1) // args.chunks # Ceiling division
     transition_chunks = [all_transitions[i:i + chunk_size] for i in range(0, len(all_transitions), chunk_size)]
     print(f"\nPartitioned {len(all_transitions)} transitions into {len(transition_chunks)} chunks of up to {chunk_size} transitions each.")
 
-    # Process the first chunk to establish a baseline FST.
-    if not transition_chunks or not transition_chunks[0]:
-        print("No transitions to process.")
-        return
-
-    first_chunk = transition_chunks.pop(0)
-    print(f"\n--- Processing Chunk 1/{len(transition_chunks) + 1} ---")
-    current_fst = VectorFst()
-    state_map = {j: current_fst.add_state() for j in range(nwa["num_states"])}
-    if nwa["start_state"] is not None:
-        current_fst.set_start(state_map[nwa["start_state"]])
-    for state_id in nwa["final_states"]:
-        current_fst.set_final(state_map[state_id], 0.0)
-    for source, label, dest in first_chunk:
-        current_fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-    print_fst_stats(current_fst, "Chunk 1 Raw FST")
-
-    try:
-        current_fst = current_fst.rm_epsilon().connect().tr_unique().minimize(config=MinimizeConfig(allow_nondet=True)).determinize()
-        print_fst_stats(current_fst, "Optimized FST after Chunk 1")
-    except Exception as e:
-        print(f"❌ Error processing chunk 1: {e}. Halting.")
-        return
-
-    # Iteratively union with subsequent chunks and re-optimize
-    for i, chunk in enumerate(transition_chunks, 2):
-        print(f"\n--- Processing Chunk {i}/{len(transition_chunks) + 1} ---")
+    optimized_chunks = []
+    for i, chunk in enumerate(transition_chunks):
+        print(f"\n--- Processing Chunk {i+1}/{len(transition_chunks)} ---")
         if not chunk:
             print("Skipping empty chunk.")
             continue
-
         try:
-            # Create an FST for the new chunk with original state numbering
-            chunk_fst = VectorFst()
-            state_map = {j: chunk_fst.add_state() for j in range(nwa["num_states"])}
-            if nwa["start_state"] is not None:
-                chunk_fst.set_start(state_map[nwa["start_state"]])
+            # 2. Create FST for the chunk
+            fst = VectorFst()
+            # We need all states in each FST so transitions are valid
+            state_map = {j: fst.add_state() for j in range(nwa["num_states"])}
+            fst.set_start(state_map[nwa["start_state"]])
             for state_id in nwa["final_states"]:
-                chunk_fst.set_final(state_map[state_id], 0.0)
+                fst.set_final(state_map[state_id], 0.0)
             for source, label, dest in chunk:
-                chunk_fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
-            print_fst_stats(chunk_fst, f"Chunk {i} Raw FST")
+                fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
 
-            # Union the already optimized FST with the new raw chunk
-            current_fst = current_fst | chunk_fst
-            print_fst_stats(current_fst, "Unioned FST (before optimization)")
+            print_fst_stats(fst, f"Chunk {i+1} Initial FST")
 
-            # Re-run the full optimization and determinization pipeline
-            current_fst = current_fst.rm_epsilon().connect().tr_unique().minimize(config=MinimizeConfig(allow_nondet=True)).determinize()
-            print_fst_stats(current_fst, f"Optimized FST after Chunk {i}")
+            # 3. Optimize the chunk
+            fst = fst.rm_epsilon()
+            fst = fst.connect()
+            fst = fst.tr_unique()
+            fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
+            fst = fst.determinize()
+            print_fst_stats(fst, f"Chunk {i+1} Optimized FST")
+            optimized_chunks.append(fst)
         except Exception as e:
-            print(f"❌ Error processing union with chunk {i}: {e}. Halting.")
-            return
+            print(f"❌ Error processing chunk {i+1}: {e}. Skipping this chunk.")
 
-    print("\n--- Chunked Determinization Complete ---")
-    print_fst_stats(current_fst, "Final Result")
-    print("\nRESULT: ✅ Chunked determinization finished successfully.")
+    if not optimized_chunks:
+        print("\nRESULT: ❌ No chunks were successfully optimized. Halting.")
+        return
+
+    # 4. Union the optimized chunks
+    print("\n--- Combining Optimized Chunks ---")
+
+    # The `|` operator on VectorFst creates a copy, then unions. This is safe.
+    final_fst = optimized_chunks[0]
+    print_fst_stats(final_fst, "Combined FST (1 chunk)")
+    for i, next_fst in enumerate(optimized_chunks[1:], 2):
+        final_fst = final_fst | next_fst
+        print_fst_stats(final_fst, f"Combined FST ({i} chunks)")
+
+    # 5. Final optimization pass
+    print("\n--- Final Optimization Pass on Combined FST ---")
+    try:
+        print_fst_stats(final_fst, "Combined FST before final optimization")
+
+        # The full pipeline from the original determinize pass
+        final_fst = final_fst.rm_epsilon()
+        print_fst_stats(final_fst, "After rm_epsilon")
+        final_fst = final_fst.connect()
+        print_fst_stats(final_fst, "After connecting")
+        final_fst = final_fst.tr_unique()
+        print_fst_stats(final_fst, "After tr_unique")
+        final_fst = final_fst.minimize(config=MinimizeConfig(allow_nondet=True))
+        print_fst_stats(final_fst, "After minimizing")
+        final_fst = final_fst.determinize()
+        print_fst_stats(final_fst, "After determinizing")
+
+        print("\nRESULT: ✅ Chunked determinization finished successfully.")
+    except Exception as e:
+        print(f"\nRESULT: ❌ Final optimization failed with an error: {e}")
 
 
 # --- MAIN CLI ---
