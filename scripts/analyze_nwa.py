@@ -399,68 +399,80 @@ def run_dump_states_pass(args):
 
 
 def run_prune_pass(args):
-    """Executes the 'prune' pass."""
+    """Executes the 'prune' pass by finding a maximal subset of transitions that does NOT cause a timeout."""
     print(f"--- Running Pruning Pass (Timeout: {args.timeout}s) ---")
     nwa = load_nwa_data(args.filepath)
+    all_transitions = nwa["transitions"]
 
     print("\n--- Establishing Baseline Behavior ---")
-    if not time_determinization_with_timeout(nwa["num_states"], nwa["start_state"], nwa["final_states"], nwa["transitions"], args.timeout):
+    if not time_determinization_with_timeout(nwa["num_states"], nwa["start_state"], nwa["final_states"], all_transitions, args.timeout):
         print(f"Baseline determinization finished within {args.timeout}s. Pruning is not needed.")
         return
     else:
         print(f"Baseline determinization timed out after {args.timeout}s (as expected).")
 
-    print("\n--- Iterative Pruning ---")
-    essential_transitions = nwa["transitions"].copy()
-    total_trans_count = len(essential_transitions)
-    chunk_sizes = [
-        total_trans_count // 5, total_trans_count // 10, total_trans_count // 50,
-        1000, 100, 10, 1
-    ]
-
-    for chunk_size in [c for c in chunk_sizes if c > 0]:
+    print("\n--- Finding maximal non-problematic subset (additive approach) ---")
+    
+    good_transitions = set()
+    candidates = list(all_transitions)
+    random.shuffle(candidates)
+    
+    # Start with large chunks and decrease size to isolate problematic transitions
+    chunk_sizes = sorted([10000, 1000, 100, 10, 1], reverse=True)
+    
+    for chunk_size in chunk_sizes:
+        if not candidates:
+            break
         print(f"\n--- PASS with Chunk Size: {chunk_size} ---")
-        untested = list(essential_transitions)
-        random.shuffle(untested)
-        potentially_essential = set()
-        chunks = [untested[i:i + chunk_size] for i in range(0, len(untested), chunk_size)]
-
+        
+        chunks = [candidates[i:i + chunk_size] for i in range(0, len(candidates), chunk_size)]
+        
+        next_round_candidates = []
         for i, chunk in enumerate(chunks):
-            candidate_transitions = essential_transitions - set(chunk)
-            progress = f"[Chunk {i + 1}/{len(chunks)}]"
-            if time_determinization_with_timeout(
+            # Test if adding this chunk to the known-good set causes a timeout
+            candidate_set = good_transitions | set(chunk)
+            
+            if not time_determinization_with_timeout(
                     nwa["num_states"],
                     nwa["start_state"],
                     nwa["final_states"],
-                    candidate_transitions,
+                    candidate_set,
                     args.timeout
                     ):
-                essential_transitions = candidate_transitions
-                print(f"{progress} ✅ Chunk removed. New count: {len(essential_transitions)}")
+                # Chunk is good, add it to the base for subsequent tests in this pass
+                good_transitions.update(chunk)
+                print(f"[{i+1}/{len(chunks)}] ✅ Chunk added. Good set size: {len(good_transitions)}")
             else:
-                potentially_essential.update(chunk)
-                print(f"{progress} ❌ Chunk is essential. Keeping for next pass.")
+                # Chunk is problematic, add its contents back to the pool for the next pass with a smaller chunk size
+                next_round_candidates.extend(chunk)
+                print(f"[{i+1}/{len(chunks)}] ❌ Chunk is problematic. Deferring {len(chunk)} transitions.")
+        
+        candidates = next_round_candidates
+        random.shuffle(candidates)
 
-        if len(potentially_essential) == len(essential_transitions) and chunk_size == 1:
-            print("No further reduction possible. Halting.")
-            break
-        essential_transitions = potentially_essential
-        print(f"--- End of Pass. {len(essential_transitions)} candidates remain. ---")
+    problematic_transitions = set(candidates)
 
     print(f"\n--- Pruning Complete ---")
-    print(f"Found a core of {len(essential_transitions)} transitions that causes the hang.")
+    print(f"Original transition count: {len(all_transitions)}")
+    print(f"Maximal good subset size: {len(good_transitions)}")
+    print(f"Found a core of {len(problematic_transitions)} problematic transitions.")
+
+    if not problematic_transitions:
+        print("\nWarning: Could not isolate any problematic transitions. The timeout might be too sensitive, or the issue is with the whole graph.")
+        return
 
     print("\n--- Analysis of Final Core Graph ---")
     G_final = nx.DiGraph()
     G_final.add_nodes_from(range(nwa["num_states"]))
-    G_final.add_edges_from([(s, d) for s, l, d in essential_transitions])
+    G_final.add_edges_from([(s, d) for s, l, d, w in problematic_transitions])
     pruned_nwa_data = {
+        "num_states": nwa["num_states"],
         "start_state": nwa["start_state"],
         "final_states": nwa["final_states"],
-        "transitions": essential_transitions,
+        "transitions": problematic_transitions,
     }
     print_graph_stats(G_final, pruned_nwa_data)
-    print_scc_analysis(G_final, essential_transitions)
+    print_scc_analysis(G_final, problematic_transitions)
 
 
 def run_chunked_determinize_pass(args):
