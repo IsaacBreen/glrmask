@@ -396,21 +396,31 @@ impl Serialize for SimpleBitset {
 where
         S: Serializer,
     {
-        use serde::ser::SerializeStruct;
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum Repr<'a> {
+            All(&'a str),
+            Ranges(Vec<RangeRepr>),
+        }
+
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum RangeRepr {
+            Single(usize),
+            Range((usize, usize)),
+        }
+
         if self.is_all {
-            let mut state = serializer.serialize_struct("SimpleBitset", 1)?;
-            state.serialize_field("is_all", &true)?;
-            state.end()
-        } else if self.is_empty() {
-            let mut state = serializer.serialize_struct("SimpleBitset", 1)?;
-            state.serialize_field("is_all", &false)?;
-            state.end()
+            Repr::All("ALL").serialize(serializer)
         } else {
-            let mut state = serializer.serialize_struct("SimpleBitset", 2)?;
-            state.serialize_field("is_all", &false)?;
-            let ranges: Vec<_> = self.rsb.ranges().collect();
-            state.serialize_field("ranges", &ranges)?;
-            state.end()
+            let ranges: Vec<RangeRepr> = self.rsb.ranges().map(|r| {
+                if r.start() == r.end() {
+                    RangeRepr::Single(*r.start())
+                } else {
+                    RangeRepr::Range((*r.start(), *r.end()))
+                }
+            }).collect();
+            Repr::Ranges(ranges).serialize(serializer)
         }
     }
 }
@@ -420,63 +430,37 @@ impl<'de> Deserialize<'de> for SimpleBitset {
     where
         D: Deserializer<'de>,
     {
-        use serde::de::{self, MapAccess, Visitor};
+        use serde::de;
 
         #[derive(Deserialize)]
-        #[serde(field_identifier, rename_all = "snake_case")]
-        enum Field {
-            IsAll,
-            Ranges,
+        #[serde(untagged)]
+        enum Repr {
+            All(String),
+            Ranges(Vec<RangeRepr>),
         }
 
-        struct SimpleBitsetVisitor;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RangeRepr {
+            Single(usize),
+            Range((usize, usize)),
+        }
 
-        impl<'de> Visitor<'de> for SimpleBitsetVisitor {
-            type Value = SimpleBitset;
-
-            fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
-                formatter.write_str("struct SimpleBitset")
-            }
-
-            fn visit_map<V>(self, mut map: V) -> Result<SimpleBitset, V::Error>
-            where
-                V: MapAccess<'de>,
-            {
-                let mut is_all = None;
-                let mut ranges: Option<Vec<std::ops::RangeInclusive<usize>>> = None;
-                while let Some(key) = map.next_key()? {
-                    match key {
-                        Field::IsAll => {
-                            if is_all.is_some() {
-                                return Err(de::Error::duplicate_field("is_all"));
-                            }
-                            is_all = Some(map.next_value()?);
-                        }
-                        Field::Ranges => {
-                            if ranges.is_some() {
-                                return Err(de::Error::duplicate_field("ranges"));
-                            }
-                            ranges = Some(map.next_value()?);
-                        }
-                    }
-                }
-                let is_all: bool = is_all.ok_or_else(|| de::Error::missing_field("is_all"))?;
-                if is_all {
-                    if ranges.is_some() {
-                        return Err(de::Error::custom(
-                            "field `ranges` is not allowed when `is_all` is true",
-                        ));
-                    }
+        match Repr::deserialize(deserializer)? {
+            Repr::All(s) => {
+                if s == "ALL" {
                     Ok(SimpleBitset::all())
                 } else {
-                    let ranges = ranges.unwrap_or_else(Vec::new);
-                    let rsb = RangeSetBlaze::from_iter(ranges);
-                    Ok(SimpleBitset::from_rsb_inner(rsb))
+                    Err(de::Error::custom("expected string 'ALL' for all-bitset"))
                 }
             }
+            Repr::Ranges(ranges) => {
+                let rsb = RangeSetBlaze::from_iter(ranges.into_iter().map(|rr| match rr {
+                    RangeRepr::Single(i) => i..=i,
+                    RangeRepr::Range((s, e)) => s..=e,
+                }));
+                Ok(SimpleBitset::from_rsb_inner(rsb))
+            }
         }
-
-        const FIELDS: &'static [&'static str] = &["is_all", "ranges"];
-        deserializer.deserialize_struct("SimpleBitset", FIELDS, SimpleBitsetVisitor)
     }
 }
