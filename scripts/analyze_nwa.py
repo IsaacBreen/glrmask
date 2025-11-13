@@ -8,6 +8,8 @@ import multiprocessing
 import argparse
 from collections import Counter, defaultdict
 
+from rustfst.algorithms.minimize import MinimizeConfig
+
 # (Import statements for rustfst and networkx remain the same)
 # We use rustfst for high-performance FST operations.
 try:
@@ -69,7 +71,7 @@ def determinize_worker(
         for source, label, dest in transitions:
             fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
         print("Minimizing")
-        fst = fst.minimize()
+        fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
         print("Determinizing")
         fst = fst.determinize()
         result_queue.put(True)
