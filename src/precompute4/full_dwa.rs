@@ -163,8 +163,7 @@ fn build_ignore_terminal_dwa() -> DWA {
 
 fn build_epsilon_dwa(weight: Weight) -> DWA {
     let mut dwa = DWA::new();
-    let final_state = dwa.states.add_state();
-    dwa.states[final_state].final_weight = Some(weight);
+    dwa.states[dwa.body.start_state].final_weight = Some(weight);
     dwa
 }
 
