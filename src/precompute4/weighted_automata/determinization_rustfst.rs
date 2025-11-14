@@ -257,12 +257,19 @@ fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
 
 pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     let mut fst = nwa_to_vector_fst(nwa);
+    crate::debug!(6, "NFA states before rm_epsilon: {}", fst.num_states());
     rm_epsilon(&mut fst).unwrap();
+    crate::debug!(6, "NFA states after rm_epsilon: {}", fst.num_states());
+
     let det_config =
         DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeNonFunctional);
+    crate::debug!(6, "NFA states before determinization: {}", fst.num_states());
     let mut det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
+    crate::debug!(6, "DFA states after determinization: {}", det_fst.num_states());
     let min_config = MinimizeConfig::default();
+    crate::debug!(6, "DFA states before minimization: {}", det_fst.num_states());
     minimize_with_config(&mut det_fst, min_config).unwrap();
+    crate::debug!(6, "DFA states after minimization: {}", det_fst.num_states());
     crate::debug!(6, "Determinized FST:\n{}", det_fst);
     vector_fst_to_dwa(&det_fst)
 }
