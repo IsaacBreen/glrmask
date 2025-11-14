@@ -795,6 +795,43 @@ def run_recompose_pass(args):
     print("Save complete.")
 
 
+def bisect_complement(base_set: set, candidates_to_reduce: list, nwa_data: dict, timeout: float) -> list:
+    """
+    Recursively bisects the 'candidates_to_reduce' list to find a minimal subset
+    that, when added to 'base_set', still causes a determinization timeout.
+    This is used to handle interaction cases in the main bisection loop.
+    """
+    if len(candidates_to_reduce) <= 1:
+        return candidates_to_reduce
+
+    mid = len(candidates_to_reduce) // 2
+    c1 = candidates_to_reduce[:mid]
+    c2 = candidates_to_reduce[mid:]
+
+    # Test if the first half of candidates is sufficient to cause failure
+    subgraph1_data = create_subgraph_nwa(nwa_data, base_set | set(c1))
+    if subgraph1_data and time_determinization_with_timeout(
+        subgraph1_data["num_states"], subgraph1_data["start_state"],
+        subgraph1_data["final_states"], subgraph1_data["transitions"], timeout
+    ):
+        return bisect_complement(base_set, c1, nwa_data, timeout)
+
+    # Test if the second half is sufficient
+    subgraph2_data = create_subgraph_nwa(nwa_data, base_set | set(c2))
+    if subgraph2_data and time_determinization_with_timeout(
+        subgraph2_data["num_states"], subgraph2_data["start_state"],
+        subgraph2_data["final_states"], subgraph2_data["transitions"], timeout
+    ):
+        return bisect_complement(base_set, c2, nwa_data, timeout)
+
+    # Neither half alone is sufficient. We need parts from both.
+    # Reduce c1, assuming c2 is present.
+    reduced_c1 = bisect_complement(base_set | set(c2), c1, nwa_data, timeout)
+    # Reduce c2, assuming the now-reduced c1 is present.
+    reduced_c2 = bisect_complement(base_set | set(reduced_c1), c2, nwa_data, timeout)
+    return reduced_c1 + reduced_c2
+
+
 def run_bisect_pass(args):
     """Executes the 'bisect' pass to find a minimal failing example."""
     print(f"--- Running Bisect Pass (Timeout: {args.timeout}s) ---")
@@ -818,9 +855,6 @@ def run_bisect_pass(args):
     smallest_failing_set = set(problematic_states)
 
     iteration = 0
-    # When a split fails to reduce the set, we can shuffle and try again.
-    # This counter prevents an infinite loop if we're truly stuck.
-    retries_left = 5
     while len(problematic_states) > 1:
         iteration += 1
         print(f"\n--- Bisection Iteration {iteration}: {len(problematic_states)} states remaining ---")
@@ -867,19 +901,33 @@ def run_bisect_pass(args):
                 smallest_failing_set = s2
             reduced = True
 
-        if reduced:
-            # A reduction was successful, reset retries for the next level of bisection.
-            retries_left = 5
-        else:
+        if not reduced:
             # not hangs1 and not hangs2: This is the complex interaction case.
-            # We can't simply discard one half.
-            print("-> Interaction detected. Cannot reduce further with this split.")
-            if retries_left > 0:
-                print(f"-> Shuffling and trying a different split ({retries_left} retries left).")
-                retries_left -= 1
-                random.shuffle(problematic_states)  # Try a new split
+            print("-> Interaction detected. Neither half fails independently.")
+            print("-> Starting recursive complement bisection to reduce the set...")
+
+            # We know s1 passes and s2 passes, but s1|s2 fails.
+            # Let's try to find the minimal part of s2 that makes s1 fail.
+            s2_list = list(s2)
+            random.shuffle(s2_list)
+            minimal_s2_complement = bisect_complement(s1, s2_list, nwa_data, args.timeout)
+
+            # Now we have a smaller failing set: s1 | minimal_s2_complement
+            # We can also try to reduce s1 using this new smaller complement.
+            s1_list = list(s1)
+            random.shuffle(s1_list)
+            minimal_s1_complement = bisect_complement(set(minimal_s2_complement), s1_list, nwa_data, args.timeout)
+
+            new_problematic_set = set(minimal_s1_complement) | set(minimal_s2_complement)
+
+            if len(new_problematic_set) < len(problematic_states):
+                print(f"-> Complement bisection reduced set from {len(problematic_states)} to {len(new_problematic_set)} states.")
+                problematic_states = list(new_problematic_set)
+                random.shuffle(problematic_states)  # Shuffle for the next bisection split
+                smallest_failing_set = new_problematic_set
             else:
-                print("-> No more retries. The current set is the smallest we could find.")
+                print("-> Complement bisection could not reduce the set further. This is likely a minimal failing set.")
+                smallest_failing_set = new_problematic_set
                 break
 
     print("\n--- Bisection Complete ---")
