@@ -578,10 +578,6 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                     NWABody { start_state: start }
                 };
                 for left_body in left_bodies {
-                    crate::debug!(6, "NWA states after concat:\n{}", states);
-                    // Union via epsilon into nwa_body
-                    crate::debug!(5, "At trie node {:?}, concatenating left body (start {}) and right body (start {}) into composed body (start {})...", node_idx, left_body.start_state, right_body.start_state, composed_body.start_state);
-                    crate::debug!(6, "NWA states after union:\n{}", states);
                     left_bodies_union = NWA::union_components(&mut states, &left_bodies_union, &left_body);
                 }
                 let composed_body = NWA::concatenate_components(&mut states, &left_bodies_union, &right_body, &Weight::all());
