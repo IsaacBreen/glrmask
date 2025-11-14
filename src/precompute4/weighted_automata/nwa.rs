@@ -251,18 +251,48 @@ impl NWA {
     pub fn determinize_to_dwa_with_rustfst(&self) -> DWA {
         super::determinization_rustfst::determinize_nwa_to_dwa(self)
     }
+}
 
+#[derive(Clone, Debug)]
+pub struct SimplifyRustfstConfig {
+    pub minimize: bool,
+    pub connect: bool,
+    pub rm_epsilon: bool,
+}
+
+impl Default for SimplifyRustfstConfig {
+    fn default() -> Self {
+        Self {
+            minimize: true,
+            connect: true,
+            rm_epsilon: true,
+        }
+    }
+}
+
+impl NWA {
     pub fn simplify_rustfst(&mut self) {
+        let config = SimplifyRustfstConfig::default();
+        self.simplify_rustfst_with_config(config);
+    }
+
+    pub fn simplify_rustfst_with_config(&mut self, config: SimplifyRustfstConfig) {
         crate::debug!(4, "NWA Simplify with rustfst");
         let mut fst = nwa_to_vector_fst(self);
-        crate::debug!(4, "Minimize");
-        let config = MinimizeConfig::default().with_allow_nondet(true);
-        minimize_with_config(&mut fst, config).unwrap();
-        crate::debug!(4, "Connect");
-        rustfst::algorithms::connect(&mut fst).unwrap();
-        crate::debug!(4, "Remove Epsilon");
-        rm_epsilon(&mut fst).unwrap();
-        crate::debug!(4, "Convert back to NWA");
+        if config.minimize {
+            crate::debug!(4, "Minimize");
+            let config = MinimizeConfig::default().with_allow_nondet(true);
+            minimize_with_config(&mut fst, config).unwrap();
+        }
+        if config.connect {
+            crate::debug!(4, "Connect");
+            rustfst::algorithms::connect(&mut fst).unwrap();
+        }
+        if config.rm_epsilon {
+            crate::debug!(4, "Remove Epsilon");
+            rm_epsilon(&mut fst).unwrap();
+            crate::debug!(4, "Convert back to NWA");
+        }
         *self = vector_fst_to_nwa(&fst);
     }
 }

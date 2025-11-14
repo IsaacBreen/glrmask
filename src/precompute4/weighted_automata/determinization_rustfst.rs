@@ -198,7 +198,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                         fst_state_id,
                         Tr::new(
                             (*label as u32) + 1,
-                            EPS_LABEL,
+                            (*label as u32) + 1,
                             BitsetWeight::new(weight.clone()),
                             state_map[target],
                         ),
