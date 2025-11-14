@@ -249,8 +249,8 @@ impl NWA {
 
             DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
         }
-        let left = states.copy_subgraph_from_and_return_body(states, *left);
-        Self::internal_concatenate_components(states, &left, right, eps_weight)
+        let new_left = states.copy_subgraph_in_place_and_return_body(*left);
+        Self::internal_concatenate_components(states, &new_left, right, eps_weight)
     }
 
     /// Determinize subgraph reachable from body.start_state to DWA

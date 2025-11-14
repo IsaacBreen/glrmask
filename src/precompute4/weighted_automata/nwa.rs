@@ -81,6 +81,58 @@ impl NWAStates {
         NWABody { start_state: new_start }
     }
 
+    pub fn copy_subgraph_in_place_and_return_body(&mut self, body: NWABody) -> NWABody {
+        let (new_start, _remap) = self.copy_subgraph_in_place(body.start_state);
+        NWABody { start_state: new_start }
+    }
+
+    /// Deep-copy a subgraph starting at 'start_id' from within this NWAStates arena into self.
+    /// Returns (new_start_id, remap_old_to_new)
+    pub fn copy_subgraph_in_place(&mut self, start_id: NWAStateID) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
+        let mut remap: HashMap<NWAStateID, NWAStateID> = HashMap::new();
+        if start_id >= self.len() {
+            let new_start = self.add_state();
+            return (new_start, remap);
+        }
+        let new_start = self.add_state();
+        self.0[new_start] = self.0[start_id].clone();
+        remap.insert(start_id, new_start);
+
+        let mut q = VecDeque::new();
+        q.push_back((start_id, new_start));
+
+        while let Some((old, new)) = q.pop_front() {
+            // Epsilon edges
+            let eps = self.0[old].epsilons.clone();
+            self.0[new].epsilons.clear();
+            for (to_old, w) in eps {
+                let to_new = *remap.entry(to_old).or_insert_with(|| {
+                    let n = self.add_state();
+                    self.0[n] = self.0[to_old].clone();
+                    q.push_back((to_old, n));
+                    n
+                });
+                self.0[new].epsilons.push((to_new, w.clone()));
+            }
+            // Labeled edges
+            let trans = self.0[old].transitions.clone();
+            self.0[new].transitions.clear();
+            for (lbl, targets) in trans {
+                for (to_old, w) in targets {
+                    let to_new = *remap.entry(to_old).or_insert_with(|| {
+                        let n = self.add_state();
+                        self.0[n] = self.0[to_old].clone();
+                        q.push_back((to_old, n));
+                        n
+                    });
+                    self.0[new].transitions.entry(lbl).or_default().push((to_new, w.clone()));
+                }
+            }
+        }
+
+        (new_start, remap)
+    }
+
     /// Deep-copy a subgraph starting at 'start_id' from another NWAStates arena into self.
     /// Returns (new_start_id, remap_old_to_new)
     pub fn copy_subgraph_from(&mut self, other: &NWAStates, start_id: NWAStateID) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
