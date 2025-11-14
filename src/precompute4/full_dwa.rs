@@ -277,52 +277,8 @@ fn build_label_follower_map(parser: &GLRParser) -> BTreeMap<ParserStateID, State
         }
     }
 
-    // From parser.combined_rows
-    for (&from_sid, row) in &parser.combined_rows {
-        // Shifts
-        for actions in row.shifts_and_reduces.values() {
-            for (action, _) in actions {
-                if let Some(to_sid) = match action {
-                    crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(*sid),
-                    crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
-                    _ => None,
-                } {
-                    add_follower(from_sid, to_sid);
-                }
-            }
-        }
-        // Gotos
-        for gotos in row.gotos.values() {
-            for (goto, _) in gotos {
-                if let Some(to_sid) = goto.state_id {
-                    add_follower(from_sid, to_sid);
-                }
-            }
-        }
-    }
-
-    // From parser.hallucinated_row
-    let from_sid = parser.hallucinated_state_id;
-    // Shifts
-    for actions in parser.hallucinated_row.shifts_and_reduces.values() {
-        for (action, _) in actions {
-            if let Some(to_sid) = match action {
-                crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(*sid),
-                crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
-                _ => None,
-            } {
-                add_follower(from_sid, to_sid);
-            }
-        }
-    }
-    // Gotos
-    for gotos in parser.hallucinated_row.gotos.values() {
-        for (goto, _) in gotos {
-            if let Some(to_sid) = goto.state_id {
-                add_follower(from_sid, to_sid);
-            }
-        }
-    }
+    // Default transition
+    
 
     follower_map
 }
@@ -340,17 +296,13 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
     // Seed initial states
     let start_state = &nwa.states[nwa.body.start_state];
     for (_, targets) in &start_state.transitions {
-        for (target_state, _) in targets {
+        for (target_state, w) in targets {
             let s_init = *target_state;
-            for (label, transitions) in &nwa.states[s_init].transitions {
-                if !is_default_transition(*label) {
-                    if let Ok((is_pos, p_id)) = decode_symbol_i16(*label) {
-                        if is_pos {
-                            for (_, w) in transitions {
-                                let entry = state_info[s_init].entry(p_id).or_insert_with(Weight::zeros);
-                                *entry |= w;
-                            }
-                        }
+            for (label, _) in &nwa.states[s_init].transitions {
+                if let Ok((is_pos, p_id)) = decode_symbol_i16(*label) {
+                    if is_pos {
+                        let entry = state_info[s_init].entry(p_id).or_insert_with(Weight::zeros);
+                        *entry |= w;
                     }
                 }
             }
@@ -369,8 +321,6 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
         }
 
         for (l, targets) in &nwa.states[u].transitions {
-            let is_def = is_default_transition(*l);
-
             for (v, w_uv) in targets {
                 let v = *v;
                 let mut changed = false;
@@ -389,58 +339,29 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
                     any_change
                 };
 
-                if is_def {
-                    // Default transitions behave like "any label": propagate from all labels at u.
-                    for (q_id, w_q) in &info_at_u {
-                        let pw = w_q & w_uv;
-                        if pw.is_empty() {
-                            continue;
-                        }
-                        if let Some(followers) = follower_map.get(q_id) {
-                            if process_propagation(&pw, followers, &mut state_info) {
-                                changed = true;
+                // Non-default: must decode as a parser-state label.
+                match decode_symbol_i16(*l) {
+                    Ok((is_pos, p_id)) => {
+                        if is_pos {
+                            // Positive label: only propagate from that label at u.
+                            if let Some(w_p) = info_at_u.get(&p_id) {
+                                let pw = w_p & w_uv;
+                                if pw.is_empty() {
+                                    continue;
+                                }
+                                if let Some(followers) = follower_map.get(&p_id) {
+                                    if process_propagation(&pw, followers, &mut state_info) {
+                                        changed = true;
+                                    }
+                                }
                             }
+                        } else {
+                            panic!("Unexpected negative label during label propagation: {}", l);
                         }
                     }
-                } else {
-                    // Non-default: must decode as a parser-state label.
-                    match decode_symbol_i16(*l) {
-                        Ok((is_pos, p_id)) => {
-                            if is_pos {
-                                // Positive label: only propagate from that label at u.
-                                if let Some(w_p) = info_at_u.get(&p_id) {
-                                    let pw = w_p & w_uv;
-                                    if pw.is_empty() {
-                                        continue;
-                                    }
-                                    if let Some(followers) = follower_map.get(&p_id) {
-                                        if process_propagation(&pw, followers, &mut state_info) {
-                                            changed = true;
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Negative label: propagate from all labels except p_id.
-                                for (q_id, w_q) in &info_at_u {
-                                    if *q_id == p_id {
-                                        continue;
-                                    }
-                                    let pw = w_q & w_uv;
-                                    if pw.is_empty() {
-                                        continue;
-                                    }
-                                    if let Some(followers) = follower_map.get(q_id) {
-                                        if process_propagation(&pw, followers, &mut state_info) {
-                                            changed = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Unknown non-default label: skip propagation for this label.
-                            panic!("Unexpected unknown non-default label during label propagation: {}", l);
-                        }
+                    Err(_) => {
+                        // Unknown non-default label: skip propagation for this label.
+                        panic!("Unexpected unknown non-default label during label propagation: {}", l);
                     }
                 }
 
@@ -463,10 +384,7 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
 
         let state = &mut nwa.states[u];
         for (l, targets) in state.transitions.iter_mut() {
-            let valid_incoming_weight = if is_default_transition(*l) {
-                // Default transitions are valid whenever *any* label can be present.
-                all_labels_weight.clone()
-            } else {
+            let valid_incoming_weight = {
                 // Non-default: decode as parser-state label, or skip if we can't.
                 match decode_symbol_i16(*l) {
                     Ok((is_pos, p_id)) => {
@@ -476,11 +394,7 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
                                 .cloned()
                                 .unwrap_or_else(Weight::zeros)
                         } else {
-                            let w_p = info_at_u
-                                .get(&p_id)
-                                .cloned()
-                                .unwrap_or_else(Weight::zeros);
-                            &all_labels_weight - &w_p
+                            panic!("Unexpected negative label during pruning: {}", l);
                         }
                     }
                     Err(_) => {
