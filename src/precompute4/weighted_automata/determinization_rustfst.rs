@@ -1,30 +1,35 @@
 // src/precompute4/weighted_automata/determinization_rustfst.rs
 
+#![allow(dead_code)]
+#![allow(clippy::needless_borrow)]
+
 use super::common::{StateID, Weight};
-use super::dwa::{DWA, DWABuildError};
+use super::dwa::DWA;
 use super::nwa::NWA;
-use crate::precompute4::weighted_automata::bitset::SimpleBitset;
-use crate::precompute4::weighted_automata::{NWAStateID};
+use crate::precompute4::weighted_automata::NWAStateID;
 use anyhow::Result;
 use nom::IResult;
 use once_cell::sync::Lazy;
-use rustfst::NomCustomError;
+use range_set_blaze::RangeSetBlaze;
+use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
+use rustfst::algorithms::minimize::{minimize_with_config, MinimizeConfig};
+use rustfst::algorithms::rm_epsilon::rm_epsilon;
+use rustfst::fst_properties::FstProperties;
 use rustfst::prelude::*;
 use rustfst::semirings::{
     DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring,
     WeightQuantize,
 };
-use serde::{Deserialize, Serialize};
+use rustfst::NomCustomError;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
-use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
-use rustfst::algorithms::rm_epsilon::rm_epsilon;
-use range_set_blaze::RangeSetBlaze;
-use rustfst::fst_properties::FstProperties;
 
-static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+/// Global interner to share identical `Weight` values behind `Arc`.
+/// This keeps the `BitsetWeight` semiring cheap to clone and compare.
+static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
 
 fn intern_weight(weight: Weight) -> Arc<Weight> {
     let mut interner = WEIGHT_INTERNER.lock().unwrap();
@@ -36,6 +41,11 @@ fn intern_weight(weight: Weight) -> Arc<Weight> {
     arc_weight
 }
 
+/// Semiring over `Weight = SimpleBitset`:
+/// - `plus` = union (set-theoretic ∪, idempotent, commutative);
+/// - `times` = intersection (∩);
+/// - `zero` = empty set;
+/// - `one`  = universe.
 #[derive(Clone, Debug, PartialOrd, Default, Eq, Hash)]
 pub struct BitsetWeight(pub Arc<Weight>);
 
@@ -52,9 +62,11 @@ impl Semiring for BitsetWeight {
     fn zero() -> Self {
         BitsetWeight(intern_weight(Weight::zeros()))
     }
+
     fn one() -> Self {
         BitsetWeight(intern_weight(Weight::all()))
     }
+
     fn new(value: Self::Type) -> Self {
         BitsetWeight(intern_weight(value))
     }
@@ -78,12 +90,15 @@ impl Semiring for BitsetWeight {
     fn value(&self) -> &Self::Type {
         &self.0
     }
+
     fn take_value(self) -> Self::Type {
         Arc::try_unwrap(self.0).unwrap_or_else(|arc| (*arc).clone())
     }
+
     fn set_value(&mut self, value: Self::Type) {
         self.0 = intern_weight(value);
     }
+
     fn reverse(&self) -> Result<Self::ReverseWeight> {
         Ok(self.clone())
     }
@@ -104,12 +119,12 @@ impl ReverseBack<BitsetWeight> for BitsetWeight {
 }
 
 impl WeaklyDivisibleSemiring for BitsetWeight {
-    fn divide_assign(&mut self, _rhs: &Self, _divide_type: DivideType) -> Result<()> {
-        // For a boolean algebra (with OR as plus and AND as times), division a/b is a | !b.
-        // This is because we need `(a/b) & b = a` when `a` is a "sub-weight" of `b` (i.e. a subset).
-        // `(a | !b) & b = (a & b) | (!b & b) = a & b`.
-        // Since `a` is a subset of `b` in this context, `a & b = a`.
-        let new_weight = &*self.0 | &!&*_rhs.0;
+    fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
+        // For a boolean algebra (with OR as plus and AND as times), a valid pseudo-division
+        // operation is a / b := a ∪ ¬b, since
+        //   (a ∪ ¬b) ∩ b = (a ∩ b) ∪ (¬b ∩ b) = a ∩ b.
+        // In contexts where `a` is known to be a subset of `b`, this equals `a`.
+        let new_weight = &*self.0 | &!&*rhs.0;
         self.0 = intern_weight(new_weight);
         Ok(())
     }
@@ -128,6 +143,7 @@ impl SerializableSemiring for BitsetWeight {
 
     fn parse_binary(i: &[u8]) -> IResult<&[u8], Self, NomCustomError<&[u8]>> {
         use nom::number::complete::le_u64;
+
         let (mut i, num_ranges) = le_u64(i)?;
         let mut ranges = Vec::with_capacity(num_ranges as usize);
         for _ in 0..num_ranges {
@@ -152,6 +168,7 @@ impl SerializableSemiring for BitsetWeight {
 
     fn parse_text(i: &str) -> IResult<&str, Self> {
         use nom::combinator::map_res;
+
         map_res(nom::combinator::rest, |s: &str| -> Result<BitsetWeight, _> {
             serde_json::from_str::<Weight>(s)
                 .map(|w| BitsetWeight(intern_weight(w)))
@@ -170,6 +187,7 @@ impl std::fmt::Display for BitsetWeight {
     }
 }
 
+/// Convert an `NWA` into a `VectorFst` over the `BitsetWeight` semiring.
 pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
     let mut fst = VectorFst::<BitsetWeight>::new();
     let mut state_map = HashMap::<NWAStateID, StateId>::new();
@@ -185,6 +203,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
 
     for (i, nwa_state) in nwa.states.0.iter().enumerate() {
         let fst_state_id = state_map[&i];
+
         if let Some(w) = &nwa_state.final_weight {
             if !w.is_empty() {
                 fst.set_final(fst_state_id, BitsetWeight::new(w.clone()))
@@ -224,10 +243,12 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
             }
         }
     }
+
     crate::debug!(5, "NWA to FST conversion done:\n{}", fst);
     fst
 }
 
+/// Convert a deterministic `VectorFst` into a `DWA`.
 pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
     let fst_start = match fst.start() {
         Some(s) => s,
@@ -254,7 +275,8 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
 
         if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
             if !w.0.is_empty() {
-                dwa.set_final_weight(dwa_state_id, w.value().clone()).unwrap();
+                dwa.set_final_weight(dwa_state_id, w.value().clone())
+                    .unwrap();
             }
         }
 
@@ -271,14 +293,20 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                 );
                 if let Err(e) = res {
                     // This should not happen if the input FST is deterministic.
-                    panic!("Error converting VectorFst to DWA: transition already exists. This indicates non-determinism. Error: {:?}", e);
+                    panic!(
+                        "Error converting VectorFst to DWA: transition already exists. \
+                         This indicates non-determinism. Error: {:?}",
+                        e
+                    );
                 }
             }
         }
     }
+
     dwa
 }
 
+/// Convert a (possibly non-deterministic) `VectorFst` back into an `NWA`.
 pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
     if fst.num_states() == 0 {
         return NWA::new();
@@ -296,8 +324,8 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
     if let Some(fst_start) = fst.start() {
         nwa.body.start_state = state_map[&fst_start];
     } else {
-        // FST has states but no start state. The NWA will also have no reachable final states from its start.
-        // We must set a start state. Let's pick 0.
+        // FST has states but no start state. The NWA will also have no reachable final states
+        // from its start. We must set a start state; pick 0.
         nwa.body.start_state = 0;
     }
 
@@ -320,18 +348,26 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
                     nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
                 } else {
                     let label = ((tr.ilabel - 1) as u16) as i16;
-                    nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
+                    nwa.states
+                        .add_transition(nwa_state_id, label, target_nwa_id, weight)
+                        .unwrap();
                 }
             }
         }
     }
+
     nwa
 }
 
+/// Determinize an `NWA` via `rustfst` and convert the result into a `DWA`.
 pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     let mut fst = nwa_to_vector_fst(nwa);
     fst.compute_and_update_properties_all().unwrap();
-    assert!(fst.properties().contains(FstProperties::ACCEPTOR), "FST should be an acceptor before determinization");
+    assert!(
+        fst.properties().contains(FstProperties::ACCEPTOR),
+        "FST should be an acceptor before determinization"
+    );
+
     crate::debug!(4, "NFA states before rm_epsilon: {}", fst.num_states());
     rm_epsilon(&mut fst).unwrap();
     crate::debug!(4, "NFA states after rm_epsilon: {}", fst.num_states());
@@ -341,14 +377,18 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     minimize_with_config(&mut fst, min_config).unwrap();
     crate::debug!(4, "NFA states after minimization: {}", fst.num_states());
 
-    let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
+    let det_config =
+        DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
     crate::debug!(4, "NFA states before determinization: {}", fst.num_states());
-    let mut det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
+    let mut det_fst: VectorFst<BitsetWeight> =
+        determinize_with_config(&fst, det_config).unwrap();
     crate::debug!(4, "DFA states after determinization: {}", det_fst.num_states());
+
     let min_config = MinimizeConfig::default();
     crate::debug!(4, "DFA states before minimization: {}", det_fst.num_states());
     minimize_with_config(&mut det_fst, min_config).unwrap();
     crate::debug!(4, "DFA states after minimization: {}", det_fst.num_states());
     crate::debug!(5, "Determinized FST:\n{}", det_fst);
+
     vector_fst_to_dwa(&det_fst)
 }

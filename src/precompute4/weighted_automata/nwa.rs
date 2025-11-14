@@ -8,11 +8,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
-use rustfst::algorithms::{minimize, MinimizeConfig};
-use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
+
+use rustfst::algorithms::determinize::{
+    determinize_with_config, DeterminizeConfig, DeterminizeType,
+};
+use rustfst::algorithms::minimize::{minimize_with_config, MinimizeConfig};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
-use rustfst::prelude::minimize_with_config;
-use crate::precompute4::weighted_automata::determinization_rustfst::{nwa_to_vector_fst, vector_fst_to_nwa};
+
+use crate::precompute4::weighted_automata::determinization_rustfst::{
+    nwa_to_vector_fst, vector_fst_to_nwa,
+};
 use crate::precompute4::weighted_automata::DWA;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,14 +28,19 @@ pub enum NWABuildError {
 impl Display for NWABuildError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            NWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
+            NWABuildError::StateOutOfBounds { state } => {
+                write!(f, "State {} is out of bounds", state)
+            }
         }
     }
 }
 
+/// Non-deterministic weighted automaton state.
+///
 /// - Non-epsilon transitions: multiple targets per input symbol are allowed.
-/// - Each transition carries a weight (Weight), which is intersected along the path; final states
-///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
+/// - Each transition carries a weight, intersected along the path.
+/// - Final states carry a final weight intersected at acceptance.
+/// - Multiple alternative paths union their weights.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NWAState {
     pub final_weight: Option<Weight>,
@@ -45,7 +55,9 @@ pub struct NWAState {
 pub struct NWAStates(pub Vec<NWAState>);
 
 impl NWAStates {
-    pub fn len(&self) -> usize { self.0.len() }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
 
     pub fn add_state(&mut self) -> NWAStateID {
         let id = self.0.len();
@@ -61,12 +73,21 @@ impl NWAStates {
     }
 
     pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
-        assert!(from < self.len() && to < self.len(), "add_epsilon: state id out of bounds");
+        assert!(
+            from < self.len() && to < self.len(),
+            "add_epsilon: state id out of bounds"
+        );
         self.0[from].epsilons.push((to, w));
     }
 
     /// Add a labeled transition. Multiple transitions on the same label are allowed.
-    pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+    pub fn add_transition(
+        &mut self,
+        from: NWAStateID,
+        on: i16,
+        to: NWAStateID,
+        w: Weight,
+    ) -> Result<(), NWABuildError> {
         if from >= self.len() {
             return Err(NWABuildError::StateOutOfBounds { state: from });
         }
@@ -77,19 +98,30 @@ impl NWAStates {
         Ok(())
     }
 
-    pub fn copy_subgraph_from_and_return_body(&mut self, other: &NWAStates, body: NWABody) -> NWABody {
+    pub fn copy_subgraph_from_and_return_body(
+        &mut self,
+        other: &NWAStates,
+        body: NWABody,
+    ) -> NWABody {
         let (new_start, _remap) = self.copy_subgraph_from(other, body.start_state);
-        NWABody { start_state: new_start }
+        NWABody {
+            start_state: new_start,
+        }
     }
 
     pub fn copy_subgraph_in_place_and_return_body(&mut self, body: NWABody) -> NWABody {
         let (new_start, _remap) = self.copy_subgraph_in_place(body.start_state);
-        NWABody { start_state: new_start }
+        NWABody {
+            start_state: new_start,
+        }
     }
 
-    /// Deep-copy a subgraph starting at 'start_id' from within this NWAStates arena into self.
-    /// Returns (new_start_id, remap_old_to_new)
-    pub fn copy_subgraph_in_place(&mut self, start_id: NWAStateID) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
+    /// Deep-copy a subgraph starting at `start_id` from within this `NWAStates` arena.
+    /// Returns `(new_start_id, remap_old_to_new)`.
+    pub fn copy_subgraph_in_place(
+        &mut self,
+        start_id: NWAStateID,
+    ) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
         let mut remap: HashMap<NWAStateID, NWAStateID> = HashMap::new();
         if start_id >= self.len() {
             let new_start = self.add_state();
@@ -126,7 +158,11 @@ impl NWAStates {
                         q.push_back((to_old, n));
                         n
                     });
-                    self.0[new].transitions.entry(lbl).or_default().push((to_new, w.clone()));
+                    self.0[new]
+                        .transitions
+                        .entry(lbl)
+                        .or_default()
+                        .push((to_new, w.clone()));
                 }
             }
         }
@@ -134,9 +170,13 @@ impl NWAStates {
         (new_start, remap)
     }
 
-    /// Deep-copy a subgraph starting at 'start_id' from another NWAStates arena into self.
-    /// Returns (new_start_id, remap_old_to_new)
-    pub fn copy_subgraph_from(&mut self, other: &NWAStates, start_id: NWAStateID) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
+    /// Deep-copy a subgraph starting at `start_id` from another `NWAStates` arena into self.
+    /// Returns `(new_start_id, remap_old_to_new)`.
+    pub fn copy_subgraph_from(
+        &mut self,
+        other: &NWAStates,
+        start_id: NWAStateID,
+    ) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
         let mut remap: HashMap<NWAStateID, NWAStateID> = HashMap::new();
         if start_id >= other.len() {
             let new_start = self.add_state();
@@ -173,7 +213,11 @@ impl NWAStates {
                         q.push_back((to_old, n));
                         n
                     });
-                    self.0[new].transitions.entry(lbl).or_default().push((to_new, w.clone()));
+                    self.0[new]
+                        .transitions
+                        .entry(lbl)
+                        .or_default()
+                        .push((to_new, w.clone()));
                 }
             }
         }
@@ -184,10 +228,16 @@ impl NWAStates {
 
 impl Index<NWAStateID> for NWAStates {
     type Output = NWAState;
-    fn index(&self, index: NWAStateID) -> &Self::Output { &self.0[index] }
+
+    fn index(&self, index: NWAStateID) -> &Self::Output {
+        &self.0[index]
+    }
 }
+
 impl IndexMut<NWAStateID> for NWAStates {
-    fn index_mut(&mut self, index: NWAStateID) -> &mut Self::Output { &mut self.0[index] }
+    fn index_mut(&mut self, index: NWAStateID) -> &mut Self::Output {
+        &mut self.0[index]
+    }
 }
 
 impl Display for NWAStates {
@@ -228,9 +278,21 @@ impl Display for NWAStats {
         writeln!(f, "  - States: {}", self.num_states)?;
         writeln!(f, "  - Final States: {}", self.num_final_states)?;
         writeln!(f, "  - Epsilon Transitions: {}", self.total_epsilon_transitions)?;
-        writeln!(f, "  - Labeled Transitions: {}", self.total_labeled_transitions)?;
-        writeln!(f, "  - Avg Epsilon/State: {:.2}", self.avg_epsilon_per_state)?;
-        writeln!(f, "  - Avg Labeled/State: {:.2}", self.avg_labeled_per_state)
+        writeln!(
+            f,
+            "  - Labeled Transitions: {}",
+            self.total_labeled_transitions
+        )?;
+        writeln!(
+            f,
+            "  - Avg Epsilon/State: {:.2}",
+            self.avg_epsilon_per_state
+        )?;
+        writeln!(
+            f,
+            "  - Avg Labeled/State: {:.2}",
+            self.avg_labeled_per_state
+        )
     }
 }
 
@@ -257,7 +319,8 @@ impl NWA {
                 num_final_states += 1;
             }
             total_epsilon_transitions += state.epsilons.len();
-            total_labeled_transitions += state.transitions.values().map(|v| v.len()).sum::<usize>();
+            total_labeled_transitions +=
+                state.transitions.values().map(|v| v.len()).sum::<usize>();
         }
 
         let avg_epsilon_per_state = total_epsilon_transitions as f64 / num_states as f64;
@@ -274,7 +337,9 @@ impl NWA {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct NWABody {
     pub start_state: NWAStateID,
 }
@@ -295,10 +360,19 @@ impl NWA {
     pub fn new() -> Self {
         let mut states = NWAStates::default();
         let start = states.add_state();
-        Self { states, body: NWABody { start_state: start } }
+        Self {
+            states,
+            body: NWABody { start_state: start },
+        }
     }
 
-    pub fn add_transition(&mut self, from: NWAStateID, on: i16, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
+    pub fn add_transition(
+        &mut self,
+        from: NWAStateID,
+        on: i16,
+        to: NWAStateID,
+        w: Weight,
+    ) -> Result<(), NWABuildError> {
         self.states.add_transition(from, on, to, w)
     }
 
@@ -361,6 +435,7 @@ impl NWA {
     pub fn simplify_rustfst_with_config(&mut self, config: SimplifyRustfstConfig) {
         crate::debug!(4, "NWA Simplify with rustfst");
         let mut fst = nwa_to_vector_fst(self);
+
         if config.minimize {
             crate::debug!(4, "Minimize");
             let config = MinimizeConfig::default().with_allow_nondet(true);
@@ -377,9 +452,9 @@ impl NWA {
         }
         if config.determinize {
             crate::debug!(4, "Determinize");
-            let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
+            let det_config = DeterminizeConfig::default()
+                .with_det_type(DeterminizeType::DeterminizeFunctional);
             fst = determinize_with_config(&fst, det_config).unwrap();
-
         }
         *self = vector_fst_to_nwa(&fst);
     }

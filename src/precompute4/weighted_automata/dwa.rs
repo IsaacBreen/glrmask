@@ -18,13 +18,25 @@ impl Display for DWABuildError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             DWABuildError::TransitionAlreadyExists { from, on } => {
-                write!(f, "Transition from state {} on code {} already exists", from, on)
+                write!(
+                    f,
+                    "Transition from state {} on code {} already exists",
+                    from, on
+                )
             }
-            DWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
+            DWABuildError::StateOutOfBounds { state } => {
+                write!(f, "State {} is out of bounds", state)
+            }
         }
     }
 }
 
+/// Deterministic weighted automaton state.
+///
+/// - `transitions` maps labels to unique target states.
+/// - `trans_weights` stores the edge weights for the same labels.
+/// - `final_weight` and `state_weight` are optional gating weights intersected
+///   during evaluation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWAState {
     pub transitions: BTreeMap<i16, StateID>,
@@ -36,7 +48,9 @@ pub struct DWAState {
 
 impl DWAState {
     pub fn get_transition(&self, ch: i16) -> Option<(StateID, &Weight)> {
-        self.transitions.get(&ch).and_then(|to| self.trans_weights.get(&ch).map(|w| (*to, w)))
+        self.transitions
+            .get(&ch)
+            .and_then(|to| self.trans_weights.get(&ch).map(|w| (*to, w)))
     }
 
     pub fn get_weight(&self, ch: i16) -> Option<&Weight> {
@@ -85,8 +99,7 @@ impl DWAState {
         }
     }
 
-    /// Iterator over all outgoing edges:
-    /// - Edges appear as (label, target, weight)
+    /// Iterator over all outgoing edges: `(label, target, weight)`.
     #[inline]
     pub fn iter_edges(&self) -> impl Iterator<Item = (i16, StateID, &Weight)> {
         self.transitions
@@ -100,32 +113,38 @@ pub struct DWAStates(pub Vec<DWAState>);
 
 impl Index<usize> for DWAStates {
     type Output = DWAState;
+
     fn index(&self, index: usize) -> &Self::Output {
         &self.0[index]
     }
 }
+
 impl IndexMut<usize> for DWAStates {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.0[index]
     }
 }
+
 impl Deref for DWAStates {
     type Target = [DWAState];
+
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+
 impl DWAStates {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
     pub fn add_state(&mut self) -> StateID {
         let id = self.0.len();
         self.0.push(DWAState::default());
         id
     }
 
-    /// Adds a pre-existing DWAState to the collection and returns its new ID.
+    /// Adds a pre-existing `DWAState` to the collection and returns its new ID.
     pub fn add_existing_state(&mut self, state: DWAState) -> StateID {
         let id = self.0.len();
         self.0.push(state);
@@ -143,7 +162,12 @@ impl DWAStates {
         self[state_id].apply_weight(weight);
     }
 
-    pub fn copy_subgraph(&mut self, start_id: StateID) -> (StateID, HashMap<StateID, StateID>) {
+    /// Copy a subgraph starting at `start_id` within this arena.
+    /// Returns `(new_start_id, remap_old_to_new)`.
+    pub fn copy_subgraph(
+        &mut self,
+        start_id: StateID,
+    ) -> (StateID, HashMap<StateID, StateID>) {
         let mut remap = HashMap::new();
         let mut q = VecDeque::new();
 
@@ -174,7 +198,12 @@ impl DWAStates {
         (new_start_id, remap)
     }
 
-    pub fn copy_subgraph_from(&mut self, other_states: &DWAStates, start_id: StateID) -> (StateID, HashMap<StateID, StateID>) {
+    /// Copy a subgraph from another `DWAStates` arena.
+    pub fn copy_subgraph_from(
+        &mut self,
+        other_states: &DWAStates,
+        start_id: StateID,
+    ) -> (StateID, HashMap<StateID, StateID>) {
         let mut remap = HashMap::new();
         let mut q = VecDeque::new();
 
@@ -190,14 +219,19 @@ impl DWAStates {
         while let Some((old_id, new_id)) = q.pop_front() {
             let old_state_clone = other_states[old_id].clone();
 
-            self[new_id].transitions = old_state_clone.transitions.iter().map(|(ch, &old_target)| {
-                let new_target_id = *remap.entry(old_target).or_insert_with(|| {
-                    let new_id = self.add_existing_state(other_states[old_target].clone());
-                    q.push_back((old_target, new_id));
-                    new_id
-                });
-                (*ch, new_target_id)
-            }).collect();
+            self[new_id].transitions = old_state_clone
+                .transitions
+                .iter()
+                .map(|(ch, &old_target)| {
+                    let new_target_id = *remap.entry(old_target).or_insert_with(|| {
+                        let new_id =
+                            self.add_existing_state(other_states[old_target].clone());
+                        q.push_back((old_target, new_id));
+                        new_id
+                    });
+                    (*ch, new_target_id)
+                })
+                .collect();
             self[new_id].trans_weights = old_state_clone.trans_weights;
         }
         (new_start_id, remap)
@@ -219,14 +253,21 @@ impl DWA {
     pub fn new() -> Self {
         let mut states = DWAStates::default();
         let start = states.add_state();
-        DWA { states, body: DWABody { start_state: start } }
+        DWA {
+            states,
+            body: DWABody { start_state: start },
+        }
     }
 
     pub fn add_state(&mut self) -> StateID {
         self.states.add_state()
     }
 
-    pub fn set_state_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
+    pub fn set_state_weight(
+        &mut self,
+        state: StateID,
+        weight: Weight,
+    ) -> Result<(), DWABuildError> {
         if state >= self.states.len() {
             return Err(DWABuildError::StateOutOfBounds { state });
         }
@@ -234,7 +275,11 @@ impl DWA {
         Ok(())
     }
 
-    pub fn set_final_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
+    pub fn set_final_weight(
+        &mut self,
+        state: StateID,
+        weight: Weight,
+    ) -> Result<(), DWABuildError> {
         if state >= self.states.len() {
             return Err(DWABuildError::StateOutOfBounds { state });
         }
@@ -279,7 +324,11 @@ impl Display for DWAStats {
         writeln!(f, "  - States: {}", self.num_states)?;
         writeln!(f, "  - Transitions: {}", self.num_transitions)?;
         writeln!(f, "  - Final States: {}", self.num_final_states)?;
-        writeln!(f, "  - Avg Transitions/State: {:.2}", self.avg_transitions_per_state)
+        writeln!(
+            f,
+            "  - Avg Transitions/State: {:.2}",
+            self.avg_transitions_per_state
+        )
     }
 }
 
@@ -335,7 +384,11 @@ impl Display for DWA {
                     format!("neg({})", decoded_id)
                 };
                 if let Some(w) = state.trans_weights.get(on) {
-                    writeln!(f, "    {} -> {} (trans_weight: {})", char_repr, to, w)?;
+                    writeln!(
+                        f,
+                        "    {} -> {} (trans_weight: {})",
+                        char_repr, to, w
+                    )?;
                 } else {
                     writeln!(f, "    {} -> {}", char_repr, to)?;
                 }
