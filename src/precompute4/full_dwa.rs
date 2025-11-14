@@ -278,7 +278,12 @@ fn build_label_follower_map(parser: &GLRParser) -> BTreeMap<ParserStateID, State
     }
 
     // Default transition
-    
+    let default_sid = ParserStateID(DEFAULT_TRANSITION_SYMBOL as usize);
+    for sid in 0..parser.table.len() {
+        let state_id = ParserStateID(sid);
+        add_follower(default_sid, state_id);
+        add_follower(state_id, default_sid);
+    }
 
     follower_map
 }
