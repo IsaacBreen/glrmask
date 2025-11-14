@@ -622,6 +622,8 @@ def run_determinize_acyclic_pass(args):
         print_fst_stats(fst, "After minimizing")
         fst = fst.determinize(config=DeterminizeConfig(det_type=DeterminizeType.DETERMINIZE_FUNCTIONAL))
         print_fst_stats(fst, "After determinizing")
+        fst = fst.minimize()
+        print_fst_stats(fst, "After final minimizing")
         print("\nRESULT: ✅ Determinization finished successfully.")
     except Exception as e:
         print(f"RESULT: ❌ Determinization failed with an error: {e}")
