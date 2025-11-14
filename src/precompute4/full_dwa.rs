@@ -193,6 +193,61 @@ fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
     changed
 }
 
+/// If a default transition for A -> B exists with weight W, subtract W from the weights of all
+/// non-default transitions A -> B (and remove if the resulting weight is empty).
+fn simplify_default_transitions(nwa: &mut NWA) -> bool {
+    let mut changed = false;
+    for i in 0..nwa.states.len() {
+        let state = &mut nwa.states[i];
+
+        // Find default transitions and aggregate their weights by target.
+        let mut default_weights: BTreeMap<StateID, Weight> = BTreeMap::new();
+        if let Some(default_targets) = state.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+            for (target, weight) in default_targets {
+                if !weight.is_empty() {
+                    *default_weights.entry(*target).or_insert_with(Weight::zeros) |= weight;
+                }
+            }
+        }
+
+        if default_weights.is_empty() {
+            continue;
+        }
+
+        // Iterate over all labeled transitions and subtract default weights where targets match.
+        for (label, targets) in state.transitions.iter_mut() {
+            if *label == DEFAULT_TRANSITION_SYMBOL {
+                continue;
+            }
+
+            for (target, weight) in targets.iter_mut() {
+                if let Some(default_weight) = default_weights.get(target) {
+                    let old_weight = weight.clone();
+                    *weight -= default_weight;
+                    if *weight != old_weight {
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // Clean up: remove empty-weight transitions.
+        for targets in state.transitions.values_mut() {
+            let old_len = targets.len();
+            targets.retain(|(_, w)| !w.is_empty());
+            if targets.len() != old_len {
+                changed = true;
+            }
+        }
+        let old_len = state.transitions.len();
+        state.transitions.retain(|_, targets| !targets.is_empty());
+        if state.transitions.len() != old_len {
+            changed = true;
+        }
+    }
+    changed
+}
+
 // Public API: precompute4 using NWA-first approach, determinize at the end.
 pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
     let now_total = Instant::now();
@@ -388,6 +443,13 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     combined_nwa.simplify_rustfst();
     crate::debug!(4, "Pruning and simplifying took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after pruning:\n{}", combined_nwa.stats());
+
+    let now = Instant::now();
+    crate::debug!(4, "Simplifying default transitions...");
+    simplify_default_transitions(&mut combined_nwa);
+    combined_nwa.simplify_rustfst();
+    crate::debug!(4, "Default transition simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+    crate::debug!(4, "Stats for combined NWA after default simplification:\n{}", combined_nwa.stats());
 
     let now = Instant::now();
     // Determinize the single combined NWA
