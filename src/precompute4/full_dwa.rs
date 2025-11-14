@@ -577,35 +577,6 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 }
             }
             if !tokens.is_empty() {
-                // Simplify the NWA by determinizing and converting back.
-                // This is an expensive but powerful simplification step.
-                // {
-                //     let mut states = states_arena.borrow_mut();
-                //
-                //     // Extract subgraph
-                //     let mut sub_nwa_states = NWAStates::default();
-                //     let (sub_start, _) = sub_nwa_states.copy_subgraph_from(&*states, nwa_body.start_state);
-                //     let mut sub_nwa = NWA {
-                //         states: sub_nwa_states,
-                //         body: NWABody { start_state: sub_start },
-                //     };
-                //     sub_nwa.simplify();
-                //
-                //     // apply_cancellations(&mut sub_nwa);
-                //     // apply_finality_fixpoint(&mut sub_nwa);
-                //     // remove_negative_transitions(&mut sub_nwa);
-                //     // prune_continuations_from_final_states(&mut sub_nwa);
-                //     // sub_nwa.simplify();
-                //
-                //     // Determinize, simplify, convert back
-                //     let mut temp_dwa = sub_nwa.determinize_to_dwa();
-                //     temp_dwa.simplify();
-                //     let new_nwa_from_dwa = NWA::from_dwa(&temp_dwa);
-                //
-                //     // Copy back into shared arena
-                //     let (new_start, _) = states.copy_subgraph_from(&new_nwa_from_dwa.states, new_nwa_from_dwa.body.start_state);
-                //     nwa_body.start_state = new_start;
-                // }
                 if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
                     for tokenizer_state_id in tokenizer_state_ids {
                         final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
