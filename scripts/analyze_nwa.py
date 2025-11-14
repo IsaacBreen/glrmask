@@ -553,6 +553,47 @@ def run_determinize_pass(args):
         print(f"RESULT: ❌ Determinization failed with an error: {e}")
 
 
+def run_determinize_unweighted_pass(args):
+    """Executes the 'determinize-unweighted' pass, ignoring all weights."""
+    print("--- Running Unweighted Determinization Pass ---")
+    nwa = load_nwa_data(args.filepath)
+
+    # Create unweighted versions of transitions and final states
+    unweighted_transitions = {(s, l, d, P.singleton(0)) for s, l, d, w in nwa["transitions"]}
+    unweighted_final_states = {s: P.singleton(0) for s in nwa["final_states"]}
+
+    print("\nAttempting to determinize the NWA structure (ignoring weights)...")
+    try:
+        # Pruning is still useful to resolve non-determinism for final/non-final states
+        transitions = prune_to_final_state_transitions(unweighted_transitions, unweighted_final_states.keys())
+
+        fst = VectorFst()
+        state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
+        fst.set_start(state_map[nwa["start_state"]])
+
+        # All final states are now simply final.
+        for state_id in unweighted_final_states:
+            fst.set_final(state_map[state_id], 0.0)
+
+        # All transitions are unweighted.
+        for source, label, dest, _ in transitions:
+            fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
+
+        print("\nFST Statistics:")
+        print_fst_stats(fst, "Initial FST")
+        fst = fst.connect().rm_epsilon().tr_unique()
+        print_fst_stats(fst, "After pre-processing")
+        fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
+        print_fst_stats(fst, "After minimizing")
+        fst = fst.determinize(config=DeterminizeConfig(det_type=DeterminizeType.DETERMINIZE_FUNCTIONAL))
+        print_fst_stats(fst, "After determinizing")
+        fst = fst.minimize()
+        print_fst_stats(fst, "After final minimizing")
+        print("\nRESULT: ✅ Unweighted determinization finished successfully.")
+    except Exception as e:
+        print(f"RESULT: ❌ Unweighted determinization failed with an error: {e}")
+
+
 def run_determinize_acyclic_pass(args):
     """Executes the 'determinize' pass after breaking all cycles."""
     print("--- Running Acyclic Determinization Pass ---")
@@ -1095,6 +1136,14 @@ if __name__ == "__main__":
     parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA using a single FST (may fail).")
     parser_det.add_argument("filepath", help="Path to the nwa_dump.json file.")
     parser_det.set_defaults(func=run_determinize_pass)
+
+    # --- Unweighted Determinize Pass ---
+    parser_det_unweighted = subparsers.add_parser(
+        "determinize-unweighted",
+        help="Determinize the NWA's structure, ignoring all weights."
+    )
+    parser_det_unweighted.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_det_unweighted.set_defaults(func=run_determinize_unweighted_pass)
 
     # --- Acyclic Determinize Pass ---
     parser_det_acyclic = subparsers.add_parser(
