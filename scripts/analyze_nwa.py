@@ -587,6 +587,8 @@ def run_determinize_unweighted_pass(args):
         print_fst_stats(fst, "After minimizing")
         fst = fst.determinize(config=DeterminizeConfig(det_type=DeterminizeType.DETERMINIZE_FUNCTIONAL))
         print_fst_stats(fst, "After determinizing")
+        fst = fst.determinize(config=DeterminizeConfig(det_type=DeterminizeType.DETERMINIZE_FUNCTIONAL))
+        print_fst_stats(fst, "After second determinization")
         fst = fst.minimize()
         print_fst_stats(fst, "After final minimizing")
         print("\nRESULT: ✅ Unweighted determinization finished successfully.")
