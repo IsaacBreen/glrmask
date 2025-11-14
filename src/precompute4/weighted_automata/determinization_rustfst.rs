@@ -174,8 +174,8 @@ fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                     fst.add_tr(
                         fst_state_id,
                         Tr::new(
-                            (*label as u16 as u64) + 1,
-                            (*label as u16 as u64) + 1,
+                            (*label as u32) + 1,
+                            (*label as u32) + 1,
                             BitsetWeight(weight.clone()),
                             state_map[target],
                         ),
