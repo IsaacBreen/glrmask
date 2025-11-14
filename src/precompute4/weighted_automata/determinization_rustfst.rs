@@ -261,5 +261,6 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     let det_config =
         DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeNonFunctional);
     let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
+    crate::debug!(5, "Determinized FST:\n{}", det_fst);
     vector_fst_to_dwa(&det_fst)
 }
