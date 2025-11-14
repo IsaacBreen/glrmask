@@ -491,7 +491,6 @@ local_system:
       use super::bitset::SimpleBitset;
 
       pub(crate) const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
-      pub(crate) const DETERMINIZE_DEBUG: bool = true;
 
       pub type StateID = usize;
       pub type Weight = SimpleBitset;
@@ -814,9 +813,8 @@ local_system:
       use chrono::Local;
       use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-      use crate::precompute4::test_weighted_automata;
 
-      use super::common::{DETERMINIZE_DEBUG, NWAStateID, Weight};
+      use super::common::{NWAStateID, Weight};
       use super::dwa::{DWA, DWABuildError};
       use super::nwa::{NWA, NWAStates};
 
@@ -1156,69 +1154,58 @@ local_system:
       impl NWA {
           /// Determinize the subgraph reachable from `self.body.start_state` into a DWA.
           pub fn determinize_to_dwa(&self) -> DWA {
-              let custom_dwa = if let Some(dwa) = try_build_singleton_loop_union(self) {
-                  dwa
-              } else {
-                  const STATE_LIMIT: usize = 100000;
-
-                  eprintln!(
-                      "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
-                  );
-                  if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
-                      DWA::new()
-                  } else {
-                      let mp = MultiProgress::new();
-                      let main_pb = mp.add(ProgressBar::new(1));
-                      main_pb.set_style(
-                          ProgressStyle::default_bar()
-                              .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-                              .unwrap()
-                              .progress_chars("#>-"),
-                      );
-                      main_pb.set_message("Determinizing NWA");
-
-                      let mut det = Determinizer::new(self, Some(mp));
-
-                      let mut start_subset: WeightedSubset = WeightedSubset::new();
-                      start_subset.insert(self.body.start_state, Weight::all());
-                      let start_id = det.register_state(start_subset);
-                      det.dwa.body.start_state = start_id;
-
-                      let mut processed_count = 0;
-                      while let Some(sid) = det.queue.pop_front() {
-                          if det.seen.len() > STATE_LIMIT {
-                              let timestamp = Local::now().format("%Y%m%d-%H%M%S");
-                              let filename = format!("nwa_dump_{}.json", timestamp);
-                              eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
-                              let f = std::fs::File::create(&filename).expect("Unable to create dump file");
-                              serde_json::to_writer(f, self).expect("Unable to write NWA to file");
-                              panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
-                          }
-
-                          let total_states = det.seen.len();
-                          main_pb.set_length(total_states as u64);
-                          main_pb.set_position(processed_count as u64);
-                          main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
-
-                          det.expand_state(sid);
-                          processed_count += 1;
-                      }
-                      main_pb.finish_with_message("Determinization complete");
-
-                      det.dwa
-                  }
-              };
-
-              if DETERMINIZE_DEBUG {
-                  let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
-                  eprintln!("[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
-                  eprintln!("[DETERMINIZE_DEBUG] Custom DWA stats: {}", custom_dwa.stats());
-                  eprintln!("[DETERMINIZE_DEBUG] Rustfst DWA stats: {}", rustfst_dwa.stats());
-                  test_weighted_automata::stochastic_equivalence_test(custom_dwa.clone(), rustfst_dwa);
-                  eprintln!("[DETERMINIZE_DEBUG] Stochastic equivalence test passed.");
+              if let Some(dwa) = try_build_singleton_loop_union(self) {
+                  return dwa;
               }
 
-              custom_dwa
+              const STATE_LIMIT: usize = 100000;
+
+              eprintln!(
+                  "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
+              );
+              if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
+                  return DWA::new();
+              }
+
+              let mp = MultiProgress::new();
+              let main_pb = mp.add(ProgressBar::new(1));
+              main_pb.set_style(
+                  ProgressStyle::default_bar()
+                      .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                      .unwrap()
+                      .progress_chars("#>-"),
+              );
+              main_pb.set_message("Determinizing NWA");
+
+              let mut det = Determinizer::new(self, Some(mp));
+
+              let mut start_subset: WeightedSubset = WeightedSubset::new();
+              start_subset.insert(self.body.start_state, Weight::all());
+              let start_id = det.register_state(start_subset);
+              det.dwa.body.start_state = start_id;
+
+              let mut processed_count = 0;
+              while let Some(sid) = det.queue.pop_front() {
+                  if det.seen.len() > STATE_LIMIT {
+                      let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+                      let filename = format!("nwa_dump_{}.json", timestamp);
+                      eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+                      let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+                      serde_json::to_writer(f, self).expect("Unable to write NWA to file");
+                      panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
+                  }
+
+                  let total_states = det.seen.len();
+                  main_pb.set_length(total_states as u64);
+                  main_pb.set_position(processed_count as u64);
+                  main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
+
+                  det.expand_state(sid);
+                  processed_count += 1;
+              }
+              main_pb.finish_with_message("Determinization complete");
+
+              det.dwa
           }
       }
     src/precompute4/weighted_automata/dwa.rs: |
@@ -4916,7 +4903,7 @@ local_system:
       use super::bitset::SimpleBitset;
 
       pub(crate) const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
-      pub(crate) const DETERMINIZE_DEBUG: bool = true;
+      pub(crate) const DETERMINIZE_DEBUG: bool = false;
 
       pub type StateID = usize;
       pub type Weight = SimpleBitset;
@@ -5250,11 +5237,11 @@ local_system:
       type ClosureMap = BTreeMap<NWAStateID, Weight>;
 
       // Helper ops on Weight
-      fn weight_union(a: &Weight, b: &Weight) -> Weight {
-          a | b
+      fn weight_union(mut a: Weight, b: &Weight) -> Weight {
+          a | b.clone()
       }
       fn weight_union_in_place(dst: &mut Weight, src: &Weight) {
-          *dst |= src;
+          *dst = dst.clone() | src.clone();
       }
       fn weight_intersection(a: &Weight, b: &Weight) -> Weight {
           a & b
@@ -5268,23 +5255,32 @@ local_system:
       // Output: closure map mapping every reachable state via ε-paths to the union of all
       // weights of those ε-paths (seed_weight ∧ ε-edges ∧ ...).
       fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap {
-          if seed.is_empty() {
-              return ClosureMap::new();
+          let mut closure: ClosureMap = ClosureMap::new();
+          let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+
+          for (sid, w) in seed {
+              if !is_zero(w) {
+                  let prev = closure.get(sid).cloned().unwrap_or_else(Weight::zeros);
+                  let neww = weight_union(prev.clone(), w);
+                  if neww != prev {
+                      closure.insert(*sid, neww.clone());
+                      queue.push_back(*sid);
+                  }
+              }
           }
-          let mut closure: ClosureMap = seed.clone();
-          let mut queue: VecDeque<NWAStateID> = seed.keys().copied().collect();
 
           while let Some(u) = queue.pop_front() {
-              let uw = closure[&u].clone();
+              let uw = closure.get(&u).cloned().unwrap_or_else(Weight::zeros);
               if is_zero(&uw) {
                   continue;
               }
               for (v, w_eps) in &nwa_states[u].epsilons {
                   let cand = weight_intersection(&uw, w_eps);
-                  if is_zero(&cand) { continue; }
-
+                  if is_zero(&cand) {
+                      continue;
+                  }
                   let prev = closure.get(v).cloned().unwrap_or_else(Weight::zeros);
-                  let merged = weight_union(&prev, &cand);
+                  let merged = weight_union(prev.clone(), &cand);
                   if merged != prev {
                       closure.insert(*v, merged.clone());
                       queue.push_back(*v);
@@ -9379,7 +9375,6 @@ messages:
       use super::bitset::SimpleBitset;
 
       pub(crate) const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
-      pub(crate) const DETERMINIZE_DEBUG: bool = true;
 
       pub type StateID = usize;
       pub type Weight = SimpleBitset;
@@ -9712,9 +9707,8 @@ messages:
       use chrono::Local;
       use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-      use crate::precompute4::test_weighted_automata;
 
-      use super::common::{DETERMINIZE_DEBUG, NWAStateID, Weight};
+      use super::common::{NWAStateID, Weight};
       use super::dwa::{DWA, DWABuildError};
       use super::nwa::{NWA, NWAStates};
 
@@ -10054,69 +10048,58 @@ messages:
       impl NWA {
           /// Determinize the subgraph reachable from `self.body.start_state` into a DWA.
           pub fn determinize_to_dwa(&self) -> DWA {
-              let custom_dwa = if let Some(dwa) = try_build_singleton_loop_union(self) {
-                  dwa
-              } else {
-                  const STATE_LIMIT: usize = 100000;
-
-                  eprintln!(
-                      "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
-                  );
-                  if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
-                      DWA::new()
-                  } else {
-                      let mp = MultiProgress::new();
-                      let main_pb = mp.add(ProgressBar::new(1));
-                      main_pb.set_style(
-                          ProgressStyle::default_bar()
-                              .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-                              .unwrap()
-                              .progress_chars("#>-"),
-                      );
-                      main_pb.set_message("Determinizing NWA");
-
-                      let mut det = Determinizer::new(self, Some(mp));
-
-                      let mut start_subset: WeightedSubset = WeightedSubset::new();
-                      start_subset.insert(self.body.start_state, Weight::all());
-                      let start_id = det.register_state(start_subset);
-                      det.dwa.body.start_state = start_id;
-
-                      let mut processed_count = 0;
-                      while let Some(sid) = det.queue.pop_front() {
-                          if det.seen.len() > STATE_LIMIT {
-                              let timestamp = Local::now().format("%Y%m%d-%H%M%S");
-                              let filename = format!("nwa_dump_{}.json", timestamp);
-                              eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
-                              let f = std::fs::File::create(&filename).expect("Unable to create dump file");
-                              serde_json::to_writer(f, self).expect("Unable to write NWA to file");
-                              panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
-                          }
-
-                          let total_states = det.seen.len();
-                          main_pb.set_length(total_states as u64);
-                          main_pb.set_position(processed_count as u64);
-                          main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
-
-                          det.expand_state(sid);
-                          processed_count += 1;
-                      }
-                      main_pb.finish_with_message("Determinization complete");
-
-                      det.dwa
-                  }
-              };
-
-              if DETERMINIZE_DEBUG {
-                  let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
-                  eprintln!("[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
-                  eprintln!("[DETERMINIZE_DEBUG] Custom DWA stats: {}", custom_dwa.stats());
-                  eprintln!("[DETERMINIZE_DEBUG] Rustfst DWA stats: {}", rustfst_dwa.stats());
-                  test_weighted_automata::stochastic_equivalence_test(custom_dwa.clone(), rustfst_dwa);
-                  eprintln!("[DETERMINIZE_DEBUG] Stochastic equivalence test passed.");
+              if let Some(dwa) = try_build_singleton_loop_union(self) {
+                  return dwa;
               }
 
-              custom_dwa
+              const STATE_LIMIT: usize = 100000;
+
+              eprintln!(
+                  "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
+              );
+              if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
+                  return DWA::new();
+              }
+
+              let mp = MultiProgress::new();
+              let main_pb = mp.add(ProgressBar::new(1));
+              main_pb.set_style(
+                  ProgressStyle::default_bar()
+                      .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                      .unwrap()
+                      .progress_chars("#>-"),
+              );
+              main_pb.set_message("Determinizing NWA");
+
+              let mut det = Determinizer::new(self, Some(mp));
+
+              let mut start_subset: WeightedSubset = WeightedSubset::new();
+              start_subset.insert(self.body.start_state, Weight::all());
+              let start_id = det.register_state(start_subset);
+              det.dwa.body.start_state = start_id;
+
+              let mut processed_count = 0;
+              while let Some(sid) = det.queue.pop_front() {
+                  if det.seen.len() > STATE_LIMIT {
+                      let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+                      let filename = format!("nwa_dump_{}.json", timestamp);
+                      eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+                      let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+                      serde_json::to_writer(f, self).expect("Unable to write NWA to file");
+                      panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
+                  }
+
+                  let total_states = det.seen.len();
+                  main_pb.set_length(total_states as u64);
+                  main_pb.set_position(processed_count as u64);
+                  main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
+
+                  det.expand_state(sid);
+                  processed_count += 1;
+              }
+              main_pb.finish_with_message("Determinization complete");
+
+              det.dwa
           }
       }
 
@@ -13380,75 +13363,9 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata/tuple_merger.rs
-  - user: |+
-      [DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken).
-      [DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...
-      [DETERMINIZE_DEBUG] Custom DWA stats: DWA Stats:
-        - States: 3
-        - Transitions: 2
-        - Final States: 2
-        - Avg Transitions/State: 0.67
-
-      [DETERMINIZE_DEBUG] Rustfst DWA stats: DWA Stats:
-        - States: 2
-        - Transitions: 1
-        - Final States: 2
-        - Avg Transitions/State: 0.50
-
-      [DEBUG] 5] src/precompute4/test_weighted_automata.rs:228: Starting stochastic equivalence test
-
-
-      thread 'precompute4::test_weighted_automata::test_union_from_debug_log_simplified2' (2851516) panicked at src/precompute4/test_weighted_automata.rs:234:13:
-      assertion `left == right` failed: Equivalence fail: A(w) != B(w) for word from A.
-      word: [0]
-      A(w): [0]
-      B(w): []
-
-      DWA A:
-      DWA (start: 0)
-        State 0:
-          0 -> 1 (trans_weight: [0..=1])
-        State 1:
-          final_weight: [0]
-          1 -> 2 (trans_weight: [1])
-        State 2:
-          final_weight: [1]
-
-
-      DWA B:
-      DWA (start: 0)
-        State 0:
-          final_weight: [0]
-          1 -> 1 (trans_weight: [1])
-        State 1:
-          final_weight: [1]
-
-        left: 0..=0
-       right: 
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::test_weighted_automata::stochastic_equivalence_test
-                   at ./src/precompute4/test_weighted_automata.rs:234:13
-         5: sep1::precompute4::weighted_automata::determinization::<impl sep1::precompute4::weighted_automata::nwa::NWA>::determinize_to_dwa
-                   at ./src/precompute4/weighted_automata/determinization.rs:431:13
-         6: sep1::precompute4::weighted_automata::ops::<impl sep1::precompute4::weighted_automata::dwa::DWA>::union
-                   at ./src/precompute4/weighted_automata/ops.rs:79:36
-         7: sep1::precompute4::test_weighted_automata::test_union_from_debug_log_simplified2
-                   at ./src/precompute4/test_weighted_automata.rs:1089:18
-         8: sep1::precompute4::test_weighted_automata::test_union_from_debug_log_simplified2::{{closure}}
-                   at ./src/precompute4/test_weighted_automata.rs:1069:43
-         9: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-        10: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
+  - user: Add a debug flag `DETERMINIZE_DEBUG` that tests the determinization.rs implementation
+      of determinization against that in determinization_rustfst.rs. It should do
+      a stochastic equality test to ensure they're equivalent.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -13468,147 +13385,200 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've analyzed the panic and the provided DWA outputs. The discrepancy between your custom determinization and the `rustfst`-based one, particularly regarding the acceptance of the empty word, points to a likely issue in the epsilon-closure calculation within your determinization algorithm.
+      Of course. Here are the step-by-step instructions to add the debug flag, followed by the corresponding git diffs.
 
-      The existing implementation in `epsilon_closure` is functionally correct but uses complex and inefficient cloning patterns. I'll refactor it to be cleaner and more direct. This will improve readability and may resolve a subtle bug related to state updates. I'll also clean up the related `weight_union` helper functions.
+      ### Step-by-step Instructions
 
-      Here are the step-by-step instructions to apply the fix:
+      1.  **In `src/precompute4/weighted_automata/common.rs`:**
+          *   Add a new boolean constant `DETERMINIZE_DEBUG` right after `STOCHASTIC_DEBUG`. This flag will control whether the comparison between determinization algorithms is run.
 
-      ### Step-by-step instructions:
+      2.  **In `src/precompute4/weighted_automata/determinization.rs`:**
+          *   First, add the necessary imports at the top of the file:
+              *   Modify the `use super::common` line to also import `DETERMINIZE_DEBUG`.
+              *   Add `use crate::precompute4::test_weighted_automata;` to bring the stochastic testing function into scope. I am assuming this module and function are available as they are used elsewhere in your project.
+          *   Next, refactor the `determinize_to_dwa` method within the `impl NWA` block:
+              *   The entire body of the function will be wrapped to first compute the result from your custom implementation and store it in a variable named `custom_dwa`. The existing `return` statements will be changed to return values from their respective code blocks.
+              *   After computing `custom_dwa`, add an `if DETERMINIZE_DEBUG` block.
+              *   Inside this block:
+                  1.  Call `self.determinize_to_dwa_with_rustfst()` to get the result from the `rustfst`-based implementation.
+                  2.  Print the stats of both the custom DWA and the `rustfst` DWA for comparison.
+                  3.  Call `test_weighted_automata::stochastic_equivalence_test()` to perform a stochastic check for equivalence between the two DWAs.
+                  4.  Print a success message if the check passes.
+              *   Finally, return the `custom_dwa`.
 
-      1.  **Open `src/precompute4/weighted_automata/determinization.rs`**.
+      ### Git Diffs
 
-      2.  **Refactor `weight_union` and `weight_union_in_place`**:
-          Locate the helper functions for `Weight` operations around line 31. Replace the existing `weight_union` and `weight_union_in_place` functions with the following more efficient versions that use borrowing and in-place assignment correctly:
-
-          ```rust
-          // Helper ops on Weight
-          fn weight_union(a: &Weight, b: &Weight) -> Weight {
-              a | b
-          }
-          fn weight_union_in_place(dst: &mut Weight, src: &Weight) {
-              *dst |= src;
-          }
-          ```
-
-      3.  **Refactor `epsilon_closure`**:
-          Replace the entire `epsilon_closure` function (starting around line 49) with this simplified and more robust implementation:
-
-          ```rust
-          fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap {
-              if seed.is_empty() {
-                  return ClosureMap::new();
-              }
-              let mut closure: ClosureMap = seed.clone();
-              let mut queue: VecDeque<NWAStateID> = seed.keys().copied().collect();
-          
-              while let Some(u) = queue.pop_front() {
-                  let uw = closure[&u].clone();
-                  if is_zero(&uw) {
-                      continue;
-                  }
-                  for (v, w_eps) in &nwa_states[u].epsilons {
-                      let cand = weight_intersection(&uw, w_eps);
-                      if is_zero(&cand) { continue; }
-          
-                      let prev = closure.get(v).cloned().unwrap_or_else(Weight::zeros);
-                      let merged = weight_union(&prev, &cand);
-                      if merged != prev {
-                          closure.insert(*v, merged.clone());
-                          queue.push_back(*v);
-                      }
-                  }
-              }
-          
-              closure
-          }
-          ```
-          This new version initializes the closure and work queue more directly from the `seed` and uses direct lookups within the main loop, which is both cleaner and safer. The call to `weight_union` is also updated to match its new signature.
-
-      After applying these changes, the determinization logic will be more direct and should correctly handle epsilon-closures, resolving the discrepancy with the reference implementation.
-
-      ### Git Diffs:
-
-      Here is the git diff for the changes:
+      Here are the git diffs to apply these changes.
 
       ```diff
+      diff --git a/src/precompute4/weighted_automata/common.rs b/src/precompute4/weighted_automata/common.rs
+      --- a/src/precompute4/weighted_automata/common.rs
+      +++ b/src/precompute4/weighted_automata/common.rs
+      @@ -5,6 +5,7 @@
+       use super::bitset::SimpleBitset;
+       
+       pub(crate) const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
+      +pub(crate) const DETERMINIZE_DEBUG: bool = false;
+       
+       pub type StateID = usize;
+       pub type Weight = SimpleBitset;
+
+      ```
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/determinization.rs b/src/precompute4/weighted_automata/determinization.rs
       --- a/src/precompute4/weighted_automata/determinization.rs
       +++ b/src/precompute4/weighted_automata/determinization.rs
-      @@ -31,11 +31,11 @@
-       type ClosureMap = BTreeMap<NWAStateID, Weight>;
+      @@ -23,9 +23,10 @@
+       use chrono::Local;
+       use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+      +use crate::precompute4::test_weighted_automata;
        
-       // Helper ops on Weight
-      -fn weight_union(mut a: Weight, b: &Weight) -> Weight {
-      -    a | b.clone()
-      +fn weight_union(a: &Weight, b: &Weight) -> Weight {
-      +    a | b
-       }
-       fn weight_union_in_place(dst: &mut Weight, src: &Weight) {
-      -    *dst = dst.clone() | src.clone();
-      +    *dst |= src;
-       }
-       fn weight_intersection(a: &Weight, b: &Weight) -> Weight {
-           a & b
-      @@ -49,36 +49,28 @@
-       // Output: closure map mapping every reachable state via ε-paths to the union of all
-       // weights of those ε-paths (seed_weight ∧ ε-edges ∧ ...).
-       fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap {
-      -    let mut closure: ClosureMap = ClosureMap::new();
-      -    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-      -
-      -    for (sid, w) in seed {
-      -        if !is_zero(w) {
-      -            let prev = closure.get(sid).cloned().unwrap_or_else(Weight::zeros);
-      -            let neww = weight_union(prev.clone(), w);
-      -            if neww != prev {
-      -                closure.insert(*sid, neww.clone());
-      -                queue.push_back(*sid);
-      -            }
+      -use super::common::{NWAStateID, Weight};
+      +use super::common::{DETERMINIZE_DEBUG, NWAStateID, Weight};
+       use super::dwa::{DWA, DWABuildError};
+       use super::nwa::{NWA, NWAStates};
+       
+      @@ -411,61 +412,70 @@
+       impl NWA {
+           /// Determinize the subgraph reachable from `self.body.start_state` into a DWA.
+           pub fn determinize_to_dwa(&self) -> DWA {
+      -        if let Some(dwa) = try_build_singleton_loop_union(self) {
+      -            return dwa;
       -        }
-      +    if seed.is_empty() {
-      +        return ClosureMap::new();
-           }
-      +    let mut closure: ClosureMap = seed.clone();
-      +    let mut queue: VecDeque<NWAStateID> = seed.keys().copied().collect();
-       
-           while let Some(u) = queue.pop_front() {
-      -        let uw = closure.get(&u).cloned().unwrap_or_else(Weight::zeros);
-      +        let uw = closure[&u].clone();
-               if is_zero(&uw) {
-                   continue;
-               }
-               for (v, w_eps) in &nwa_states[u].epsilons {
-                   let cand = weight_intersection(&uw, w_eps);
-      -            if is_zero(&cand) {
-      -                continue;
+      -
+      -        const STATE_LIMIT: usize = 100000;
+      -
+      -        eprintln!(
+      -            "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
+      -        );
+      -        if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
+      -            return DWA::new();
+      -        }
+      -
+      -        let mp = MultiProgress::new();
+      -        let main_pb = mp.add(ProgressBar::new(1));
+      -        main_pb.set_style(
+      -            ProgressStyle::default_bar()
+      -                .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+      -                .unwrap()
+      -                .progress_chars("#>-"),
+      -        );
+      -        main_pb.set_message("Determinizing NWA");
+      -
+      -        let mut det = Determinizer::new(self, Some(mp));
+      -
+      -        let mut start_subset: WeightedSubset = WeightedSubset::new();
+      -        start_subset.insert(self.body.start_state, Weight::all());
+      -        let start_id = det.register_state(start_subset);
+      -        det.dwa.body.start_state = start_id;
+      -
+      -        let mut processed_count = 0;
+      -        while let Some(sid) = det.queue.pop_front() {
+      -            if det.seen.len() > STATE_LIMIT {
+      -                let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+      -                let filename = format!("nwa_dump_{}.json", timestamp);
+      -                eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+      -                let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+      -                serde_json::to_writer(f, self).expect("Unable to write NWA to file");
+      -                panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
       -            }
-      +            if is_zero(&cand) { continue; }
+      -
+      -            let total_states = det.seen.len();
+      -            main_pb.set_length(total_states as u64);
+      -            main_pb.set_position(processed_count as u64);
+      -            main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
+      -
+      -            det.expand_state(sid);
+      -            processed_count += 1;
+      -        }
+      -        main_pb.finish_with_message("Determinization complete");
+      -
+      -        det.dwa
+      +        let custom_dwa = if let Some(dwa) = try_build_singleton_loop_union(self) {
+      +            dwa
+      +        } else {
+      +            const STATE_LIMIT: usize = 100000;
       +
-                   let prev = closure.get(v).cloned().unwrap_or_else(Weight::zeros);
-      -            let merged = weight_union(prev.clone(), &cand);
-      +            let merged = weight_union(&prev, &cand);
-                   if merged != prev {
-                       closure.insert(*v, merged.clone());
-                       queue.push_back(*v);
-                   }
-               }
+      +            eprintln!(
+      +                "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
+      +            );
+      +            if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
+      +                DWA::new()
+      +            } else {
+      +                let mp = MultiProgress::new();
+      +                let main_pb = mp.add(ProgressBar::new(1));
+      +                main_pb.set_style(
+      +                    ProgressStyle::default_bar()
+      +                        .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+      +                        .unwrap()
+      +                        .progress_chars("#>-"),
+      +                );
+      +                main_pb.set_message("Determinizing NWA");
+      +
+      +                let mut det = Determinizer::new(self, Some(mp));
+      +
+      +                let mut start_subset: WeightedSubset = WeightedSubset::new();
+      +                start_subset.insert(self.body.start_state, Weight::all());
+      +                let start_id = det.register_state(start_subset);
+      +                det.dwa.body.start_state = start_id;
+      +
+      +                let mut processed_count = 0;
+      +                while let Some(sid) = det.queue.pop_front() {
+      +                    if det.seen.len() > STATE_LIMIT {
+      +                        let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+      +                        let filename = format!("nwa_dump_{}.json", timestamp);
+      +                        eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+      +                        let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+      +                        serde_json::to_writer(f, self).expect("Unable to write NWA to file");
+      +                        panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
+      +                    }
+      +
+      +                    let total_states = det.seen.len();
+      +                    main_pb.set_length(total_states as u64);
+      +                    main_pb.set_position(processed_count as u64);
+      +                    main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
+      +
+      +                    det.expand_state(sid);
+      +                    processed_count += 1;
+      +                }
+      +                main_pb.finish_with_message("Determinization complete");
+      +
+      +                det.dwa
+      +            }
+      +        };
+      +
+      +        if DETERMINIZE_DEBUG {
+      +            let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
+      +            eprintln!("[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
+      +            eprintln!("[DETERMINIZE_DEBUG] Custom DWA stats: {}", custom_dwa.stats());
+      +            eprintln!("[DETERMINIZE_DEBUG] Rustfst DWA stats: {}", rustfst_dwa.stats());
+      +            test_weighted_automata::stochastic_equivalence_test(custom_dwa.clone(), rustfst_dwa);
+      +            eprintln!("[DETERMINIZE_DEBUG] Stochastic equivalence test passed.");
+      +        }
+      +
+      +        custom_dwa
            }
-       
-           closure
        }
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/common.rs
+      Applying patch to 'src/precompute4/weighted_automata/common.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/common.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/precompute4/weighted_automata/determinization.rs
       Applying patch to 'src/precompute4/weighted_automata/determinization.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Simplify weight union helpers
-      and clean up epsilon_closure implementation"'
+  - user: 'Changes committed with message: "Add DETERMINIZE_DEBUG flag to compare
+      custom NWA determinization against rustfst implementation"'
     metadata:
 ...

@@ -39,11 +39,11 @@ type WeightedSubset = BTreeMap<NWAStateID, Weight>;
 type ClosureMap = BTreeMap<NWAStateID, Weight>;
 
 // Helper ops on Weight
-fn weight_union(a: &Weight, b: &Weight) -> Weight {
-    a | b
+fn weight_union(mut a: Weight, b: &Weight) -> Weight {
+    a | b.clone()
 }
 fn weight_union_in_place(dst: &mut Weight, src: &Weight) {
-    *dst |= src;
+    *dst = dst.clone() | src.clone();
 }
 fn weight_intersection(a: &Weight, b: &Weight) -> Weight {
     a & b
@@ -57,23 +57,32 @@ fn is_zero(w: &Weight) -> bool {
 // Output: closure map mapping every reachable state via ε-paths to the union of all
 // weights of those ε-paths (seed_weight ∧ ε-edges ∧ ...).
 fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap {
-    if seed.is_empty() {
-        return ClosureMap::new();
+    let mut closure: ClosureMap = ClosureMap::new();
+    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+
+    for (sid, w) in seed {
+        if !is_zero(w) {
+            let prev = closure.get(sid).cloned().unwrap_or_else(Weight::zeros);
+            let neww = weight_union(prev.clone(), w);
+            if neww != prev {
+                closure.insert(*sid, neww.clone());
+                queue.push_back(*sid);
+            }
+        }
     }
-    let mut closure: ClosureMap = seed.clone();
-    let mut queue: VecDeque<NWAStateID> = seed.keys().copied().collect();
 
     while let Some(u) = queue.pop_front() {
-        let uw = closure[&u].clone();
+        let uw = closure.get(&u).cloned().unwrap_or_else(Weight::zeros);
         if is_zero(&uw) {
             continue;
         }
         for (v, w_eps) in &nwa_states[u].epsilons {
             let cand = weight_intersection(&uw, w_eps);
-            if is_zero(&cand) { continue; }
-
+            if is_zero(&cand) {
+                continue;
+            }
             let prev = closure.get(v).cloned().unwrap_or_else(Weight::zeros);
-            let merged = weight_union(&prev, &cand);
+            let merged = weight_union(prev.clone(), &cand);
             if merged != prev {
                 closure.insert(*v, merged.clone());
                 queue.push_back(*v);
