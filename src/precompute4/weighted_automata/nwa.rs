@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
 use rustfst::algorithms::{minimize, MinimizeConfig};
+use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
 use rustfst::prelude::minimize_with_config;
 use crate::precompute4::weighted_automata::determinization_rustfst::{nwa_to_vector_fst, vector_fst_to_nwa};
@@ -312,6 +313,7 @@ impl NWA {
 
 #[derive(Clone, Debug)]
 pub struct SimplifyRustfstConfig {
+    pub determinize: bool,
     pub minimize: bool,
     pub connect: bool,
     pub rm_epsilon: bool,
@@ -320,6 +322,7 @@ pub struct SimplifyRustfstConfig {
 impl Default for SimplifyRustfstConfig {
     fn default() -> Self {
         Self {
+            determinize: false,
             minimize: true,
             connect: true,
             rm_epsilon: false,
@@ -328,6 +331,11 @@ impl Default for SimplifyRustfstConfig {
 }
 
 impl SimplifyRustfstConfig {
+    pub fn with_determinize(mut self, determinize: bool) -> Self {
+        self.determinize = determinize;
+        self
+    }
+
     pub fn with_minimize(mut self, minimize: bool) -> Self {
         self.minimize = minimize;
         self
@@ -366,6 +374,12 @@ impl NWA {
             crate::debug!(4, "Remove Epsilon");
             rm_epsilon(&mut fst).unwrap();
             crate::debug!(4, "Convert back to NWA");
+        }
+        if config.determinize {
+            crate::debug!(4, "Determinize");
+            let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
+            fst = determinize_with_config(&fst, det_config).unwrap();
+
         }
         *self = vector_fst_to_nwa(&fst);
     }
