@@ -473,6 +473,80 @@ def run_determinize_pass(args):
         print(f"RESULT: ❌ Determinization failed with an error: {e}")
 
 
+def run_determinize_acyclic_pass(args):
+    """Executes the 'determinize' pass after breaking all cycles."""
+    print("--- Running Acyclic Determinization Pass ---")
+    nwa = load_nwa_data(args.filepath)
+
+    print("\nBuilding graph to find cycles...")
+    G = nx.DiGraph()
+    G.add_nodes_from(range(nwa["num_states"]))
+    G.add_edges_from([(s, d) for s, l, d, w in nwa["transitions"]])
+
+    all_sccs = list(nx.strongly_connected_components(G))
+    transitions_to_remove = set()
+
+    # A map for quick lookup
+    source_to_trans = defaultdict(list)
+    for t in nwa["transitions"]:
+        source_to_trans[t[0]].append(t)
+
+    for scc in all_sccs:
+        scc_nodes = set(scc)
+        if len(scc_nodes) > 1:
+            # Non-trivial SCC, find an internal edge to break the cycle
+            edge_to_break = None
+            for source_node in scc_nodes:
+                for s, l, d, w in source_to_trans.get(source_node, []):
+                    if d in scc_nodes:
+                        edge_to_break = (s, l, d, w)
+                        break
+                if edge_to_break:
+                    break
+            if edge_to_break:
+                print(f"Breaking cycle in SCC of size {len(scc_nodes)} by removing transition: {edge_to_break[:3]}")
+                transitions_to_remove.add(edge_to_break)
+        else:
+            # Trivial SCC, check for self-loop
+            node = list(scc_nodes)[0]
+            for s, l, d, w in source_to_trans.get(node, []):
+                if d == node:  # self-loop
+                    self_loop_edge = (s, l, d, w)
+                    print(f"Breaking self-loop on state {node} by removing transition: {self_loop_edge[:3]}")
+                    transitions_to_remove.add(self_loop_edge)
+
+    acyclic_transitions = nwa["transitions"] - transitions_to_remove
+    print(f"\nRemoved {len(transitions_to_remove)} transitions to make the graph acyclic.")
+    print(f"Proceeding with {len(acyclic_transitions)} transitions.")
+
+    print("\nAttempting to determinize the acyclic NWA...")
+    try:
+        transitions = prune_to_final_state_transitions(acyclic_transitions, nwa["final_states"].keys())
+        fst = VectorFst()
+        state_map = {i: fst.add_state() for i in range(nwa["num_states"])}
+        fst.set_start(state_map[nwa["start_state"]])
+        for state_id, weight in nwa["final_states"].items():
+            fst.set_final(state_map[state_id], 0.0)
+        for source, label, dest, weight in transitions:
+            fst.add_tr(state_map[source], Tr(label, label, 0.0, state_map[dest]))
+
+        print("\nFST Statistics:")
+        print_fst_stats(fst, "Initial FST")
+        fst = fst.connect()
+        print_fst_stats(fst, "After connecting")
+        fst = fst.rm_epsilon()
+        print_fst_stats(fst, "After removing epsilons")
+        fst = fst.tr_unique()
+        print_fst_stats(fst, "After tr_unique")
+        fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
+        print_fst_stats(fst, "After minimizing")
+        fst = fst.determinize(config=DeterminizeConfig(det_type=DeterminizeType.DETERMINIZE_FUNCTIONAL))
+        print_fst_stats(fst, "After determinizing")
+        print("\nRESULT: ✅ Determinization finished successfully.")
+    except Exception as e:
+        print(f"RESULT: ❌ Determinization failed with an error: {e}")
+
+
 def run_inspect_states_pass(args):
     """Executes the 'inspect-states' pass for pretty-printing."""
     print("--- Running Inspect States Pass ---")
@@ -859,6 +933,14 @@ if __name__ == "__main__":
     parser_det = subparsers.add_parser("determinize", help="Attempt to determinize the full NWA using a single FST (may fail).")
     parser_det.add_argument("filepath", help="Path to the nwa_dump.json file.")
     parser_det.set_defaults(func=run_determinize_pass)
+
+    # --- Acyclic Determinize Pass ---
+    parser_det_acyclic = subparsers.add_parser(
+        "determinize-acyclic",
+        help="Breaks all cycles (SCCs) in the NWA and then attempts to determinize it."
+    )
+    parser_det_acyclic.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_det_acyclic.set_defaults(func=run_determinize_acyclic_pass)
 
     # --- Inspect States Pass (Pretty) ---
     parser_inspect = subparsers.add_parser("inspect-states", help="Pretty-print a human-readable summary for specific state IDs.")
