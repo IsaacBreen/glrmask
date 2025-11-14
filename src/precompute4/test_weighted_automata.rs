@@ -1,4 +1,4 @@
-use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word, DEFAULT_TRANSITION_SYMBOL};
+use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
@@ -54,29 +54,6 @@ const BASE_ALPHABET: &[i16] = &[
     i16::MIN + 5, i16::MIN + 6, i16::MIN + 7, i16::MIN + 8, i16::MIN + 9, i16::MIN + 10,
 ];
 
-fn pick_default_char_for_state(st: &DWAState, rng: &mut SimpleRng) -> i16 {
-    let ex = &st.transitions;
-    // Try random from base alphabet
-    if !BASE_ALPHABET.is_empty() {
-        let mut idx = rng.gen_usize(BASE_ALPHABET.len());
-        for _ in 0..BASE_ALPHABET.len() {
-            let ch = BASE_ALPHABET[idx % BASE_ALPHABET.len()];
-            if !ex.contains_key(&ch) {
-                return ch;
-            }
-            idx = idx.wrapping_add(1);
-        }
-    }
-    // Fallback: scan integers to find a non-exception char (always exists since exceptions are finite).
-    let mut probe: i16 = 0;
-    loop {
-        if !ex.contains_key(&probe) {
-            return probe;
-        }
-        probe = probe.wrapping_add(1);
-    }
-}
-
 fn weight_subset(sub: &Weight, sup: &Weight) -> bool {
     (sub & sup) == sub.clone()
 }
@@ -118,9 +95,8 @@ impl DWA {
 
                 // Choose next character: one of the exception keys or a default-character if default exists.
                 let st = &self.states[s];
-                let mut choices: Vec<i16> = st.transitions.keys().copied().filter(|&k| k != DEFAULT_TRANSITION_SYMBOL).collect();
-                let has_default = st.transitions.contains_key(&DEFAULT_TRANSITION_SYMBOL);
-                let total = choices.len() + if has_default { 1 } else { 0 };
+                let choices: Vec<i16> = st.transitions.keys().copied().collect();
+                let total = choices.len();
                 if total == 0 {
                     // Dead-end; try to finalize or abort attempt.
                     if let Some(fw) = &st.final_weight {
@@ -132,13 +108,9 @@ impl DWA {
                     break; // new attempt
                 }
                 let pick = rng.gen_usize(total);
-                let ch = if has_default && pick == choices.len() {
-                    pick_default_char_for_state(st, rng)
-                } else {
-                    choices[pick]
-                };
+                let ch = choices[pick];
 
-                let next = st.transitions.get(&ch).or_else(|| st.transitions.get(&DEFAULT_TRANSITION_SYMBOL)).copied();
+                let next = st.transitions.get(&ch).copied();
                 if next.is_none() {
                     break;
                 }
@@ -315,13 +287,6 @@ fn test_dwa_builder() {
     let res = dwa.add_transition(0, b'a' as i16, 1, SimpleBitset::zeros());
     assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: 97 })));
 
-    dwa.set_default_transition(0, 0, SimpleBitset::from_item(40)).unwrap();
-    assert_eq!(dwa.states[0].transitions.get(&DEFAULT_TRANSITION_SYMBOL), Some(&0));
-    assert_eq!(dwa.states[0].trans_weights.get(&DEFAULT_TRANSITION_SYMBOL), Some(&SimpleBitset::from_item(40)));
-
-    let res = dwa.set_default_transition(0, 0, SimpleBitset::zeros());
-    assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: DEFAULT_TRANSITION_SYMBOL })));
-
     let res = dwa.set_final_weight(10, SimpleBitset::zeros());
     assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
 }
@@ -426,7 +391,7 @@ fn test_apply_weight() {
     let s1 = d.add_state();
     d.set_final_weight(0, Weight::from_iter(vec![5, 6])).unwrap();
     d.add_transition(0, 'a' as i16, s1, Weight::from_iter(vec![100, 101])).unwrap();
-    d.set_default_transition(0, 0, Weight::from_iter(vec![200, 201])).unwrap();
+    d.add_transition(0, 'b' as i16, 0, Weight::from_iter(vec![200, 201])).unwrap();
 
     let gate = Weight::from_iter(vec![6, 11, 101, 201]);
     let new_start = d.apply_weight(&gate);
@@ -435,9 +400,9 @@ fn test_apply_weight() {
     let new_start_state = &d.states[new_start];
     assert_eq!(new_start_state.final_weight, Some(Weight::from_item(6)));
     assert_eq!(new_start_state.trans_weights.get(&('a' as i16)), Some(&Weight::from_item(101)));
-    assert_eq!(new_start_state.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL), Some(&Weight::from_item(201)));
+    assert_eq!(new_start_state.trans_weights.get(&('b' as i16)), Some(&Weight::from_item(201)));
     assert_eq!(new_start_state.transitions.get(&('a' as i16)), Some(&s1));
-    assert_eq!(new_start_state.transitions.get(&DEFAULT_TRANSITION_SYMBOL), Some(&0));
+    assert_eq!(new_start_state.transitions.get(&('b' as i16)), Some(&0));
 }
 
 /// Helper that creates a DWA with a single transition on `ch` with a given
@@ -486,8 +451,7 @@ fn test_json_roundtrip_complex() {
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
-    d.set_default_transition(d.body.start_state, s1, Weight::from_iter(vec![1, 2, 3]))
-        .unwrap();
+    d.add_transition(d.body.start_state, 'y' as i16, s1, Weight::from_iter(vec![1, 2, 3])).unwrap();
     d.add_transition(d.body.start_state, 'x' as i16, s2, Weight::from_item(99))
         .unwrap();
     d.set_final_weight(s2, Weight::from_iter(vec![5, 7])).unwrap();
@@ -512,8 +476,7 @@ fn test_prune_unreachable_with_default_chain() {
     let mut d = DWA::new();
     let s1 = d.add_state();
     let _s2 = d.add_state(); // Unused, unreachable
-    d.set_default_transition(d.body.start_state, s1, Weight::all())
-        .unwrap();
+    d.add_transition(d.body.start_state, 'y' as i16, s1, Weight::all()).unwrap();
     d.set_final_weight(s1, Weight::from_item(1)).unwrap();
     d.add_transition(s1, 'x' as i16, s1, Weight::all()).unwrap();
 
@@ -541,7 +504,6 @@ fn test_equivalence_via_simplification() {
     a.add_transition(0, 1, s2a, Weight::from_iter(0..=1)).unwrap();
     a.add_transition(0, 2, s1a, Weight::from_item(0)).unwrap();
     a.add_transition(0, 3, s1a, Weight::from_iter(0..=1)).unwrap();
-    a.set_default_transition(s2a, s1a, Weight::all()).unwrap();
 
     // DWA 'b' lacks these transitions. For inputs '1' and '3', it transitions
     // to an implicit sink. The simplification process should make 'a' equivalent
@@ -631,18 +593,18 @@ fn test_union_complex_from_attachment() {
     left.add_transition(0, 9, 9, Weight::from_item(1)).unwrap();
     left.add_transition(0, 10, 10, Weight::from_item(1)).unwrap();
     left.add_transition(1, neg(0), 11, Weight::all()).unwrap();
-    left.set_default_transition(2, 12, Weight::all()).unwrap();
+    left.add_transition(2, 100, 12, Weight::all()).unwrap();
     left.add_transition(3, neg(3), 13, Weight::all()).unwrap();
     left.add_transition(5, 3, 14, Weight::all()).unwrap();
     left.add_transition(5, 7, 9, Weight::all()).unwrap();
-    left.set_default_transition(6, 5, Weight::all()).unwrap();
+    left.add_transition(6, 100, 5, Weight::all()).unwrap();
     left.add_transition(7, neg(7), 15, Weight::all()).unwrap();
-    left.set_default_transition(8, 9, Weight::all()).unwrap();
+    left.add_transition(8, 100, 9, Weight::all()).unwrap();
     left.add_transition(9, 3, 16, Weight::all()).unwrap();
     left.add_transition(9, 7, 9, Weight::all()).unwrap();
     left.add_transition(10, 5, 5, Weight::all()).unwrap();
     left.add_transition(11, neg(9), 17, Weight::all()).unwrap();
-    left.set_default_transition(12, 18, Weight::all()).unwrap();
+    left.add_transition(12, 100, 18, Weight::all()).unwrap();
     left.add_transition(13, neg(9), 19, Weight::all()).unwrap();
     left.add_transition(14, neg(3), 20, Weight::all()).unwrap();
     left.add_transition(15, neg(9), 21, Weight::all()).unwrap();
@@ -671,17 +633,17 @@ fn test_union_complex_from_attachment() {
     left.add_transition(21, 9, 28, w01.clone()).unwrap();
     left.add_transition(21, 10, 29, w01.clone()).unwrap();
     left.add_transition(22, neg(0), 31, Weight::all()).unwrap();
-    left.set_default_transition(23, 32, Weight::all()).unwrap();
+    left.add_transition(23, 100, 32, Weight::all()).unwrap();
     left.add_transition(25, 7, 28, Weight::all()).unwrap();
-    left.set_default_transition(26, 25, Weight::all()).unwrap();
-    left.set_default_transition(27, 28, Weight::all()).unwrap();
+    left.add_transition(26, 100, 25, Weight::all()).unwrap();
+    left.add_transition(27, 100, 28, Weight::all()).unwrap();
     left.add_transition(28, 0, 33, Weight::all()).unwrap();
     left.add_transition(28, 3, 34, Weight::all()).unwrap();
     left.add_transition(28, 7, 35, Weight::all()).unwrap();
     left.add_transition(29, 5, 25, Weight::all()).unwrap();
     left.add_transition(30, neg(9), 36, Weight::all()).unwrap();
     left.add_transition(31, neg(9), 37, Weight::all()).unwrap();
-    left.set_default_transition(32, 38, Weight::all()).unwrap();
+    left.add_transition(32, 100, 38, Weight::all()).unwrap();
     left.add_transition(33, neg(0), 39, Weight::all()).unwrap();
     left.add_transition(34, neg(3), 40, Weight::all()).unwrap();
     left.add_transition(35, neg(7), 41, Weight::all()).unwrap();
@@ -722,15 +684,15 @@ fn test_union_complex_from_attachment() {
     right.add_transition(0, 8, 5, Weight::from_item(0)).unwrap();
     right.add_transition(0, 9, 6, Weight::from_item(0)).unwrap();
     right.add_transition(0, 10, 7, Weight::from_item(0)).unwrap();
-    right.set_default_transition(1, 8, Weight::all()).unwrap();
+    right.add_transition(1, 100, 8, Weight::all()).unwrap();
     right.add_transition(3, 7, 6, Weight::all()).unwrap();
-    right.set_default_transition(4, 3, Weight::all()).unwrap();
-    right.set_default_transition(5, 6, Weight::all()).unwrap();
+    right.add_transition(4, 100, 3, Weight::all()).unwrap();
+    right.add_transition(5, 100, 6, Weight::all()).unwrap();
     right.add_transition(6, 0, 9, Weight::all()).unwrap();
     right.add_transition(6, 3, 10, Weight::all()).unwrap();
     right.add_transition(6, 7, 11, Weight::all()).unwrap();
     right.add_transition(7, 5, 3, Weight::all()).unwrap();
-    right.set_default_transition(8, 12, Weight::all()).unwrap();
+    right.add_transition(8, 100, 12, Weight::all()).unwrap();
     right.add_transition(9, neg(0), 13, Weight::all()).unwrap();
     right.add_transition(10, neg(3), 14, Weight::all()).unwrap();
     right.add_transition(11, neg(7), 15, Weight::all()).unwrap();
@@ -761,15 +723,15 @@ fn test_union_complex_from_attachment() {
     right.add_transition(21, 8, 26, w01.clone()).unwrap();
     right.add_transition(21, 9, 27, w01.clone()).unwrap();
     right.add_transition(21, 10, 28, w01.clone()).unwrap();
-    right.set_default_transition(22, 29, Weight::all()).unwrap();
+    right.add_transition(22, 100, 29, Weight::all()).unwrap();
     right.add_transition(24, 7, 27, Weight::all()).unwrap();
-    right.set_default_transition(25, 24, Weight::all()).unwrap();
-    right.set_default_transition(26, 27, Weight::all()).unwrap();
+    right.add_transition(25, 100, 24, Weight::all()).unwrap();
+    right.add_transition(26, 100, 27, Weight::all()).unwrap();
     right.add_transition(27, 0, 30, Weight::all()).unwrap();
     right.add_transition(27, 3, 31, Weight::all()).unwrap();
     right.add_transition(27, 7, 32, Weight::all()).unwrap();
     right.add_transition(28, 5, 24, Weight::all()).unwrap();
-    right.set_default_transition(29, 33, Weight::all()).unwrap();
+    right.add_transition(29, 100, 33, Weight::all()).unwrap();
     right.add_transition(30, neg(0), 34, Weight::all()).unwrap();
     right.add_transition(31, neg(3), 35, Weight::all()).unwrap();
     right.add_transition(32, neg(7), 36, Weight::all()).unwrap();
@@ -817,7 +779,7 @@ fn test_union_complex_from_attachment_simpified() {
     left.add_transition(3, 3, 8, Weight::all()).unwrap();
     left.add_transition(3, 7, 3, Weight::all()).unwrap();
     // State 4
-    left.set_default_transition(4, 3, Weight::all()).unwrap();
+    left.add_transition(4, 100, 3, Weight::all()).unwrap();
     // State 5
     left.add_transition(5, neg(7), 7, Weight::all()).unwrap();
     // State 6
@@ -835,9 +797,9 @@ fn test_union_complex_from_attachment_simpified() {
     // State 10
     left.add_transition(10, 7, 13, Weight::all()).unwrap();
     // State 11
-    left.set_default_transition(11, 10, Weight::all()).unwrap();
+    left.add_transition(11, 100, 10, Weight::all()).unwrap();
     // State 12
-    left.set_default_transition(12, 13, Weight::all()).unwrap();
+    left.add_transition(12, 100, 13, Weight::all()).unwrap();
     // State 13
     left.add_transition(13, 0, 15, Weight::all()).unwrap();
     left.add_transition(13, 3, 16, Weight::all()).unwrap();
@@ -873,9 +835,9 @@ fn test_union_complex_from_attachment_simpified() {
     // State 1
     right.add_transition(1, 7, 4, Weight::all()).unwrap();
     // State 2
-    right.set_default_transition(2, 1, Weight::all()).unwrap();
+    right.add_transition(2, 100, 1, Weight::all()).unwrap();
     // State 3
-    right.set_default_transition(3, 4, Weight::all()).unwrap();
+    right.add_transition(3, 100, 4, Weight::all()).unwrap();
     // State 4
     right.add_transition(4, 0, 6, Weight::all()).unwrap();
     right.add_transition(4, 3, 7, Weight::all()).unwrap();
@@ -901,9 +863,9 @@ fn test_union_complex_from_attachment_simpified() {
     // State 12
     right.add_transition(12, 7, 15, Weight::all()).unwrap();
     // State 13
-    right.set_default_transition(13, 12, Weight::all()).unwrap();
+    right.add_transition(13, 100, 12, Weight::all()).unwrap();
     // State 14
-    right.set_default_transition(14, 15, Weight::all()).unwrap();
+    right.add_transition(14, 100, 15, Weight::all()).unwrap();
     // State 15
     right.add_transition(15, 0, 17, Weight::all()).unwrap();
     right.add_transition(15, 3, 18, Weight::all()).unwrap();
@@ -970,13 +932,13 @@ fn test_concatenate_complex_from_attachment() {
     // State 8
     left.set_final_weight(8, w_all.clone()).unwrap();
     // State 9
-    left.set_default_transition(9, 10, w_all.clone()).unwrap();
+    left.add_transition(9, 100, 10, w_all.clone()).unwrap();
     // State 10
-    left.set_default_transition(10, 2, w_all.clone()).unwrap();
+    left.add_transition(10, 101, 2, w_all.clone()).unwrap();
     // State 11
-    left.set_default_transition(11, 3, w_all.clone()).unwrap();
+    left.add_transition(11, 100, 3, w_all.clone()).unwrap();
     // State 12
-    left.set_default_transition(12, 4, w_all.clone()).unwrap();
+    left.add_transition(12, 100, 4, w_all.clone()).unwrap();
     // State 13
     left.add_transition(13, neg(0), 14, w_all.clone()).unwrap();
     // State 14
@@ -1041,11 +1003,10 @@ fn test_union_from_debug_log() {
     left.add_transition(0, 3, 4, Weight::from_iter(0..=1)).unwrap();
 
     left.add_transition(1, neg(0), 5, Weight::all()).unwrap();
-    left.set_default_transition(2, 6, Weight::all()).unwrap();
+    left.add_transition(2, 100, 6, Weight::all()).unwrap();
     left.add_transition(3, neg(2), 7, Weight::all()).unwrap();
     // state 4 is sink
     left.add_transition(5, neg(1), 8, Weight::all()).unwrap();
-    // state 6 is sink
     left.add_transition(7, neg(0), 9, Weight::all()).unwrap();
 
     left.set_final_weight(8, Weight::all()).unwrap();
@@ -1062,7 +1023,7 @@ fn test_union_from_debug_log() {
     right.add_transition(0, 2, 2, Weight::from_item(3)).unwrap();
     right.add_transition(0, 3, 3, Weight::from_item(3)).unwrap();
 
-    right.set_default_transition(1, 4, Weight::all()).unwrap();
+    right.add_transition(1, 100, 4, Weight::all()).unwrap();
     right.add_transition(2, neg(2), 5, Weight::all()).unwrap();
     // state 3 is sink
     // state 4 is sink
@@ -1073,7 +1034,7 @@ fn test_union_from_debug_log() {
     right.add_transition(6, 3, 9, Weight::from_item(3)).unwrap();
 
     right.add_transition(7, neg(0), 10, Weight::all()).unwrap();
-    right.set_default_transition(8, 11, Weight::all()).unwrap();
+    right.add_transition(8, 100, 11, Weight::all()).unwrap();
     // state 9 is sink
     right.add_transition(10, neg(1), 12, Weight::all()).unwrap();
     // state 11 is sink
@@ -1288,13 +1249,13 @@ fn test_simplify_complex_dwa_from_attachment() {
     // State 8
     left.set_final_weight(8, w_all.clone()).unwrap();
     // State 9
-    left.set_default_transition(9, 10, w_all.clone()).unwrap();
+    left.add_transition(9, 100, 10, w_all.clone()).unwrap();
     // State 10
-    left.set_default_transition(10, 2, w_all.clone()).unwrap();
+    left.add_transition(10, 101, 2, w_all.clone()).unwrap();
     // State 11
-    left.set_default_transition(11, 3, w_all.clone()).unwrap();
+    left.add_transition(11, 100, 3, w_all.clone()).unwrap();
     // State 12
-    left.set_default_transition(12, 4, w_all.clone()).unwrap();
+    left.add_transition(12, 100, 4, w_all.clone()).unwrap();
     // State 13
     left.add_transition(13, neg(0), 14, w_all.clone()).unwrap();
     // State 14
@@ -1361,11 +1322,11 @@ fn test_concatenate_from_debug_log() {
     // State 3
     base_dwa.add_transition(3, 6, 1, Weight::all()).unwrap();
     // State 4
-    base_dwa.set_default_transition(4, 1, Weight::all()).unwrap();
+    base_dwa.add_transition(4, 100, 1, Weight::all()).unwrap();
     // State 5
-    base_dwa.set_default_transition(5, 6, Weight::all()).unwrap();
+    base_dwa.add_transition(5, 100, 6, Weight::all()).unwrap();
     // State 6
-    base_dwa.set_default_transition(6, 2, Weight::all()).unwrap();
+    base_dwa.add_transition(6, 100, 2, Weight::all()).unwrap();
     // State 7
     base_dwa.add_transition(7, neg(0), 8, Weight::all()).unwrap();
     // State 8
@@ -1412,7 +1373,7 @@ fn test_union_from_panicked_log() {
     a.add_transition(0, 9, 9, Weight::from_iter(1..=2)).unwrap();
     a.add_transition(1, neg(0), 10, Weight::from_item(1)).unwrap();
     a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
-    a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
+    a.add_transition(3, 100, 12, Weight::from_item(1)).unwrap();
     a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
     a.add_transition(4, neg(3), 13, Weight::from_item(2)).unwrap();
     a.add_transition(4, 5, 14, Weight::from_item(1)).unwrap();
@@ -1423,16 +1384,16 @@ fn test_union_from_panicked_log() {
     a.add_transition(7, 1, 15, Weight::from_iter(1..=2)).unwrap();
     a.add_transition(7, 5, 16, Weight::from_iter(1..=2)).unwrap();
     a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
-    a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(9, 100, 17, Weight::from_iter(1..=2)).unwrap();
     a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
     a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
-    a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
+    a.add_transition(12, 100, 20, Weight::from_item(1)).unwrap();
     a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
     a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
-    a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
+    a.add_transition(15, 100, 20, Weight::from_item(1)).unwrap();
     a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
     a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
-    a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(17, 100, 7, Weight::from_iter(1..=2)).unwrap();
     a.set_final_weight(18, Weight::from_item(1)).unwrap();
     a.set_final_weight(19, Weight::from_item(0)).unwrap();
     a.add_transition(20, 5, 14, Weight::from_item(1)).unwrap();
@@ -1453,18 +1414,18 @@ fn test_union_from_panicked_log() {
     b.add_transition(0, 7, 5, Weight::from_item(3)).unwrap();
     b.add_transition(0, 9, 6, Weight::from_item(3)).unwrap();
     b.add_transition(1, neg(0), 7, Weight::from_item(3)).unwrap();
-    b.set_default_transition(2, 8, Weight::from_item(3)).unwrap();
+    b.add_transition(2, 100, 8, Weight::from_item(3)).unwrap();
     b.add_transition(3, 5, 9, Weight::from_item(3)).unwrap();
     b.add_transition(4, 1, 8, Weight::from_item(3)).unwrap();
     b.add_transition(4, 5, 9, Weight::from_item(3)).unwrap();
     b.add_transition(4, 8, 10, Weight::from_item(3)).unwrap();
     b.add_transition(5, 1, 8, Weight::from_item(3)).unwrap();
     b.add_transition(5, 5, 9, Weight::from_item(3)).unwrap();
-    b.set_default_transition(6, 10, Weight::from_item(3)).unwrap();
+    b.add_transition(6, 100, 10, Weight::from_item(3)).unwrap();
     b.add_transition(7, neg(1), 11, Weight::from_item(3)).unwrap();
-    b.set_default_transition(8, 3, Weight::from_item(3)).unwrap();
+    b.add_transition(8, 100, 3, Weight::from_item(3)).unwrap();
     b.add_transition(9, neg(5), 1, Weight::from_item(3)).unwrap();
-    b.set_default_transition(10, 5, Weight::from_item(3)).unwrap();
+    b.add_transition(10, 100, 5, Weight::from_item(3)).unwrap();
     b.add_transition(11, 1, 12, Weight::from_item(3)).unwrap();
     b.add_transition(11, 5, 13, Weight::from_item(3)).unwrap();
     b.add_transition(11, 8, 14, Weight::from_item(3)).unwrap();
@@ -1482,7 +1443,7 @@ fn test_union_from_panicked_log() {
 fn test_concatenate_default_path_to_final() {
     let mut a = DWA::new();
     let s1a = a.add_state();
-    a.set_default_transition(a.body.start_state, s1a, Weight::all()).unwrap();
+    a.add_transition(a.body.start_state, 'a' as i16, s1a, Weight::all()).unwrap();
     a.set_final_weight(s1a, Weight::from_item(1)).unwrap();
 
     let mut b = DWA::new();
@@ -1552,10 +1513,10 @@ fn test_simplify() {
     d.set_final_weight(s5, w_all.clone()).unwrap();
 
     // State 6
-    d.set_default_transition(s6, s12, w_all.clone()).unwrap();
+    d.add_transition(s6, 100, s12, w_all.clone()).unwrap();
 
     // State 7
-    d.set_default_transition(s7, s6, w_all.clone()).unwrap();
+    d.add_transition(s7, 100, s6, w_all.clone()).unwrap();
 
     // State 8
     d.set_final_weight(s8, w_all.clone()).unwrap();
@@ -1565,10 +1526,10 @@ fn test_simplify() {
     d.add_transition(s9, 13, s8, w_all.clone()).unwrap();
 
     // State 10
-    d.set_default_transition(s10, s13, w_all.clone()).unwrap();
+    d.add_transition(s10, 100, s13, w_all.clone()).unwrap();
 
     // State 11
-    d.set_default_transition(s11, s10, w_all.clone()).unwrap();
+    d.add_transition(s11, 100, s10, w_all.clone()).unwrap();
 
     // State 12
     d.add_transition(s12, 13, s5, w_all.clone()).unwrap();
@@ -1612,7 +1573,7 @@ fn test_dwa_to_nwa_to_dwa_roundtrip() {
     a.add_transition(2, neg(1), 11, Weight::from_item(0)).unwrap();
 
     // State 3:
-    a.set_default_transition(3, 12, Weight::from_item(1)).unwrap();
+    a.add_transition(3, 100, 12, Weight::from_item(1)).unwrap();
     a.add_transition(3, neg(2), 13, Weight::from_item(2)).unwrap();
 
     // State 4:
@@ -1635,7 +1596,7 @@ fn test_dwa_to_nwa_to_dwa_roundtrip() {
     a.add_transition(8, neg(8), 11, Weight::from_item(0)).unwrap();
 
     // State 9:
-    a.set_default_transition(9, 17, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(9, 100, 17, Weight::from_iter(1..=2)).unwrap();
 
     // State 10:
     a.add_transition(10, neg(1), 18, Weight::from_item(1)).unwrap();
@@ -1644,7 +1605,7 @@ fn test_dwa_to_nwa_to_dwa_roundtrip() {
     a.add_transition(11, neg(4), 19, Weight::from_item(0)).unwrap();
 
     // State 12:
-    a.set_default_transition(12, 20, Weight::from_item(1)).unwrap();
+    a.add_transition(12, 100, 20, Weight::from_item(1)).unwrap();
 
     // State 13:
     a.add_transition(13, neg(8), 21, Weight::from_item(2)).unwrap();
@@ -1653,14 +1614,14 @@ fn test_dwa_to_nwa_to_dwa_roundtrip() {
     a.add_transition(14, neg(5), 1, Weight::from_item(1)).unwrap();
 
     // State 15:
-    a.set_default_transition(15, 20, Weight::from_item(1)).unwrap();
+    a.add_transition(15, 100, 20, Weight::from_item(1)).unwrap();
     a.add_transition(15, neg(1), 22, Weight::from_item(2)).unwrap();
 
     // State 16:
     a.add_transition(16, neg(5), 23, Weight::from_iter(1..=2)).unwrap();
 
     // State 17:
-    a.set_default_transition(17, 7, Weight::from_iter(1..=2)).unwrap();
+    a.add_transition(17, 100, 7, Weight::from_iter(1..=2)).unwrap();
 
     // State 18:
     a.set_final_weight(18, Weight::from_item(1)).unwrap();
@@ -1692,88 +1653,6 @@ fn test_dwa_to_nwa_to_dwa_roundtrip() {
     println!("Roundtrip DWA:\n{}", roundtrip_dwa);
 
     stochastic_equivalence_test(a, roundtrip_dwa);
-}
-
-#[test]
-fn test_simplify_loses_exception() {
-    let mut d = DWA::new();
-    // This DWA is a manual reconstruction of a DWA generated by determinization
-    // that was observed to fail simplification.
-    for _ in 0..5 {
-        d.add_state();
-    }
-    assert_eq!(d.states.len(), 6);
-
-    // State 0
-    d.set_default_transition(0, 2, Weight::all()).unwrap();
-    d.add_transition(0, 'a' as i16, 1, Weight::all()).unwrap();
-    d.add_transition(0, 'b' as i16, 2, Weight::all()).unwrap();
-    d.add_transition(0, 'c' as i16, 2, Weight::all()).unwrap();
-
-    // State 1
-    d.set_default_transition(1, 3, Weight::all()).unwrap();
-    d.add_transition(1, 'a' as i16, 3, Weight::all()).unwrap();
-    d.add_transition(1, 'b' as i16, 4, Weight::all()).unwrap();
-    d.add_transition(1, 'c' as i16, 3, Weight::all()).unwrap();
-
-    // State 2 is a non-final sink
-
-    // State 3
-    d.set_default_transition(3, 2, Weight::all()).unwrap();
-    d.add_transition(3, 'a' as i16, 2, Weight::all()).unwrap();
-    d.add_transition(3, 'b' as i16, 2, Weight::all()).unwrap();
-    d.add_transition(3, 'c' as i16, 5, Weight::all()).unwrap();
-
-    // State 4
-    // This state is a sink, but with a non-ALL weight on its transitions.
-    // This is to mimic the weight partitioning from determinization.
-    let mut not_all = Weight::all();
-    not_all.remove(1);
-    d.set_default_transition(4, 2, not_all.clone()).unwrap();
-    d.add_transition(4, 'a' as i16, 2, not_all.clone()).unwrap();
-    d.add_transition(4, 'b' as i16, 2, not_all.clone()).unwrap();
-    d.add_transition(4, 'c' as i16, 2, not_all.clone()).unwrap();
-
-    // State 5
-    d.set_default_transition(5, 2, Weight::all()).unwrap();
-    d.set_final_weight(5, Weight::from_item(1)).unwrap();
-    d.add_transition(5, 'a' as i16, 2, Weight::all()).unwrap();
-    d.add_transition(5, 'b' as i16, 2, Weight::all()).unwrap();
-    d.add_transition(5, 'c' as i16, 2, Weight::all()).unwrap();
-
-    let original = d.clone();
-    d.simplify();
-    stochastic_equivalence_test(original, d);
-}
-
-#[test]
-fn test_simplify_preserves_exception_to_dead_end() {
-    let mut d = DWA::new();
-    let s1 = d.add_state();
-    let s2_live_final = d.add_state();
-    let s3_dead_sink = d.add_state();
-
-    // 0 --'a'--> 1
-    d.add_transition(0, 'a' as i16, s1, Weight::all()).unwrap();
-
-    // 1 --*--> 2 (live)
-    d.set_default_transition(s1, s2_live_final, Weight::all()).unwrap();
-    // 1 --'b'--> 3 (dead)
-    d.add_transition(s1, 'b' as i16, s3_dead_sink, Weight::all()).unwrap();
-
-    d.set_final_weight(s2_live_final, Weight::from_item(1)).unwrap();
-
-    let original = d.clone();
-    // Word "ax" (x != 'b') should be accepted.
-    assert_eq!(original.eval_word_weight(&['a' as i16, 'x' as i16]), Weight::from_item(1));
-    // Word "ab" should be rejected.
-    assert_eq!(original.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
-
-    d.simplify();
-
-    // After simplify, "ab" should still be rejected.
-    let simplified_ab_weight = d.eval_word_weight(&['a' as i16, 'b' as i16]);
-    assert_eq!(simplified_ab_weight, Weight::zeros(), "Simplification made rejecting path 'ab' accepting.\nOriginal:\n{}\nSimplified:\n{}", original, d);
 }
 
 #[cfg(test)]
@@ -1879,38 +1758,12 @@ mod determinization_tests {
     }
 
     #[test]
-    fn test_det_default_transition() {
-        let mut nwa = NWA::new();
-        let s_a = nwa.states.add_state();
-        let s_def = nwa.states.add_state();
-        nwa.add_transition(nwa.body.start_state, 'a' as i16, s_a, Weight::all()).unwrap();
-        nwa.add_default_transition(nwa.body.start_state, s_def, Weight::all(), BTreeSet::from(['a' as i16])).unwrap();
-        nwa.states[s_a].final_weight = Some(Weight::from_item(1));
-        nwa.states[s_def].final_weight = Some(Weight::from_item(2));
-
-        println!("{}", nwa);
-        let dwa = nwa.determinize_to_dwa();
-        println!("{}", dwa);
-
-        let mut expected = DWA::new();
-        let s_a_dwa = expected.add_state();
-        let s_def_dwa = expected.add_state();
-        expected.add_transition(expected.body.start_state, 'a' as i16, s_a_dwa, Weight::all()).unwrap();
-        expected.set_default_transition(expected.body.start_state, s_def_dwa, Weight::all()).unwrap();
-        expected.set_final_weight(s_a_dwa, Weight::from_item(1)).unwrap();
-        expected.set_final_weight(s_def_dwa, Weight::from_item(2)).unwrap();
-
-        stochastic_equivalence_test(dwa, expected);
-    }
-
-    #[test]
     fn test_det_empty_nwa() {
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Truly empty
         let dwa = nwa.determinize_to_dwa();
         assert_eq!(dwa.states.len(), 1);
         assert!(dwa.states[dwa.body.start_state].final_weight.is_none());
-        assert!(!dwa.states[dwa.body.start_state].transitions.contains_key(&DEFAULT_TRANSITION_SYMBOL));
         assert!(dwa.states[dwa.body.start_state].transitions.is_empty());
     }
 
@@ -1930,63 +1783,6 @@ mod determinization_tests {
         let mut expected = DWA::new();
         expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
         stochastic_equivalence_test(dwa, expected);
-    }
-
-    #[test]
-    fn test_determinize_default_vs_exception_bug() {
-        // DWA 'a' (the ground truth)
-        let mut a = DWA::new();
-        let s1 = a.add_state();
-        let s2_default_target = a.add_state();
-        let s3_exception_target = a.add_state();
-        let s4_final = a.add_state();
-
-        // Path: start --'a'--> s1
-        a.add_transition(a.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
-
-        // From s1:
-        // - Default transition to s2
-        // - Exception on 'b' to s3
-        a.set_default_transition(s1, s2_default_target, Weight::all()).unwrap();
-        a.add_transition(s1, 'b' as i16, s3_exception_target, Weight::all()).unwrap();
-
-        // The default path continues and is accepting.
-        a.add_transition(s2_default_target, 'c' as i16, s4_final, Weight::all()).unwrap();
-        a.set_final_weight(s4_final, Weight::from_item(1)).unwrap();
-
-        println!("Original DWA:\n{}", a);
-
-        // The exception path 'b' leads to a non-final sink state s3.
-        // So, "ab" is not accepted, and "abc" is not accepted.
-
-        // Check A's behavior.
-        // A word taking the default path should be accepted.
-        assert_eq!(a.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
-        // Words taking the exception path should be rejected.
-        assert_eq!(a.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
-        assert_eq!(a.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
-
-        // Now, convert A to NWA and back to DWA 'b'.
-        let nwa = NWA::from_dwa(&a);
-        let mut b = nwa.determinize_to_dwa();
-        println!("Determinized DWA:\n{}", b);
-
-        assert_eq!(b.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
-        assert_eq!(b.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
-        assert_eq!(b.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
-
-        // Run the full stochastic equivalence test for good measure.
-        stochastic_equivalence_test(a.clone(), b.clone());
-
-        let mut c = b.clone();
-        c.simplify();
-        println!("Simplified DWA:\n{}", c);
-
-        assert_eq!(c.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
-        assert_eq!(c.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
-        assert_eq!(c.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
-
-        stochastic_equivalence_test(a, c);
     }
 
     #[test]
@@ -2029,9 +1825,7 @@ mod determinization_tests {
         // State 10
         nwa.add_transition(10, 2, 11, Weight::all()).unwrap();
         // State 11
-        nwa.add_default_transition(11, 12, Weight::all(), BTreeSet::new()).unwrap();
         // State 12
-        nwa.add_default_transition(12, 2, Weight::all(), BTreeSet::new()).unwrap();
         // State 13
         nwa.add_transition(13, 4, 1, Weight::all()).unwrap();
         // State 14
@@ -2039,11 +1833,9 @@ mod determinization_tests {
         // State 15
         nwa.add_transition(15, 6, 16, Weight::all()).unwrap();
         // State 16
-        nwa.add_default_transition(16, 3, Weight::all(), BTreeSet::new()).unwrap();
         // State 17
         nwa.add_transition(17, 8, 18, Weight::all()).unwrap();
         // State 18
-        nwa.add_default_transition(18, 4, Weight::all(), BTreeSet::new()).unwrap();
         // State 19
         nwa.add_transition(19, 9, 4, Weight::all()).unwrap();
         // State 20
@@ -2169,7 +1961,6 @@ mod determinization_tests {
         enum NwaComponent {
             Epsilon { from: usize, to: usize },
             Transition { from: usize, on: i16, to: usize },
-            Default { from: usize, to: usize },
             FinalWeight { state: usize },
         }
 
@@ -2182,7 +1973,6 @@ mod determinization_tests {
                 match component {
                     NwaComponent::Epsilon { from, to } => nwa.add_epsilon(*from, *to, Weight::all()),
                     NwaComponent::Transition { from, on, to } => nwa.add_transition(*from, *on, *to, Weight::all()).unwrap(),
-                    NwaComponent::Default { from, to } => nwa.add_default_transition(*from, *to, Weight::all(), BTreeSet::new()).unwrap(),
                     NwaComponent::FinalWeight { state } => nwa.states[*state].final_weight = Some(Weight::all()),
                 }
             }
@@ -2206,11 +1996,9 @@ mod determinization_tests {
             NwaComponent::Epsilon { from: 4, to: 33 }, NwaComponent::Epsilon { from: 5, to: 38 },
             NwaComponent::Transition { from: 6, on: 5, to: 7 }, NwaComponent::Transition { from: 7, on: neg(5), to: 8 },
             NwaComponent::Transition { from: 8, on: neg(10), to: 9 }, NwaComponent::FinalWeight { state: 9 },
-            NwaComponent::Transition { from: 10, on: 2, to: 11 }, NwaComponent::Default { from: 11, to: 12 },
-            NwaComponent::Default { from: 12, to: 2 }, NwaComponent::Transition { from: 13, on: 4, to: 1 },
+            NwaComponent::Transition { from: 10, on: 2, to: 11 }, NwaComponent::Transition { from: 13, on: 4, to: 1 },
             NwaComponent::Transition { from: 14, on: 5, to: 3 }, NwaComponent::Transition { from: 15, on: 6, to: 16 },
-            NwaComponent::Default { from: 16, to: 3 }, NwaComponent::Transition { from: 17, on: 8, to: 18 },
-            NwaComponent::Default { from: 18, to: 4 }, NwaComponent::Transition { from: 19, on: 9, to: 4 },
+            NwaComponent::Transition { from: 17, on: 8, to: 18 }, NwaComponent::Transition { from: 19, on: 9, to: 4 },
             NwaComponent::Transition { from: 20, on: 10, to: 5 }, NwaComponent::Transition { from: 21, on: 7, to: 4 },
             NwaComponent::Transition { from: 22, on: 7, to: 4 }, NwaComponent::Transition { from: 23, on: 0, to: 24 },
             NwaComponent::Transition { from: 24, on: neg(0), to: 25 }, NwaComponent::Transition { from: 25, on: neg(5), to: 26 },
@@ -2379,38 +2167,12 @@ mod determinization_tests {
     }
 
     #[test]
-    fn test_det_default_transition_rustfst() {
-        let mut nwa = NWA::new();
-        let s_a = nwa.states.add_state();
-        let s_def = nwa.states.add_state();
-        nwa.add_transition(nwa.body.start_state, 'a' as i16, s_a, Weight::all()).unwrap();
-        nwa.add_default_transition(nwa.body.start_state, s_def, Weight::all(), BTreeSet::from(['a' as i16])).unwrap();
-        nwa.states[s_a].final_weight = Some(Weight::from_item(1));
-        nwa.states[s_def].final_weight = Some(Weight::from_item(2));
-
-        println!("{}", nwa);
-        let dwa = nwa.determinize_to_dwa_with_rustfst();
-        println!("{}", dwa);
-
-        let mut expected = DWA::new();
-        let s_a_dwa = expected.add_state();
-        let s_def_dwa = expected.add_state();
-        expected.add_transition(expected.body.start_state, 'a' as i16, s_a_dwa, Weight::all()).unwrap();
-        expected.set_default_transition(expected.body.start_state, s_def_dwa, Weight::all()).unwrap();
-        expected.set_final_weight(s_a_dwa, Weight::from_item(1)).unwrap();
-        expected.set_final_weight(s_def_dwa, Weight::from_item(2)).unwrap();
-
-        stochastic_equivalence_test(dwa, expected);
-    }
-
-    #[test]
     fn test_det_empty_nwa_rustfst() {
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Truly empty
         let dwa = nwa.determinize_to_dwa_with_rustfst();
         assert_eq!(dwa.states.len(), 1);
         assert!(dwa.states[dwa.body.start_state].final_weight.is_none());
-        assert!(!dwa.states[dwa.body.start_state].transitions.contains_key(&DEFAULT_TRANSITION_SYMBOL));
         assert!(dwa.states[dwa.body.start_state].transitions.is_empty());
     }
 
@@ -2430,63 +2192,6 @@ mod determinization_tests {
         let mut expected = DWA::new();
         expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
         stochastic_equivalence_test(dwa, expected);
-    }
-
-    #[test]
-    fn test_determinize_default_vs_exception_bug_rustfst() {
-        // DWA 'a' (the ground truth)
-        let mut a = DWA::new();
-        let s1 = a.add_state();
-        let s2_default_target = a.add_state();
-        let s3_exception_target = a.add_state();
-        let s4_final = a.add_state();
-
-        // Path: start --'a'--> s1
-        a.add_transition(a.body.start_state, 'a' as i16, s1, Weight::all()).unwrap();
-
-        // From s1:
-        // - Default transition to s2
-        // - Exception on 'b' to s3
-        a.set_default_transition(s1, s2_default_target, Weight::all()).unwrap();
-        a.add_transition(s1, 'b' as i16, s3_exception_target, Weight::all()).unwrap();
-
-        // The default path continues and is accepting.
-        a.add_transition(s2_default_target, 'c' as i16, s4_final, Weight::all()).unwrap();
-        a.set_final_weight(s4_final, Weight::from_item(1)).unwrap();
-
-        println!("Original DWA:\n{}", a);
-
-        // The exception path 'b' leads to a non-final sink state s3.
-        // So, "ab" is not accepted, and "abc" is not accepted.
-
-        // Check A's behavior.
-        // A word taking the default path should be accepted.
-        assert_eq!(a.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
-        // Words taking the exception path should be rejected.
-        assert_eq!(a.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
-        assert_eq!(a.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
-
-        // Now, convert A to NWA and back to DWA 'b'.
-        let nwa = NWA::from_dwa(&a);
-        let mut b = nwa.determinize_to_dwa_with_rustfst();
-        println!("Determinized DWA:\n{}", b);
-
-        assert_eq!(b.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
-        assert_eq!(b.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
-        assert_eq!(b.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
-
-        // Run the full stochastic equivalence test for good measure.
-        stochastic_equivalence_test(a.clone(), b.clone());
-
-        let mut c = b.clone();
-        c.simplify();
-        println!("Simplified DWA:\n{}", c);
-
-        assert_eq!(c.eval_word_weight(&['a' as i16, 'x' as i16, 'c' as i16]), Weight::from_item(1));
-        assert_eq!(c.eval_word_weight(&['a' as i16, 'b' as i16]), Weight::zeros());
-        assert_eq!(c.eval_word_weight(&['a' as i16, 'b' as i16, 'c' as i16]), Weight::zeros());
-
-        stochastic_equivalence_test(a, c);
     }
 
     #[test]
@@ -2529,9 +2234,7 @@ mod determinization_tests {
         // State 10
         nwa.add_transition(10, 2, 11, Weight::all()).unwrap();
         // State 11
-        nwa.add_default_transition(11, 12, Weight::all(), BTreeSet::new()).unwrap();
         // State 12
-        nwa.add_default_transition(12, 2, Weight::all(), BTreeSet::new()).unwrap();
         // State 13
         nwa.add_transition(13, 4, 1, Weight::all()).unwrap();
         // State 14
@@ -2539,11 +2242,9 @@ mod determinization_tests {
         // State 15
         nwa.add_transition(15, 6, 16, Weight::all()).unwrap();
         // State 16
-        nwa.add_default_transition(16, 3, Weight::all(), BTreeSet::new()).unwrap();
         // State 17
         nwa.add_transition(17, 8, 18, Weight::all()).unwrap();
         // State 18
-        nwa.add_default_transition(18, 4, Weight::all(), BTreeSet::new()).unwrap();
         // State 19
         nwa.add_transition(19, 9, 4, Weight::all()).unwrap();
         // State 20
