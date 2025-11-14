@@ -25,9 +25,9 @@ pub fn decode_symbol_i16(code: i16) -> Result<(bool, ParserStateID), ()> {
     if code == DEFAULT_TRANSITION_SYMBOL {
         Err(())
     } else if code >= 0 {
-        Ok((false, ParserStateID(code as usize)))
+        Ok((true, ParserStateID(code as usize)))
     } else {
-        Ok((true, ParserStateID((code.wrapping_sub(i16::MIN)) as usize)))
+        Ok((false, ParserStateID((code.wrapping_sub(i16::MIN)) as usize)))
     }
 }
 
