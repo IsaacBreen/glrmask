@@ -439,6 +439,7 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
                         }
                         Err(_) => {
                             // Unknown non-default label: skip propagation for this label.
+                            panic!("Unexpected unknown non-default label during label propagation: {}", l);
                         }
                     }
                 }
@@ -484,6 +485,7 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
                     }
                     Err(_) => {
                         // Unknown non-default label: don't prune it (leave weights as-is).
+                        panic!("Unexpected unknown non-default label during pruning: {}", l);
                         continue;
                     }
                 }
