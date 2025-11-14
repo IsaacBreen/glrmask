@@ -1,6 +1,7 @@
 use crate::r#macro::is_debug_level_enabled;
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
 use crate::datastructures::trie::{Trie, Trie2Index};
+use crate::json_serialization::JSONConvertible;
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
@@ -460,6 +461,13 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         let f = std::fs::File::create(&filename).expect("Unable to create NWA dump file");
         serde_json::to_writer_pretty(f, &combined_nwa).expect("Unable to write NWA to file");
         eprintln!("NWA dump complete.");
+
+        let parser_filename = format!("parser_dump_before_final_det_{}.json", timestamp);
+        eprintln!("Dumping parser to {}...", parser_filename);
+        let parser_f = std::fs::File::create(&parser_filename).expect("Unable to create parser dump file");
+        let parser_json = parser.to_json();
+        serde_json::to_writer_pretty(parser_f, &parser_json).expect("Unable to write parser to file");
+        eprintln!("Parser dump complete.");
     }
 
     let now = Instant::now();
