@@ -390,6 +390,37 @@ def print_dwa_stats(dwa_data: dict):
 
 # --- PASS FUNCTIONS ---
 
+def create_subgraph_nwa(nwa_data: dict, states_to_keep: set) -> dict | None:
+    """
+    Creates a new NWA dictionary containing only the states and transitions
+    within the 'states_to_keep' set.
+    """
+    if not states_to_keep:
+        return None
+
+    # Find a valid start state within the subset, preferring the original
+    new_start_state = nwa_data["start_state"]
+    if new_start_state not in states_to_keep:
+        # If original start is gone, just pick one to make the FST valid
+        new_start_state = next(iter(states_to_keep), None)
+        if new_start_state is None:
+            return None
+
+    subgraph_transitions = {
+        (s, l, d, w) for s, l, d, w in nwa_data["transitions"]
+        if s in states_to_keep and d in states_to_keep
+    }
+    subgraph_finals = {
+        s: w for s, w in nwa_data["final_states"].items() if s in states_to_keep
+    }
+
+    return {
+        "num_states": nwa_data["num_states"], # Keep original state IDs for mapping
+        "start_state": new_start_state,
+        "final_states": subgraph_finals,
+        "transitions": subgraph_transitions,
+    }
+
 def run_stats_pass(args):
     """Executes the 'stats' pass."""
     print("--- Running Stats Pass ---")
@@ -690,6 +721,112 @@ def run_recompose_pass(args):
     print("Save complete.")
 
 
+def run_bisect_pass(args):
+    """Executes the 'bisect' pass to find a minimal failing example."""
+    print(f"--- Running Bisect Pass (Timeout: {args.timeout}s) ---")
+    nwa_data = load_nwa_data(args.filepath)
+    all_states = set(range(nwa_data["num_states"]))
+
+    print("\n--- Establishing Baseline ---")
+    if not time_determinization_with_timeout(
+        nwa_data["num_states"], nwa_data["start_state"], nwa_data["final_states"],
+        nwa_data["transitions"], args.timeout
+    ):
+        print("✅ Baseline determinization finished within the timeout. Nothing to bisect.")
+        return
+    else:
+        print(f"✅ Baseline determinization timed out after {args.timeout}s. Starting bisection.")
+
+    problematic_states = list(all_states)
+
+    # We'll keep track of the smallest known failing set of states
+    smallest_failing_set = set(problematic_states)
+
+    iteration = 0
+    while len(problematic_states) > 1:
+        iteration += 1
+        print(f"\n--- Bisection Iteration {iteration}: {len(problematic_states)} states remaining ---")
+
+        # Split the current set of problematic states
+        mid = len(problematic_states) // 2
+        s1 = set(problematic_states[:mid])
+        s2 = set(problematic_states[mid:])
+
+        print(f"Splitting into two sets of sizes: {len(s1)} and {len(s2)}")
+
+        # Create and test the two subgraphs
+        subgraph1_data = create_subgraph_nwa(nwa_data, s1)
+        subgraph2_data = create_subgraph_nwa(nwa_data, s2)
+
+        hangs1 = time_determinization_with_timeout(
+            subgraph1_data["num_states"], subgraph1_data["start_state"],
+            subgraph1_data["final_states"], subgraph1_data["transitions"], args.timeout
+        ) if subgraph1_data else False
+
+        hangs2 = time_determinization_with_timeout(
+            subgraph2_data["num_states"], subgraph2_data["start_state"],
+            subgraph2_data["final_states"], subgraph2_data["transitions"], args.timeout
+        ) if subgraph2_data else False
+
+        if hangs1 and not hangs2:
+            print("-> Problem is in the first half. Discarding second half.")
+            problematic_states = list(s1)
+            smallest_failing_set = s1
+        elif not hangs1 and hangs2:
+            print("-> Problem is in the second half. Discarding first half.")
+            problematic_states = list(s2)
+            smallest_failing_set = s2
+        else:
+            # This is the complex case: the interaction is the problem, or both halves are problematic.
+            # We can't simply discard one half.
+            print("-> Interaction detected or both halves are problematic. Cannot reduce further with this split.")
+            # A simple strategy is to just stop here. A more advanced one would be to try a different split.
+            # For now, we'll break and report the last known smallest failing set.
+            break
+
+    print("\n--- Bisection Complete ---")
+    print(f"Found a minimal problematic set of {len(smallest_failing_set)} states:")
+    print(sorted(list(smallest_failing_set)))
+
+    print("\n--- Analysis of Minimal Failing Subgraph ---")
+    minimal_nwa_data = create_subgraph_nwa(nwa_data, smallest_failing_set)
+    G_minimal = nx.DiGraph()
+    G_minimal.add_nodes_from(smallest_failing_set)
+    G_minimal.add_edges_from([(s, d) for s, l, d, w in minimal_nwa_data["transitions"]])
+
+    print_graph_stats(G_minimal, minimal_nwa_data)
+    print_scc_analysis(G_minimal, minimal_nwa_data["transitions"])
+
+    # Save the minimal failing example to a file for inspection
+    output_path = "minimal_failing_nwa.json"
+    print(f"\nSaving minimal failing NWA to {output_path}...")
+
+    # We need to remap state IDs to be contiguous from 0 for the output file
+    state_remapping = {old_id: new_id for new_id, old_id in enumerate(sorted(list(smallest_failing_set)))}
+
+    remapped_states = [nwa_data["raw_data"]["states"][i] for i in sorted(list(smallest_failing_set))]
+    for state_data in remapped_states:
+        if 'epsilons' in state_data:
+            state_data['epsilons'] = [[state_remapping[t[0]], t[1]] for t in state_data['epsilons'] if t[0] in state_remapping]
+        if 'transitions' in state_data:
+            new_transitions = {}
+            for label, targets in state_data['transitions'].items():
+                new_targets = [[state_remapping[t[0]], t[1]] for t in targets if t[0] in state_remapping]
+                if new_targets:
+                    new_transitions[label] = new_targets
+            state_data['transitions'] = new_transitions
+
+    minimal_json = {
+        "states": remapped_states,
+        "body": {
+            "start_state": state_remapping[minimal_nwa_data["start_state"]]
+        }
+    }
+    with open(output_path, 'w') as f:
+        json.dump(minimal_json, f, indent=2)
+    print("Save complete.")
+
+
 # --- MAIN CLI ---
 
 if __name__ == "__main__":
@@ -746,6 +883,18 @@ if __name__ == "__main__":
         help="Timeout in seconds for each determinization check during pruning."
     )
     parser_prune.set_defaults(func=run_prune_pass)
+
+    # --- Bisect Pass ---
+    parser_bisect = subparsers.add_parser(
+        "bisect",
+        help="Use binary search to find a minimal subgraph that fails to determinize."
+    )
+    parser_bisect.add_argument("filepath", help="Path to the nwa_dump.json file.")
+    parser_bisect.add_argument(
+        "--timeout", type=float, default=1.0,
+        help="Timeout in seconds for each determinization check."
+    )
+    parser_bisect.set_defaults(func=run_bisect_pass)
 
     # --- Chunked Determinize Pass ---
     parser_chunked_det = subparsers.add_parser(
