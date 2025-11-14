@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
 use range_set_blaze::RangeSetBlaze;
+use rustfst::fst_properties::FstProperties;
 
 static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
@@ -329,6 +330,8 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
 
 pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     let mut fst = nwa_to_vector_fst(nwa);
+    fst.compute_and_update_properties_all().unwrap();
+    assert!(fst.properties().contains(FstProperties::ACCEPTOR), "FST should be an acceptor before determinization");
     crate::debug!(4, "NFA states before rm_epsilon: {}", fst.num_states());
     rm_epsilon(&mut fst).unwrap();
     crate::debug!(4, "NFA states after rm_epsilon: {}", fst.num_states());
