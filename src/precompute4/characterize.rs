@@ -1,33 +1,71 @@
-use crate::glr::parser::GLRParser;
-use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
-use std::fmt::{Display, Formatter};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::{self, Display, Formatter};
+
+use crate::glr::parser::GLRParser;
+use crate::glr::table::{
+    NonTerminalID,
+    Stage7ShiftsAndReducesLookaheadValue,
+    StateID,
+    TerminalID,
+};
+
+type InitialShift = (StateID, StateID);
+type InitialReduce = (StateID, usize, NonTerminalID);
+type RevealAndRereduce = (StateID, usize, NonTerminalID);
+type RevealGotoShiftEscape = (StateID, StateID, StateID);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ReduceCharacterization {
     pub terminal: TerminalID,
     pub nonterminal: NonTerminalID,
     // (revealed_state, len, nonterminal)
-    pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
+    pub reveal_and_rereduces: BTreeSet<RevealAndRereduce>,
     // (revealed_state, goto_state, shift_state)
-    pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
+    pub reveal_goto_shift_escapes: BTreeSet<RevealGotoShiftEscape>,
+}
+
+impl ReduceCharacterization {
+    fn new(terminal: TerminalID, nonterminal: NonTerminalID) -> Self {
+        Self {
+            terminal,
+            nonterminal,
+            reveal_and_rereduces: BTreeSet::new(),
+            reveal_goto_shift_escapes: BTreeSet::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.reveal_and_rereduces.is_empty()
+            && self.reveal_goto_shift_escapes.is_empty()
+    }
 }
 
 impl Display for ReduceCharacterization {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
+
         if !self.reveal_and_rereduces.is_empty() {
             writeln!(f, "      Reveal-and-rereduces:")?;
             for (revealed, len, nt) in &self.reveal_and_rereduces {
-                writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?;
+                writeln!(
+                    f,
+                    "        - revealed: {}, len: {}, reduce_nt: {}",
+                    revealed.0, len, nt.0
+                )?;
             }
         }
+
         if !self.reveal_goto_shift_escapes.is_empty() {
             writeln!(f, "      Reveal-goto-shift escapes:")?;
             for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
-                writeln!(f, "        - revealed: {}, goto: {}, shift: {}", revealed.0, goto.0, shift.0)?;
+                writeln!(
+                    f,
+                    "        - revealed: {}, goto: {}, shift: {}",
+                    revealed.0, goto.0, shift.0
+                )?;
             }
         }
+
         Ok(())
     }
 }
@@ -36,76 +74,123 @@ impl Display for ReduceCharacterization {
 pub struct BelowBottomCharacterization {
     pub terminal: TerminalID,
     // (initial_state, shift_state)
-    pub initial_shifts: BTreeSet<(StateID, StateID)>,
+    pub initial_shifts: BTreeSet<InitialShift>,
     // (initial_state, len, nonterminal)
-    pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
+    pub initial_reduces: BTreeSet<InitialReduce>,
     pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
     pub all_nts: BTreeSet<NonTerminalID>,
 }
 
 impl Display for BelowBottomCharacterization {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
+
         if !self.initial_shifts.is_empty() {
             writeln!(f, "  Initial Shifts:")?;
             for (initial, shift) in &self.initial_shifts {
                 writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
             }
         }
+
         if !self.initial_reduces.is_empty() {
             writeln!(f, "  Initial Reduces:")?;
             for (initial, len, nt) in &self.initial_reduces {
-                writeln!(f, "    - initial: {}, len: {}, nt: {}", initial.0, len, nt.0)?;
+                writeln!(
+                    f,
+                    "    - initial: {}, len: {}, nt: {}",
+                    initial.0, len, nt.0
+                )?;
             }
         }
+
         if !self.reduce_characterizations.is_empty() {
             writeln!(f, "  Reduce Characterizations:")?;
             for rc in self.reduce_characterizations.values() {
                 write!(f, "{}", rc)?;
             }
         }
+
         Ok(())
     }
 }
 
-pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
-    let mut all_chars = BTreeMap::new();
-    for &terminal_id in parser.terminal_map.right_values() {
-        all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
-    }
-    all_chars
+pub fn compute_all_characterizations(
+    parser: &GLRParser,
+) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
+    parser
+        .terminal_map
+        .right_values()
+        .cloned()
+        .map(|terminal_id| {
+            (
+                terminal_id,
+                compute_below_bottom_characterization(parser, terminal_id),
+            )
+        })
+        .collect()
 }
 
-pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
-    let all_nts = parser.non_terminal_map.right_values().cloned().collect();
-    let mut char = BelowBottomCharacterization {
+pub fn compute_below_bottom_characterization(
+    parser: &GLRParser,
+    terminal_id: TerminalID,
+) -> BelowBottomCharacterization {
+    let all_nts: BTreeSet<_> = parser
+        .non_terminal_map
+        .right_values()
+        .cloned()
+        .collect();
+
+    let (initial_shifts, initial_reduces) = collect_initial_actions(parser, terminal_id);
+    let reduce_characterizations =
+        collect_reduce_characterizations(parser, terminal_id, &all_nts);
+
+    let result = BelowBottomCharacterization {
         terminal: terminal_id,
-        initial_shifts: BTreeSet::new(),
-        initial_reduces: BTreeSet::new(),
-        reduce_characterizations: BTreeMap::new(),
+        initial_shifts,
+        initial_reduces,
+        reduce_characterizations,
         all_nts,
     };
 
-    // --- 1. Compute initial actions ---
+    crate::debug!(
+        5,
+        "Computed Below-Bottom Characterization for terminal {}:\n{}",
+        terminal_id.0,
+        result
+    );
+
+    result
+}
+
+fn collect_initial_actions(
+    parser: &GLRParser,
+    terminal_id: TerminalID,
+) -> (BTreeSet<InitialShift>, BTreeSet<InitialReduce>) {
+    use Stage7ShiftsAndReducesLookaheadValue::*;
+
+    let mut initial_shifts = BTreeSet::new();
+    let mut initial_reduces = BTreeSet::new();
+
     for (&initial_state, row) in &parser.table {
         if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
             match action {
-                Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                    char.initial_shifts.insert((initial_state, *shift_state));
+                Shift(shift_state) => {
+                    initial_shifts.insert((initial_state, *shift_state));
                 }
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                Reduce { nonterminal_id, len, .. } => {
                     if *len > 0 {
-                        char.initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                        initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
                     }
                 }
-                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                Split { shift, reduces } => {
                     if let Some(shift_state) = shift {
-                        char.initial_shifts.insert((initial_state, *shift_state));
+                        initial_shifts.insert((initial_state, *shift_state));
                     }
+
                     for (len, nts) in reduces {
                         if *len > 0 {
                             for (nt_id, _) in nts {
-                                char.initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                                initial_reduces.insert((initial_state, *len - 1, *nt_id));
                             }
                         }
                     }
@@ -114,80 +199,153 @@ pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: Te
         }
     }
 
-    // --- 2. Compute reduce characterizations ---
-    for &nt_id in parser.non_terminal_map.right_values() {
-        let mut reduce_char = ReduceCharacterization {
-            terminal: terminal_id,
-            nonterminal: nt_id,
-            reveal_and_rereduces: BTreeSet::new(),
-            reveal_goto_shift_escapes: BTreeSet::new(),
-        };
+    (initial_shifts, initial_reduces)
+}
 
-        // Iterate over all possible revealed states
+fn collect_reduce_characterizations(
+    parser: &GLRParser,
+    terminal_id: TerminalID,
+    all_nts: &BTreeSet<NonTerminalID>,
+) -> BTreeMap<NonTerminalID, ReduceCharacterization> {
+    let mut result = BTreeMap::new();
+
+    for &nt_id in all_nts {
+        let mut reduce_char = ReduceCharacterization::new(terminal_id, nt_id);
+
         for (&revealed_state, row) in &parser.table {
-            // Check if this state has a GOTO for our non-terminal
             if let Some(goto) = row.gotos.get(&nt_id) {
                 if let Some(goto_state) = goto.state_id {
-                    // This is a valid starting point for a chain.
-                    let mut worklist: VecDeque<StateID> = VecDeque::new();
-                    worklist.push_back(goto_state);
-                    let mut visited: BTreeSet<StateID> = BTreeSet::new();
-                    visited.insert(goto_state);
-
-                    while let Some(current_state) = worklist.pop_front() {
-                        if let Some(action) = parser.table.get(&current_state).and_then(|r| r.shifts_and_reduces_full.get(&terminal_id)) {
-                            match action {
-                                Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                                    reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                }
-                                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
-                                    if *len == 1 {
-                                        // Unit reduction chain
-                                        if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                            if let Some(next_goto_state) = next_goto.state_id {
-                                                if visited.insert(next_goto_state) {
-                                                    worklist.push_back(next_goto_state);
-                                                }
-                                            }
-                                        }
-                                    } else if *len > 1 {
-                                        // Pop below revealed state
-                                        reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                    }
-                                }
-                                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                    if let Some(shift_state) = shift {
-                                        reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                    }
-                                    for (len, nts) in reduces {
-                                        for (reduce_nt, _) in nts {
-                                            if *len == 1 {
-                                                if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                    if let Some(next_goto_state) = next_goto.state_id {
-                                                        if visited.insert(next_goto_state) {
-                                                            worklist.push_back(next_goto_state);
-                                                        }
-                                                    }
-                                                }
-                                            } else if *len > 1 {
-                                                reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    explore_from_goto(
+                        parser,
+                        terminal_id,
+                        revealed_state,
+                        goto_state,
+                        &mut reduce_char,
+                    );
                 }
             }
         }
 
-        if !reduce_char.reveal_and_rereduces.is_empty() || !reduce_char.reveal_goto_shift_escapes.is_empty() {
-            char.reduce_characterizations.insert(nt_id, reduce_char);
+        if !reduce_char.is_empty() {
+            result.insert(nt_id, reduce_char);
         }
     }
 
-    crate::debug!(5, "Computed Below-Bottom Characterization for terminal {}:\n{}", terminal_id.0, char);
+    result
+}
 
-    char
+fn explore_from_goto(
+    parser: &GLRParser,
+    terminal_id: TerminalID,
+    revealed_state: StateID,
+    start_state: StateID,
+    reduce_char: &mut ReduceCharacterization,
+) {
+    let mut worklist = VecDeque::new();
+    let mut visited = BTreeSet::new();
+
+    worklist.push_back(start_state);
+    visited.insert(start_state);
+
+    while let Some(current_state) = worklist.pop_front() {
+        let action_opt = parser
+            .table
+            .get(&current_state)
+            .and_then(|row| row.shifts_and_reduces_full.get(&terminal_id));
+
+        if let Some(action) = action_opt {
+            process_reduce_action(
+                parser,
+                revealed_state,
+                current_state,
+                action,
+                reduce_char,
+                &mut visited,
+                &mut worklist,
+            );
+        }
+    }
+}
+
+fn process_reduce_action(
+    parser: &GLRParser,
+    revealed_state: StateID,
+    current_state: StateID,
+    action: &Stage7ShiftsAndReducesLookaheadValue,
+    reduce_char: &mut ReduceCharacterization,
+    visited: &mut BTreeSet<StateID>,
+    worklist: &mut VecDeque<StateID>,
+) {
+    use Stage7ShiftsAndReducesLookaheadValue::*;
+
+    match action {
+        Shift(shift_state) => {
+            reduce_char
+                .reveal_goto_shift_escapes
+                .insert((revealed_state, current_state, *shift_state));
+        }
+        Reduce {
+            nonterminal_id: reduce_nt,
+            len,
+            ..
+        } => {
+            handle_reduce(
+                parser,
+                revealed_state,
+                *len,
+                *reduce_nt,
+                visited,
+                worklist,
+                reduce_char,
+            );
+        }
+        Split { shift, reduces } => {
+            if let Some(shift_state) = shift {
+                reduce_char
+                    .reveal_goto_shift_escapes
+                    .insert((revealed_state, current_state, *shift_state));
+            }
+
+            for (len, nts) in reduces {
+                for (reduce_nt, _) in nts {
+                    handle_reduce(
+                        parser,
+                        revealed_state,
+                        *len,
+                        *reduce_nt,
+                        visited,
+                        worklist,
+                        reduce_char,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn handle_reduce(
+    parser: &GLRParser,
+    revealed_state: StateID,
+    len: usize,
+    reduce_nt: NonTerminalID,
+    visited: &mut BTreeSet<StateID>,
+    worklist: &mut VecDeque<StateID>,
+    reduce_char: &mut ReduceCharacterization,
+) {
+    if len == 1 {
+        if let Some(next_goto_state) = parser
+            .table
+            .get(&revealed_state)
+            .and_then(|row| row.gotos.get(&reduce_nt))
+            .and_then(|goto| goto.state_id)
+        {
+            if visited.insert(next_goto_state) {
+                worklist.push_back(next_goto_state);
+            }
+        }
+    } else if len > 1 {
+        reduce_char
+            .reveal_and_rereduces
+            .insert((revealed_state, len - 2, reduce_nt));
+    }
 }
