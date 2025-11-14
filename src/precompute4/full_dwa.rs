@@ -571,15 +571,21 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             crate::debug!(6, "NWA states:\n{}", states_arena.borrow());
             crate::debug!(6, "{:?}", nwa_bodies_map);
             for (right_body, left_bodies) in nwa_bodies_map {
-                for left_body in left_bodies {
+                let mut states = states_arena.borrow_mut();
+                let mut left_bodies_union = {
                     let mut states = states_arena.borrow_mut();
-                    let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+                    let start = states.add_state();
+                    NWABody { start_state: start }
+                };
+                for left_body in left_bodies {
                     crate::debug!(6, "NWA states after concat:\n{}", states);
                     // Union via epsilon into nwa_body
                     crate::debug!(5, "At trie node {:?}, concatenating left body (start {}) and right body (start {}) into composed body (start {})...", node_idx, left_body.start_state, right_body.start_state, composed_body.start_state);
-                    nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
                     crate::debug!(6, "NWA states after union:\n{}", states);
+                    left_bodies_union = NWA::union_components(&mut states, &left_bodies_union, &left_body);
                 }
+                let composed_body = NWA::concatenate_components(&mut states, &left_bodies_union, &right_body, &Weight::all());
+                nwa_body = NWA::union_components(&mut states, &left_bodies_union, &composed_body);
             }
 
             crate::debug!(6, "At trie node {:?}, obtained NWA body with start state {} and {} states.", node_idx, nwa_body.start_state, states_arena.borrow().len());
