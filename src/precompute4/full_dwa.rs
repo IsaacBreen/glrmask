@@ -1,17 +1,17 @@
 use crate::r#macro::is_debug_level_enabled;
-use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
+use crate::constraint::{PrecomputeNode1Index, StateIDBV, Trie1GodWrapper};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::json_serialization::JSONConvertible;
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
-use crate::precompute4::utils;
+use crate::precompute4::utils::{self, decode_symbol_i16, is_default_transition};
 use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight};
 use crate::constraint::LLMTokenBV;
 use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
 use std::time::Instant;
 use chrono::Local;
@@ -252,6 +252,232 @@ fn simplify_default_transitions(nwa: &mut NWA) -> bool {
     changed
 }
 
+fn build_label_follower_map(parser: &GLRParser) -> BTreeMap<ParserStateID, StateIDBV> {
+    let mut follower_map: BTreeMap<ParserStateID, StateIDBV> = BTreeMap::new();
+
+    let mut add_follower = |from_sid: ParserStateID, to_sid: ParserStateID| {
+        follower_map.entry(from_sid).or_default().insert(to_sid.0);
+    };
+
+    // From parser.table
+    for (&from_sid, row) in &parser.table {
+        // Shifts
+        for &to_sid in row.shifts_and_reduces_full.values().filter_map(|action| match action {
+            crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(sid),
+            crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => shift.as_ref(),
+            _ => None,
+        }) {
+            add_follower(from_sid, to_sid);
+        }
+        // Gotos
+        for goto in row.gotos.values() {
+            if let Some(to_sid) = goto.state_id {
+                add_follower(from_sid, to_sid);
+            }
+        }
+    }
+
+    // From parser.combined_rows
+    for (&from_sid, row) in &parser.combined_rows {
+        // Shifts
+        for actions in row.shifts_and_reduces.values() {
+            for (action, _) in actions {
+                if let Some(to_sid) = match action {
+                    crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(*sid),
+                    crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
+                    _ => None,
+                } {
+                    add_follower(from_sid, to_sid);
+                }
+            }
+        }
+        // Gotos
+        for gotos in row.gotos.values() {
+            for (goto, _) in gotos {
+                if let Some(to_sid) = goto.state_id {
+                    add_follower(from_sid, to_sid);
+                }
+            }
+        }
+    }
+
+    // From parser.hallucinated_row
+    let from_sid = parser.hallucinated_state_id;
+    // Shifts
+    for actions in parser.hallucinated_row.shifts_and_reduces.values() {
+        for (action, _) in actions {
+            if let Some(to_sid) = match action {
+                crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(*sid),
+                crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
+                _ => None,
+            } {
+                add_follower(from_sid, to_sid);
+            }
+        }
+    }
+    // Gotos
+    for gotos in parser.hallucinated_row.gotos.values() {
+        for (goto, _) in gotos {
+            if let Some(to_sid) = goto.state_id {
+                add_follower(from_sid, to_sid);
+            }
+        }
+    }
+
+    follower_map
+}
+
+fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
+    crate::debug!(4, "Starting label propagation and pruning...");
+    let now = Instant::now();
+
+    let follower_map = build_label_follower_map(parser);
+
+    let mut state_info: Vec<BTreeMap<ParserStateID, Weight>> = vec![BTreeMap::new(); nwa.states.len()];
+    let mut worklist: VecDeque<StateID> = VecDeque::new();
+    let mut in_worklist: BTreeSet<StateID> = BTreeSet::new();
+
+    // Seed initial states
+    let start_state = &nwa.states[nwa.body.start_state];
+    for (_, targets) in &start_state.transitions {
+        for (target_state, _) in targets {
+            let s_init = *target_state;
+            for (label, transitions) in &nwa.states[s_init].transitions {
+                if !is_default_transition(*label) {
+                    if let Ok((is_pos, p_id)) = decode_symbol_i16(*label) {
+                        if is_pos {
+                            for (_, w) in transitions {
+                                let entry = state_info[s_init].entry(p_id).or_default();
+                                *entry |= w;
+                            }
+                        }
+                    }
+                }
+            }
+            if !state_info[s_init].is_empty() && in_worklist.insert(s_init) {
+                worklist.push_back(s_init);
+            }
+        }
+    }
+
+    // Fixpoint propagation
+    while let Some(u) = worklist.pop_front() {
+        in_worklist.remove(&u);
+        let info_at_u = state_info[u].clone();
+        if info_at_u.is_empty() { continue; }
+
+        for (l, targets) in &nwa.states[u].transitions {
+            let (is_pos, is_neg, is_def, p_id) = match decode_symbol_i16(*l) {
+                Ok((is_pos, p_id)) => (is_pos, !is_pos, false, p_id),
+                Err(_) => (false, false, true, ParserStateID(0)), // Dummy p_id for default
+            };
+
+            for (v, w_uv) in targets {
+                let v = *v;
+                let mut changed = false;
+
+                let process_propagation = |pw: &Weight, followers: &StateIDBV, state_info: &mut Vec<BTreeMap<ParserStateID, Weight>>| -> bool {
+                    let mut any_change = false;
+                    for follower_id_val in followers.iter() {
+                        let follower_id = ParserStateID(follower_id_val);
+                        let entry = state_info[v].entry(follower_id).or_default();
+                        let old_len = entry.len();
+                        *entry |= &pw;
+                        if entry.len() != old_len { any_change = true; }
+                    }
+                    any_change
+                };
+
+                if is_def {
+                    for (q_id, w_q) in &info_at_u {
+                        let pw = w_q & w_uv;
+                        if pw.is_empty() { continue; }
+                        if let Some(followers) = follower_map.get(q_id) {
+                            if process_propagation(&pw, followers, &mut state_info) { changed = true; }
+                        }
+                    }
+                } else if is_pos {
+                    if let Some(w_p) = info_at_u.get(&p_id) {
+                        let pw = w_p & w_uv;
+                        if pw.is_empty() { continue; }
+                        if let Some(followers) = follower_map.get(&p_id) {
+                            if process_propagation(&pw, followers, &mut state_info) { changed = true; }
+                        }
+                    }
+                } else { // is_neg
+                    for (q_id, w_q) in &info_at_u {
+                        if *q_id == p_id { continue; }
+                        let pw = w_q & w_uv;
+                        if pw.is_empty() { continue; }
+                        if let Some(followers) = follower_map.get(q_id) {
+                            if process_propagation(&pw, followers, &mut state_info) { changed = true; }
+                        }
+                    }
+                }
+
+                if changed && in_worklist.insert(v) {
+                    worklist.push_back(v);
+                }
+            }
+        }
+    }
+    crate::debug!(4, "Label propagation fixpoint took: {:?}", now.elapsed());
+
+    // Pruning pass
+    let now_prune = Instant::now();
+    let mut changed_count = 0;
+    for u in 0..nwa.states.len() {
+        let info_at_u = &state_info[u];
+        if info_at_u.is_empty() { continue; }
+
+        let all_labels_weight = info_at_u.values().fold(Weight::zeros(), |acc, w| acc | w);
+
+        let state = &mut nwa.states[u];
+        for (l, targets) in state.transitions.iter_mut() {
+            let (is_pos, is_neg, is_def, p_id) = match decode_symbol_i16(*l) {
+                Ok((is_pos, p_id)) => (is_pos, !is_pos, false, p_id),
+                Err(_) => (false, false, true, ParserStateID(0)),
+            };
+
+            let valid_incoming_weight = if is_def {
+                all_labels_weight.clone()
+            } else if is_pos {
+                info_at_u.get(&p_id).cloned().unwrap_or_default()
+            } else { // is_neg
+                let w_p = info_at_u.get(&p_id).cloned().unwrap_or_default();
+                &all_labels_weight - &w_p
+            };
+
+            if valid_incoming_weight.is_empty() {
+                // All transitions for this label can be pruned
+                for (_, w_uv) in targets.iter_mut() {
+                    if !w_uv.is_empty() {
+                        changed_count += 1;
+                        *w_uv = Weight::zeros();
+                    }
+                }
+            } else {
+                for (_, w_uv) in targets.iter_mut() {
+                    let old_w = w_uv.clone();
+                    *w_uv &= &valid_incoming_weight;
+                    if *w_uv != old_w {
+                        changed_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Clean up empty transitions
+    for state in &mut nwa.states.0 {
+        for targets in state.transitions.values_mut() {
+            targets.retain(|(_, w)| !w.is_empty());
+        }
+        state.transitions.retain(|_, v| !v.is_empty());
+    }
+    crate::debug!(4, "Pruning pass changed {} weights and took: {:?}", changed_count, now_prune.elapsed());
+}
+
 // Public API: precompute4 using NWA-first approach, determinize at the end.
 pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>, trie1_god: &Trie1GodWrapper) -> DWA {
     let now_total = Instant::now();
@@ -425,6 +651,10 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
+
+    // New optimization pass
+    propagate_and_prune_labels(parser, &mut combined_nwa);
+    combined_nwa.simplify_rustfst();
 
     // prune_continuations_from_final_states(&mut combined_nwa);
     // combined_nwa.simplify();
