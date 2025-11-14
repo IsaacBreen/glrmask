@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 use chrono::Local;
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
+use crate::precompute4::weighted_automata::nwa::SimplifyRustfstConfig;
 
 pub type Precomputed4 = DWA;
 use crate::tokenizer::TokenizerStateID;
@@ -441,14 +442,14 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let now = Instant::now();
     crate::debug!(4, "Pruning continuations from final states...");
     prune_continuations_from_final_states(&mut combined_nwa);
-    combined_nwa.simplify_rustfst();
+    combined_nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true));
     crate::debug!(4, "Pruning and simplifying took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after pruning:\n{}", combined_nwa.stats());
 
     let now = Instant::now();
     crate::debug!(4, "Simplifying default transitions...");
     simplify_default_transitions(&mut combined_nwa);
-    combined_nwa.simplify_rustfst();
+    combined_nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true));
     crate::debug!(4, "Default transition simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after default simplification:\n{}", combined_nwa.stats());
 
