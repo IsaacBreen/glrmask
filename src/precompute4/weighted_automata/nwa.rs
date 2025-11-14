@@ -76,27 +76,14 @@ impl NWAStates {
         Ok(())
     }
 
-    pub fn copy_subgraph_from_and_return_body(&mut self, body: NWABody) -> NWABody {
-        // The call site that caused a compile error was attempting a self-copy.
-        // This signature is now specialized for that case, making the self-copy explicit and safe.
-        let source = self.clone();
-        let (new_start, _remap) = self.copy_subgraph_from(&source, body.start_state);
+    pub fn copy_subgraph_from_and_return_body(&mut self, other: &NWAStates, body: NWABody) -> NWABody {
+        let (new_start, _remap) = self.copy_subgraph_from(other, body.start_state);
         NWABody { start_state: new_start }
     }
 
     /// Deep-copy a subgraph starting at 'start_id' from another NWAStates arena into self.
     /// Returns (new_start_id, remap_old_to_new)
     pub fn copy_subgraph_from(&mut self, other: &NWAStates, start_id: NWAStateID) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
-        if std::ptr::eq(self, other) {
-            // To prevent issues with re-allocation invalidating `other` when it's a reference to `self`,
-            // we operate on a clone in the self-copy case.
-            let other_clone = other.clone();
-            return self.copy_subgraph_from_internal(&other_clone, start_id);
-        }
-        self.copy_subgraph_from_internal(other, start_id)
-    }
-
-    fn copy_subgraph_from_internal(&mut self, other: &NWAStates, start_id: NWAStateID) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
         let mut remap: HashMap<NWAStateID, NWAStateID> = HashMap::new();
         if start_id >= other.len() {
             let new_start = self.add_state();
@@ -140,7 +127,6 @@ impl NWAStates {
 
         (new_start, remap)
     }
-
 }
 
 impl Index<NWAStateID> for NWAStates {
