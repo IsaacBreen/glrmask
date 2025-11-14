@@ -12,6 +12,7 @@ use crate::constraint::LLMTokenBV;
 use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::time::Instant;
 use chrono::Local;
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
@@ -454,14 +455,13 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     crate::debug!(4, "Default transition simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after default simplification:\n{}", combined_nwa.stats());
 
-    {
+    if env::var("RLLM_DUMP_NWA").is_ok() {
         let timestamp = Local::now().format("%Y%m%d-%H%M%S");
         let filename = format!("nwa_dump_before_final_det_{}.json", timestamp);
         eprintln!("Dumping NWA to {} before final determinization...", filename);
         let f = std::fs::File::create(&filename).expect("Unable to create NWA dump file");
         serde_json::to_writer_pretty(f, &combined_nwa).expect("Unable to write NWA to file");
         eprintln!("NWA dump complete.");
-
         let parser_filename = format!("parser_dump_before_final_det_{}.json", timestamp);
         eprintln!("Dumping parser to {}...", parser_filename);
         let parser_f = std::fs::File::create(&parser_filename).expect("Unable to create parser dump file");
@@ -469,7 +469,6 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         serde_json::to_writer_pretty(parser_f, &parser_json).expect("Unable to write parser to file");
         eprintln!("Parser dump complete.");
     }
-
     let now = Instant::now();
     // Determinize the single combined NWA
     crate::debug!(4, "Determinizing final combined NWA...");
