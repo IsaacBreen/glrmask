@@ -22,9 +22,7 @@ pub fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> 
 }
 
 pub fn decode_symbol_i16(code: i16) -> Result<(bool, ParserStateID), ()> {
-    if code == DEFAULT_TRANSITION_SYMBOL {
-        Err(())
-    } else if code >= 0 {
+    if code >= 0 {
         Ok((true, ParserStateID(code as usize)))
     } else {
         Ok((false, ParserStateID((code.wrapping_sub(i16::MIN)) as usize)))
