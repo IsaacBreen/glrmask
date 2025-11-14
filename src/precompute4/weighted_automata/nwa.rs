@@ -251,11 +251,11 @@ impl NWA {
         super::determinization_rustfst::determinize_nwa_to_dwa(self)
     }
 
-    pub fn simplify_rustfst(&self) -> NWA {
+    pub fn simplify_rustfst(&mut self) {
         let mut fst = nwa_to_vector_fst(self);
         let config = MinimizeConfig::default().with_allow_nondet(true);
         minimize_with_config(&mut fst, config).unwrap();
-        vector_fst_to_nwa(&fst)
+        *self = vector_fst_to_nwa(&fst);
     }
 }
 
