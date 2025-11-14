@@ -581,7 +581,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                     left_bodies_union2 = NWA::union_components(&mut states2, &left_bodies_union2, &left_body2);
                 }
                 let mut left_bodies_nwa = NWA { states: states2, body: left_bodies_union2 };
-                left_bodies_nwa.simplify_rustfst();
+                left_bodies_nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true));
                 let left_bodies_dwa = left_bodies_nwa.determinize_to_dwa_with_rustfst();
                 let left_bodies_nwa = NWA::from_dwa(&left_bodies_dwa);
                 let NWA { states: states2, body: left_bodies_union2 } = left_bodies_nwa;
