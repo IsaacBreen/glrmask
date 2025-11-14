@@ -7,6 +7,7 @@ use crate::precompute4::weighted_automata::bitset::SimpleBitset;
 use crate::precompute4::weighted_automata::{NWAStateID};
 use anyhow::Result;
 use nom::IResult;
+use once_cell::sync::Lazy;
 use rustfst::NomCustomError;
 use rustfst::prelude::*;
 use rustfst::semirings::{
@@ -15,51 +16,91 @@ use rustfst::semirings::{
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
 use range_set_blaze::RangeSetBlaze;
 
-#[derive(Clone, Debug, PartialEq, PartialOrd, Default, Eq, Hash, Serialize, Deserialize)]
-pub struct BitsetWeight(pub Weight);
+static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+fn intern_weight(weight: Weight) -> Arc<Weight> {
+    let mut interner = WEIGHT_INTERNER.lock().unwrap();
+    if let Some(w) = interner.get(&weight) {
+        return w.clone();
+    }
+    let arc_weight = Arc::new(weight);
+    interner.insert(arc_weight.clone());
+    arc_weight
+}
+
+#[derive(Clone, Debug, PartialOrd, Default, Eq, Hash)]
+pub struct BitsetWeight(pub Arc<Weight>);
+
+impl PartialEq for BitsetWeight {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0
+    }
+}
+
+impl Serialize for BitsetWeight {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BitsetWeight {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let weight = Weight::deserialize(deserializer)?;
+        Ok(BitsetWeight(intern_weight(weight)))
+    }
+}
 
 impl Semiring for BitsetWeight {
     type Type = Weight;
     type ReverseWeight = BitsetWeight;
 
     fn zero() -> Self {
-        BitsetWeight(Weight::zeros())
+        BitsetWeight(intern_weight(Weight::zeros()))
     }
     fn one() -> Self {
-        BitsetWeight(Weight::all())
+        BitsetWeight(intern_weight(Weight::all()))
     }
     fn new(value: Self::Type) -> Self {
-        BitsetWeight(value)
+        BitsetWeight(intern_weight(value))
     }
 
     fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-        self.0 |= &rhs.borrow().0;
+        let new_weight = &*self.0 | &*rhs.borrow().0;
+        self.0 = intern_weight(new_weight);
         Ok(())
     }
 
     fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-        self.0 &= &rhs.borrow().0;
+        let new_weight = &*self.0 & &*rhs.borrow().0;
+        self.0 = intern_weight(new_weight);
         Ok(())
     }
 
     fn approx_equal<P: Borrow<Self>>(&self, rhs: P, _delta: f32) -> bool {
-        self.0 == rhs.borrow().0
+        *self.0 == *rhs.borrow().0
     }
 
     fn value(&self) -> &Self::Type {
         &self.0
     }
     fn take_value(self) -> Self::Type {
-        self.0
+        Arc::try_unwrap(self.0).unwrap_or_else(|arc| (*arc).clone())
     }
     fn set_value(&mut self, value: Self::Type) {
-        self.0 = value;
+        self.0 = intern_weight(value);
     }
     fn reverse(&self) -> Result<Self::ReverseWeight> {
         Ok(self.clone())
@@ -86,7 +127,8 @@ impl WeaklyDivisibleSemiring for BitsetWeight {
         // This is because we need `(a/b) & b = a` when `a` is a "sub-weight" of `b` (i.e. a subset).
         // `(a | !b) & b = (a & b) | (!b & b) = a & b`.
         // Since `a` is a subset of `b` in this context, `a & b = a`.
-        self.0 |= &!&_rhs.0;
+        let new_weight = &*self.0 | &!&*_rhs.0;
+        self.0 = intern_weight(new_weight);
         Ok(())
     }
 }
@@ -113,7 +155,7 @@ impl SerializableSemiring for BitsetWeight {
             i = next_i;
         }
         let rsb = RangeSetBlaze::from_iter(ranges);
-        Ok((i, BitsetWeight(Weight::from_rsb(rsb))))
+        Ok((i, BitsetWeight(intern_weight(Weight::from_rsb(rsb)))))
     }
 
     fn write_binary<F: Write>(&self, file: &mut F) -> Result<()> {
@@ -130,7 +172,7 @@ impl SerializableSemiring for BitsetWeight {
         use nom::combinator::map_res;
         map_res(nom::combinator::rest, |s: &str| -> Result<BitsetWeight, _> {
             serde_json::from_str::<Weight>(s)
-                .map(BitsetWeight)
+                .map(|w| BitsetWeight(intern_weight(w)))
                 .map_err(|e| e.to_string())
         })(i)
     }
@@ -163,7 +205,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
         let fst_state_id = state_map[&i];
         if let Some(w) = &nwa_state.final_weight {
             if !w.is_empty() {
-                fst.set_final(fst_state_id, BitsetWeight(w.clone()))
+                fst.set_final(fst_state_id, BitsetWeight::new(w.clone()))
                     .unwrap();
             }
         }
@@ -176,7 +218,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                         Tr::new(
                             (*label as u32) + 1,
                             EPS_LABEL,
-                            BitsetWeight(weight.clone()),
+                            BitsetWeight::new(weight.clone()),
                             state_map[target],
                         ),
                     )
@@ -192,7 +234,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                     Tr::new(
                         EPS_LABEL,
                         EPS_LABEL,
-                        BitsetWeight(weight.clone()),
+                        BitsetWeight::new(weight.clone()),
                         state_map[target],
                     ),
                 )
@@ -230,7 +272,7 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
 
         if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
             if !w.0.is_empty() {
-                dwa.set_final_weight(dwa_state_id, w.0).unwrap();
+                dwa.set_final_weight(dwa_state_id, w.value().clone()).unwrap();
             }
         }
 
@@ -243,7 +285,7 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                     dwa_state_id,
                     ((tr.ilabel - 1) as u16) as i16,
                     state_map[&tr.nextstate],
-                    tr.weight.0.clone(),
+                    tr.weight.value().clone(),
                 );
                 if let Err(e) = res {
                     // This should not happen if the input FST is deterministic.
@@ -283,14 +325,14 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
 
         if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
             if !w.0.is_empty() {
-                nwa.states[nwa_state_id].final_weight = Some(w.0.clone());
+                nwa.states[nwa_state_id].final_weight = Some(w.value().clone());
             }
         }
 
         for tr in fst.get_trs(fst_state_id).unwrap().trs() {
             if !tr.weight.0.is_empty() {
                 let target_nwa_id = state_map[&tr.nextstate];
-                let weight = tr.weight.0.clone();
+                let weight = tr.weight.value().clone();
 
                 if tr.ilabel == EPS_LABEL {
                     nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
