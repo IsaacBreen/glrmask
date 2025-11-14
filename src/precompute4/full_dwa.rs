@@ -575,6 +575,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                     nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
                 }
             }
+
+            println!("At trie node {:?}, obtained NWA body with start state {} and {} states.", node_idx, nwa_body.start_state, states_arena.borrow().len());
+            println!("NWA body:\n{}", nwa_body);
+            println!("NWA states:\n{}", states_arena.borrow());
+
             if !tokens.is_empty() {
                 if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
                     for tokenizer_state_id in tokenizer_state_ids {
