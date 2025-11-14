@@ -373,7 +373,7 @@ impl NWA {
         let custom_dwa = if let Some(dwa) = try_build_singleton_loop_union(self) {
             dwa
         } else {
-            const STATE_LIMIT: usize = 100000;
+            const STATE_LIMIT: usize = usize::MAX;
 
             eprintln!(
                 "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
