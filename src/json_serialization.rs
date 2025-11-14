@@ -747,6 +747,26 @@ where
     }
 }
 
+impl serde::Serialize for JSONNode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let serde_value = self.to_serde_value();
+        serde_value.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for JSONNode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let serde_value = SerdeValue::deserialize(deserializer)?;
+        JSONNode::from_serde_value(serde_value).map_err(serde::de::Error::custom)
+    }
+}
+
 // --- Tests (optional, but good for verifying) ---
 #[cfg(test)]
 mod tests {
