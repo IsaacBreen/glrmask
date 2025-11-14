@@ -44,25 +44,6 @@ impl PartialEq for BitsetWeight {
     }
 }
 
-impl Serialize for BitsetWeight {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for BitsetWeight {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let weight = Weight::deserialize(deserializer)?;
-        Ok(BitsetWeight(intern_weight(weight)))
-    }
-}
-
 impl Semiring for BitsetWeight {
     type Type = Weight;
     type ReverseWeight = BitsetWeight;
@@ -183,7 +164,7 @@ impl std::fmt::Display for BitsetWeight {
         write!(
             f,
             "{}",
-            serde_json::to_string(&self.0).unwrap_or_else(|_| "err".to_string())
+            serde_json::to_string(self.0.as_ref()).unwrap_or_else(|_| "err".to_string())
         )
     }
 }
