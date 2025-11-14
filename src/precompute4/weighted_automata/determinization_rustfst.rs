@@ -174,8 +174,8 @@ fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                     fst.add_tr(
                         fst_state_id,
                         Tr::new(
-                            *label as Label,
-                            *label as Label,
+                            (*label as u16 as u64) + 1,
+                            (*label as u16 as u64) + 1,
                             BitsetWeight(weight.clone()),
                             state_map[target],
                         ),
@@ -241,7 +241,7 @@ fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                 }
                 let res = dwa.add_transition(
                     dwa_state_id,
-                    tr.ilabel as i16,
+                    ((tr.ilabel - 1) as u16) as i16,
                     state_map[&tr.nextstate],
                     tr.weight.0.clone(),
                 );
