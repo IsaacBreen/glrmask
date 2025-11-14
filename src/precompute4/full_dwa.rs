@@ -489,7 +489,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         NWABody { start_state: start }
     };
     let initial_tokens = LLMTokenBV::max_ones();
-    let initial_values: Vec<(Trie2Index, (NWABody, LLMTokenBV))> = vec![(reversed_trie_root, (initial_nwa_body, initial_tokens))];
+    let initial_values: Vec<(Trie2Index, (BTreeMap<NWABody, Vec<NWABody>>, LLMTokenBV))> = vec![(reversed_trie_root, (BTreeMap::from([(initial_nwa_body, vec![initial_nwa_body])]), initial_tokens))];
     let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
     let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
     for (k, v) in precomputed1.iter() {
@@ -520,7 +520,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 &ignore_dwa
             };
 
-            let mut results: Vec<(PrecomputeNode1Index, (NWABody, LLMTokenBV))> = Vec::new();
+            let mut results: Vec<(PrecomputeNode1Index, (BTreeMap<NWABody, Vec<NWABody>>, LLMTokenBV))> = Vec::new();
             for (dest_idx, llm_token_bv) in dest_map.iter() {
                 let next_tokens = current_tokens & llm_token_bv;
                 if next_tokens.is_empty() {
@@ -530,7 +530,10 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 let mut states = states_arena.borrow_mut();
 
                 // Convert template DWA to NWA and copy it into the arena
-                let template_nwa = NWA::from_dwa(template_dwa);
+                let mut tempalte_dwa = template_dwa.clone();
+                let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                tempalte_dwa.apply_weight(&eps_weight);
+                let template_nwa = NWA::from_dwa(&tempalte_dwa);
                 crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
                 let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
                 crate::debug!(5, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
@@ -538,27 +541,41 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
                 // Concatenate: left then current (right) via epsilon with weight = llm_token_bv
                 crate::debug!(5, "Starting NWA::concatenate_components: left_start={} right_start={}...", left_body.start_state, current_nwa_body.start_state);
-                let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
-                crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
+                // let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                // let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
+                // crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
 
-                results.push((*dest_idx, (composed_body, next_tokens)));
+                results.push((*dest_idx, (BTreeMap::from([(*current_nwa_body, vec![left_body])]), next_tokens)));
             }
             results
         },
         // merge function: union them via epsilon
-        |val1, val2| {
-            let (body1, tokens1) = val1;
-            let (body2, tokens2) = val2;
-            let mut states = states_arena.borrow_mut();
-            crate::debug!(5, "Starting NWA::union_components: body1_start={} body2_start={}...", body1.start_state, body2.start_state);
-            *body1 = NWA::union_components(&mut states, body1, &body2);
+        |val1: &mut (BTreeMap<NWABody, Vec<NWABody>>, LLMTokenBV), val2: (BTreeMap<NWABody, Vec<NWABody>>, LLMTokenBV)| {
+            let (bodies1, tokens1) = val1;
+            let (bodies2, tokens2) = val2;
+            for (right_body, left_bodies) in bodies2 {
+                bodies1.entry(right_body).or_default().extend(left_bodies);
+            }
             *tokens1 |= &tokens2;
-            crate::debug!(5, "NWA::union_components finished. New start state: {}.", body1.start_state);
         },
         // process function: capture at original roots
-        |_node_data, node_idx, val| {
-            let (mut nwa_body, tokens) = val;
+        |_node_data, node_idx, val: (BTreeMap<NWABody, Vec<NWABody>>, LLMTokenBV)| {
+            let (nwa_bodies_map, tokens) = val;
+            // Combine all left bodies into a single NWA body via union (epsilon)
+            let mut nwa_body = {
+                let mut states = states_arena.borrow_mut();
+                let start = states.add_state();
+                NWABody { start_state: start }
+            };
+            for (right_body, left_bodies) in nwa_bodies_map {
+                for left_body in left_bodies {
+                    let mut states = states_arena.borrow_mut();
+                    let eps_weight = Weight::from_rsb(tokens.inner.as_ref().clone());
+                    let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &eps_weight);
+                    // Union via epsilon into nwa_body
+                    states.add_epsilon(nwa_body.start_state, composed_body.start_state, Weight::all());
+                }
+            }
             if !tokens.is_empty() {
                 // Simplify the NWA by determinizing and converting back.
                 // This is an expensive but powerful simplification step.
