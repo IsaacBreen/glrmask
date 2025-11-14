@@ -585,11 +585,13 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 for left_body in left_bodies {
                     let left_body2 = states2.copy_subgraph_from_and_return_body(&states_arena.borrow(), left_body);
                     left_bodies_union2 = NWA::union_components(&mut states2, &left_bodies_union2, &left_body2);
+                    let mut nwa = NWA { states: states2.clone(), body: left_bodies_union2.clone() };
+                    nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true).with_determinize(true));
+                    states2 = nwa.states;
+                    left_bodies_union2 = nwa.body;
                 }
                 let mut left_bodies_nwa = NWA { states: states2, body: left_bodies_union2 };
-                left_bodies_nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true));
-                let left_bodies_dwa = left_bodies_nwa.determinize_to_dwa_with_rustfst();
-                let left_bodies_nwa = NWA::from_dwa(&left_bodies_dwa);
+                left_bodies_nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true).with_determinize(true));
                 let NWA { states: states2, body: left_bodies_union2 } = left_bodies_nwa;
                 let mut states = states_arena.borrow_mut();
                 let left_bodies_union = states.copy_subgraph_from_and_return_body(&states2, left_bodies_union2);
