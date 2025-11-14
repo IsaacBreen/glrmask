@@ -383,9 +383,6 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
     let mut changed_count = 0;
     for u in 0..nwa.states.len() {
         let info_at_u = &state_info[u];
-        if info_at_u.is_empty() { continue; }
-
-        let all_labels_weight = info_at_u.values().fold(Weight::zeros(), |acc, w| acc | w);
 
         let state = &mut nwa.states[u];
         for (l, targets) in state.transitions.iter_mut() {
