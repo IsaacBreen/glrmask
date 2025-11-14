@@ -652,10 +652,6 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
 
-    // New optimization pass
-    propagate_and_prune_labels(parser, &mut combined_nwa);
-    combined_nwa.simplify_rustfst();
-
     // prune_continuations_from_final_states(&mut combined_nwa);
     // combined_nwa.simplify();
     // prune_continuations_from_final_states(&mut combined_nwa);
@@ -684,6 +680,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     combined_nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true));
     crate::debug!(4, "Default transition simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after default simplification:\n{}", combined_nwa.stats());
+
+    crate::debug!(4, "Starting label propagation and pruning...");
+    // New optimization pass
+    propagate_and_prune_labels(parser, &mut combined_nwa);
+    combined_nwa.simplify_rustfst();
+    crate::debug!(4, "Label propagation and pruning took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
 
     if env::var("RLLM_DUMP_NWA").is_ok() {
         let timestamp = Local::now().format("%Y%m%d-%H%M%S");
