@@ -20,3 +20,15 @@ pub fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> 
         Ok(i16::MIN + (id.0 as i16))
     }
 }
+
+pub fn decode_symbol_i16(code: i16) -> ParserStateID {
+    if code >= 0 {
+        ParserStateID(code as usize)
+    } else {
+        ParserStateID((code.wrapping_sub(i16::MIN)) as usize)
+    }
+}
+
+pub fn is_default_transition(code: i16) -> bool {
+    code == DEFAULT_TRANSITION_SYMBOL
+}
