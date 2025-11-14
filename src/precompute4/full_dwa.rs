@@ -427,6 +427,11 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
         }
     }
 
+    println!("state_info after propagation:");
+    for (i, info) in state_info.iter().enumerate() {
+        println!("  State {}: {:?}", i, info);
+    }
+
     // Clean up empty transitions
     for state in &mut nwa.states.0 {
         for targets in state.transitions.values_mut() {
