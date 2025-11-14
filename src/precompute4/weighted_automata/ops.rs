@@ -121,6 +121,21 @@ impl DWA {
         self.body.start_state = new_start_id;
         new_start_id
     }
+
+    pub fn apply_weight_inplace(&mut self, weight: &Weight) {
+        let start_state = self.states.0.get_mut(self.body.start_state).unwrap();
+        if let Some(sw) = &start_state.state_weight {
+            start_state.state_weight = Some(sw & weight);
+        } else {
+            start_state.state_weight = Some(weight.clone());
+        }
+        if let Some(sw) = &start_state.final_weight {
+            start_state.final_weight = Some(sw & weight);
+        }
+        for (_, tw) in start_state.trans_weights.iter_mut() {
+            *tw |= weight;
+        }
+    }
 }
 
 impl NWA {

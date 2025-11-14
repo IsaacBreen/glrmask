@@ -570,10 +570,9 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             for (right_body, left_bodies) in nwa_bodies_map {
                 for left_body in left_bodies {
                     let mut states = states_arena.borrow_mut();
-                    let eps_weight = Weight::from_rsb(tokens.inner.as_ref().clone());
-                    let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &eps_weight);
+                    let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
                     // Union via epsilon into nwa_body
-                    states.add_epsilon(nwa_body.start_state, composed_body.start_state, Weight::all());
+                    nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
                 }
             }
             if !tokens.is_empty() {
