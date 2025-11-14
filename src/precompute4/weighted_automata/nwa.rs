@@ -76,6 +76,11 @@ impl NWAStates {
         Ok(())
     }
 
+    pub fn copy_subgraph_from_and_return_body(&mut self, other: &NWAStates, body: NWABody) -> NWABody {
+        let (new_start, _remap) = self.copy_subgraph_from(other, body.start_state);
+        NWABody { start_state: new_start }
+    }
+
     /// Deep-copy a subgraph starting at 'start_id' from another NWAStates arena into self.
     /// Returns (new_start_id, remap_old_to_new)
     pub fn copy_subgraph_from(&mut self, other: &NWAStates, start_id: NWAStateID) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {

@@ -8,6 +8,7 @@ use super::dwa::DWA;
 use super::nwa::{NWABody, NWAStates, NWA};
 use crate::precompute4::weighted_automata::NWAStateID;
 use std::collections::{BTreeSet, VecDeque};
+use crate::constraint_precompute2_utils::clone_trie2_graph;
 
 impl DWA {
     /// Evaluate a word's weight in this DWA by intersecting per-edge weights, optional state-entry weights, and the final state's weight.
@@ -248,7 +249,8 @@ impl NWA {
 
             DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
         }
-        Self::internal_concatenate_components(states, left, right, eps_weight)
+        let left = states.copy_subgraph_from_and_return_body(states, *left);
+        Self::internal_concatenate_components(states, &left, right, eps_weight)
     }
 
     /// Determinize subgraph reachable from body.start_state to DWA
