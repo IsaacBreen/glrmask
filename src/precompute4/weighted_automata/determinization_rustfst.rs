@@ -82,7 +82,11 @@ impl ReverseBack<BitsetWeight> for BitsetWeight {
 
 impl WeaklyDivisibleSemiring for BitsetWeight {
     fn divide_assign(&mut self, _rhs: &Self, _divide_type: DivideType) -> Result<()> {
-        // For a boolean algebra, division a/b is `a`. This is a no-op.
+        // For a boolean algebra (with OR as plus and AND as times), division a/b is a | !b.
+        // This is because we need `(a/b) & b = a` when `a` is a "sub-weight" of `b` (i.e. a subset).
+        // `(a | !b) & b = (a & b) | (!b & b) = a & b`.
+        // Since `a` is a subset of `b` in this context, `a & b = a`.
+        self.0 |= &!&_rhs.0;
         Ok(())
     }
 }
@@ -196,6 +200,7 @@ fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
             }
         }
     }
+    crate::debug!(5, "NWA to FST conversion done:\n{}", fst);
     fst
 }
 
