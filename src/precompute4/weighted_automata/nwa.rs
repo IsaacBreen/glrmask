@@ -253,11 +253,16 @@ impl NWA {
     }
 
     pub fn simplify_rustfst(&mut self) {
+        crate::debug!(4, "NWA Simplify with rustfst");
         let mut fst = nwa_to_vector_fst(self);
-        rustfst::algorithms::connect(&mut fst).unwrap();
-        rm_epsilon(&mut fst).unwrap();
+        crate::debug!(4, "Minimize");
         let config = MinimizeConfig::default().with_allow_nondet(true);
         minimize_with_config(&mut fst, config).unwrap();
+        crate::debug!(4, "Connect");
+        rustfst::algorithms::connect(&mut fst).unwrap();
+        crate::debug!(4, "Remove Epsilon");
+        rm_epsilon(&mut fst).unwrap();
+        crate::debug!(4, "Convert back to NWA");
         *self = vector_fst_to_nwa(&fst);
     }
 }
