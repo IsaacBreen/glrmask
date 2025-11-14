@@ -142,7 +142,7 @@ fn build_template_dwas(
     for (term, bb) in all {
         let nwa = build_template_nwa_from_characterization(&bb)?;
         let mut dwa = nwa.determinize_to_dwa_with_rustfst();
-        dwa.simplify();
+        // dwa.simplify();
         crate::debug!(5, "Built template DWA for terminal {:?}:", term);
         crate::debug!(5, "{}", dwa);
         out.insert(term, dwa);
@@ -362,7 +362,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         states: combined_nwa_states,
         body: NWABody { start_state: combined_start_state },
     };
-    combined_nwa.simplify();
+    combined_nwa.simplify_rustfst();
     crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
@@ -378,14 +378,14 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     apply_cancellations(&mut combined_nwa);
     apply_finality_fixpoint(&mut combined_nwa);
     remove_negative_transitions(&mut combined_nwa);
-    combined_nwa.simplify();
+    combined_nwa.simplify_rustfst();
     crate::debug!(4, "Negative code resolution took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after negative resolution:\n{}", combined_nwa.stats());
 
     let now = Instant::now();
     crate::debug!(4, "Pruning continuations from final states...");
     prune_continuations_from_final_states(&mut combined_nwa);
-    combined_nwa.simplify();
+    combined_nwa.simplify_rustfst();
     crate::debug!(4, "Pruning and simplifying took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after pruning:\n{}", combined_nwa.stats());
 
@@ -393,7 +393,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     // Determinize the single combined NWA
     crate::debug!(4, "Determinizing final combined NWA...");
     let mut final_dwa = combined_nwa.determinize_to_dwa_with_rustfst();
-    final_dwa.simplify();
+    // final_dwa.simplify();
     crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
     crate::debug!(4, "Stats for final DWA:\n{}", final_dwa.stats());
 
