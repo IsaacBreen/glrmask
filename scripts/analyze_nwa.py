@@ -86,6 +86,84 @@ def load_nwa_data(filepath: str) -> dict:
     }
 
 
+def load_parser_data(filepath: str) -> dict:
+    """Loads and parses the parser JSON file into a structured dictionary."""
+    print(f"Loading parser from: {filepath}")
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+
+    def format_terminal(term_obj):
+        if term_obj['type'] == 'Regex':
+            return term_obj['value']
+        elif term_obj['type'] == 'Literal':
+            try:
+                return bytes(term_obj['value']).decode('utf-8', 'replace')
+            except Exception:
+                return str(term_obj['value'])
+        return 'UNKNOWN_TERMINAL'
+
+    tid_to_str = {item[1]: format_terminal(item[0]) for item in data['terminal_map']}
+    ntid_to_str = {item[1]: item[0] for item in data['non_terminal_map']}
+
+    return {
+        "productions": data['productions'],
+        "tid_to_str": tid_to_str,
+        "ntid_to_str": ntid_to_str,
+        "table": data['stage_7_table'],
+        "start_state_id": data['start_state_id'],
+        "raw_data": data
+    }
+
+
+def format_action(action_data, ntid_to_str, productions):
+    variant = action_data['variant']
+    if variant == 'Shift':
+        return f"Shift -> {action_data['state_id']}"
+    elif variant == 'Reduce':
+        nt_name = ntid_to_str.get(action_data['nonterminal_id'], '???')
+        pids = ', '.join(map(str, action_data['production_ids']))
+        return f"Reduce {nt_name} (len {action_data['len']}) via [{pids}]"
+    elif variant == 'Split':
+        parts = []
+        if action_data['shift'] is not None:
+            parts.append(f"Shift -> {action_data['shift']}")
+        reduce_parts = []
+        for length, nts in action_data['reduces'].items():
+            for nt_id, pids in nts.items():
+                nt_name = ntid_to_str.get(int(nt_id), '???')
+                pids_str = ', '.join(map(str, pids))
+                reduce_parts.append(f"R({nt_name}, len {length}, pids [{pids_str}])")
+        if reduce_parts:
+            parts.append("Reduces: " + "; ".join(reduce_parts))
+        return f"Split: " + " | ".join(parts)
+    return "Unknown Action"
+
+
+def format_parser_details(parser_data):
+    lines = ["--- GLR Parser Table ---", f"Start State: {parser_data['start_state_id']}"]
+    tid_to_str, ntid_to_str, productions = parser_data['tid_to_str'], parser_data['ntid_to_str'], parser_data['productions']
+    sorted_states = sorted(parser_data['table'].items(), key=lambda item: int(item[0]))
+    for state_id_str, row in sorted_states:
+        lines.append(f"\n--- State {state_id_str} ---")
+        lines.append("  Actions:")
+        actions = row.get('shifts_and_reduces_full', {})
+        sorted_actions = sorted(actions.items(), key=lambda item: int(item[0]))
+        for tid_str, action_data in sorted_actions:
+            term_name = tid_to_str.get(int(tid_str), f"TID({tid_str})")
+            lines.append(f"    On '{term_name}': {format_action(action_data, ntid_to_str, productions)}")
+        lines.append("  Default Action:")
+        default = row.get('default_reduce', {})
+        if default.get('reduce'):
+            reduce_data, _ = default['reduce']
+            nt_name = ntid_to_str.get(reduce_data['nonterminal_id'], '???')
+            lines.append(f"    - Reduce {nt_name} (len {reduce_data['len']})")
+        lines.append("  Gotos:")
+        for ntid_str, goto_data in sorted(row.get('gotos', {}).items(), key=lambda item: int(item[0])):
+            nt_name = ntid_to_str.get(int(ntid_str), f"NTID({ntid_str})")
+            lines.append(f"    On '{nt_name}': Goto {goto_data.get('state_id')}{' or ACCEPT' if goto_data.get('accept') else ''}")
+    return "\n".join(lines)
+
+
 def prune_to_final_state_transitions(transitions: set, final_state_ids: set) -> set:
     """
     For each (source, label) pair, if there are transitions to final states,
@@ -973,6 +1051,14 @@ def run_bisect_pass(args):
     print("Save complete.")
 
 
+def run_print_parser_pass(args):
+    """Executes the 'print-parser' pass."""
+    print("--- Running Print Parser Pass ---")
+    parser_data = load_parser_data(args.filepath)
+    formatted_output = format_parser_details(parser_data)
+    print(formatted_output)
+
+
 # --- MAIN CLI ---
 
 if __name__ == "__main__":
@@ -1061,6 +1147,14 @@ if __name__ == "__main__":
         help="Number of chunks to split the transitions into (default: 10)."
     )
     parser_chunked_det.set_defaults(func=run_chunked_determinize_pass)
+
+    # --- Print Parser Pass ---
+    parser_print_parser = subparsers.add_parser(
+        "print-parser",
+        help="Load a parser JSON file and pretty-print the parse table."
+    )
+    parser_print_parser.add_argument("filepath", help="Path to the parser.json file.")
+    parser_print_parser.set_defaults(func=run_print_parser_pass)
 
     args = parser.parse_args()
     args.func(args)
