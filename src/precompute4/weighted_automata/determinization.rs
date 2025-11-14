@@ -28,8 +28,9 @@
 use chrono::Local;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use crate::precompute4::test_weighted_automata;
 
-use super::common::{NWAStateID, Weight};
+use super::common::{DETERMINIZE_DEBUG, NWAStateID, Weight};
 use super::dwa::{DWA, DWABuildError};
 use super::nwa::{NWA, NWAStates};
 
@@ -369,57 +370,68 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
 impl NWA {
     /// Determinize the subgraph reachable from `self.body.start_state` into a DWA.
     pub fn determinize_to_dwa(&self) -> DWA {
-        if let Some(dwa) = try_build_singleton_loop_union(self) {
-            return dwa;
-        }
+        let custom_dwa = if let Some(dwa) = try_build_singleton_loop_union(self) {
+            dwa
+        } else {
+            const STATE_LIMIT: usize = 100000;
 
-        const STATE_LIMIT: usize = 100000;
+            eprintln!(
+                "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
+            );
+            if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
+                DWA::new()
+            } else {
+                let mp = MultiProgress::new();
+                let main_pb = mp.add(ProgressBar::new(1));
+                main_pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                        .unwrap()
+                        .progress_chars("#>-"),
+                );
+                main_pb.set_message("Determinizing NWA");
 
-        eprintln!(
-            "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
-        );
-        if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
-            return DWA::new();
-        }
+                let mut det = Determinizer::new(self, Some(mp));
 
-        let mp = MultiProgress::new();
-        let main_pb = mp.add(ProgressBar::new(1));
-        main_pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-        main_pb.set_message("Determinizing NWA");
+                let mut start_subset: WeightedSubset = WeightedSubset::new();
+                start_subset.insert(self.body.start_state, Weight::all());
+                let start_id = det.register_state(start_subset);
+                det.dwa.body.start_state = start_id;
 
-        let mut det = Determinizer::new(self, Some(mp));
+                let mut processed_count = 0;
+                while let Some(sid) = det.queue.pop_front() {
+                    if det.seen.len() > STATE_LIMIT {
+                        let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+                        let filename = format!("nwa_dump_{}.json", timestamp);
+                        eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+                        let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+                        serde_json::to_writer(f, self).expect("Unable to write NWA to file");
+                        panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
+                    }
 
-        let mut start_subset: WeightedSubset = WeightedSubset::new();
-        start_subset.insert(self.body.start_state, Weight::all());
-        let start_id = det.register_state(start_subset);
-        det.dwa.body.start_state = start_id;
+                    let total_states = det.seen.len();
+                    main_pb.set_length(total_states as u64);
+                    main_pb.set_position(processed_count as u64);
+                    main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
 
-        let mut processed_count = 0;
-        while let Some(sid) = det.queue.pop_front() {
-            if det.seen.len() > STATE_LIMIT {
-                let timestamp = Local::now().format("%Y%m%d-%H%M%S");
-                let filename = format!("nwa_dump_{}.json", timestamp);
-                eprintln!("Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
-                let f = std::fs::File::create(&filename).expect("Unable to create dump file");
-                serde_json::to_writer(f, self).expect("Unable to write NWA to file");
-                panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
+                    det.expand_state(sid);
+                    processed_count += 1;
+                }
+                main_pb.finish_with_message("Determinization complete");
+
+                det.dwa
             }
+        };
 
-            let total_states = det.seen.len();
-            main_pb.set_length(total_states as u64);
-            main_pb.set_position(processed_count as u64);
-            main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
-
-            det.expand_state(sid);
-            processed_count += 1;
+        if DETERMINIZE_DEBUG {
+            let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
+            eprintln!("[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
+            eprintln!("[DETERMINIZE_DEBUG] Custom DWA stats: {}", custom_dwa.stats());
+            eprintln!("[DETERMINIZE_DEBUG] Rustfst DWA stats: {}", rustfst_dwa.stats());
+            test_weighted_automata::stochastic_equivalence_test(custom_dwa.clone(), rustfst_dwa);
+            eprintln!("[DETERMINIZE_DEBUG] Stochastic equivalence test passed.");
         }
-        main_pb.finish_with_message("Determinization complete");
 
-        det.dwa
+        custom_dwa
     }
 }
