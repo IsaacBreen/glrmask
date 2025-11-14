@@ -1,9 +1,9 @@
 use crate::finite_automata::{ExecutionResult, GroupID, Match, Regex};
 use crate::profiler::PROGRESS_BAR_ENABLED;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::collections::{BTreeMap, BTreeSet};
 use hashbrown::{HashMap, HashSet};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use smallvec::SmallVec;
+use std::collections::{BTreeMap, BTreeSet};
 
 // For debugging: verify equivalence classes using a brute-force method.
 const VERIFY_EQUIVALENCE_CLASSES: bool = false;
@@ -70,6 +70,7 @@ struct CanonicalSuffixRep {
 // by (str_idx, offset) to avoid re-hashing within the same process.
 struct SuffixDeduper<'a> {
     strings: &'a [Vec<u8>],
+    hashes: &'a [Vec<u128>],
     // hash -> list of node IDs (we verify equality inside bucket)
     buckets: HashMap<u128, Vec<usize>>,
     // node_id -> canonical representative
@@ -79,9 +80,11 @@ struct SuffixDeduper<'a> {
 }
 
 impl<'a> SuffixDeduper<'a> {
-    fn new(strings: &'a [Vec<u8>]) -> Self {
+    fn new(strings: &'a [Vec<u8>], hashes: &'a [Vec<u128>]) -> Self {
+        debug_assert_eq!(strings.len(), hashes.len());
         SuffixDeduper {
             strings,
+            hashes,
             buckets: HashMap::new(),
             nodes: Vec::new(),
             offset_cache: HashMap::new(),
@@ -99,7 +102,7 @@ impl<'a> SuffixDeduper<'a> {
             return nid;
         }
         let bytes = &self.strings[str_idx][offset..];
-        let h = hash128(bytes);
+        let h = self.hashes[str_idx][offset];
         if let Some(bucket) = self.buckets.get(&h) {
             for &nid in bucket.iter() {
                 let rep = self.nodes[nid];
@@ -124,29 +127,6 @@ impl<'a> SuffixDeduper<'a> {
     }
 }
 
-// 128-bit non-cryptographic hash for byte slices, computed in one pass.
-#[inline]
-fn hash128(bytes: &[u8]) -> u128 {
-    const FNV_OFFSET_BASIS1: u64 = 1469598103934665603;
-    const FNV_OFFSET_BASIS2: u64 = 1099511628211;
-    const FNV_PRIME1: u64 = 1099511628211;
-    const FNV_PRIME2: u64 = 14029467366897019727;
-
-    let mut h1: u64 = FNV_OFFSET_BASIS1;
-    let mut h2: u64 = FNV_OFFSET_BASIS2 ^ 0x9E3779B97F4A7C15;
-
-    for &b in bytes {
-        h1 ^= b as u64;
-        h1 = h1.wrapping_mul(FNV_PRIME1);
-
-        let rb = (b as u64).rotate_left(5);
-        h2 ^= rb;
-        h2 = h2.wrapping_mul(FNV_PRIME2);
-    }
-
-    ((h1 as u128) << 64) | (h2 as u128)
-}
-
 #[inline]
 fn mix64(mut x: u64) -> u64 {
     // SplitMix64 mix function
@@ -158,6 +138,41 @@ fn mix64(mut x: u64) -> u64 {
     x
 }
 
+/// Precompute a 128-bit hash for every suffix of every string.
+///
+/// For each string `s`, this returns a vector `h` of length `s.len() + 1` where
+/// `h[i]` is a 128-bit hash of the suffix `s[i..]`. The hash is computed
+/// right-to-left with a simple mixing function and is used only for bucketing
+/// in `SuffixDeduper`; equality is always checked on the underlying bytes.
+fn compute_suffix_hashes(strings: &[Vec<u8>]) -> Vec<Vec<u128>> {
+    let mut all_hashes = Vec::with_capacity(strings.len());
+    for s in strings {
+        let n = s.len();
+        let mut suffix_hashes = Vec::with_capacity(n + 1);
+        suffix_hashes.resize(n + 1, 0);
+
+        let mut h1: u64 = 0x9E3779B97F4A7C15;
+        let mut h2: u64 = 0xD6E8FEB86659FD93;
+
+        // Hash for the empty suffix.
+        suffix_hashes[n] = ((h1 as u128) << 64) | (h2 as u128);
+
+        for i in (0..n).rev() {
+            let b = s[i] as u64;
+            h1 = h1
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(mix64(b.wrapping_add(0x100)));
+            h2 = h2
+                .wrapping_mul(0x94D049BB133111EB)
+                .wrapping_add(mix64(b.wrapping_add(0x200)));
+            suffix_hashes[i] = ((h1 as u128) << 64) | (h2 as u128);
+        }
+
+        all_hashes.push(suffix_hashes);
+    }
+    all_hashes
+}
+
 // Computes a 128-bit fingerprint for CanonicalSignature to bucket interning candidates.
 // This avoids hashing long vectors with the default hasher on every insertion/lookup.
 #[inline]
@@ -167,8 +182,12 @@ fn fingerprint_canonical_signature(sig: &CanonicalSignature) -> u128 {
     for &(g, p, r) in &sig.matches {
         let k1 = mix64((g as u64).wrapping_mul(0x9E3779B185EBCA87) ^ (p as u64));
         let k2 = mix64((r as u64).wrapping_mul(0x94D049BB133111EB) ^ ((p as u64) << 1));
-        h1 = h1.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(k1);
-        h2 = h2.wrapping_mul(0x94D049BB133111EB).wrapping_add(k2);
+        h1 = h1
+            .wrapping_mul(0x9E3779B97F4A7C15)
+            .wrapping_add(k1);
+        h2 = h2
+            .wrapping_mul(0x94D049BB133111EB)
+            .wrapping_add(k2);
     }
     let fsv = sig.final_state.map(|x| x as u64).unwrap_or(0xFFFF_FFFF_FFFF_FFFF);
     h1 ^= mix64(fsv);
@@ -203,13 +222,18 @@ impl<'a> EquivalenceAnalyzer<'a> {
             self.strings.len()
         );
 
-        // Phase 0: Build suffix deduper over all (string, offset) pairs.
-        let mut deduper = SuffixDeduper::new(self.strings);
-        // Insert all suffixes (including empty) for all strings.
+        // Phase 0a: Precompute hashes for all suffixes (linear-time per string).
+        let suffix_hashes = compute_suffix_hashes(self.strings);
+
+        // Phase 0b: Build suffix deduper over all (string, offset) pairs.
+        let mut deduper = SuffixDeduper::new(self.strings, &suffix_hashes);
+
         let pb_build = ProgressBar::new(self.strings.len() as u64);
         pb_build.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Build Suffix Set)")
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Build Suffix Set)",
+                )
                 .expect("progress-bar"),
         );
         if !PROGRESS_BAR_ENABLED {
@@ -236,7 +260,9 @@ impl<'a> EquivalenceAnalyzer<'a> {
         let pb_suffix = ProgressBar::new(total_nodes as u64);
         pb_suffix.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Suffix Signatures)")
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Suffix Signatures)",
+                )
                 .expect("progress-bar"),
         );
         if !PROGRESS_BAR_ENABLED {
@@ -246,7 +272,9 @@ impl<'a> EquivalenceAnalyzer<'a> {
         for &nid in &node_ids {
             pb_suffix.inc(1);
             let bytes = deduper.slice_of(nid);
-            let result = self.regex.execute_from_state2(bytes, self.regex.dfa.start_state);
+            let result = self
+                .regex
+                .execute_from_state_fast(bytes, self.regex.dfa.start_state);
 
             // Gather matches; for each match, remainder signature must already be computed.
             let mut matches_vec: SmallVec<[(GroupID, usize, SignatureId); 4]> = SmallVec::new();
@@ -283,7 +311,9 @@ impl<'a> EquivalenceAnalyzer<'a> {
         let pb_class = ProgressBar::new(self.strings.len() as u64);
         pb_class.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Token Classification)")
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Token Classification)",
+                )
                 .expect("progress-bar"),
         );
         if !PROGRESS_BAR_ENABLED {
@@ -299,7 +329,7 @@ impl<'a> EquivalenceAnalyzer<'a> {
             for &initial_state in self.initial_states {
                 // Execute once per (token, initial_state) to enumerate match positions,
                 // but remainder handling is fully shared via suffix_sig_ids computed from start_state.
-                let result = self.regex.execute_from_state2(s, initial_state);
+                let result = self.regex.execute_from_state_fast(s, initial_state);
 
                 let mut matches_vec: SmallVec<[(GroupID, usize, SignatureId); 4]> = SmallVec::new();
                 for m in result.matches {
@@ -327,12 +357,20 @@ impl<'a> EquivalenceAnalyzer<'a> {
                 let sid = signature_interner.intern(sig);
                 signature_vector.push(sid);
             }
-            equivalence_classes.entry(signature_vector).or_default().push(i);
+            equivalence_classes
+                .entry(signature_vector)
+                .or_default()
+                .push(i);
         }
         pb_class.finish();
 
         if VERIFY_EQUIVALENCE_CLASSES {
-            verify_equivalence_classes(self.regex, self.strings, self.initial_states, &equivalence_classes);
+            verify_equivalence_classes(
+                self.regex,
+                self.strings,
+                self.initial_states,
+                &equivalence_classes,
+            );
         }
 
         // Convert to BTreeMap to preserve determinism of output ordering.
@@ -367,7 +405,7 @@ fn verify_equivalence_classes(
     computed_classes: &HashMap<Vec<SignatureId>, Vec<usize>>,
 ) {
     println!("Verifying equivalence classes (this may be slow)...");
- 
+
     // A canonical representation of the tokenization graph for verification.
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct InternedVerificationSignature {
@@ -420,12 +458,15 @@ fn verify_equivalence_classes(
 
     // 3. Compute signatures for all suffixes, from shortest to longest.
     let mut interner = VerificationSignatureInterner::new();
-    let mut memo: HashMap<&[u8], BTreeMap<usize, InternedVerificationSignatureId>> = HashMap::new();
+    let mut memo: HashMap<&[u8], BTreeMap<usize, InternedVerificationSignatureId>> =
+        HashMap::new();
 
     let pb = ProgressBar::new(sorted_suffixes.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Verification)")
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Verification)",
+            )
             .expect("progress-bar"),
     );
     if !PROGRESS_BAR_ENABLED {
@@ -460,10 +501,7 @@ fn verify_equivalence_classes(
                 None
             };
 
-            let sig = InternedVerificationSignature {
-                matches,
-                final_state,
-            };
+            let sig = InternedVerificationSignature { matches, final_state };
             let sig_id = interner.intern(sig);
             state_sigs.insert(dfa_state, sig_id);
         }
@@ -472,7 +510,8 @@ fn verify_equivalence_classes(
     pb.finish();
 
     // 4. Classify original strings based on their signature vectors.
-    let mut brute_force_classes: BTreeMap<Vec<InternedVerificationSignatureId>, Vec<usize>> = BTreeMap::new();
+    let mut brute_force_classes: BTreeMap<Vec<InternedVerificationSignatureId>, Vec<usize>> =
+        BTreeMap::new();
     for (i, s) in strings.iter().enumerate() {
         let mut signature_vector = Vec::with_capacity(initial_states.len());
         if let Some(string_sigs) = memo.get(s.as_slice()) {
@@ -481,7 +520,10 @@ fn verify_equivalence_classes(
                 signature_vector.push(sig_id);
             }
         }
-        brute_force_classes.entry(signature_vector).or_default().push(i);
+        brute_force_classes
+            .entry(signature_vector)
+            .or_default()
+            .push(i);
     }
 
     // 5. Compare partitions.
@@ -499,8 +541,16 @@ fn verify_equivalence_classes(
         println!("Equivalence class verification successful!");
     } else {
         eprintln!("Equivalence class verification FAILED!");
-        eprintln!("Computed partitions ({}): {:?}", computed_partitions.len(), computed_partitions);
-        eprintln!("Brute-force partitions ({}): {:?}", brute_force_partitions.len(), brute_force_partitions);
+        eprintln!(
+            "Computed partitions ({}): {:?}",
+            computed_partitions.len(),
+            computed_partitions
+        );
+        eprintln!(
+            "Brute-force partitions ({}): {:?}",
+            brute_force_partitions.len(),
+            brute_force_partitions
+        );
         panic!("Equivalence class verification failed.");
     }
 }

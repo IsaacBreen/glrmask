@@ -25,22 +25,38 @@ impl JSONConvertible for NFAState {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
         obj.insert("transitions".to_string(), self.transitions.to_json());
-        obj.insert("epsilon_transitions".to_string(), self.epsilon_transitions.to_json());
+        obj.insert(
+            "epsilon_transitions".to_string(),
+            self.epsilon_transitions.to_json(),
+        );
         obj.insert("finalizers".to_string(), self.finalizers.to_json());
-        obj.insert("non_greedy_finalizers".to_string(), self.non_greedy_finalizers.to_json());
+        obj.insert(
+            "non_greedy_finalizers".to_string(),
+            self.non_greedy_finalizers.to_json(),
+        );
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let transitions = obj.remove("transitions").ok_or_else(|| "Missing field transitions for NFAState".to_string())
-                                     .and_then(|n| TrieMap::<Vec<usize>>::from_json(n))?;
-                let epsilon_transitions = obj.remove("epsilon_transitions").ok_or_else(|| "Missing field epsilon_transitions for NFAState".to_string())
-                                             .and_then(Vec::<usize>::from_json)?;
-                let finalizers = obj.remove("finalizers").ok_or_else(|| "Missing field finalizers for NFAState".to_string())
-                                    .and_then(BTreeSet::<GroupID>::from_json)?;
-                let non_greedy_finalizers = obj.remove("non_greedy_finalizers").ok_or_else(|| "Missing field non_greedy_finalizers for NFAState".to_string())
-                                               .and_then(BTreeSet::<GroupID>::from_json)?;
+                let transitions = obj
+                    .remove("transitions")
+                    .ok_or_else(|| "Missing field transitions for NFAState".to_string())
+                    .and_then(|n| TrieMap::<Vec<usize>>::from_json(n))?;
+                let epsilon_transitions = obj
+                    .remove("epsilon_transitions")
+                    .ok_or_else(|| "Missing field epsilon_transitions for NFAState".to_string())
+                    .and_then(Vec::<usize>::from_json)?;
+                let finalizers = obj
+                    .remove("finalizers")
+                    .ok_or_else(|| "Missing field finalizers for NFAState".to_string())
+                    .and_then(BTreeSet::<GroupID>::from_json)?;
+                let non_greedy_finalizers = obj
+                    .remove("non_greedy_finalizers")
+                    .ok_or_else(|| {
+                        "Missing field non_greedy_finalizers for NFAState".to_string()
+                    })
+                    .and_then(BTreeSet::<GroupID>::from_json)?;
                 Ok(NFAState {
                     transitions,
                     epsilon_transitions,
@@ -52,7 +68,6 @@ impl JSONConvertible for NFAState {
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct NFA {
@@ -71,17 +86,23 @@ impl JSONConvertible for NFA {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let states = obj.remove("states").ok_or_else(|| "Missing field states for NFA".to_string())
-                                .and_then(Vec::<NFAState>::from_json)?;
-                let start_state = obj.remove("start_state").ok_or_else(|| "Missing field start_state for NFA".to_string())
-                                     .and_then(usize::from_json)?;
-                Ok(NFA { states, start_state })
+                let states = obj
+                    .remove("states")
+                    .ok_or_else(|| "Missing field states for NFA".to_string())
+                    .and_then(Vec::<NFAState>::from_json)?;
+                let start_state = obj
+                    .remove("start_state")
+                    .ok_or_else(|| "Missing field start_state for NFA".to_string())
+                    .and_then(usize::from_json)?;
+                Ok(NFA {
+                    states,
+                    start_state,
+                })
             }
             _ => Err("Expected JSONNode::Object for NFA".to_string()),
         }
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DFAState {
@@ -97,21 +118,39 @@ impl JSONConvertible for DFAState {
         let mut obj = StdMap::new();
         obj.insert("transitions".to_string(), self.transitions.to_json());
         obj.insert("finalizers".to_string(), self.finalizers.to_json());
-        obj.insert("possible_future_group_ids".to_string(), self.possible_future_group_ids.to_json());
-        obj.insert("group_id_to_u8set".to_string(), self.group_id_to_u8set.to_json());
+        obj.insert(
+            "possible_future_group_ids".to_string(),
+            self.possible_future_group_ids.to_json(),
+        );
+        obj.insert(
+            "group_id_to_u8set".to_string(),
+            self.group_id_to_u8set.to_json(),
+        );
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let transitions = obj.remove("transitions").ok_or_else(|| "Missing field transitions for DFAState".to_string())
-                                     .and_then(|n| TrieMap::<usize>::from_json(n))?;
-                let finalizers = obj.remove("finalizers").ok_or_else(|| "Missing field finalizers for DFAState".to_string())
-                                    .and_then(BTreeSet::<GroupID>::from_json)?;
-                let possible_future_group_ids = obj.remove("possible_future_group_ids").ok_or_else(|| "Missing field possible_future_group_ids for DFAState".to_string())
-                                                   .and_then(BTreeSet::<GroupID>::from_json)?;
-                let group_id_to_u8set = obj.remove("group_id_to_u8set").ok_or_else(|| "Missing field group_id_to_u8set for DFAState".to_string())
-                                           .and_then(|n| BTreeMap::<GroupID, U8Set>::from_json(n))?;
+                let transitions = obj
+                    .remove("transitions")
+                    .ok_or_else(|| "Missing field transitions for DFAState".to_string())
+                    .and_then(|n| TrieMap::<usize>::from_json(n))?;
+                let finalizers = obj
+                    .remove("finalizers")
+                    .ok_or_else(|| "Missing field finalizers for DFAState".to_string())
+                    .and_then(BTreeSet::<GroupID>::from_json)?;
+                let possible_future_group_ids = obj
+                    .remove("possible_future_group_ids")
+                    .ok_or_else(|| {
+                        "Missing field possible_future_group_ids for DFAState".to_string()
+                    })
+                    .and_then(BTreeSet::<GroupID>::from_json)?;
+                let group_id_to_u8set = obj
+                    .remove("group_id_to_u8set")
+                    .ok_or_else(|| {
+                        "Missing field group_id_to_u8set for DFAState".to_string()
+                    })
+                    .and_then(|n| BTreeMap::<GroupID, U8Set>::from_json(n))?;
                 Ok(DFAState {
                     transitions,
                     finalizers,
@@ -123,7 +162,6 @@ impl JSONConvertible for DFAState {
         }
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DFA {
@@ -138,25 +176,39 @@ impl JSONConvertible for DFA {
         let mut obj = StdMap::new();
         obj.insert("states".to_string(), self.states.to_json());
         obj.insert("start_state".to_string(), self.start_state.to_json());
-        obj.insert("non_greedy_finalizers".to_string(), self.non_greedy_finalizers.to_json());
+        obj.insert(
+            "non_greedy_finalizers".to_string(),
+            self.non_greedy_finalizers.to_json(),
+        );
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let states = obj.remove("states").ok_or_else(|| "Missing field states for DFA".to_string())
-                                .and_then(Vec::<DFAState>::from_json)?;
-                let start_state = obj.remove("start_state").ok_or_else(|| "Missing field start_state for DFA".to_string())
-                                     .and_then(usize::from_json)?;
-                let non_greedy_finalizers = obj.remove("non_greedy_finalizers").ok_or_else(|| "Missing field non_greedy_finalizers for DFA".to_string())
-                                               .and_then(BTreeSet::<GroupID>::from_json)?;
-                Ok(DFA { states, start_state, non_greedy_finalizers })
+                let states = obj
+                    .remove("states")
+                    .ok_or_else(|| "Missing field states for DFA".to_string())
+                    .and_then(Vec::<DFAState>::from_json)?;
+                let start_state = obj
+                    .remove("start_state")
+                    .ok_or_else(|| "Missing field start_state for DFA".to_string())
+                    .and_then(usize::from_json)?;
+                let non_greedy_finalizers = obj
+                    .remove("non_greedy_finalizers")
+                    .ok_or_else(|| {
+                        "Missing field non_greedy_finalizers for DFA".to_string()
+                    })
+                    .and_then(BTreeSet::<GroupID>::from_json)?;
+                Ok(DFA {
+                    states,
+                    start_state,
+                    non_greedy_finalizers,
+                })
             }
             _ => Err("Expected JSONNode::Object for DFA".to_string()),
         }
     }
 }
-
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,15 +226,16 @@ impl JSONConvertible for Regex {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let dfa = obj.remove("dfa").ok_or_else(|| "Missing field dfa for Regex".to_string())
-                             .and_then(DFA::from_json)?;
+                let dfa = obj
+                    .remove("dfa")
+                    .ok_or_else(|| "Missing field dfa for Regex".to_string())
+                    .and_then(DFA::from_json)?;
                 Ok(Regex { dfa })
             }
             _ => Err("Expected JSONNode::Object for Regex".to_string()),
         }
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Match {
@@ -201,17 +254,20 @@ impl JSONConvertible for Match {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let group_id = obj.remove("group_id").ok_or_else(|| "Missing field group_id for Match".to_string())
-                                  .and_then(GroupID::from_json)?;
-                let position = obj.remove("position").ok_or_else(|| "Missing field position for Match".to_string())
-                                  .and_then(usize::from_json)?;
+                let group_id = obj
+                    .remove("group_id")
+                    .ok_or_else(|| "Missing field group_id for Match".to_string())
+                    .and_then(GroupID::from_json)?;
+                let position = obj
+                    .remove("position")
+                    .ok_or_else(|| "Missing field position for Match".to_string())
+                    .and_then(usize::from_json)?;
                 Ok(Match { group_id, position })
             }
             _ => Err("Expected JSONNode::Object for Match".to_string()),
         }
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FinalStateReport {
@@ -230,10 +286,14 @@ impl JSONConvertible for FinalStateReport {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let position = obj.remove("position").ok_or_else(|| "Missing field position for FinalStateReport".to_string())
-                                  .and_then(usize::from_json)?;
-                let matches = obj.remove("matches").ok_or_else(|| "Missing field matches for FinalStateReport".to_string())
-                                 .and_then(|n| BTreeMap::<GroupID, usize>::from_json(n))?;
+                let position = obj
+                    .remove("position")
+                    .ok_or_else(|| "Missing field position for FinalStateReport".to_string())
+                    .and_then(usize::from_json)?;
+                let matches = obj
+                    .remove("matches")
+                    .ok_or_else(|| "Missing field matches for FinalStateReport".to_string())
+                    .and_then(|n| BTreeMap::<GroupID, usize>::from_json(n))?;
                 Ok(FinalStateReport { position, matches })
             }
             _ => Err("Expected JSONNode::Object for FinalStateReport".to_string()),
@@ -246,7 +306,6 @@ pub struct ExecutionResult {
     pub matches: Vec<Match>,
     pub end_state: Option<usize>,
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegexState<'a> {
@@ -274,7 +333,6 @@ impl<'a> JSONConvertible for RegexState<'a> {
         Err("RegexState deserialization is not supported due to lifetime and reference.".to_string())
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Expr {
@@ -304,7 +362,10 @@ impl JSONConvertible for Expr {
                 obj.insert("inner".to_string(), inner.to_json());
             }
             Expr::Quantifier(expr, q_type) => {
-                obj.insert("variant".to_string(), JSONNode::String("Quantifier".to_string()));
+                obj.insert(
+                    "variant".to_string(),
+                    JSONNode::String("Quantifier".to_string()),
+                );
                 obj.insert("expr".to_string(), expr.to_json());
                 obj.insert("q_type".to_string(), q_type.to_json());
             }
@@ -326,39 +387,55 @@ impl JSONConvertible for Expr {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Expr".to_string())
-                                   .and_then(String::from_json)?;
+                let variant = obj
+                    .remove("variant")
+                    .ok_or_else(|| "Missing field variant for Expr".to_string())
+                    .and_then(String::from_json)?;
                 match variant.as_str() {
                     "U8Seq" => {
-                        let bytes = obj.remove("bytes").ok_or_else(|| "Missing field bytes for U8Seq".to_string())
-                                       .and_then(Vec::<u8>::from_json)?;
+                        let bytes = obj
+                            .remove("bytes")
+                            .ok_or_else(|| "Missing field bytes for U8Seq".to_string())
+                            .and_then(Vec::<u8>::from_json)?;
                         Ok(Expr::U8Seq(bytes))
                     }
                     "U8Class" => {
-                        let u8set = obj.remove("u8set").ok_or_else(|| "Missing field u8set for U8Class".to_string())
-                                       .and_then(U8Set::from_json)?;
+                        let u8set = obj
+                            .remove("u8set")
+                            .ok_or_else(|| "Missing field u8set for U8Class".to_string())
+                            .and_then(U8Set::from_json)?;
                         Ok(Expr::U8Class(u8set))
                     }
                     "Shared" => {
-                        let inner = obj.remove("inner").ok_or_else(|| "Missing field inner for Shared".to_string())?;
+                        let inner = obj
+                            .remove("inner")
+                            .ok_or_else(|| "Missing field inner for Shared".to_string())?;
                         let expr = Expr::from_json(inner)?;
                         Ok(Expr::Shared(Arc::new(expr)))
                     }
                     "Quantifier" => {
-                        let expr_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Quantifier".to_string())?;
+                        let expr_node = obj
+                            .remove("expr")
+                            .ok_or_else(|| "Missing field expr for Quantifier".to_string())?;
                         let expr = Box::new(Expr::from_json(expr_node)?);
-                        let q_type = obj.remove("q_type").ok_or_else(|| "Missing field q_type for Quantifier".to_string())
-                                          .and_then(QuantifierType::from_json)?;
+                        let q_type = obj
+                            .remove("q_type")
+                            .ok_or_else(|| "Missing field q_type for Quantifier".to_string())
+                            .and_then(QuantifierType::from_json)?;
                         Ok(Expr::Quantifier(expr, q_type))
                     }
                     "Choice" => {
-                        let exprs = obj.remove("exprs").ok_or_else(|| "Missing field exprs for Choice".to_string())
-                                       .and_then(Vec::<Expr>::from_json)?;
+                        let exprs = obj
+                            .remove("exprs")
+                            .ok_or_else(|| "Missing field exprs for Choice".to_string())
+                            .and_then(Vec::<Expr>::from_json)?;
                         Ok(Expr::Choice(exprs))
                     }
                     "Seq" => {
-                        let exprs = obj.remove("exprs").ok_or_else(|| "Missing field exprs for Seq".to_string())
-                                       .and_then(Vec::<Expr>::from_json)?;
+                        let exprs = obj
+                            .remove("exprs")
+                            .ok_or_else(|| "Missing field exprs for Seq".to_string())
+                            .and_then(Vec::<Expr>::from_json)?;
                         Ok(Expr::Seq(exprs))
                     }
                     "Epsilon" => Ok(Expr::Epsilon),
@@ -369,7 +446,6 @@ impl JSONConvertible for Expr {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum QuantifierType {
@@ -401,7 +477,6 @@ impl JSONConvertible for QuantifierType {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExprGroup {
     pub expr: Expr,
@@ -419,17 +494,23 @@ impl JSONConvertible for ExprGroup {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let expr = obj.remove("expr").ok_or_else(|| "Missing field expr for ExprGroup".to_string())
-                                .and_then(Expr::from_json)?;
-                let is_non_greedy = obj.remove("is_non_greedy").ok_or_else(|| "Missing field is_non_greedy for ExprGroup".to_string())
-                                       .and_then(bool::from_json)?;
-                Ok(ExprGroup { expr, is_non_greedy })
+                let expr = obj
+                    .remove("expr")
+                    .ok_or_else(|| "Missing field expr for ExprGroup".to_string())
+                    .and_then(Expr::from_json)?;
+                let is_non_greedy = obj
+                    .remove("is_non_greedy")
+                    .ok_or_else(|| "Missing field is_non_greedy for ExprGroup".to_string())
+                    .and_then(bool::from_json)?;
+                Ok(ExprGroup {
+                    expr,
+                    is_non_greedy,
+                })
             }
             _ => Err("Expected JSONNode::Object for ExprGroup".to_string()),
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct ExprGroups {
@@ -446,8 +527,10 @@ impl JSONConvertible for ExprGroups {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let groups = obj.remove("groups").ok_or_else(|| "Missing field groups for ExprGroups".to_string())
-                                  .and_then(Vec::<ExprGroup>::from_json)?;
+                let groups = obj
+                    .remove("groups")
+                    .ok_or_else(|| "Missing field groups for ExprGroups".to_string())
+                    .and_then(Vec::<ExprGroup>::from_json)?;
                 Ok(ExprGroups { groups })
             }
             _ => Err("Expected JSONNode::Object for ExprGroups".to_string()),
@@ -455,16 +538,23 @@ impl JSONConvertible for ExprGroups {
     }
 }
 
-
 impl From<Expr> for ExprGroup {
     fn from(expr: Expr) -> Self {
-        ExprGroup { expr, is_non_greedy: false }
+        ExprGroup {
+            expr,
+            is_non_greedy: false,
+        }
     }
 }
 
 impl From<Expr> for ExprGroups {
     fn from(expr: Expr) -> Self {
-        ExprGroups { groups: vec![ExprGroup { expr, is_non_greedy: false }] }
+        ExprGroups {
+            groups: vec![ExprGroup {
+                expr,
+                is_non_greedy: false,
+            }],
+        }
     }
 }
 
@@ -505,7 +595,10 @@ pub fn shared<T: Into<Expr>>(expr: T) -> Expr {
 }
 
 pub fn prec<T: Into<Expr>>(_precedence: isize, expr: T) -> ExprGroup {
-    ExprGroup { expr: expr.into(), is_non_greedy: false }
+    ExprGroup {
+        expr: expr.into(),
+        is_non_greedy: false,
+    }
 }
 
 pub fn eps() -> Expr {
@@ -563,7 +656,10 @@ impl Display for NFA {
             f.write_str(&format!("State {}:\n", state_index))?;
 
             for (transition_u8, next_states) in &state.transitions {
-                f.write_str(&format!("  - '{}': {:?}\n", transition_u8 as char, next_states))?; // Display u8 as char
+                f.write_str(&format!(
+                    "  - '{}': {:?}\n",
+                    transition_u8 as char, next_states
+                ))?; // Display u8 as char
             }
 
             for next_state in &state.epsilon_transitions {
@@ -575,7 +671,10 @@ impl Display for NFA {
             }
 
             if !state.non_greedy_finalizers.is_empty() {
-                f.write_str(&format!("  - Non-Greedy Finalizers: {:?}\n", state.non_greedy_finalizers))?;
+                f.write_str(&format!(
+                    "  - Non-Greedy Finalizers: {:?}\n",
+                    state.non_greedy_finalizers
+                ))?;
             }
         }
 
@@ -591,7 +690,10 @@ impl Display for DFA {
             f.write_str(&format!("State {}:\n", state_index))?;
 
             for (transition_u8, next_state) in &state.transitions {
-                f.write_str(&format!("  - {} ({:?}): {}\n", transition_u8, transition_u8 as char, next_state))?; // Display u8 as char
+                f.write_str(&format!(
+                    "  - {} ({:?}): {}\n",
+                    transition_u8, transition_u8 as char, next_state
+                ))?; // Display u8 as char
             }
 
             if !state.finalizers.is_empty() {
@@ -599,7 +701,10 @@ impl Display for DFA {
             }
 
             if !state.possible_future_group_ids.is_empty() {
-                f.write_str(&format!("  - Possible Future Group IDs: {:?}\n", state.possible_future_group_ids))?;
+                f.write_str(&format!(
+                    "  - Possible Future Group IDs: {:?}\n",
+                    state.possible_future_group_ids
+                ))?;
             }
 
             if !state.group_id_to_u8set.is_empty() {
@@ -650,7 +755,9 @@ impl ExprGroups {
             if is_non_greedy {
                 nfa.states[end_state].finalizers.insert(group);
                 // Additionally, track that this finalizer is non-greedy
-                nfa.states[end_state].non_greedy_finalizers.insert(group);
+                nfa.states[end_state]
+                    .non_greedy_finalizers
+                    .insert(group);
             } else {
                 nfa.states[end_state].finalizers.insert(group);
             }
@@ -662,10 +769,21 @@ impl ExprGroups {
 
 impl Expr {
     pub fn build(self) -> Regex {
-        ExprGroups { groups: vec![ExprGroup { expr: self, is_non_greedy: false }] }.build()
+        ExprGroups {
+            groups: vec![ExprGroup {
+                expr: self,
+                is_non_greedy: false,
+            }],
+        }
+        .build()
     }
 
-    fn handle_expr_cached(expr: Expr, nfa: &mut NFA, mut current_state: usize, cache: &mut HashMap<usize, (usize, usize)>) -> usize {
+    fn handle_expr_cached(
+        expr: Expr,
+        nfa: &mut NFA,
+        mut current_state: usize,
+        cache: &mut HashMap<usize, (usize, usize)>,
+    ) -> usize {
         match expr {
             Expr::U8Seq(u8s) => {
                 let mut next_state = current_state;
@@ -698,41 +816,40 @@ impl Expr {
                     end
                 }
             }
-            Expr::Quantifier(expr, quantifier_type) => {
-                match quantifier_type {
-                    QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
-                        let loop_start_state = nfa.add_state();
+            Expr::Quantifier(expr, quantifier_type) => match quantifier_type {
+                QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
+                    let loop_start_state = nfa.add_state();
 
-                        // Epsilon transition from current state to loop start state
-                        nfa.add_epsilon_transition(current_state, loop_start_state);
+                    // Epsilon transition from current state to loop start state
+                    nfa.add_epsilon_transition(current_state, loop_start_state);
 
-                        // Process the expr
-                        let expr_end_state = Self::handle_expr_cached(*expr, nfa, loop_start_state, cache);
+                    // Process the expr
+                    let expr_end_state =
+                        Self::handle_expr_cached(*expr, nfa, loop_start_state, cache);
 
-                        // Epsilon transition from expr end state back to loop start state for repetition
-                        nfa.add_epsilon_transition(expr_end_state, loop_start_state);
+                    // Epsilon transition from expr end state back to loop start state for repetition
+                    nfa.add_epsilon_transition(expr_end_state, loop_start_state);
 
-                        match quantifier_type {
-                            QuantifierType::ZeroOrMore => loop_start_state, // The loop start state becomes the new current state
-                            QuantifierType::OneOrMore => expr_end_state, // The expr end state becomes the new current state
-                            _ => unreachable!()
-                        }
-                    }
-                    QuantifierType::ZeroOrOne => {
-                        // Process the expr
-                        let expr_end_state = Self::handle_expr_cached(*expr, nfa, current_state, cache);
-
-                        // Epsilon transition from current state to expr end state
-                        nfa.add_epsilon_transition(current_state, expr_end_state);
-
-                        // The expr end state becomes the new current state
-                        expr_end_state
+                    match quantifier_type {
+                        QuantifierType::ZeroOrMore => loop_start_state, // The loop start state becomes the new current state
+                        QuantifierType::OneOrMore => expr_end_state,    // The expr end state becomes the new current state
+                        _ => unreachable!(),
                     }
                 }
-            }
+                QuantifierType::ZeroOrOne => {
+                    // Process the expr
+                    let expr_end_state = Self::handle_expr_cached(*expr, nfa, current_state, cache);
+
+                    // Epsilon transition from current state to expr end state
+                    nfa.add_epsilon_transition(current_state, expr_end_state);
+
+                    // The expr end state becomes the new current state
+                    expr_end_state
+                }
+            },
             Expr::Choice(exprs) => {
                 // New start state for choice
-                let choice_end_state = nfa.add_state();   // New end state for choice
+                let choice_end_state = nfa.add_state(); // New end state for choice
 
                 for expr in exprs {
                     // Process the expr and get its end state
@@ -751,7 +868,7 @@ impl Expr {
                 }
                 current_state
             }
-            Expr::Epsilon => current_state
+            Expr::Epsilon => current_state,
         }
     }
 
@@ -806,7 +923,7 @@ impl NFA {
             transitions: TrieMap::new(),
             finalizers,
             possible_future_group_ids: BTreeSet::new(), // Will be computed later
-            group_id_to_u8set: BTreeMap::new(),  // Will be computed later
+            group_id_to_u8set: BTreeMap::new(),         // Will be computed later
         });
 
         while let Some(current_set) = worklist.pop() {
@@ -834,7 +951,9 @@ impl NFA {
                 let frozen_closure = FrozenSet::from_iter(closure.iter().cloned());
 
                 // If this set of states is new, add it as a new DFA state
-                let next_dfa_state = if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
+                let next_dfa_state = if let Some(&existing_state) =
+                    dfa_state_map.get(&frozen_closure)
+                {
                     existing_state
                 } else {
                     let new_state_index = dfa_states.len();
@@ -846,21 +965,24 @@ impl NFA {
                     let mut new_non_greedy_finalizers = BTreeSet::new();
                     for &state in closure.iter() {
                         new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                        new_non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                        new_non_greedy_finalizers
+                            .extend(self.states[state].non_greedy_finalizers.iter().cloned());
                     }
 
                     dfa_states.push(DFAState {
                         transitions: TrieMap::new(),
                         finalizers: new_finalizers,
                         possible_future_group_ids: BTreeSet::new(), // Will be computed later
-                        group_id_to_u8set: BTreeMap::new(),  // Will be computed later
+                        group_id_to_u8set: BTreeMap::new(), // Will be computed later
                     });
 
                     new_state_index
                 };
 
                 // Insert the transition into the DFA state
-                dfa_states[current_dfa_state].transitions.insert(input_u8, next_dfa_state);
+                dfa_states[current_dfa_state]
+                    .transitions
+                    .insert(input_u8, next_dfa_state);
             }
         }
 
@@ -871,7 +993,8 @@ impl NFA {
         };
 
         for state in &self.states {
-            dfa.non_greedy_finalizers.extend(state.non_greedy_finalizers.iter().cloned());
+            dfa.non_greedy_finalizers
+                .extend(state.non_greedy_finalizers.iter().cloned());
         }
 
         dfa.compute_possible_future_group_ids();
@@ -913,9 +1036,11 @@ impl DFA {
             for state_index in 0..self.states.len() {
                 let state = self.states[state_index].clone(); // Clone to avoid borrow checker issues
                 for (_input, &next_state_index) in &state.transitions {
-                    let next_possible_future_groups = self.states[next_state_index].possible_future_group_ids.clone();
+                    let next_possible_future_groups =
+                        self.states[next_state_index].possible_future_group_ids.clone();
                     let next_finalizers = self.states[next_state_index].finalizers.clone();
-                    let state_possible_future_groups = &mut self.states[state_index].possible_future_group_ids;
+                    let state_possible_future_groups =
+                        &mut self.states[state_index].possible_future_group_ids;
 
                     let old_len = state_possible_future_groups.len();
                     state_possible_future_groups.extend(next_finalizers.iter()); // Add finalizers of the *next* state
@@ -935,7 +1060,10 @@ impl DFA {
     pub fn compute_group_id_to_u8set(&mut self) {
         // Create the vector of possible future group IDs within a block scope, cloning the data
         let possible_current_or_future_group_ids: Vec<BTreeSet<GroupID>> = {
-            self.states.iter().map(|state| &state.possible_future_group_ids | &state.finalizers).collect()
+            self.states
+                .iter()
+                .map(|state| &state.possible_future_group_ids | &state.finalizers)
+                .collect()
         };
 
         // Now that the block has ended, there are no borrows of self.states
@@ -943,7 +1071,8 @@ impl DFA {
             let mut group_id_to_u8set: BTreeMap<GroupID, U8Set> = BTreeMap::new();
 
             for (input_u8, &next_state_index) in &state.transitions {
-                let next_possible_current_or_future_group_ids = &possible_current_or_future_group_ids[next_state_index];
+                let next_possible_current_or_future_group_ids =
+                    &possible_current_or_future_group_ids[next_state_index];
 
                 for &group_id in next_possible_current_or_future_group_ids {
                     group_id_to_u8set
@@ -988,7 +1117,8 @@ impl DFA {
             if reachable[old_index] {
                 let mut new_state = state.clone();
                 // Update transitions to use new state indices
-                new_state.transitions = new_state.transitions
+                new_state.transitions = new_state
+                    .transitions
                     .iter()
                     .map(|(u8, &next)| (u8, state_mapping[next]))
                     .collect();
@@ -1008,12 +1138,17 @@ impl DFA {
         }
 
         // Step 1: Create initial partition based on finalizers and transitions
-        let mut partitions = BTreeMap::<(BTreeSet<GroupID>, BTreeMap<u8, usize>), BTreeSet<usize>>::new();
+        let mut partitions =
+            BTreeMap::<(BTreeSet<GroupID>, BTreeMap<u8, usize>), BTreeSet<usize>>::new();
 
         for (state_idx, state) in self.states.iter().enumerate() {
             let key = (
                 state.finalizers.clone(),
-                state.transitions.iter().map(|(u8, &next)| (u8, next)).collect()
+                state
+                    .transitions
+                    .iter()
+                    .map(|(u8, &next)| (u8, next))
+                    .collect(),
             );
             partitions.entry(key).or_default().insert(state_idx);
         }
@@ -1033,14 +1168,16 @@ impl DFA {
 
                     // For each transition, record which partition it leads to
                     for (u8, &next_state) in &self.states[state].transitions {
-                        let target_partition = new_partitions.iter()
+                        let target_partition = new_partitions
+                            .iter()
                             .chain(partition_list.iter())
                             .position(|p| p.contains(&next_state))
                             .unwrap_or(usize::MAX);
                         signature.insert(u8, target_partition);
                     }
 
-                    refined_partitions.entry(signature)
+                    refined_partitions
+                        .entry(signature)
                         .or_insert_with(BTreeSet::new)
                         .insert(state);
                 }
@@ -1060,7 +1197,8 @@ impl DFA {
         let mut state_mapping = vec![0; self.states.len()];
 
         // Find which partition contains the start state
-        let start_partition_idx = partition_list.iter()
+        let start_partition_idx = partition_list
+            .iter()
             .position(|p| p.contains(&self.start_state))
             .unwrap();
 
@@ -1082,7 +1220,8 @@ impl DFA {
             let mut new_state = self.states[*old_state].clone();
 
             // Update transitions according to the new state mapping
-            new_state.transitions = new_state.transitions
+            new_state.transitions = new_state
+                .transitions
                 .iter()
                 .map(|(u8, &next)| (u8, state_mapping[next]))
                 .collect();
@@ -1099,6 +1238,30 @@ impl DFA {
         self.compute_possible_future_group_ids();
         self.compute_group_id_to_u8set();
     }
+}
+
+/// Early termination condition used by both `RegexState::execute` and the
+/// fast `Regex::execute_from_state_fast`.
+///
+/// Returns true iff every group ID in `possible_future_group_ids` is a
+/// non-greedy group that has already been matched.
+fn should_terminate_early(
+    possible_future_group_ids: &BTreeSet<GroupID>,
+    non_greedy_finalizers: &BTreeSet<GroupID>,
+    matched_groups: &BTreeSet<GroupID>,
+) -> bool {
+    for group_id in possible_future_group_ids {
+        if non_greedy_finalizers.contains(group_id) {
+            if !matched_groups.contains(group_id) {
+                // Non-greedy group not yet matched; keep running.
+                return false;
+            }
+        } else {
+            // Greedy group still possible; keep running.
+            return false;
+        }
+    }
+    true
 }
 
 impl RegexState<'_> {
@@ -1118,13 +1281,19 @@ impl RegexState<'_> {
                 local_position += 1;
                 // Handle greedy finalizers and collect all matches
                 for &group_id in &dfa.states[self.current_state].finalizers {
-                    all_matches.push(Match { group_id, position: self.position + local_position });
+                    all_matches.push(Match {
+                        group_id,
+                        position: self.position + local_position,
+                    });
 
                     if dfa.non_greedy_finalizers.contains(&group_id) {
-                        self.matches.entry(group_id).or_insert(self.position + local_position);
+                        self.matches
+                            .entry(group_id)
+                            .or_insert(self.position + local_position);
                     } else {
                         // Overwrite existing match for greedy groups
-                        self.matches.insert(group_id, self.position + local_position);
+                        self.matches
+                            .insert(group_id, self.position + local_position);
                     }
                 }
 
@@ -1132,8 +1301,11 @@ impl RegexState<'_> {
                 // - a greedy group, or
                 // - a non-greedy group that has not been matched yet
                 let matched: BTreeSet<GroupID> = self.matches.keys().cloned().collect();
-                let excluded: BTreeSet<GroupID> = matched.intersection(&dfa.non_greedy_finalizers).cloned().collect();
-                let should_terminate = dfa.states[self.current_state].possible_future_group_ids.difference(&excluded).next().is_none();
+                let should_terminate = should_terminate_early(
+                    &dfa.states[self.current_state].possible_future_group_ids,
+                    &dfa.non_greedy_finalizers,
+                    &matched,
+                );
 
                 if should_terminate {
                     self.position += text.len();
@@ -1225,7 +1397,9 @@ impl RegexState<'_> {
         self.matches
             .iter()
             .filter(|(_, &pos)| pos > 0) // Tokenizers must consume input to avoid infinite loops.
-            .max_by(|(&g1, &p1), (&g2, &p2)| p1.cmp(&p2).then_with(|| g2.cmp(&g1))) // Longest match (p1 vs p2), then smallest group_id (g2 vs g1).
+            .max_by(|(&g1, &p1), (&g2, &p2)| p1
+                .cmp(&p2)
+                .then_with(|| g2.cmp(&g1))) // Longest match (p1 vs p2), then smallest group_id (g2 vs g1).
             .map(|(&group_id, &position)| Match { group_id, position })
     }
 
@@ -1339,12 +1513,89 @@ impl Regex {
     }
 
     pub fn execute_from_state2(&self, text: &[u8], state: usize) -> ExecutionResult {
-        let mut regex_state = self.init_to_state(state);
-        let matches = regex_state.execute(text);
+        // For backward compatibility, this is a thin wrapper around the optimized fast path.
+        self.execute_from_state_fast(text, state)
+    }
 
-        let end_state = if regex_state.done { None } else { Some(regex_state.current_state) };
+    /// Optimized execution from an arbitrary DFA state.
+    ///
+    /// This is functionally equivalent to `execute_from_state2`'s previous
+    /// implementation (which used `RegexState`), but avoids allocating a full
+    /// `RegexState` and repeatedly rebuilding set operations during the run.
+    pub fn execute_from_state_fast(&self, text: &[u8], state: usize) -> ExecutionResult {
+        let dfa = &self.dfa;
+        let mut all_matches: Vec<Match> = Vec::new();
 
-        ExecutionResult { matches, end_state }
+        let mut current_state = state;
+        let mut matched_groups: BTreeSet<GroupID> = dfa.states[state].finalizers.clone();
+
+        // Match behavior of RegexState::execute when starting from a "done" state:
+        // if there are no outgoing transitions, we cannot consume input.
+        if dfa.states[state].transitions.is_empty() {
+            return ExecutionResult {
+                matches: all_matches,
+                end_state: None,
+            };
+        }
+
+        let text_len = text.len();
+        let mut local_position = 0usize;
+
+        while local_position < text_len {
+            let state_data = &dfa.states[current_state];
+            let next_byte = text[local_position];
+
+            let Some(&next_state) = state_data.transitions.get(next_byte) else {
+                // No matching transition: the engine would mark itself as done
+                // and stop immediately.
+                return ExecutionResult {
+                    matches: all_matches,
+                    end_state: None,
+                };
+            };
+
+            current_state = next_state;
+            local_position += 1;
+
+            let state_data = &dfa.states[current_state];
+
+            // Collect matches at this position.
+            if !state_data.finalizers.is_empty() {
+                for &group_id in &state_data.finalizers {
+                    all_matches.push(Match {
+                        group_id,
+                        position: local_position,
+                    });
+                    matched_groups.insert(group_id);
+                }
+            }
+
+            // Early termination: only continue while there exists either
+            // - a greedy group that could still be matched, or
+            // - a non-greedy group that has not yet been matched.
+            if should_terminate_early(
+                &state_data.possible_future_group_ids,
+                &dfa.non_greedy_finalizers,
+                &matched_groups,
+            ) {
+                return ExecutionResult {
+                    matches: all_matches,
+                    end_state: None,
+                };
+            }
+        }
+
+        // End of input: return a continuation state only if further transitions are possible.
+        let end_state = if dfa.states[current_state].transitions.is_empty() {
+            None
+        } else {
+            Some(current_state)
+        };
+
+        ExecutionResult {
+            matches: all_matches,
+            end_state,
+        }
     }
 
     pub fn init_to_state(&self, state: usize) -> RegexState {
@@ -1368,7 +1619,10 @@ impl Regex {
     }
 
     pub fn get_next_state(&self, current_state: usize, byte: u8) -> Option<usize> {
-        self.dfa.states[current_state].transitions.get(byte).copied()
+        self.dfa.states[current_state]
+            .transitions
+            .get(byte)
+            .copied()
     }
 
     pub fn find(&self, text: &[u8]) -> Option<(GroupID, usize)> {
@@ -1727,7 +1981,18 @@ mod even_more_complex_tests {
             "yield",
         ];
 
-        let expr = Expr::Choice(words.iter().map(|word| Expr::Seq(word.bytes().map(|c| Expr::U8Seq(vec![c])).collect())).collect());
+        let expr = Expr::Choice(
+            words
+                .iter()
+                .map(|word| {
+                    Expr::Seq(
+                        word.bytes()
+                            .map(|c| Expr::U8Seq(vec![c]))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        );
         let regex = expr.build();
         dbg!(&regex);
 
@@ -1844,7 +2109,10 @@ mod even_more_complex_tests {
         // Non-greedy should match correctly
         let mut non_greedy_state = non_greedy_regex.init();
         non_greedy_state.execute(input);
-        assert_eq!(non_greedy_state.matches.get(&0), Some(&b"\"\"\"hello\"\"\"".len())); // Matches up to the second """
+        assert_eq!(
+            non_greedy_state.matches.get(&0),
+            Some(&b"\"\"\"hello\"\"\"".len())
+        ); // Matches up to the second """
 
         // Greedy should match incorrectly (matching the entire string)
         let mut greedy_state = greedy_regex.init();
@@ -1860,24 +2128,39 @@ mod possible_future_group_ids_tests {
     fn run_test(expr: impl Into<ExprGroups>, expected_possible_future_group_ids: BTreeSet<GroupID>) {
         let regex = expr.into().build();
         let state = regex.init();
-        assert_eq!(state.possible_future_group_ids(), expected_possible_future_group_ids);
+        assert_eq!(
+            state.possible_future_group_ids(),
+            expected_possible_future_group_ids
+        );
     }
 
     #[test]
     fn test_possible_future_group_ids() {
         run_test(seq![], BTreeSet::new());
         run_test(eat_u8(b'a'), BTreeSet::from([0]));
-        run_test(groups![eat_u8(b'a'), eat_u8(b'b')], BTreeSet::from([0, 1]));
-        run_test(seq![eat_u8(b'a'), eat_u8(b'b')], BTreeSet::from([0]));
+        run_test(
+            groups![eat_u8(b'a'), eat_u8(b'b')],
+            BTreeSet::from([0, 1]),
+        );
+        run_test(
+            seq![eat_u8(b'a'), eat_u8(b'b')],
+            BTreeSet::from([0]),
+        );
         run_test(rep(eat_u8(b'a')), BTreeSet::from([0]));
-        run_test(groups![
-            choice![opt(eat_u8(b'a')), rep(eat_u8(b'b')), eat_u8(b'c')],
-            eat_u8(b'a'),
-        ], BTreeSet::from([0, 1]));
-        run_test(groups![
-            eat_u8(b'a'),
-            seq![eat_u8(b'a'), eat_u8(b'a')],
-        ], BTreeSet::from([0, 1]));
+        run_test(
+            groups![
+                choice![opt(eat_u8(b'a')), rep(eat_u8(b'b')), eat_u8(b'c')],
+                eat_u8(b'a'),
+            ],
+            BTreeSet::from([0, 1]),
+        );
+        run_test(
+            groups![
+                eat_u8(b'a'),
+                seq![eat_u8(b'a'), eat_u8(b'a')],
+            ],
+            BTreeSet::from([0, 1]),
+        );
     }
 
     #[test]
@@ -1896,7 +2179,10 @@ mod possible_future_group_ids_tests {
 
         // possible_future_group_ids should only contain group 1, as it's reachable via a transition ('a').
         // It should *not* contain group 0, which is final *at* the current state.
-        assert_eq!(start_state_data.possible_future_group_ids, BTreeSet::from([1]));
+        assert_eq!(
+            start_state_data.possible_future_group_ids,
+            BTreeSet::from([1])
+        );
     }
 }
 
@@ -2139,7 +2425,8 @@ mod group_id_to_u8set_tests {
         );
 
         // Verify group_id_to_u8set for the new state
-        let group_id_to_u8set_new = &regex.dfa.states[regex_state.current_state].group_id_to_u8set;
+        let group_id_to_u8set_new =
+            &regex.dfa.states[regex_state.current_state].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_new.len(), 2);
         assert!(group_id_to_u8set_new.contains_key(&0));
         assert!(group_id_to_u8set_new.contains_key(&1));
@@ -2196,7 +2483,8 @@ mod group_id_to_u8set_tests {
         // - Group 1: 'b'
         // - Group 2: 'b'
 
-        let group_id_to_u8set_a = &regex.dfa.states[regex_state_a.current_state].group_id_to_u8set;
+        let group_id_to_u8set_a =
+            &regex.dfa.states[regex_state_a.current_state].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_a.len(), 3);
         assert!(group_id_to_u8set_a.contains_key(&0));
         assert!(group_id_to_u8set_a.contains_key(&1));
@@ -2225,7 +2513,8 @@ mod group_id_to_u8set_tests {
         // - Group 1: 'd'
         // - Group 2: 'e'
 
-        let group_id_to_u8set_ab = &regex.dfa.states[regex_state_ab.current_state].group_id_to_u8set;
+        let group_id_to_u8set_ab =
+            &regex.dfa.states[regex_state_ab.current_state].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_ab.len(), 3);
         assert!(group_id_to_u8set_ab.contains_key(&0));
         assert!(group_id_to_u8set_ab.contains_key(&1));
@@ -2270,7 +2559,8 @@ mod group_id_to_u8set_tests {
 
         // group_id_to_u8set for state after 'a':
         // - Group 0: {'b'}
-        let group_id_to_u8set_a = &regex.dfa.states[regex_state_a.current_state].group_id_to_u8set;
+        let group_id_to_u8set_a =
+            &regex.dfa.states[regex_state_a.current_state].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_a.len(), 1);
         assert!(group_id_to_u8set_a.contains_key(&0));
 
@@ -2312,7 +2602,8 @@ mod group_id_to_u8set_tests {
         let mut regex_state_a = regex.init();
         regex_state_a.execute(b"a");
 
-        let group_id_to_u8set_a = &regex.dfa.states[regex_state_a.current_state].group_id_to_u8set;
+        let group_id_to_u8set_a =
+            &regex.dfa.states[regex_state_a.current_state].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_a.len(), 2);
         assert!(group_id_to_u8set_a.contains_key(&0));
         assert!(group_id_to_u8set_a.contains_key(&1));
@@ -2364,7 +2655,7 @@ mod group_u8set_tests {
             transitions: TrieMap::new(),
             finalizers: BTreeSet::new(),
             possible_future_group_ids: BTreeSet::new(), // Will be computed
-            group_id_to_u8set: BTreeMap::new(),   // Will be computed
+            group_id_to_u8set: BTreeMap::new(),         // Will be computed
         });
 
         // State 1: After reading 'a'
@@ -2481,10 +2772,7 @@ mod tests_nov_24 {
         // The following expression should yield a DFA with 2 states:
         // - one to match 'a' or 'b'
         // - one to hold the finalizer
-        let expr = choice![
-            eat_u8(b'a'),
-            eat_u8(b'b'),
-        ];
+        let expr = choice![eat_u8(b'a'), eat_u8(b'b'),];
         let regex = expr.build();
         dbg!(&regex);
         assert_eq!(regex.dfa.states.len(), 2);
@@ -2615,6 +2903,10 @@ mod test_python {
 
         assert!(state.definitely_matches(), "Tokenizer should match 'hello'");
         // Ensure there is a match for the NAME token and that it's at the correct position
-        assert_eq!(state.matches.get(&token_name_to_id["NAME"]), Some(&5), "NAME token should be matched at position 5");
+        assert_eq!(
+            state.matches.get(&token_name_to_id["NAME"]),
+            Some(&5),
+            "NAME token should be matched at position 5"
+        );
     }
 }
