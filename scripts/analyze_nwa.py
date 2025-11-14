@@ -734,11 +734,13 @@ def run_bisect_pass(args):
     ):
         print("✅ Baseline determinization finished within the timeout. Nothing to bisect.")
         return
-        else:
-            print(f"✅ Baseline determinization timed out after {args.timeout}s. Starting bisection.")
+    else:
+        print(f"✅ Baseline determinization timed out after {args.timeout}s. Starting bisection.")
 
     problematic_states = list(all_states)
-    random.shuffle(problematic_states)  # Shuffle to try different splits
+
+    # We'll keep track of the smallest known failing set of states
+    smallest_failing_set = set(problematic_states)
 
     iteration = 0
     while len(problematic_states) > 1:
@@ -752,40 +754,39 @@ def run_bisect_pass(args):
 
         print(f"Splitting into two sets of sizes: {len(s1)} and {len(s2)}")
 
-        # Test the first half. If it fails, we can greedily reduce to it.
+        # Create and test the two subgraphs
         subgraph1_data = create_subgraph_nwa(nwa_data, s1)
+        subgraph2_data = create_subgraph_nwa(nwa_data, s2)
+
         hangs1 = time_determinization_with_timeout(
             subgraph1_data["num_states"], subgraph1_data["start_state"],
             subgraph1_data["final_states"], subgraph1_data["transitions"], args.timeout
         ) if subgraph1_data else False
 
-        if hangs1:
-            print("-> Problem is reproducible in the first half. Discarding second half.")
-            problematic_states = list(s1)
-            continue
-
-        # If s1 was fine, test s2.
-        subgraph2_data = create_subgraph_nwa(nwa_data, s2)
         hangs2 = time_determinization_with_timeout(
             subgraph2_data["num_states"], subgraph2_data["start_state"],
             subgraph2_data["final_states"], subgraph2_data["transitions"], args.timeout
         ) if subgraph2_data else False
 
-        if hangs2:
-            print("-> Problem is reproducible in the second half. Discarding first half.")
+        if hangs1 and not hangs2:
+            print("-> Problem is in the first half. Discarding second half.")
+            problematic_states = list(s1)
+            smallest_failing_set = s1
+        elif not hangs1 and hangs2:
+            print("-> Problem is in the second half. Discarding first half.")
             problematic_states = list(s2)
-            continue
-
-        # If neither half fails on its own, the problem is the interaction.
-        print("-> Neither half is problematic alone. Interaction is required to trigger failure.")
-        print("-> Cannot reduce further with this split. Stopping.")
-        break
+            smallest_failing_set = s2
+        else:
+            # This is the complex case: the interaction is the problem, or both halves are problematic.
+            # We can't simply discard one half.
+            print("-> Interaction detected or both halves are problematic. Cannot reduce further with this split.")
+            # A simple strategy is to just stop here. A more advanced one would be to try a different split.
+            # For now, we'll break and report the last known smallest failing set.
+            break
 
     print("\n--- Bisection Complete ---")
-    smallest_failing_set = set(problematic_states)
     print(f"Found a minimal problematic set of {len(smallest_failing_set)} states:")
     print(sorted(list(smallest_failing_set)))
-
 
     print("\n--- Analysis of Minimal Failing Subgraph ---")
     minimal_nwa_data = create_subgraph_nwa(nwa_data, smallest_failing_set)
