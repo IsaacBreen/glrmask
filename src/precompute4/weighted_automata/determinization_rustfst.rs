@@ -64,13 +64,19 @@ impl Semiring for BitsetWeight {
     fn reverse(&self) -> Result<Self::ReverseWeight> {
         Ok(self.clone())
     }
-
+    fn star(&self) -> Result<Self> {
+        // For an idempotent semiring, w* = 1 | w.
+        // For BitsetWeight, 1 is ALL, and ALL | w = ALL.
+        // So w* is always ALL.
+        Ok(Self::one())
+    }
+ 
     fn properties() -> SemiringProperties {
         SemiringProperties::LEFT_SEMIRING
             | SemiringProperties::RIGHT_SEMIRING
             | SemiringProperties::COMMUTATIVE
             | SemiringProperties::IDEMPOTENT
-            | SemiringProperties::PATH
+        // | SemiringProperties::PATH // Removed, to use explicit `star` impl
     }
 }
 
@@ -145,7 +151,7 @@ impl std::fmt::Display for BitsetWeight {
     }
 }
 
-fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
+fn nwa_to_vector_fst(nwa: &NWA) -> VectoorFst<BitsetWeight> {
     let mut fst = VectorFst::<BitsetWeight>::new();
     let mut state_map = HashMap::<NWAStateID, StateId>::new();
 
