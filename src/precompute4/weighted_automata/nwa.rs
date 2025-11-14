@@ -264,8 +264,8 @@ impl Default for SimplifyRustfstConfig {
     fn default() -> Self {
         Self {
             minimize: true,
-            connect: false,
-            rm_epsilon: true,
+            connect: true,
+            rm_epsilon: false,
         }
     }
 }
