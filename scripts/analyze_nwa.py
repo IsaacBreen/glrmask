@@ -812,11 +812,15 @@ def run_bisect_pass(args):
         print(f"✅ Baseline determinization timed out after {args.timeout}s. Starting bisection.")
 
     problematic_states = list(all_states)
+    random.shuffle(problematic_states)  # Shuffle to randomize the bisection process
 
     # We'll keep track of the smallest known failing set of states
     smallest_failing_set = set(problematic_states)
 
     iteration = 0
+    # When a split fails to reduce the set, we can shuffle and try again.
+    # This counter prevents an infinite loop if we're truly stuck.
+    retries_left = 5
     while len(problematic_states) > 1:
         iteration += 1
         print(f"\n--- Bisection Iteration {iteration}: {len(problematic_states)} states remaining ---")
@@ -842,21 +846,41 @@ def run_bisect_pass(args):
             subgraph2_data["final_states"], subgraph2_data["transitions"], args.timeout
         ) if subgraph2_data else False
 
+        reduced = False
         if hangs1 and not hangs2:
             print("-> Problem is in the first half. Discarding second half.")
             problematic_states = list(s1)
             smallest_failing_set = s1
+            reduced = True
         elif not hangs1 and hangs2:
             print("-> Problem is in the second half. Discarding first half.")
             problematic_states = list(s2)
             smallest_failing_set = s2
+            reduced = True
+        elif hangs1 and hangs2:
+            print("-> Both halves are independently problematic. Continuing bisection on the smaller half.")
+            if len(s1) <= len(s2):
+                problematic_states = list(s1)
+                smallest_failing_set = s1
+            else:
+                problematic_states = list(s2)
+                smallest_failing_set = s2
+            reduced = True
+
+        if reduced:
+            # A reduction was successful, reset retries for the next level of bisection.
+            retries_left = 5
         else:
-            # This is the complex case: the interaction is the problem, or both halves are problematic.
+            # not hangs1 and not hangs2: This is the complex interaction case.
             # We can't simply discard one half.
-            print("-> Interaction detected or both halves are problematic. Cannot reduce further with this split.")
-            # A simple strategy is to just stop here. A more advanced one would be to try a different split.
-            # For now, we'll break and report the last known smallest failing set.
-            break
+            print("-> Interaction detected. Cannot reduce further with this split.")
+            if retries_left > 0:
+                print(f"-> Shuffling and trying a different split ({retries_left} retries left).")
+                retries_left -= 1
+                random.shuffle(problematic_states)  # Try a new split
+            else:
+                print("-> No more retries. The current set is the smallest we could find.")
+                break
 
     print("\n--- Bisection Complete ---")
     print(f"Found a minimal problematic set of {len(smallest_failing_set)} states:")
