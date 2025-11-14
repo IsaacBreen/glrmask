@@ -347,7 +347,7 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
                     if let Ok((is_pos, p_id)) = decode_symbol_i16(*label) {
                         if is_pos {
                             for (_, w) in transitions {
-                                let entry = state_info[s_init].entry(p_id).or_default();
+                                let entry = state_info[s_init].entry(p_id).or_insert_with(Weight::zeros);
                                 *entry |= w;
                             }
                         }
@@ -364,13 +364,12 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
     while let Some(u) = worklist.pop_front() {
         in_worklist.remove(&u);
         let info_at_u = state_info[u].clone();
-        if info_at_u.is_empty() { continue; }
+        if info_at_u.is_empty() {
+            continue;
+        }
 
         for (l, targets) in &nwa.states[u].transitions {
-            let (is_pos, is_neg, is_def, p_id) = match decode_symbol_i16(*l) {
-                Ok((is_pos, p_id)) => (is_pos, !is_pos, false, p_id),
-                Err(_) => (false, false, true, ParserStateID(0)), // Dummy p_id for default
-            };
+            let is_def = is_default_transition(*l);
 
             for (v, w_uv) in targets {
                 let v = *v;
@@ -380,37 +379,66 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
                     let mut any_change = false;
                     for follower_id_val in followers.iter() {
                         let follower_id = ParserStateID(follower_id_val);
-                        let entry = state_info[v].entry(follower_id).or_default();
+                        let entry = state_info[v].entry(follower_id).or_insert_with(Weight::zeros);
                         let old_len = entry.len();
-                        *entry |= &pw;
-                        if entry.len() != old_len { any_change = true; }
+                        *entry |= pw;
+                        if entry.len() != old_len {
+                            any_change = true;
+                        }
                     }
                     any_change
                 };
 
                 if is_def {
+                    // Default transitions behave like "any label": propagate from all labels at u.
                     for (q_id, w_q) in &info_at_u {
                         let pw = w_q & w_uv;
-                        if pw.is_empty() { continue; }
+                        if pw.is_empty() {
+                            continue;
+                        }
                         if let Some(followers) = follower_map.get(q_id) {
-                            if process_propagation(&pw, followers, &mut state_info) { changed = true; }
+                            if process_propagation(&pw, followers, &mut state_info) {
+                                changed = true;
+                            }
                         }
                     }
-                } else if is_pos {
-                    if let Some(w_p) = info_at_u.get(&p_id) {
-                        let pw = w_p & w_uv;
-                        if pw.is_empty() { continue; }
-                        if let Some(followers) = follower_map.get(&p_id) {
-                            if process_propagation(&pw, followers, &mut state_info) { changed = true; }
+                } else {
+                    // Non-default: must decode as a parser-state label.
+                    match decode_symbol_i16(*l) {
+                        Ok((is_pos, p_id)) => {
+                            if is_pos {
+                                // Positive label: only propagate from that label at u.
+                                if let Some(w_p) = info_at_u.get(&p_id) {
+                                    let pw = w_p & w_uv;
+                                    if pw.is_empty() {
+                                        continue;
+                                    }
+                                    if let Some(followers) = follower_map.get(&p_id) {
+                                        if process_propagation(&pw, followers, &mut state_info) {
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Negative label: propagate from all labels except p_id.
+                                for (q_id, w_q) in &info_at_u {
+                                    if *q_id == p_id {
+                                        continue;
+                                    }
+                                    let pw = w_q & w_uv;
+                                    if pw.is_empty() {
+                                        continue;
+                                    }
+                                    if let Some(followers) = follower_map.get(q_id) {
+                                        if process_propagation(&pw, followers, &mut state_info) {
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    }
-                } else { // is_neg
-                    for (q_id, w_q) in &info_at_u {
-                        if *q_id == p_id { continue; }
-                        let pw = w_q & w_uv;
-                        if pw.is_empty() { continue; }
-                        if let Some(followers) = follower_map.get(q_id) {
-                            if process_propagation(&pw, followers, &mut state_info) { changed = true; }
+                        Err(_) => {
+                            // Unknown non-default label: skip propagation for this label.
                         }
                     }
                 }
@@ -434,18 +462,31 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
 
         let state = &mut nwa.states[u];
         for (l, targets) in state.transitions.iter_mut() {
-            let (is_pos, is_neg, is_def, p_id) = match decode_symbol_i16(*l) {
-                Ok((is_pos, p_id)) => (is_pos, !is_pos, false, p_id),
-                Err(_) => (false, false, true, ParserStateID(0)),
-            };
-
-            let valid_incoming_weight = if is_def {
+            let valid_incoming_weight = if is_default_transition(*l) {
+                // Default transitions are valid whenever *any* label can be present.
                 all_labels_weight.clone()
-            } else if is_pos {
-                info_at_u.get(&p_id).cloned().unwrap_or_default()
-            } else { // is_neg
-                let w_p = info_at_u.get(&p_id).cloned().unwrap_or_default();
-                &all_labels_weight - &w_p
+            } else {
+                // Non-default: decode as parser-state label, or skip if we can't.
+                match decode_symbol_i16(*l) {
+                    Ok((is_pos, p_id)) => {
+                        if is_pos {
+                            info_at_u
+                                .get(&p_id)
+                                .cloned()
+                                .unwrap_or_else(Weight::zeros)
+                        } else {
+                            let w_p = info_at_u
+                                .get(&p_id)
+                                .cloned()
+                                .unwrap_or_else(Weight::zeros);
+                            &all_labels_weight - &w_p
+                        }
+                    }
+                    Err(_) => {
+                        // Unknown non-default label: don't prune it (leave weights as-is).
+                        continue;
+                    }
+                }
             };
 
             if valid_incoming_weight.is_empty() {
@@ -681,6 +722,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     crate::debug!(4, "Default transition simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA after default simplification:\n{}", combined_nwa.stats());
 
+    let now = Instant::now();
     crate::debug!(4, "Starting label propagation and pruning...");
     // New optimization pass
     propagate_and_prune_labels(parser, &mut combined_nwa);
