@@ -310,8 +310,10 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     rm_epsilon(&mut fst).unwrap();
     crate::debug!(4, "NFA states after rm_epsilon: {}", fst.num_states());
 
+    crate::debug!(4, "NFA states before minimization: {}", fst.num_states());
     let min_config = MinimizeConfig::default().with_allow_nondet(true);
     minimize_with_config(&mut fst, min_config).unwrap();
+    crate::debug!(4, "NFA states after minimization: {}", fst.num_states());
 
     let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeNonFunctional);
     crate::debug!(4, "NFA states before determinization: {}", fst.num_states());
