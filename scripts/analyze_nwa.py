@@ -8,6 +8,7 @@ import multiprocessing
 import argparse
 from collections import Counter, defaultdict
 import portion as P
+from rustfst.algorithms.determinize import DeterminizeConfig, DeterminizeType
 from tqdm import tqdm
 
 # We use rustfst for high-performance FST operations.
@@ -434,7 +435,7 @@ def run_determinize_pass(args):
         print_fst_stats(fst, "After tr_unique")
         fst = fst.minimize(config=MinimizeConfig(allow_nondet=True))
         print_fst_stats(fst, "After minimizing")
-        fst = fst.determinize()
+        fst = fst.determinize(config=DeterminizeConfig(det_type=DeterminizeType.DETERMINIZE_FUNCTIONAL))
         print_fst_stats(fst, "After determinizing")
         print("\nRESULT: ✅ Determinization finished successfully.")
     except Exception as e:
