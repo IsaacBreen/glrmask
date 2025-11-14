@@ -426,7 +426,6 @@ impl NWA {
         if DETERMINIZE_DEBUG {
             let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
             eprintln!("[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
-            eprintln!("[DETERMINIZE_DEBUG] Input NWA: {}", self);
             eprintln!("[DETERMINIZE_DEBUG] Custom DWA stats: {}", custom_dwa.stats());
             eprintln!("[DETERMINIZE_DEBUG] Rustfst DWA stats: {}", rustfst_dwa.stats());
             test_weighted_automata::stochastic_equivalence_test(custom_dwa.clone(), rustfst_dwa);
