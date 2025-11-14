@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
+use rustfst::algorithms::{minimize, MinimizeConfig};
+use rustfst::prelude::minimize_with_config;
+use crate::precompute4::weighted_automata::determinization_rustfst::{nwa_to_vector_fst, vector_fst_to_nwa};
 use crate::precompute4::weighted_automata::DWA;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +249,13 @@ impl NWA {
 
     pub fn determinize_to_dwa_with_rustfst(&self) -> DWA {
         super::determinization_rustfst::determinize_nwa_to_dwa(self)
+    }
+
+    pub fn simplify_rustfst(&self) -> NWA {
+        let mut fst = nwa_to_vector_fst(self);
+        let config = MinimizeConfig::default().with_allow_nondet(true);
+        minimize_with_config(&mut fst, config).unwrap();
+        vector_fst_to_nwa(&fst)
     }
 }
 

@@ -146,7 +146,7 @@ impl std::fmt::Display for BitsetWeight {
     }
 }
 
-fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
+pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
     let mut fst = VectorFst::<BitsetWeight>::new();
     let mut state_map = HashMap::<NWAStateID, StateId>::new();
 
@@ -204,7 +204,7 @@ fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
     fst
 }
 
-fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
+pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
     let fst_start = match fst.start() {
         Some(s) => s,
         None => return DWA::new(),
@@ -253,6 +253,10 @@ fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
         }
     }
     dwa
+}
+
+pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
+    todo!()
 }
 
 pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
