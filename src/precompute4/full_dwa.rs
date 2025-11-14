@@ -300,8 +300,10 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
 
     // Seed initial states
     let start_state = &nwa.states[nwa.body.start_state];
+    let mut initial_states: BTreeSet<StateID> = BTreeSet::new();
     for (_, targets) in &start_state.transitions {
         for (target_state, w) in targets {
+            initial_states.insert(*target_state);
             let s_init = *target_state;
             for (label, _) in &nwa.states[s_init].transitions {
                 if let Ok((is_pos, p_id)) = decode_symbol_i16(*label) {
@@ -382,6 +384,10 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
     let now_prune = Instant::now();
     let mut changed_count = 0;
     for u in 0..nwa.states.len() {
+        if initial_states.contains(&u) || u == nwa.body.start_state {
+            continue;
+        }
+
         let info_at_u = &state_info[u];
 
         let state = &mut nwa.states[u];
