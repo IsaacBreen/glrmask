@@ -532,7 +532,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 // Convert template DWA to NWA and copy it into the arena
                 let mut tempalte_dwa = template_dwa.clone();
                 let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                tempalte_dwa.apply_weight(&eps_weight);
+                tempalte_dwa.apply_weight_inplace(&eps_weight);
                 let template_nwa = NWA::from_dwa(&tempalte_dwa);
                 crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
                 let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
