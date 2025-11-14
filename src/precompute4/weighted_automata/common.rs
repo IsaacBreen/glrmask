@@ -6,7 +6,7 @@
 use super::bitset::SimpleBitset;
 
 pub(crate) const STOCHASTIC_DEBUG: bool = false; // Set to false by default to avoid heavy stochastic validation on large automata
-pub(crate) const DETERMINIZE_DEBUG: bool = false;
+pub(crate) const DETERMINIZE_DEBUG: bool = true;
 
 pub type StateID = usize;
 pub type Weight = SimpleBitset;
