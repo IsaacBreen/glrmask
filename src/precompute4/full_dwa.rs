@@ -702,6 +702,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     // Determinize the single combined NWA
     crate::debug!(4, "Determinizing final combined NWA...");
     combined_nwa = NWA::from_dwa(&combined_nwa.determinize_to_dwa());
+    crate::debug!(4, "Stats after final NWA determinization:\n{}", combined_nwa.stats());
     let mut final_dwa = combined_nwa.determinize_to_dwa_with_rustfst();
     // final_dwa.simplify();
     crate::debug!(4, "Final determinize & simplify took: {:?}. Final DWA has {} states.", now.elapsed(), final_dwa.states.len());
