@@ -141,7 +141,7 @@ fn build_template_dwas(
     let mut out = BTreeMap::new();
     for (term, bb) in all {
         let nwa = build_template_nwa_from_characterization(&bb)?;
-        let mut dwa = nwa.determinize_to_dwa();
+        let mut dwa = nwa.determinize_to_dwa_with_rustfst();
         dwa.simplify();
         crate::debug!(5, "Built template DWA for terminal {:?}:", term);
         crate::debug!(5, "{}", dwa);

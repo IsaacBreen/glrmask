@@ -260,7 +260,9 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     rm_epsilon(&mut fst).unwrap();
     let det_config =
         DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeNonFunctional);
-    let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
+    let mut det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
+    let min_config = MinimizeConfig::default();
+    minimize_with_config(&mut det_fst, min_config).unwrap();
     crate::debug!(6, "Determinized FST:\n{}", det_fst);
     vector_fst_to_dwa(&det_fst)
 }
