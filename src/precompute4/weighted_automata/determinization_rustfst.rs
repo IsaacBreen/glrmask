@@ -256,7 +256,52 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
 }
 
 pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
-    todo!()
+    if fst.num_states() == 0 {
+        return NWA::new();
+    }
+
+    let mut nwa = NWA::new();
+    nwa.states.0.clear();
+    let mut state_map = HashMap::<StateId, NWAStateID>::new();
+
+    for i in 0..fst.num_states() {
+        let s = nwa.states.add_state();
+        state_map.insert(i as StateId, s);
+    }
+
+    if let Some(fst_start) = fst.start() {
+        nwa.body.start_state = state_map[&fst_start];
+    } else {
+        // FST has states but no start state. The NWA will also have no reachable final states from its start.
+        // We must set a start state. Let's pick 0.
+        nwa.body.start_state = 0;
+    }
+
+    for i in 0..fst.num_states() {
+        let fst_state_id = i as StateId;
+        let nwa_state_id = state_map[&fst_state_id];
+
+        if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
+            if !w.0.is_empty() {
+                nwa.states[nwa_state_id].final_weight = Some(w.0.clone());
+            }
+        }
+
+        for tr in fst.get_trs(fst_state_id).unwrap().trs() {
+            if !tr.weight.0.is_empty() {
+                let target_nwa_id = state_map[&tr.nextstate];
+                let weight = tr.weight.0.clone();
+
+                if tr.ilabel == EPS_LABEL {
+                    nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
+                } else {
+                    let label = ((tr.ilabel - 1) as u16) as i16;
+                    nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
+                }
+            }
+        }
+    }
+    nwa
 }
 
 pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
