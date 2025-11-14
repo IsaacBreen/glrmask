@@ -134,7 +134,7 @@ impl DWA {
             start_state.final_weight = Some(sw & weight);
         }
         for (_, tw) in start_state.trans_weights.iter_mut() {
-            *tw |= weight;
+            *tw &= weight;
         }
     }
 }
