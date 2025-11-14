@@ -81,8 +81,11 @@ impl ReverseBack<BitsetWeight> for BitsetWeight {
 }
 
 impl WeaklyDivisibleSemiring for BitsetWeight {
-    fn divide_assign(&mut self, _rhs: &Self, _divide_type: DivideType) -> Result<()> {
-        // For a boolean algebra, division a/b is `a`. This is a no-op.
+    fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
+        // For a boolean algebra (sets), division a/b is a | !b (material implication)
+        // such that b & (a | !b) = (b&a) | (b&!b) = b&a.
+        // This is correct if a is a subset of b. Determinization requires this property.
+        self.0 |= &(!&rhs.0);
         Ok(())
     }
 }
