@@ -686,6 +686,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     propagate_and_prune_labels(parser, &mut combined_nwa);
     combined_nwa.simplify_rustfst();
     crate::debug!(4, "Label propagation and pruning took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+    crate::debug!(4, "Stats for combined NWA after label propagation:\n{}", combined_nwa.stats());
+
+    crate::debug!(4, "Starting simplification before final determinization...");
+    combined_nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true));
+    crate::debug!(4, "Simplification before final determinization took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+    crate::debug!(4, "Stats for combined NWA before final determinization:\n{}", combined_nwa.stats());
 
     if env::var("RLLM_DUMP_NWA").is_ok() {
         let timestamp = Local::now().format("%Y%m%d-%H%M%S");
