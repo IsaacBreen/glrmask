@@ -931,6 +931,15 @@ fn prune_dead_ends(&mut self) -> bool {
             }
         }
 
+        while let Some(v) = q.pop_front() {
+            for &p in &rev_adj[v] {
+                if !live[p] {
+                    live[p] = true;
+                    q.push_back(p);
+                }
+            }
+        }
+
         if self.body.start_state >= n || !live[self.body.start_state] {
             let changed = n > 0;
             if changed {
