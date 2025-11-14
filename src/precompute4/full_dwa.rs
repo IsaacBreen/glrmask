@@ -433,9 +433,9 @@ fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
         }
     }
 
-    println!("state_info after propagation:");
+    crate::debug!(6, "state_info after propagation:");
     for (i, info) in state_info.iter().enumerate() {
-        println!("  State {}: {:?}", i, info);
+        crate::debug!(6, "  State {}: {:?}", i, info);
     }
 
     // Clean up empty transitions
@@ -534,7 +534,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
                 template_dwa.apply_weight_inplace(&eps_weight);
                 let template_nwa = NWA::from_dwa(&template_dwa);
-                println!("Template NWA for terminal {:?} with epsilon gate weight {:?}:\n{}", edge_terminal_opt, llm_token_bv, template_nwa);
+                crate::debug!(6, "Template NWA for terminal {:?} with epsilon gate weight {:?}:\n{}", edge_terminal_opt, llm_token_bv, template_nwa);
                 crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
                 let (template_start_in_arena, _) = states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
                 crate::debug!(5, "Template NWA copied into arena. Current arena size: {} states.", states.0.len());
@@ -568,23 +568,23 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 let start = states.add_state();
                 NWABody { start_state: start }
             };
-            println!("NWA states:\n{}", states_arena.borrow());
-            println!("{:?}", nwa_bodies_map);
+            crate::debug!(6, "NWA states:\n{}", states_arena.borrow());
+            crate::debug!(6, "{:?}", nwa_bodies_map);
             for (right_body, left_bodies) in nwa_bodies_map {
                 for left_body in left_bodies {
                     let mut states = states_arena.borrow_mut();
                     let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
-                    println!("NWA states after concat:\n{}", states);
+                    crate::debug!(6, "NWA states after concat:\n{}", states);
                     // Union via epsilon into nwa_body
                     crate::debug!(5, "At trie node {:?}, concatenating left body (start {}) and right body (start {}) into composed body (start {})...", node_idx, left_body.start_state, right_body.start_state, composed_body.start_state);
                     nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
-                    println!("NWA states after union:\n{}", states);
+                    crate::debug!(6, "NWA states after union:\n{}", states);
                 }
             }
 
-            println!("At trie node {:?}, obtained NWA body with start state {} and {} states.", node_idx, nwa_body.start_state, states_arena.borrow().len());
-            println!("NWA body:\n{}", nwa_body);
-            println!("NWA states:\n{}", states_arena.borrow());
+            crate::debug!(6, "At trie node {:?}, obtained NWA body with start state {} and {} states.", node_idx, nwa_body.start_state, states_arena.borrow().len());
+            crate::debug!(6, "NWA body:\n{}", nwa_body);
+            crate::debug!(6, "NWA states:\n{}", states_arena.borrow());
 
             if !tokens.is_empty() {
                 if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
