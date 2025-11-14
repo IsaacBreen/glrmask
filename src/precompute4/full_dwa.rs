@@ -161,6 +161,13 @@ fn build_ignore_terminal_dwa() -> DWA {
     dwa
 }
 
+fn build_epsilon_dwa(weight: Weight) -> DWA {
+    let mut dwa = DWA::new();
+    let final_state = dwa.states.add_state();
+    dwa.states[final_state].final_weight = Some(weight);
+    dwa
+}
+
 /// For any state with a final weight, subtract that weight from all outgoing transitions.
 /// This prunes paths that continue after a word has already been accepted with a given weight.
 fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
@@ -532,7 +539,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 // Convert template DWA to NWA and copy it into the arena
                 let mut template_dwa = template_dwa.clone();
                 let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                template_dwa.apply_weight_inplace(&eps_weight);
+                template_dwa = DWA::concatenate(&template_dwa, &build_epsilon_dwa(eps_weight));
                 let template_nwa = NWA::from_dwa(&template_dwa);
                 crate::debug!(6, "Template NWA for terminal {:?} with epsilon gate weight {:?}:\n{}", edge_terminal_opt, llm_token_bv, template_nwa);
                 crate::debug!(5, "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...", edge_terminal_opt, llm_token_bv);
