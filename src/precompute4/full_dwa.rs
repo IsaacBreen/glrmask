@@ -597,9 +597,9 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 let left_bodies_union = states.copy_subgraph_from_and_return_body(&states2, left_bodies_union2);
                 let composed_body = NWA::concatenate_components(&mut states, &left_bodies_union, &right_body, &Weight::all());
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
-                let mut nwa = NWA { states: states.clone(), body: nwa_body.clone() };
-                nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true).with_determinize(true));
-                nwa_body = states.copy_subgraph_from_and_return_body(&nwa.states, nwa.body);
+                // let mut nwa = NWA { states: states.clone(), body: nwa_body.clone() };
+                // nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true).with_determinize(true));
+                // nwa_body = states.copy_subgraph_from_and_return_body(&nwa.states, nwa.body);
             }
 
             crate::debug!(6, "At trie node {:?}, obtained NWA body with start state {} and {} states.", node_idx, nwa_body.start_state, states_arena.borrow().len());
