@@ -577,29 +577,41 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             crate::debug!(6, "NWA states:\n{}", states_arena.borrow());
             crate::debug!(6, "{:?}", nwa_bodies_map);
             for (right_body, left_bodies) in nwa_bodies_map {
-                let mut states2 = NWAStates::default();
-                let mut left_bodies_union2 = {
-                    let start = states2.add_state();
-                    NWABody { start_state: start }
-                };
-                for left_body in left_bodies {
-                    let left_body2 = states2.copy_subgraph_from_and_return_body(&states_arena.borrow(), left_body);
-                    left_bodies_union2 = NWA::union_components(&mut states2, &left_bodies_union2, &left_body2);
-                    let mut nwa = NWA { states: states2.clone(), body: left_bodies_union2.clone() };
-                    nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true).with_determinize(true));
-                    states2 = nwa.states;
-                    left_bodies_union2 = nwa.body;
+                if left_bodies.is_empty() {
+                    continue;
                 }
-                let mut left_bodies_nwa = NWA { states: states2, body: left_bodies_union2 };
-                left_bodies_nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true).with_determinize(true));
+
+                let mut queue: VecDeque<NWA> = VecDeque::with_capacity(left_bodies.len());
+                {
+                    let arena = states_arena.borrow();
+                    for left_body in left_bodies {
+                        let mut states = NWAStates::default();
+                        let start = states.copy_subgraph_from_and_return_body(&arena, left_body).start_state;
+                        queue.push_back(NWA { states, body: NWABody { start_state: start } });
+                    }
+                }
+
+                if queue.len() == 1 {
+                    queue.front_mut().unwrap().simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true).with_determinize(true));
+                }
+
+                while queue.len() > 1 {
+                    let nwa1 = queue.pop_front().unwrap();
+                    let nwa2 = queue.pop_front().unwrap();
+                    let mut states = nwa1.states;
+                    let (start2, _) = states.copy_subgraph_from(&nwa2.states, nwa2.body.start_state);
+                    let union_body = NWA::union_components(&mut states, &nwa1.body, &NWABody { start_state: start2 });
+                    let mut res = NWA { states, body: union_body };
+                    res.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true).with_determinize(true));
+                    queue.push_back(res);
+                }
+
+                let left_bodies_nwa = queue.pop_front().unwrap();
                 let NWA { states: states2, body: left_bodies_union2 } = left_bodies_nwa;
                 let mut states = states_arena.borrow_mut();
                 let left_bodies_union = states.copy_subgraph_from_and_return_body(&states2, left_bodies_union2);
                 let composed_body = NWA::concatenate_components(&mut states, &left_bodies_union, &right_body, &Weight::all());
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
-                // let mut nwa = NWA { states: states.clone(), body: nwa_body.clone() };
-                // nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true).with_determinize(true));
-                // nwa_body = states.copy_subgraph_from_and_return_body(&nwa.states, nwa.body);
             }
 
             crate::debug!(6, "At trie node {:?}, obtained NWA body with start state {} and {} states.", node_idx, nwa_body.start_state, states_arena.borrow().len());
