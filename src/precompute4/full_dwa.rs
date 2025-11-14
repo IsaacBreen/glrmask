@@ -572,16 +572,17 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             crate::debug!(6, "{:?}", nwa_bodies_map);
             for (right_body, left_bodies) in nwa_bodies_map {
                 let mut states2 = NWAStates::default();
-                let mut left_bodies_union = {
+                let mut left_bodies_union2 = {
                     let start = states2.add_state();
                     NWABody { start_state: start }
                 };
                 for left_body in left_bodies {
-                    left_bodies_union = NWA::union_components(&mut states2, &left_bodies_union, &left_body);
+                    let left_body2 = states2.copy_subgraph_from_and_return_body(&states_arena.borrow(), left_body);
+                    left_bodies_union2 = NWA::union_components(&mut states2, &left_bodies_union2, &left_body2);
                 }
                 let mut states = states_arena.borrow_mut();
-                let left_bodies_union_in_arena = states.copy_subgraph_from_and_return_body(&states2, left_bodies_union);
-                let composed_body = NWA::concatenate_components(&mut states, &left_bodies_union_in_arena, &right_body, &Weight::all());
+                let left_bodies_union = states.copy_subgraph_from_and_return_body(&states2, left_bodies_union2);
+                let composed_body = NWA::concatenate_components(&mut states, &left_bodies_union, &right_body, &Weight::all());
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
             }
 
