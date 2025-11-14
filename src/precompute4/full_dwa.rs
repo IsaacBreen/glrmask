@@ -6,12 +6,13 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
 use crate::precompute4::utils;
-use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight, DEFAULT_TRANSITION_SYMBOL};
+use crate::precompute4::weighted_automata::{DWA, DWABody, DWAState, DWAStates, NWA, NWABuildError, NWAStates, NWABody, StateID, Weight};
 use crate::constraint::LLMTokenBV;
 use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
+use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 
 pub type Precomputed4 = DWA;
 use crate::tokenizer::TokenizerStateID;

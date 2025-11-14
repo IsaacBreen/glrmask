@@ -29,7 +29,7 @@ use chrono::Local;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use super::common::{NWAStateID, Weight, DEFAULT_TRANSITION_SYMBOL};
+use super::common::{NWAStateID, Weight};
 use super::dwa::{DWA, DWABuildError};
 use super::nwa::{NWA, NWAStates};
 
@@ -92,44 +92,16 @@ fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap 
     closure
 }
 
-// Compute S_total: explicit labels and default exceptions in this ε-closure
-fn collect_exception_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTreeSet<i16> {
+// Compute all explicit labels in this ε-closure
+fn collect_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTreeSet<i16> {
     let mut labels: BTreeSet<i16> = BTreeSet::new();
     for (sid, cw) in closure {
         if is_zero(cw) {
             continue;
         }
-        for &lbl in nwa_states[*sid].transitions.keys() {
-            if lbl != DEFAULT_TRANSITION_SYMBOL {
-                labels.insert(lbl);
-            }
-        }
+        labels.extend(nwa_states[*sid].transitions.keys());
     }
     labels
-}
-
-// Next subset for "others" labels not in S_total: use all defaults
-fn next_subset_for_others(nwa_states: &NWAStates, closure: &ClosureMap) -> WeightedSubset {
-    let mut next: WeightedSubset = WeightedSubset::new();
-    for (sid, cw) in closure {
-        if is_zero(cw) {
-            continue;
-        }
-        let st = &nwa_states[*sid];
-        if let Some(default_targets) = st.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-            for (target, weight) in default_targets {
-                let cand = weight_intersection(cw, weight);
-                if is_zero(&cand) {
-                    continue;
-                }
-                next.entry(*target)
-                    .and_modify(|w| weight_union_in_place(w, &cand))
-                    .or_insert(cand);
-            }
-        }
-    }
-    next.retain(|_, w| !is_zero(w));
-    next
 }
 
 // Next subset for a specific label ch
@@ -152,17 +124,6 @@ fn next_subset_for_label(
                     continue;
                 }
                 next.entry(*to)
-                    .and_modify(|w| weight_union_in_place(w, &cand))
-                    .or_insert(cand);
-            }
-        } else if let Some(default_targets) = st.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-            // No explicit transition for 'ch': use default.
-            for (target, weight) in default_targets {
-                let cand = weight_intersection(cw, weight);
-                if is_zero(&cand) {
-                    continue;
-                }
-                next.entry(*target)
                     .and_modify(|w| weight_union_in_place(w, &cand))
                     .or_insert(cand);
             }
@@ -277,21 +238,18 @@ impl<'a> Determinizer<'a> {
             None
         };
 
-        let exception_labels = collect_exception_labels(&self.nwa.states, closure);
+        let labels = collect_labels(&self.nwa.states, closure);
 
         if let Some(pb) = &labels_pb {
-            pb.set_length(exception_labels.len() as u64);
+            pb.set_length(labels.len() as u64);
         }
 
-        let others_subset = next_subset_for_others(&self.nwa.states, closure);
-        let others_weight = union_over_values(&others_subset);
-
-        let mut exception_data: BTreeMap<i16, (WeightedSubset, Weight)> = BTreeMap::new();
-        for ch in &exception_labels {
+        let mut transition_data: BTreeMap<i16, (WeightedSubset, Weight)> = BTreeMap::new();
+        for ch in &labels {
             let sub_ch = next_subset_for_label(&self.nwa.states, closure, *ch);
             let w_ch = union_over_values(&sub_ch);
             if !sub_ch.is_empty() && !is_zero(&w_ch) {
-                exception_data.insert(*ch, (sub_ch, w_ch));
+                transition_data.insert(*ch, (sub_ch, w_ch));
             }
             if let Some(pb) = &labels_pb {
                 pb.inc(1);
@@ -300,34 +258,13 @@ impl<'a> Determinizer<'a> {
 
         if let Some(pb) = &labels_pb {
             pb.set_message(format!("State {}: installing transitions", sid));
-            pb.set_length(exception_data.len() as u64);
+            pb.set_length(transition_data.len() as u64);
             pb.set_position(0);
         }
 
-        let mut default_target_id: Option<usize> = None;
-        if !others_subset.is_empty() && !is_zero(&others_weight) {
-            let to_id = self.register_state(others_subset);
-            default_target_id = Some(to_id);
-            let _ = self
-                .dwa
-                .set_default_transition(sid, to_id, others_weight.clone())
-                .map_err(|_e: DWABuildError| ())
-                .ok();
-        }
-
-        for (ch, (sub_ch, w_ch)) in exception_data {
+        for (ch, (sub_ch, w_ch)) in transition_data {
             let to_ch_id = self.register_state(sub_ch);
-            let need_exception = match default_target_id {
-                None => true,
-                Some(def_id) => to_ch_id != def_id || w_ch != others_weight,
-            };
-            if need_exception {
-                let _ = self
-                    .dwa
-                    .add_transition(sid, ch, to_ch_id, w_ch.clone())
-                    .map_err(|_e: DWABuildError| ())
-                    .ok();
-            }
+            let _ = self.dwa.add_transition(sid, ch, to_ch_id, w_ch.clone()).ok();
             if let Some(pb) = &labels_pb {
                 pb.inc(1);
             }

@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{format_pos_code, StateID, Weight, DEFAULT_TRANSITION_SYMBOL};
+use super::common::{format_pos_code, StateID, Weight};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Deref, Index, IndexMut};
@@ -36,13 +36,11 @@ pub struct DWAState {
 
 impl DWAState {
     pub fn get_transition(&self, ch: i16) -> Option<(StateID, &Weight)> {
-        self.transitions.get(&ch).or_else(|| self.transitions.get(&DEFAULT_TRANSITION_SYMBOL)).and_then(|to| {
-            self.trans_weights.get(&ch).or_else(|| self.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL)).map(|w| (*to, w))
-        })
+        self.transitions.get(&ch).and_then(|to| self.trans_weights.get(&ch).map(|w| (*to, w)))
     }
 
     pub fn get_weight(&self, ch: i16) -> Option<&Weight> {
-        self.trans_weights.get(&ch).or_else(|| self.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL))
+        self.trans_weights.get(&ch)
     }
 
     /// Intersects all weights in this state with the given weight.
@@ -265,15 +263,6 @@ impl DWA {
         from_state.trans_weights.insert(on, weight);
         Ok(())
     }
-
-    pub fn set_default_transition(
-        &mut self,
-        from: StateID,
-        to: StateID,
-        weight: Weight,
-    ) -> Result<(), DWABuildError> {
-        self.add_transition(from, DEFAULT_TRANSITION_SYMBOL, to, weight)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -281,8 +270,7 @@ pub struct DWAStats {
     pub num_states: usize,
     pub num_transitions: usize,
     pub num_final_states: usize,
-    pub num_default_transitions: usize,
-    pub avg_exceptions_per_state: f64,
+    pub avg_transitions_per_state: f64,
 }
 
 impl Display for DWAStats {
@@ -291,8 +279,7 @@ impl Display for DWAStats {
         writeln!(f, "  - States: {}", self.num_states)?;
         writeln!(f, "  - Transitions: {}", self.num_transitions)?;
         writeln!(f, "  - Final States: {}", self.num_final_states)?;
-        writeln!(f, "  - States with Default: {}", self.num_default_transitions)?;
-        writeln!(f, "  - Avg Exceptions/State: {:.2}", self.avg_exceptions_per_state)
+        writeln!(f, "  - Avg Transitions/State: {:.2}", self.avg_transitions_per_state)
     }
 }
 
@@ -304,35 +291,27 @@ impl DWA {
                 num_states: 0,
                 num_transitions: 0,
                 num_final_states: 0,
-                num_default_transitions: 0,
-                avg_exceptions_per_state: 0.0,
+                avg_transitions_per_state: 0.0,
             };
         }
 
-        let mut num_exceptions = 0;
+        let mut num_transitions = 0;
         let mut num_final_states = 0;
-        let mut num_default_transitions = 0;
 
         for state in &self.states.0 {
-            num_exceptions += state.transitions.len();
+            num_transitions += state.transitions.len();
             if state.final_weight.is_some() {
                 num_final_states += 1;
             }
-            if state.transitions.contains_key(&DEFAULT_TRANSITION_SYMBOL) {
-                num_default_transitions += 1;
-            }
         }
 
-        let num_transitions = num_exceptions;
-        let num_exceptions_only = num_exceptions - num_default_transitions;
-        let avg_exceptions_per_state = num_exceptions_only as f64 / num_states as f64;
+        let avg_transitions_per_state = num_transitions as f64 / num_states as f64;
 
         DWAStats {
             num_states,
             num_transitions,
             num_final_states,
-            num_default_transitions,
-            avg_exceptions_per_state,
+            avg_transitions_per_state,
         }
     }
 }
@@ -349,24 +328,16 @@ impl Display for DWA {
                 writeln!(f, "    final_weight: {}", w)?;
             }
             for (on, to) in &state.transitions {
-                if *on == DEFAULT_TRANSITION_SYMBOL {
-                    if let Some(w) = state.trans_weights.get(on) {
-                        writeln!(f, "    * -> {} (trans_weight: {})", to, w)?;
-                    } else {
-                        writeln!(f, "    * -> {}", to)?;
-                    }
+                let char_repr = if *on >= 0 {
+                    format_pos_code(*on)
                 } else {
-                    let char_repr = if *on >= 0 {
-                        format_pos_code(*on)
-                    } else {
-                        let decoded_id = on.wrapping_sub(i16::MIN);
-                        format!("neg({})", decoded_id)
-                    };
-                    if let Some(w) = state.trans_weights.get(on) {
-                        writeln!(f, "    {} -> {} (trans_weight: {})", char_repr, to, w)?;
-                    } else {
-                        writeln!(f, "    {} -> {}", char_repr, to)?;
-                    }
+                    let decoded_id = on.wrapping_sub(i16::MIN);
+                    format!("neg({})", decoded_id)
+                };
+                if let Some(w) = state.trans_weights.get(on) {
+                    writeln!(f, "    {} -> {} (trans_weight: {})", char_repr, to, w)?;
+                } else {
+                    writeln!(f, "    {} -> {}", char_repr, to)?;
                 }
             }
         }

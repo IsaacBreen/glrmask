@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{format_i16_char, NWAStateID, Weight, DEFAULT_TRANSITION_SYMBOL};
+use super::common::{format_i16_char, NWAStateID, Weight};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
@@ -23,7 +23,7 @@ impl Display for NWABuildError {
     }
 }
 
-/// - Non-epsilon transitions: unique target per input symbol.
+/// - Non-epsilon transitions: multiple targets per input symbol are allowed.
 /// - Each transition carries a weight (Weight), which is intersected along the path; final states
 ///   carry a final weight that is intersected at acceptance; multiple alternative paths union their weights.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,17 +69,6 @@ impl NWAStates {
             return Err(NWABuildError::StateOutOfBounds { state: to });
         }
         self.0[from].transitions.entry(on).or_default().push((to, w));
-        Ok(())
-    }
-
-    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, _exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
-        if from >= self.len() {
-            return Err(NWABuildError::StateOutOfBounds { state: from });
-        }
-        if to >= self.len() {
-            return Err(NWABuildError::StateOutOfBounds { state: to });
-        }
-        self.0[from].transitions.entry(DEFAULT_TRANSITION_SYMBOL).or_default().push((to, w));
         Ok(())
     }
 
@@ -148,15 +137,9 @@ impl Display for NWAStates {
                 writeln!(f, "    final_weight: {}", w)?;
             }
             for (on, targets) in &state.transitions {
-                if *on == DEFAULT_TRANSITION_SYMBOL {
-                    for (to, w) in targets {
-                        writeln!(f, "    * -> {} (weight: {})", to, w)?;
-                    }
-                } else {
-                    for (to, w) in targets {
-                        let char_repr = format_i16_char(*on);
-                        writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
-                    }
+                for (to, w) in targets {
+                    let char_repr = format_i16_char(*on);
+                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
                 }
             }
             for (to, w) in &state.epsilons {
@@ -173,7 +156,6 @@ pub struct NWAStats {
     pub num_final_states: usize,
     pub total_epsilon_transitions: usize,
     pub total_labeled_transitions: usize,
-    pub total_default_transitions: usize,
     pub avg_epsilon_per_state: f64,
     pub avg_labeled_per_state: f64,
 }
@@ -185,7 +167,6 @@ impl Display for NWAStats {
         writeln!(f, "  - Final States: {}", self.num_final_states)?;
         writeln!(f, "  - Epsilon Transitions: {}", self.total_epsilon_transitions)?;
         writeln!(f, "  - Labeled Transitions: {}", self.total_labeled_transitions)?;
-        writeln!(f, "  - Default Transitions: {}", self.total_default_transitions)?;
         writeln!(f, "  - Avg Epsilon/State: {:.2}", self.avg_epsilon_per_state)?;
         writeln!(f, "  - Avg Labeled/State: {:.2}", self.avg_labeled_per_state)
     }
@@ -200,7 +181,6 @@ impl NWA {
                 num_final_states: 0,
                 total_epsilon_transitions: 0,
                 total_labeled_transitions: 0,
-                total_default_transitions: 0,
                 avg_epsilon_per_state: 0.0,
                 avg_labeled_per_state: 0.0,
             };
@@ -209,7 +189,6 @@ impl NWA {
         let mut num_final_states = 0;
         let mut total_epsilon_transitions = 0;
         let mut total_labeled_transitions = 0;
-        let mut total_default_transitions = 0;
 
         for state in &self.states.0 {
             if state.final_weight.is_some() {
@@ -217,21 +196,16 @@ impl NWA {
             }
             total_epsilon_transitions += state.epsilons.len();
             total_labeled_transitions += state.transitions.values().map(|v| v.len()).sum::<usize>();
-            if let Some(defaults) = state.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-                total_default_transitions += defaults.len();
-            }
         }
 
-        let total_labeled_transitions_only = total_labeled_transitions - total_default_transitions;
         let avg_epsilon_per_state = total_epsilon_transitions as f64 / num_states as f64;
-        let avg_labeled_per_state = total_labeled_transitions_only as f64 / num_states as f64;
+        let avg_labeled_per_state = total_labeled_transitions as f64 / num_states as f64;
 
         NWAStats {
             num_states,
             num_final_states,
             total_epsilon_transitions,
-            total_labeled_transitions: total_labeled_transitions_only,
-            total_default_transitions,
+            total_labeled_transitions,
             avg_epsilon_per_state,
             avg_labeled_per_state,
         }
@@ -266,10 +240,6 @@ impl NWA {
         self.states.add_transition(from, on, to, w)
     }
 
-    pub fn add_default_transition(&mut self, from: NWAStateID, to: NWAStateID, w: Weight, exceptions: BTreeSet<i16>) -> Result<(), NWABuildError> {
-        self.states.add_default_transition(from, to, w, exceptions)
-    }
-
     pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
         self.states.add_epsilon(from, to, w);
     }
@@ -288,15 +258,9 @@ impl Display for NWA {
                 writeln!(f, "    final_weight: {}", w)?;
             }
             for (on, targets) in &state.transitions {
-                if *on == DEFAULT_TRANSITION_SYMBOL {
-                    for (to, w) in targets {
-                        writeln!(f, "    * -> {} (weight: {})", to, w)?;
-                    }
-                } else {
-                    for (to, w) in targets {
-                        let char_repr = format_i16_char(*on);
-                        writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
-                    }
+                for (to, w) in targets {
+                    let char_repr = format_i16_char(*on);
+                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
                 }
             }
             for (to, w) in &state.epsilons {

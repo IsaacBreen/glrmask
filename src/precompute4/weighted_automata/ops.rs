@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{StateID, Weight, STOCHASTIC_DEBUG, DEFAULT_TRANSITION_SYMBOL};
+use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
 use super::dwa::DWA;
 use super::nwa::{NWABody, NWAStates, NWA};
 use crate::precompute4::weighted_automata::NWAStateID;

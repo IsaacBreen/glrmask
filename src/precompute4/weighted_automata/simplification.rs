@@ -13,7 +13,7 @@ use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use crate::precompute4::test_weighted_automata;
-use crate::precompute4::weighted_automata::{NWAStateID, DEFAULT_TRANSITION_SYMBOL};
+use crate::precompute4::weighted_automata::NWAStateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::cell::Cell;
@@ -224,16 +224,11 @@ impl DWA {
             }
 
             // Part 2: absorb_sink_finals_into_incoming logic
-            let mut def_preds: Vec<Vec<StateID>> = vec![Vec::new(); n];
-            let mut ex_preds: Vec<Vec<(StateID, i16)>> = vec![Vec::new(); n];
+            let mut preds: Vec<Vec<(StateID, i16)>> = vec![Vec::new(); n];
             for p in 0..n {
                 for (ch, d, _w) in states[p].iter_edges() {
                     if d < n {
-                        if ch == DEFAULT_TRANSITION_SYMBOL {
-                            def_preds[d].push(p);
-                        } else {
-                            ex_preds[d].push((p, ch));
-                        }
+                        preds[d].push((p, ch));
                     }
                 }
             }
@@ -260,20 +255,11 @@ impl DWA {
                 if !has_restriction {
                     continue;
                 }
-                if def_preds[v].is_empty() && ex_preds[v].is_empty() {
+                if preds[v].is_empty() {
                     continue;
                 }
 
-                for &p in &def_preds[v] {
-                    if let Some(w) = states[p].trans_weights.get_mut(&DEFAULT_TRANSITION_SYMBOL) {
-                        let old_w = w.clone();
-                        *w &= &effective_weight;
-                        if *w != old_w {
-                            changed_this_iteration = true;
-                        }
-                    }
-                }
-                for &(p, ch) in &ex_preds[v] {
+                for &(p, ch) in &preds[v] {
                     if let Some(w) = states[p].trans_weights.get_mut(&ch) {
                         let old_w = w.clone();
                         *w &= &effective_weight;
@@ -427,22 +413,12 @@ impl DWA {
     pub fn normalize_edges_inplace(states: &mut DWAStates) -> bool {
         let mut changed = false;
         for st in &mut states.0 {
-            let before = st.transitions.len();
-            if let Some(&def_tgt) = st.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-                if let Some(def_w) = st.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL).cloned() {
-                    st.transitions.retain(|&ch, &mut tgt| {
-                        if ch == DEFAULT_TRANSITION_SYMBOL { return true; }
-                        if tgt != def_tgt { return true; }
-                        st.trans_weights.get(&ch) != Some(&def_w)
-                    });
-                }
-            }
-            changed |= st.transitions.len() != before;
-
             let before_w = st.trans_weights.len();
             st.trans_weights
                 .retain(|ch, _| st.transitions.contains_key(ch));
-            changed |= st.trans_weights.len() != before_w;
+            if st.trans_weights.len() != before_w {
+                changed = true;
+            }
         }
         changed
     }
@@ -572,18 +548,11 @@ impl DWA {
         for i in 0..n {
             let st = &mut states[i];
 
-            // Check if default transition goes to a live state.
-            let default_goes_live = st.transitions.get(&DEFAULT_TRANSITION_SYMBOL).map_or(false, |&d| d < n && live[d]);
-
-            // A transition to a dead state can be removed if it's not the default
-            // and the default goes to a live state.
+            // A transition to a dead state can be removed.
             let before = st.transitions.len();
-            st.transitions.retain(|&ch, tgt| {
+            st.transitions.retain(|&_ch, tgt| {
                 if *tgt >= n { return false; } // Target is out of bounds (shouldn't happen after prune_unreachable)
-                if live[*tgt] { return true; } // Target is live
-                if ch == DEFAULT_TRANSITION_SYMBOL { return false; } // Default to dead state is removed
-                // Exception to dead state is kept only if the default goes live.
-                default_goes_live
+                live[*tgt] // Target is live
             });
 
             if st.transitions.len() != before {
@@ -962,15 +931,6 @@ fn prune_dead_ends(&mut self) -> bool {
             }
         }
 
-        while let Some(v) = q.pop_front() {
-            for &p in &rev_adj[v] {
-                if !live[p] {
-                    live[p] = true;
-                    q.push_back(p);
-                }
-            }
-        }
-
         if self.body.start_state >= n || !live[self.body.start_state] {
             let changed = n > 0;
             if changed {
@@ -1147,10 +1107,6 @@ impl NWAStates {
             st.transitions.values_mut().for_each(|targets| targets.retain(|(_, w)| !w.is_empty()));
             st.transitions.retain(|_, targets| !targets.is_empty());
             if st.transitions.len() != before_lbl { changed = true; }
-
-            // NOTE: The old logic for removing labeled transitions identical to default is now simpler
-            // as there is only one kind of default transition. However, since an NWA can have multiple
-            // default transitions, we leave this logic to the DWA simplification.
         }
         changed
     }

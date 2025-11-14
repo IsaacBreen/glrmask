@@ -1,8 +1,9 @@
-use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight, DEFAULT_TRANSITION_SYMBOL};
+use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
+use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 
 pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     let pb = if PROGRESS_BAR_ENABLED {

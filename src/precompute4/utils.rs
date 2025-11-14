@@ -1,6 +1,8 @@
 use crate::glr::table::StateID as ParserStateID;
 use crate::precompute4::full_dwa::FullDWABuildError;
 
+pub const DEFAULT_TRANSITION_SYMBOL: i16 = i16::MAX;
+
 pub fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
     if id.0 > i16::MAX as usize {
         Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
