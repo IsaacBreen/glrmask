@@ -1,631 +1,718 @@
 local_system:
   attached_files:
     - src/precompute4/mod.rs
-    - src/precompute4/resolve_negatives.rs
+    - src/precompute4/characterize.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/precompute4/mod.rs: |+
+    src/precompute4/mod.rs: |
       pub mod weighted_automata;
       pub mod characterize;
       pub mod full_dwa;
       pub mod conversion;
       pub mod resolve_negatives;
+
       mod utils;
+      mod template_nwa;
+      mod nwa_optimizations;
+
       pub mod test_weighted_automata;
       mod test_resolve_negatives;
+    src/precompute4/characterize.rs: |
+      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::fmt::{self, Display, Formatter};
 
+      use crate::glr::parser::GLRParser;
+      use crate::glr::table::{
+          NonTerminalID,
+          Stage7ShiftsAndReducesLookaheadValue,
+          StateID,
+          TerminalID,
+      };
 
+      type InitialShift = (StateID, StateID);
+      type InitialReduce = (StateID, usize, NonTerminalID);
+      type RevealAndRereduce = (StateID, usize, NonTerminalID);
+      type RevealGotoShiftEscape = (StateID, StateID, StateID);
 
-    src/precompute4/resolve_negatives.rs: |
-      use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
-      use crate::profiler::PROGRESS_BAR_ENABLED;
-      use indicatif::{ProgressBar, ProgressStyle};
-      use std::collections::{HashMap, VecDeque};
-      use std::time::Instant;
-      use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
-
-      pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-          let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(3);
-              p.set_style(
-                  ProgressStyle::default_bar()
-                      .template("{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
-                      .expect("progress-bar"),
-              );
-              Some(p)
-          } else {
-              None
-          };
-
-          if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(1); }
-          apply_cancellations(nwa);
-
-          if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(2); }
-          apply_finality_fixpoint(nwa);
-
-          if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(3); }
-          remove_negative_transitions(nwa);
-          crate::debug!(4, "Applied changes to NWA.");
-
-          if let Some(p) = &pb { p.finish_with_message("Done"); }
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      pub struct ReduceCharacterization {
+          pub terminal: TerminalID,
+          pub nonterminal: NonTerminalID,
+          // (revealed_state, len, nonterminal)
+          pub reveal_and_rereduces: BTreeSet<RevealAndRereduce>,
+          // (revealed_state, goto_state, shift_state)
+          pub reveal_goto_shift_escapes: BTreeSet<RevealGotoShiftEscape>,
       }
 
-      pub fn apply_cancellations(nwa: &mut NWA) {
-          let epsilons_to_add = compute_cancellations(&nwa.states);
-          crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
-          for (from, to, w) in epsilons_to_add {
-              nwa.states.add_epsilon(from, to, w);
-          }
-      }
-
-      pub fn apply_finality_fixpoint(nwa: &mut NWA) {
-          let final_fix = compute_finality_fixpoint(&nwa.states);
-          for sid in 0..nwa.states.len() {
-              if !final_fix[sid].is_empty() {
-                  let st = &mut nwa.states.0[sid];
-                  if let Some(fw) = &mut st.final_weight {
-                      *fw |= &final_fix[sid];
-                  } else {
-                      st.final_weight = Some(final_fix[sid].clone());
-                  }
-              }
-          }
-      }
-
-      pub fn remove_negative_transitions(nwa: &mut NWA) {
-          for st in &mut nwa.states.0 {
-              st.transitions.retain(|k, _| *k >= 0 || *k == DEFAULT_TRANSITION_SYMBOL);
-          }
-      }
-
-      /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
-      /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
-      /// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
-      /// correctly represents the language defined by these complex interactions.
-      ///
-      /// The process is as follows:
-      /// 1.  **Convert to NWA**: The DWA is first converted to an NWA to allow for flexible graph manipulations,
-      ///     such as adding epsilon transitions.
-      /// 2.  **Resolve Cancellations**: The algorithm identifies all `A --neg(c)--> B --c--> C` sequences.
-      ///     Each such "cancellation" is resolved by adding a new epsilon transition `A --eps--> C`, which acts as a shortcut.
-      ///     The weights are combined along the path.
-      /// 3.  **Propagate Finality**: Finality is propagated backward across all `neg(c)` and epsilon transitions (both
-      ///     original and newly created ones). If a state `A` can reach a final state `F` through a path of such
-      ///     transitions, `A` inherits finality from `F`. This is computed using a standard least fixpoint algorithm.
-      /// 4.  **Apply Changes & Cleanup**: The newly computed final weights are applied to the NWA states. Then, all
-      ///     negative-code transitions are removed from the graph, as their semantic effects have been fully resolved.
-      /// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
-      ///     DWA, which is the final result.
-      pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          let now = Instant::now();
-          crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
-
-          let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(4);
-              p.set_style(
-                  ProgressStyle::default_bar()
-                      .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
-                      .expect("progress-bar"),
-              );
-              Some(p)
-          } else {
-              None
-          };
-
-          if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
-          let mut nwa = NWA::from_dwa(dwa);
-          crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
-
-          if let Some(p) = &pb { p.set_message("Resolve negatives in NWA"); p.set_position(2); }
-          resolve_negative_codes_in_nwa(&mut nwa);
-          crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
-
-          if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(3); }
-          let mut result = nwa.determinize_to_dwa();
-          if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(4); }
-          result.simplify();
-          *dwa = result;
-          crate::debug!(4, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
-
-          if let Some(p) = &pb { p.finish_with_message("Done"); }
-          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-      }
-
-      /// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
-      /// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
-      fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-          let n = states.len();
-          // `queries[s]` stores cancellation "searches" that have reached state `s`.
-          // A search is identified by its origin state `a` and the positive code `c` it's looking for.
-          // The map stores the accumulated weight of the path `a --neg(c)--> ... --eps*--> s`.
-          let mut queries: Vec<HashMap<(NWAStateID, i16), Weight>> = vec![HashMap::new(); n];
-          let mut worklist: VecDeque<(NWAStateID, NWAStateID, i16, Weight)> = VecDeque::new();
-          let mut new_epsilons: HashMap<(NWAStateID, NWAStateID), Weight> = HashMap::new();
-
-          // 1. Initialize worklist with all negative transitions.
-          // Each `a --neg(c)--> b` starts a search at `b` for a matching `c`.
-          for a in 0..n {
-              for (label, targets) in &states[a].transitions {
-                  if *label < 0 && *label != DEFAULT_TRANSITION_SYMBOL {
-                      let c = label.wrapping_sub(i16::MIN);
-                      for (b, w_ab) in targets {
-                          if *b >= n { continue; }
-                          let query_key = (a, c);
-                          let query_weight = queries[*b].entry(query_key).or_default();
-                          let old_w = query_weight.clone();
-                          *query_weight |= w_ab;
-                          if *query_weight != old_w {
-                              worklist.push_back((*b, a, c, query_weight.clone()));
-                          }
-                      }
-                  }
+      impl ReduceCharacterization {
+          fn new(terminal: TerminalID, nonterminal: NonTerminalID) -> Self {
+              Self {
+                  terminal,
+                  nonterminal,
+                  reveal_and_rereduces: BTreeSet::new(),
+                  reveal_goto_shift_escapes: BTreeSet::new(),
               }
           }
 
-          // 2. Main fixpoint loop: propagate searches and generate new epsilon shortcuts.
-          while let Some((s, a, c, w_as)) = worklist.pop_front() {
-              // 2a. Check for cancellations at the current state `s`.
-              // A cancellation occurs if `s` has an outgoing transition on `c`.
-              let mut check_cancellations = |target: NWAStateID, w_st: &Weight, worklist: &mut VecDeque<_>| {
-                  let new_eps_w = &w_as & w_st;
-                  if new_eps_w.is_empty() { return; }
-
-                  let eps_key = (a, target);
-                  let eps_weight = new_epsilons.entry(eps_key).or_default();
-                  let old_eps_w = eps_weight.clone();
-                  *eps_weight |= &new_eps_w;
-
-                  // If this epsilon is new or stronger, it can propagate existing searches.
-                  if *eps_weight != old_eps_w {
-                      // Any search that has reached `a` can now cross this new epsilon to `target`.
-                      // To avoid borrow checker issues, clone the queries at state `a`.
-                      let queries_at_a = queries[a].clone();
-                      for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
-                          let prop_w = w_a_prime_a & &*eps_weight;
-                          if prop_w.is_empty() { continue; }
-
-                          let query_key = (a_prime, c_prime);
-                          let query_weight = queries[target].entry(query_key).or_default();
-                          let old_qw = query_weight.clone();
-                          *query_weight |= &prop_w;
-                          if *query_weight != old_qw {
-                              worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-                          }
-                      }
-                  }
-              };
-
-              if let Some(pos_targets) = states[s].transitions.get(&c) {
-                  for (t, w_st) in pos_targets {
-                      if *t < n { check_cancellations(*t, w_st, &mut worklist); }
-                  }
-              }
-              if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-                  for (target, weight) in default_targets {
-                      check_cancellations(*target, weight, &mut worklist);
-                  }
-              }
-
-              // 2b. Propagate the current search forward over original epsilon edges.
-              for (t, w_st) in &states[s].epsilons {
-                  if *t >= n { continue; }
-                  let prop_w = &w_as & w_st;
-                  if prop_w.is_empty() { continue; }
-
-                  let query_key = (a, c);
-                  let query_weight = queries[*t].entry(query_key).or_default();
-                  let old_qw = query_weight.clone();
-                  *query_weight |= &prop_w;
-                  if *query_weight != old_qw {
-                      worklist.push_back((*t, a, c, query_weight.clone()));
-                  }
-              }
+          fn is_empty(&self) -> bool {
+              self.reveal_and_rereduces.is_empty()
+                  && self.reveal_goto_shift_escapes.is_empty()
           }
+      }
 
-          new_epsilons
-              .into_iter()
-              .map(|((from, to), w)| (from, to, w))
+      impl Display for ReduceCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
+
+              if !self.reveal_and_rereduces.is_empty() {
+                  writeln!(f, "      Reveal-and-rereduces:")?;
+                  for (revealed, len, nt) in &self.reveal_and_rereduces {
+                      writeln!(
+                          f,
+                          "        - revealed: {}, len: {}, reduce_nt: {}",
+                          revealed.0, len, nt.0
+                      )?;
+                  }
+              }
+
+              if !self.reveal_goto_shift_escapes.is_empty() {
+                  writeln!(f, "      Reveal-goto-shift escapes:")?;
+                  for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
+                      writeln!(
+                          f,
+                          "        - revealed: {}, goto: {}, shift: {}",
+                          revealed.0, goto.0, shift.0
+                      )?;
+                  }
+              }
+
+              Ok(())
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct BelowBottomCharacterization {
+          pub terminal: TerminalID,
+          // (initial_state, shift_state)
+          pub initial_shifts: BTreeSet<InitialShift>,
+          // (initial_state, len, nonterminal)
+          pub initial_reduces: BTreeSet<InitialReduce>,
+          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+          pub all_nts: BTreeSet<NonTerminalID>,
+      }
+
+      impl Display for BelowBottomCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
+
+              if !self.initial_shifts.is_empty() {
+                  writeln!(f, "  Initial Shifts:")?;
+                  for (initial, shift) in &self.initial_shifts {
+                      writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
+                  }
+              }
+
+              if !self.initial_reduces.is_empty() {
+                  writeln!(f, "  Initial Reduces:")?;
+                  for (initial, len, nt) in &self.initial_reduces {
+                      writeln!(
+                          f,
+                          "    - initial: {}, len: {}, nt: {}",
+                          initial.0, len, nt.0
+                      )?;
+                  }
+              }
+
+              if !self.reduce_characterizations.is_empty() {
+                  writeln!(f, "  Reduce Characterizations:")?;
+                  for rc in self.reduce_characterizations.values() {
+                      write!(f, "{}", rc)?;
+                  }
+              }
+
+              Ok(())
+          }
+      }
+
+      pub fn compute_all_characterizations(
+          parser: &GLRParser,
+      ) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
+          parser
+              .terminal_map
+              .right_values()
+              .cloned()
+              .map(|terminal_id| {
+                  (
+                      terminal_id,
+                      compute_below_bottom_characterization(parser, terminal_id),
+                  )
+              })
               .collect()
       }
 
-      /// Compute the least fixpoint of final weights propagated backward along all epsilon edges
-      /// (original and new) and all negative-labeled edges.
-      fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
-          let n = states.len();
-          let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
+      pub fn compute_below_bottom_characterization(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> BelowBottomCharacterization {
+          let all_nts: BTreeSet<_> = parser
+              .non_terminal_map
+              .right_values()
+              .cloned()
+              .collect();
 
-          // Build reverse graph for propagation
-          for u in 0..n {
-              // All epsilons
-              for &(v, ref w) in &states[u].epsilons {
-                  if v < n { rev[v].push((u, w.clone())); }
-              }
-              // Negative edges
-              for (label, targets) in &states[u].transitions {
-                  if *label < 0 && *label != DEFAULT_TRANSITION_SYMBOL {
-                      for (v, w) in targets {
-                          if *v < n { rev[*v].push((u, w.clone())); }
+          let (initial_shifts, initial_reduces) = collect_initial_actions(parser, terminal_id);
+          let reduce_characterizations =
+              collect_reduce_characterizations(parser, terminal_id, &all_nts);
+
+          let result = BelowBottomCharacterization {
+              terminal: terminal_id,
+              initial_shifts,
+              initial_reduces,
+              reduce_characterizations,
+              all_nts,
+          };
+
+          crate::debug!(
+              5,
+              "Computed Below-Bottom Characterization for terminal {}:\n{}",
+              terminal_id.0,
+              result
+          );
+
+          result
+      }
+
+      fn collect_initial_actions(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> (BTreeSet<InitialShift>, BTreeSet<InitialReduce>) {
+          use Stage7ShiftsAndReducesLookaheadValue::*;
+
+          let mut initial_shifts = BTreeSet::new();
+          let mut initial_reduces = BTreeSet::new();
+
+          for (&initial_state, row) in &parser.table {
+              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
+                  match action {
+                      Shift(shift_state) => {
+                          initial_shifts.insert((initial_state, *shift_state));
+                      }
+                      Reduce { nonterminal_id, len, .. } => {
+                          if *len > 0 {
+                              initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                          }
+                      }
+                      Split { shift, reduces } => {
+                          if let Some(shift_state) = shift {
+                              initial_shifts.insert((initial_state, *shift_state));
+                          }
+
+                          for (len, nts) in reduces {
+                              if *len > 0 {
+                                  for (nt_id, _) in nts {
+                                      initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                                  }
+                              }
+                          }
                       }
                   }
               }
           }
 
-          let mut q: VecDeque<NWAStateID> = VecDeque::new();
-          for s in 0..n {
-              if let Some(ref fw) = states[s].final_weight {
-                  if !fw.is_empty() {
-                      fut[s] = fw.clone();
-                      q.push_back(s);
+          (initial_shifts, initial_reduces)
+      }
+
+      fn collect_reduce_characterizations(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+          all_nts: &BTreeSet<NonTerminalID>,
+      ) -> BTreeMap<NonTerminalID, ReduceCharacterization> {
+          let mut result = BTreeMap::new();
+
+          for &nt_id in all_nts {
+              let mut reduce_char = ReduceCharacterization::new(terminal_id, nt_id);
+
+              for (&revealed_state, row) in &parser.table {
+                  if let Some(goto) = row.gotos.get(&nt_id) {
+                      if let Some(goto_state) = goto.state_id {
+                          explore_from_goto(
+                              parser,
+                              terminal_id,
+                              revealed_state,
+                              goto_state,
+                              &mut reduce_char,
+                          );
+                      }
                   }
+              }
+
+              if !reduce_char.is_empty() {
+                  result.insert(nt_id, reduce_char);
               }
           }
 
-          while let Some(v) = q.pop_front() {
-              let fv = fut[v].clone();
-              if fv.is_empty() { continue; }
-              for &(u, ref w_uv) in &rev[v] {
-                  let add = &fv & w_uv;
-                  if add.is_empty() { continue; }
-                  let old = &fut[u];
-                  if (&add & old) != add {
-                      fut[u] |= &add;
-                      q.push_back(u);
+          result
+      }
+
+      fn explore_from_goto(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+          revealed_state: StateID,
+          start_state: StateID,
+          reduce_char: &mut ReduceCharacterization,
+      ) {
+          let mut worklist = VecDeque::new();
+          let mut visited = BTreeSet::new();
+
+          worklist.push_back(start_state);
+          visited.insert(start_state);
+
+          while let Some(current_state) = worklist.pop_front() {
+              let action_opt = parser
+                  .table
+                  .get(&current_state)
+                  .and_then(|row| row.shifts_and_reduces_full.get(&terminal_id));
+
+              if let Some(action) = action_opt {
+                  process_reduce_action(
+                      parser,
+                      revealed_state,
+                      current_state,
+                      action,
+                      reduce_char,
+                      &mut visited,
+                      &mut worklist,
+                  );
+              }
+          }
+      }
+
+      fn process_reduce_action(
+          parser: &GLRParser,
+          revealed_state: StateID,
+          current_state: StateID,
+          action: &Stage7ShiftsAndReducesLookaheadValue,
+          reduce_char: &mut ReduceCharacterization,
+          visited: &mut BTreeSet<StateID>,
+          worklist: &mut VecDeque<StateID>,
+      ) {
+          use Stage7ShiftsAndReducesLookaheadValue::*;
+
+          match action {
+              Shift(shift_state) => {
+                  reduce_char
+                      .reveal_goto_shift_escapes
+                      .insert((revealed_state, current_state, *shift_state));
+              }
+              Reduce {
+                  nonterminal_id: reduce_nt,
+                  len,
+                  ..
+              } => {
+                  handle_reduce(
+                      parser,
+                      revealed_state,
+                      *len,
+                      *reduce_nt,
+                      visited,
+                      worklist,
+                      reduce_char,
+                  );
+              }
+              Split { shift, reduces } => {
+                  if let Some(shift_state) = shift {
+                      reduce_char
+                          .reveal_goto_shift_escapes
+                          .insert((revealed_state, current_state, *shift_state));
+                  }
+
+                  for (len, nts) in reduces {
+                      for (reduce_nt, _) in nts {
+                          handle_reduce(
+                              parser,
+                              revealed_state,
+                              *len,
+                              *reduce_nt,
+                              visited,
+                              worklist,
+                              reduce_char,
+                          );
+                      }
                   }
               }
           }
-          fut
+      }
+
+      fn handle_reduce(
+          parser: &GLRParser,
+          revealed_state: StateID,
+          len: usize,
+          reduce_nt: NonTerminalID,
+          visited: &mut BTreeSet<StateID>,
+          worklist: &mut VecDeque<StateID>,
+          reduce_char: &mut ReduceCharacterization,
+      ) {
+          if len == 1 {
+              if let Some(next_goto_state) = parser
+                  .table
+                  .get(&revealed_state)
+                  .and_then(|row| row.gotos.get(&reduce_nt))
+                  .and_then(|goto| goto.state_id)
+              {
+                  if visited.insert(next_goto_state) {
+                      worklist.push_back(next_goto_state);
+                  }
+              }
+          } else if len > 1 {
+              reduce_char
+                  .reveal_and_rereduces
+                  .insert((revealed_state, len - 2, reduce_nt));
+          }
       }
   prev_file_contents:
-    src/precompute4/mod.rs: |+
+    src/precompute4/mod.rs: |
       pub mod weighted_automata;
       pub mod characterize;
       pub mod full_dwa;
       pub mod conversion;
       pub mod resolve_negatives;
+
       mod utils;
+      mod template_nwa;
+      mod nwa_optimizations;
+
       pub mod test_weighted_automata;
       mod test_resolve_negatives;
+    src/precompute4/characterize.rs: |
+      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::fmt::{self, Display, Formatter};
 
+      use crate::glr::parser::GLRParser;
+      use crate::glr::table::{
+          NonTerminalID,
+          Stage7ShiftsAndReducesLookaheadValue,
+          StateID,
+          TerminalID,
+      };
 
+      /// (initial_state, shift_state)
+      type InitialShift = (StateID, StateID);
+      /// (initial_state, reduction_len_minus_one, reduced_nonterminal)
+      type InitialReduce = (StateID, usize, NonTerminalID);
+      /// (revealed_state, remaining_len_minus_one, reduced_nonterminal)
+      type RevealAndRereduce = (StateID, usize, NonTerminalID);
+      /// (revealed_state, goto_state, shift_state)
+      type RevealGotoShiftEscape = (StateID, StateID, StateID);
 
-    src/precompute4/resolve_negatives.rs: |
-      use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
-      use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
-      use crate::profiler::PROGRESS_BAR_ENABLED;
-      use indicatif::{ProgressBar, ProgressStyle};
-      use std::collections::{HashMap, VecDeque};
-      use std::time::Instant;
-
-      /// Convenience alias for transition labels (both positive and negative codes).
-      type Code = i16;
-
-      /// Key identifying an in-flight cancellation search:
-      /// `(origin_state, positive_code_being_cancelled)`.
-      type QueryKey = (NWAStateID, Code);
-
-      #[inline]
-      fn is_negative_symbol(label: Code) -> bool {
-          label < 0 && label != DEFAULT_TRANSITION_SYMBOL
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      pub struct ReduceCharacterization {
+          pub terminal: TerminalID,
+          pub nonterminal: NonTerminalID,
+          // (revealed_state, len, nonterminal)
+          pub reveal_and_rereduces: BTreeSet<RevealAndRereduce>,
+          // (revealed_state, goto_state, shift_state)
+          pub reveal_goto_shift_escapes: BTreeSet<RevealGotoShiftEscape>,
       }
 
-      /// Optionally construct a configured progress bar.
-      fn make_progress_bar(length: u64, template: &str) -> Option<ProgressBar> {
-          if !PROGRESS_BAR_ENABLED {
-              return None;
-          }
-          let pb = ProgressBar::new(length);
-          pb.set_style(
-              ProgressStyle::default_bar()
-                  .template(template)
-                  .expect("progress-bar"),
-          );
-          Some(pb)
-      }
-
-      /// Helper to advance the progress bar if it is enabled.
-      fn progress_step(pb: &Option<ProgressBar>, step: u64, msg: &str) {
-          if let Some(p) = pb {
-              p.set_message(msg.to_string());
-              p.set_position(step);
-          }
-      }
-
-      pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-          let pb = make_progress_bar(
-              3,
-              "{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] \
-               [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
-          );
-
-          progress_step(&pb, 1, "Compute cancellations");
-          apply_cancellations(nwa);
-
-          progress_step(&pb, 2, "Propagate finality");
-          apply_finality_fixpoint(nwa);
-
-          progress_step(&pb, 3, "Apply changes & remove negatives");
-          remove_negative_transitions(nwa);
-          crate::debug!(4, "Applied changes to NWA.");
-
-          if let Some(p) = &pb {
-              p.finish_with_message("Done");
-          }
-      }
-
-      pub fn apply_cancellations(nwa: &mut NWA) {
-          let epsilons_to_add = compute_cancellations(&nwa.states);
-          crate::debug!(
-              4,
-              "Computed {} new epsilon transitions from cancellations.",
-              epsilons_to_add.len()
-          );
-          for (from, to, w) in epsilons_to_add {
-              nwa.states.add_epsilon(from, to, w);
-          }
-      }
-
-      pub fn apply_finality_fixpoint(nwa: &mut NWA) {
-          let final_fix = compute_finality_fixpoint(&nwa.states);
-          for sid in 0..nwa.states.len() {
-              if final_fix[sid].is_empty() {
-                  continue;
-              }
-              let st = &mut nwa.states.0[sid];
-              if let Some(fw) = &mut st.final_weight {
-                  *fw |= &final_fix[sid];
-              } else {
-                  st.final_weight = Some(final_fix[sid].clone());
-              }
-          }
-      }
-
-      pub fn remove_negative_transitions(nwa: &mut NWA) {
-          for st in &mut nwa.states.0 {
-              st.transitions.retain(|&label, _| !is_negative_symbol(label));
-          }
-      }
-
-      /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
-      /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
-      /// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
-      /// correctly represents the language defined by these complex interactions.
-      ///
-      /// The process is as follows:
-      /// 1.  Convert to NWA: The DWA is first converted to an NWA to allow for flexible graph manipulations,
-      ///     such as adding epsilon transitions.
-      /// 2.  Resolve cancellations: The algorithm identifies all `A --neg(c)--> B --c--> C` sequences
-      ///     (optionally using epsilon and default transitions).
-      ///     Each such cancellation is resolved by adding a new epsilon transition `A --eps--> C`, with
-      ///     weights combined along the path.
-      /// 3.  Propagate finality: Finality is propagated backward across all negative, epsilon,
-      ///     and default transitions. If a state `A` can reach a final state `F` through such a path,
-      ///     `A` inherits finality from `F`.
-      /// 4.  Apply changes and clean up: The newly computed final weights are applied and all
-      ///     negative-code transitions are removed.
-      /// 5.  Determinize: The resulting NWA, now free of negative codes, is determinized and simplified
-      ///     back into a DWA.
-      pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          let now = Instant::now();
-          crate::debug!(
-              4,
-              "Resolving negative codes in DWA with {} states...",
-              dwa.states.len()
-          );
-
-          let pb = make_progress_bar(
-              4,
-              "{spinner:.green} [Resolving negative codes: {elapsed_precise}] \
-               [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
-          );
-
-          progress_step(&pb, 1, "DWA -> NWA");
-          let mut nwa = NWA::from_dwa(dwa);
-          crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
-
-          progress_step(&pb, 2, "Resolve negatives in NWA");
-          resolve_negative_codes_in_nwa(&mut nwa);
-          crate::debug!(
-              4,
-              "Applied changes, NWA has {} states before determinization.",
-              nwa.states.len()
-          );
-          crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
-
-          progress_step(&pb, 3, "Determinize");
-          let mut result = nwa.determinize_to_dwa();
-
-          progress_step(&pb, 4, "Simplify");
-          result.simplify();
-          *dwa = result;
-          crate::debug!(
-              4,
-              "Stats for final DWA after negative resolution:\n{}",
-              dwa.stats()
-          );
-
-          if let Some(p) = &pb {
-              p.finish_with_message("Done");
-          }
-          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-      }
-
-      /// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
-      /// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
-      fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-          let n = states.len();
-
-          // `queries[s]` stores cancellation searches that have reached state `s`.
-          // A search is identified by its origin state `a` and the positive code `c` it is looking for.
-          // The map stores the accumulated weight of the path `a --neg(c)--> ... --eps*--> s`.
-          let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
-          let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
-          let mut new_epsilons: HashMap<(NWAStateID, NWAStateID), Weight> = HashMap::new();
-
-          // 1. Initialize worklist with all negative transitions.
-          // Each `a --neg(c)--> b` starts a search at `b` for a matching `c`.
-          for a in 0..n {
-              for (&label, targets) in &states[a].transitions {
-                  if !is_negative_symbol(label) {
-                      continue;
-                  }
-                  let c = label.wrapping_sub(Code::MIN);
-                  for (b, w_ab) in targets {
-                      if *b >= n {
-                          continue;
-                      }
-                      let query_key: QueryKey = (a, c);
-                      let query_weight = queries[*b].entry(query_key).or_default();
-                      let old_w = query_weight.clone();
-                      *query_weight |= w_ab;
-                      if *query_weight != old_w {
-                          worklist.push_back((*b, a, c, query_weight.clone()));
-                      }
-                  }
+      impl ReduceCharacterization {
+          fn new(terminal: TerminalID, nonterminal: NonTerminalID) -> Self {
+              Self {
+                  terminal,
+                  nonterminal,
+                  reveal_and_rereduces: BTreeSet::new(),
+                  reveal_goto_shift_escapes: BTreeSet::new(),
               }
           }
 
-          // 2. Main fixpoint loop: propagate searches and generate new epsilon shortcuts.
-          while let Some((s, a, c, w_as)) = worklist.pop_front() {
-              // Check for cancellations at the current state `s`.
-              // A cancellation occurs if `s` has an outgoing transition on `c`,
-              // or on the default symbol.
-              let mut check_cancellations = |target: NWAStateID,
-                                             w_st: &Weight,
-                                             worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code, Weight)>| {
-                  let new_eps_w = &w_as & w_st;
-                  if new_eps_w.is_empty() {
-                      return;
-                  }
-
-                  let eps_key = (a, target);
-                  let eps_weight = new_epsilons.entry(eps_key).or_default();
-                  let old_eps_w = eps_weight.clone();
-                  *eps_weight |= &new_eps_w;
-
-                  // If this epsilon is new or strengthened, it can propagate existing searches.
-                  if *eps_weight != old_eps_w {
-                      // Any search that has reached `a` can now cross this new epsilon to `target`.
-                      let queries_at_a = queries[a].clone();
-                      for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
-                          let prop_w = w_a_prime_a & &*eps_weight;
-                          if prop_w.is_empty() {
-                              continue;
-                          }
-
-                          let query_key: QueryKey = (a_prime, c_prime);
-                          let query_weight = queries[target].entry(query_key).or_default();
-                          let old_qw = query_weight.clone();
-                          *query_weight |= &prop_w;
-                          if *query_weight != old_qw {
-                              worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-                          }
-                      }
-                  }
-              };
-
-              if let Some(pos_targets) = states[s].transitions.get(&c) {
-                  for (t, w_st) in pos_targets {
-                      if *t < n {
-                          check_cancellations(*t, w_st, &mut worklist);
-                      }
-                  }
-              }
-              if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-                  for (target, weight) in default_targets {
-                      check_cancellations(*target, weight, &mut worklist);
-                  }
-              }
-
-              // 2b. Propagate the current search forward over original epsilon edges.
-              for (t, w_st) in &states[s].epsilons {
-                  if *t >= n {
-                      continue;
-                  }
-                  let prop_w = &w_as & w_st;
-                  if prop_w.is_empty() {
-                      continue;
-                  }
-
-                  let query_key: QueryKey = (a, c);
-                  let query_weight = queries[*t].entry(query_key).or_default();
-                  let old_qw = query_weight.clone();
-                  *query_weight |= &prop_w;
-                  if *query_weight != old_qw {
-                      worklist.push_back((*t, a, c, query_weight.clone()));
-                  }
-              }
+          fn is_empty(&self) -> bool {
+              self.reveal_and_rereduces.is_empty()
+                  && self.reveal_goto_shift_escapes.is_empty()
           }
+      }
 
-          new_epsilons
-              .into_iter()
-              .map(|((from, to), w)| (from, to, w))
+      impl Display for ReduceCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
+
+              if !self.reveal_and_rereduces.is_empty() {
+                  writeln!(f, "      Reveal-and-rereduces:")?;
+                  for (revealed, len, nt) in &self.reveal_and_rereduces {
+                      writeln!(
+                          f,
+                          "        - revealed: {}, len: {}, reduce_nt: {}",
+                          revealed.0, len, nt.0
+                      )?;
+                  }
+              }
+
+              if !self.reveal_goto_shift_escapes.is_empty() {
+                  writeln!(f, "      Reveal-goto-shift escapes:")?;
+                  for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
+                      writeln!(
+                          f,
+                          "        - revealed: {}, goto: {}, shift: {}",
+                          revealed.0, goto.0, shift.0
+                      )?;
+                  }
+              }
+
+              Ok(())
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct BelowBottomCharacterization {
+          pub terminal: TerminalID,
+          // (initial_state, shift_state)
+          pub initial_shifts: BTreeSet<InitialShift>,
+          // (initial_state, len, nonterminal)
+          pub initial_reduces: BTreeSet<InitialReduce>,
+          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+          pub all_nts: BTreeSet<NonTerminalID>,
+      }
+
+      impl Display for BelowBottomCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
+
+              if !self.initial_shifts.is_empty() {
+                  writeln!(f, "  Initial Shifts:")?;
+                  for (initial, shift) in &self.initial_shifts {
+                      writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
+                  }
+              }
+
+              if !self.initial_reduces.is_empty() {
+                  writeln!(f, "  Initial Reduces:")?;
+                  for (initial, len, nt) in &self.initial_reduces {
+                      writeln!(
+                          f,
+                          "    - initial: {}, len: {}, nt: {}",
+                          initial.0, len, nt.0
+                      )?;
+                  }
+              }
+
+              if !self.reduce_characterizations.is_empty() {
+                  writeln!(f, "  Reduce Characterizations:")?;
+                  for rc in self.reduce_characterizations.values() {
+                      write!(f, "{rc}")?;
+                  }
+              }
+
+              Ok(())
+          }
+      }
+
+      pub fn compute_all_characterizations(
+          parser: &GLRParser,
+      ) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
+          parser
+              .terminal_map
+              .right_values()
+              .cloned()
+              .map(|terminal_id| {
+                  (
+                      terminal_id,
+                      compute_below_bottom_characterization(parser, terminal_id),
+                  )
+              })
               .collect()
       }
 
-      /// Compute the least fixpoint of final weights propagated backward along all epsilon edges
-      /// (original and new) and all negative-labeled edges.
-      fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
-          let n = states.len();
-          let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
+      pub fn compute_below_bottom_characterization(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> BelowBottomCharacterization {
+          let all_nts: BTreeSet<_> = parser
+              .non_terminal_map
+              .right_values()
+              .cloned()
+              .collect();
 
-          // Build reverse graph for propagation.
-          for u in 0..n {
-              // All epsilons.
-              for &(v, ref w) in &states[u].epsilons {
-                  if v < n {
-                      predecessors[v].push((u, w.clone()));
-                  }
-              }
-              // Negative edges.
-              for (&label, targets) in &states[u].transitions {
-                  if !is_negative_symbol(label) {
-                      continue;
-                  }
-                  for (v, w) in targets {
-                      if *v < n {
-                          predecessors[*v].push((u, w.clone()));
+          let (initial_shifts, initial_reduces) = collect_initial_actions(parser, terminal_id);
+          let reduce_characterizations = collect_reduce_characterizations(parser, terminal_id);
+
+          let result = BelowBottomCharacterization {
+              terminal: terminal_id,
+              initial_shifts,
+              initial_reduces,
+              reduce_characterizations,
+              all_nts,
+          };
+
+          crate::debug!(
+              5,
+              "Computed Below-Bottom Characterization for terminal {}:\n{}",
+              terminal_id.0,
+              result
+          );
+
+          result
+      }
+
+      fn collect_initial_actions(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> (BTreeSet<InitialShift>, BTreeSet<InitialReduce>) {
+          use Stage7ShiftsAndReducesLookaheadValue::*;
+
+          let mut initial_shifts = BTreeSet::new();
+          let mut initial_reduces = BTreeSet::new();
+
+          for (&initial_state, row) in &parser.table {
+              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
+                  match action {
+                      Shift(shift_state) => {
+                          initial_shifts.insert((initial_state, *shift_state));
+                      }
+                      Reduce { nonterminal_id, len, .. } => {
+                          if *len > 0 {
+                              initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                          }
+                      }
+                      Split { shift, reduces } => {
+                          if let Some(shift_state) = shift {
+                              initial_shifts.insert((initial_state, *shift_state));
+                          }
+
+                          for (len, nts) in reduces {
+                              if *len > 0 {
+                                  for (nt_id, _) in nts {
+                                      initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                                  }
+                              }
+                          }
                       }
                   }
               }
           }
 
-          // Initialize with already-final states.
-          let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-          for s in 0..n {
-              if let Some(ref fw) = states[s].final_weight {
-                  if !fw.is_empty() {
-                      future_final[s] = fw.clone();
-                      queue.push_back(s);
+          (initial_shifts, initial_reduces)
+      }
+
+      fn collect_reduce_characterizations(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> BTreeMap<NonTerminalID, ReduceCharacterization> {
+          let mut result: BTreeMap<NonTerminalID, ReduceCharacterization> = BTreeMap::new();
+
+          for (&revealed_state, row) in &parser.table {
+              for (&nt_id, goto) in &row.gotos {
+                  if let Some(goto_state) = goto.state_id {
+                      let reduce_char = result
+                          .entry(nt_id)
+                          .or_insert_with(|| ReduceCharacterization::new(terminal_id, nt_id));
+                      explore_from_goto(
+                          parser,
+                          terminal_id,
+                          revealed_state,
+                          goto_state,
+                          reduce_char,
+                      );
                   }
               }
           }
 
-          // Standard worklist fixpoint.
-          while let Some(v) = queue.pop_front() {
-              let fv = future_final[v].clone();
-              if fv.is_empty() {
+          result.retain(|_, rc| !rc.is_empty());
+          result
+      }
+
+      fn explore_from_goto(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+          revealed_state: StateID,
+          start_state: StateID,
+          reduce_char: &mut ReduceCharacterization,
+      ) {
+          use Stage7ShiftsAndReducesLookaheadValue::*;
+
+          let mut worklist = VecDeque::new();
+          let mut visited = BTreeSet::new();
+
+          visited.insert(start_state);
+          worklist.push_back(start_state);
+
+          while let Some(current_state) = worklist.pop_front() {
+              let Some(row) = parser.table.get(&current_state) else {
                   continue;
-              }
-              for &(u, ref w_uv) in &predecessors[v] {
-                  let add = &fv & w_uv;
-                  if add.is_empty() {
-                      continue;
+              };
+              let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) else {
+                  continue;
+              };
+
+              match action {
+                  Shift(shift_state) => {
+                      reduce_char
+                          .reveal_goto_shift_escapes
+                          .insert((revealed_state, current_state, *shift_state));
                   }
-                  let old = &future_final[u];
-                  if (&add & old) != add {
-                      future_final[u] |= &add;
-                      queue.push_back(u);
+                  Reduce {
+                      nonterminal_id: reduce_nt,
+                      len,
+                      ..
+                  } => {
+                      handle_reduce(
+                          parser,
+                          revealed_state,
+                          *len,
+                          *reduce_nt,
+                          &mut visited,
+                          &mut worklist,
+                          reduce_char,
+                      );
+                  }
+                  Split { shift, reduces } => {
+                      if let Some(shift_state) = shift {
+                          reduce_char
+                              .reveal_goto_shift_escapes
+                              .insert((revealed_state, current_state, *shift_state));
+                      }
+
+                      for (len, nts) in reduces {
+                          for (reduce_nt, _) in nts {
+                              handle_reduce(
+                                  parser,
+                                  revealed_state,
+                                  *len,
+                                  *reduce_nt,
+                                  &mut visited,
+                                  &mut worklist,
+                                  reduce_char,
+                              );
+                          }
+                      }
                   }
               }
           }
+      }
 
-          future_final
+      fn handle_reduce(
+          parser: &GLRParser,
+          revealed_state: StateID,
+          len: usize,
+          reduce_nt: NonTerminalID,
+          visited: &mut BTreeSet<StateID>,
+          worklist: &mut VecDeque<StateID>,
+          reduce_char: &mut ReduceCharacterization,
+      ) {
+          if len == 1 {
+              if let Some(next_goto_state) = parser
+                  .table
+                  .get(&revealed_state)
+                  .and_then(|row| row.gotos.get(&reduce_nt))
+                  .and_then(|goto| goto.state_id)
+              {
+                  if visited.insert(next_goto_state) {
+                      worklist.push_back(next_goto_state);
+                  }
+              }
+          } else if len > 1 {
+              reduce_char
+                  .reveal_and_rereduces
+                  .insert((revealed_state, len - 2, reduce_nt));
+          }
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -676,283 +763,374 @@ messages:
       pub mod full_dwa;
       pub mod conversion;
       pub mod resolve_negatives;
+
       mod utils;
+      mod template_nwa;
+      mod nwa_optimizations;
+
       pub mod test_weighted_automata;
       mod test_resolve_negatives;
-
-
-
 
       ```
     metadata:
       filename: src/precompute4/mod.rs
   - user: |-
-      ```rust "src/precompute4/resolve_negatives.rs"
-      use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
-      use crate::profiler::PROGRESS_BAR_ENABLED;
-      use indicatif::{ProgressBar, ProgressStyle};
-      use std::collections::{HashMap, VecDeque};
-      use std::time::Instant;
-      use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
+      ```rust "src/precompute4/characterize.rs"
+      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::fmt::{self, Display, Formatter};
 
-      pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-          let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(3);
-              p.set_style(
-                  ProgressStyle::default_bar()
-                      .template("{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
-                      .expect("progress-bar"),
-              );
-              Some(p)
-          } else {
-              None
-          };
+      use crate::glr::parser::GLRParser;
+      use crate::glr::table::{
+          NonTerminalID,
+          Stage7ShiftsAndReducesLookaheadValue,
+          StateID,
+          TerminalID,
+      };
 
-          if let Some(p) = &pb { p.set_message("Compute cancellations"); p.set_position(1); }
-          apply_cancellations(nwa);
+      type InitialShift = (StateID, StateID);
+      type InitialReduce = (StateID, usize, NonTerminalID);
+      type RevealAndRereduce = (StateID, usize, NonTerminalID);
+      type RevealGotoShiftEscape = (StateID, StateID, StateID);
 
-          if let Some(p) = &pb { p.set_message("Propagate finality"); p.set_position(2); }
-          apply_finality_fixpoint(nwa);
-
-          if let Some(p) = &pb { p.set_message("Apply changes & remove negatives"); p.set_position(3); }
-          remove_negative_transitions(nwa);
-          crate::debug!(4, "Applied changes to NWA.");
-
-          if let Some(p) = &pb { p.finish_with_message("Done"); }
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      pub struct ReduceCharacterization {
+          pub terminal: TerminalID,
+          pub nonterminal: NonTerminalID,
+          // (revealed_state, len, nonterminal)
+          pub reveal_and_rereduces: BTreeSet<RevealAndRereduce>,
+          // (revealed_state, goto_state, shift_state)
+          pub reveal_goto_shift_escapes: BTreeSet<RevealGotoShiftEscape>,
       }
 
-      pub fn apply_cancellations(nwa: &mut NWA) {
-          let epsilons_to_add = compute_cancellations(&nwa.states);
-          crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
-          for (from, to, w) in epsilons_to_add {
-              nwa.states.add_epsilon(from, to, w);
-          }
-      }
-
-      pub fn apply_finality_fixpoint(nwa: &mut NWA) {
-          let final_fix = compute_finality_fixpoint(&nwa.states);
-          for sid in 0..nwa.states.len() {
-              if !final_fix[sid].is_empty() {
-                  let st = &mut nwa.states.0[sid];
-                  if let Some(fw) = &mut st.final_weight {
-                      *fw |= &final_fix[sid];
-                  } else {
-                      st.final_weight = Some(final_fix[sid].clone());
-                  }
-              }
-          }
-      }
-
-      pub fn remove_negative_transitions(nwa: &mut NWA) {
-          for st in &mut nwa.states.0 {
-              st.transitions.retain(|k, _| *k >= 0 || *k == DEFAULT_TRANSITION_SYMBOL);
-          }
-      }
-
-      /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
-      /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
-      /// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
-      /// correctly represents the language defined by these complex interactions.
-      ///
-      /// The process is as follows:
-      /// 1.  **Convert to NWA**: The DWA is first converted to an NWA to allow for flexible graph manipulations,
-      ///     such as adding epsilon transitions.
-      /// 2.  **Resolve Cancellations**: The algorithm identifies all `A --neg(c)--> B --c--> C` sequences.
-      ///     Each such "cancellation" is resolved by adding a new epsilon transition `A --eps--> C`, which acts as a shortcut.
-      ///     The weights are combined along the path.
-      /// 3.  **Propagate Finality**: Finality is propagated backward across all `neg(c)` and epsilon transitions (both
-      ///     original and newly created ones). If a state `A` can reach a final state `F` through a path of such
-      ///     transitions, `A` inherits finality from `F`. This is computed using a standard least fixpoint algorithm.
-      /// 4.  **Apply Changes & Cleanup**: The newly computed final weights are applied to the NWA states. Then, all
-      ///     negative-code transitions are removed from the graph, as their semantic effects have been fully resolved.
-      /// 5.  **Determinize**: The resulting NWA, now free of negative codes, is determinized and simplified back into a
-      ///     DWA, which is the final result.
-      pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          let now = Instant::now();
-          crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
-
-          let pb = if PROGRESS_BAR_ENABLED {
-              let p = ProgressBar::new(4);
-              p.set_style(
-                  ProgressStyle::default_bar()
-                      .template("{spinner:.green} [Resolving negative codes: {elapsed_precise}] [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})")
-                      .expect("progress-bar"),
-              );
-              Some(p)
-          } else {
-              None
-          };
-
-          if let Some(p) = &pb { p.set_message("DWA -> NWA"); p.set_position(1); }
-          let mut nwa = NWA::from_dwa(dwa);
-          crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
-
-          if let Some(p) = &pb { p.set_message("Resolve negatives in NWA"); p.set_position(2); }
-          resolve_negative_codes_in_nwa(&mut nwa);
-          crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
-
-          if let Some(p) = &pb { p.set_message("Determinize"); p.set_position(3); }
-          let mut result = nwa.determinize_to_dwa();
-          if let Some(p) = &pb { p.set_message("Simplify"); p.set_position(4); }
-          result.simplify();
-          *dwa = result;
-          crate::debug!(4, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
-
-          if let Some(p) = &pb { p.finish_with_message("Done"); }
-          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-      }
-
-      /// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
-      /// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
-      fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-          let n = states.len();
-          // `queries[s]` stores cancellation "searches" that have reached state `s`.
-          // A search is identified by its origin state `a` and the positive code `c` it's looking for.
-          // The map stores the accumulated weight of the path `a --neg(c)--> ... --eps*--> s`.
-          let mut queries: Vec<HashMap<(NWAStateID, i16), Weight>> = vec![HashMap::new(); n];
-          let mut worklist: VecDeque<(NWAStateID, NWAStateID, i16, Weight)> = VecDeque::new();
-          let mut new_epsilons: HashMap<(NWAStateID, NWAStateID), Weight> = HashMap::new();
-
-          // 1. Initialize worklist with all negative transitions.
-          // Each `a --neg(c)--> b` starts a search at `b` for a matching `c`.
-          for a in 0..n {
-              for (label, targets) in &states[a].transitions {
-                  if *label < 0 && *label != DEFAULT_TRANSITION_SYMBOL {
-                      let c = label.wrapping_sub(i16::MIN);
-                      for (b, w_ab) in targets {
-                          if *b >= n { continue; }
-                          let query_key = (a, c);
-                          let query_weight = queries[*b].entry(query_key).or_default();
-                          let old_w = query_weight.clone();
-                          *query_weight |= w_ab;
-                          if *query_weight != old_w {
-                              worklist.push_back((*b, a, c, query_weight.clone()));
-                          }
-                      }
-                  }
+      impl ReduceCharacterization {
+          fn new(terminal: TerminalID, nonterminal: NonTerminalID) -> Self {
+              Self {
+                  terminal,
+                  nonterminal,
+                  reveal_and_rereduces: BTreeSet::new(),
+                  reveal_goto_shift_escapes: BTreeSet::new(),
               }
           }
 
-          // 2. Main fixpoint loop: propagate searches and generate new epsilon shortcuts.
-          while let Some((s, a, c, w_as)) = worklist.pop_front() {
-              // 2a. Check for cancellations at the current state `s`.
-              // A cancellation occurs if `s` has an outgoing transition on `c`.
-              let mut check_cancellations = |target: NWAStateID, w_st: &Weight, worklist: &mut VecDeque<_>| {
-                  let new_eps_w = &w_as & w_st;
-                  if new_eps_w.is_empty() { return; }
-
-                  let eps_key = (a, target);
-                  let eps_weight = new_epsilons.entry(eps_key).or_default();
-                  let old_eps_w = eps_weight.clone();
-                  *eps_weight |= &new_eps_w;
-
-                  // If this epsilon is new or stronger, it can propagate existing searches.
-                  if *eps_weight != old_eps_w {
-                      // Any search that has reached `a` can now cross this new epsilon to `target`.
-                      // To avoid borrow checker issues, clone the queries at state `a`.
-                      let queries_at_a = queries[a].clone();
-                      for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
-                          let prop_w = w_a_prime_a & &*eps_weight;
-                          if prop_w.is_empty() { continue; }
-
-                          let query_key = (a_prime, c_prime);
-                          let query_weight = queries[target].entry(query_key).or_default();
-                          let old_qw = query_weight.clone();
-                          *query_weight |= &prop_w;
-                          if *query_weight != old_qw {
-                              worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-                          }
-                      }
-                  }
-              };
-
-              if let Some(pos_targets) = states[s].transitions.get(&c) {
-                  for (t, w_st) in pos_targets {
-                      if *t < n { check_cancellations(*t, w_st, &mut worklist); }
-                  }
-              }
-              if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-                  for (target, weight) in default_targets {
-                      check_cancellations(*target, weight, &mut worklist);
-                  }
-              }
-
-              // 2b. Propagate the current search forward over original epsilon edges.
-              for (t, w_st) in &states[s].epsilons {
-                  if *t >= n { continue; }
-                  let prop_w = &w_as & w_st;
-                  if prop_w.is_empty() { continue; }
-
-                  let query_key = (a, c);
-                  let query_weight = queries[*t].entry(query_key).or_default();
-                  let old_qw = query_weight.clone();
-                  *query_weight |= &prop_w;
-                  if *query_weight != old_qw {
-                      worklist.push_back((*t, a, c, query_weight.clone()));
-                  }
-              }
+          fn is_empty(&self) -> bool {
+              self.reveal_and_rereduces.is_empty()
+                  && self.reveal_goto_shift_escapes.is_empty()
           }
+      }
 
-          new_epsilons
-              .into_iter()
-              .map(|((from, to), w)| (from, to, w))
+      impl Display for ReduceCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
+
+              if !self.reveal_and_rereduces.is_empty() {
+                  writeln!(f, "      Reveal-and-rereduces:")?;
+                  for (revealed, len, nt) in &self.reveal_and_rereduces {
+                      writeln!(
+                          f,
+                          "        - revealed: {}, len: {}, reduce_nt: {}",
+                          revealed.0, len, nt.0
+                      )?;
+                  }
+              }
+
+              if !self.reveal_goto_shift_escapes.is_empty() {
+                  writeln!(f, "      Reveal-goto-shift escapes:")?;
+                  for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
+                      writeln!(
+                          f,
+                          "        - revealed: {}, goto: {}, shift: {}",
+                          revealed.0, goto.0, shift.0
+                      )?;
+                  }
+              }
+
+              Ok(())
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct BelowBottomCharacterization {
+          pub terminal: TerminalID,
+          // (initial_state, shift_state)
+          pub initial_shifts: BTreeSet<InitialShift>,
+          // (initial_state, len, nonterminal)
+          pub initial_reduces: BTreeSet<InitialReduce>,
+          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+          pub all_nts: BTreeSet<NonTerminalID>,
+      }
+
+      impl Display for BelowBottomCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
+
+              if !self.initial_shifts.is_empty() {
+                  writeln!(f, "  Initial Shifts:")?;
+                  for (initial, shift) in &self.initial_shifts {
+                      writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
+                  }
+              }
+
+              if !self.initial_reduces.is_empty() {
+                  writeln!(f, "  Initial Reduces:")?;
+                  for (initial, len, nt) in &self.initial_reduces {
+                      writeln!(
+                          f,
+                          "    - initial: {}, len: {}, nt: {}",
+                          initial.0, len, nt.0
+                      )?;
+                  }
+              }
+
+              if !self.reduce_characterizations.is_empty() {
+                  writeln!(f, "  Reduce Characterizations:")?;
+                  for rc in self.reduce_characterizations.values() {
+                      write!(f, "{}", rc)?;
+                  }
+              }
+
+              Ok(())
+          }
+      }
+
+      pub fn compute_all_characterizations(
+          parser: &GLRParser,
+      ) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
+          parser
+              .terminal_map
+              .right_values()
+              .cloned()
+              .map(|terminal_id| {
+                  (
+                      terminal_id,
+                      compute_below_bottom_characterization(parser, terminal_id),
+                  )
+              })
               .collect()
       }
 
-      /// Compute the least fixpoint of final weights propagated backward along all epsilon edges
-      /// (original and new) and all negative-labeled edges.
-      fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
-          let n = states.len();
-          let mut fut: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut rev: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
+      pub fn compute_below_bottom_characterization(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> BelowBottomCharacterization {
+          let all_nts: BTreeSet<_> = parser
+              .non_terminal_map
+              .right_values()
+              .cloned()
+              .collect();
 
-          // Build reverse graph for propagation
-          for u in 0..n {
-              // All epsilons
-              for &(v, ref w) in &states[u].epsilons {
-                  if v < n { rev[v].push((u, w.clone())); }
-              }
-              // Negative edges
-              for (label, targets) in &states[u].transitions {
-                  if *label < 0 && *label != DEFAULT_TRANSITION_SYMBOL {
-                      for (v, w) in targets {
-                          if *v < n { rev[*v].push((u, w.clone())); }
+          let (initial_shifts, initial_reduces) = collect_initial_actions(parser, terminal_id);
+          let reduce_characterizations =
+              collect_reduce_characterizations(parser, terminal_id, &all_nts);
+
+          let result = BelowBottomCharacterization {
+              terminal: terminal_id,
+              initial_shifts,
+              initial_reduces,
+              reduce_characterizations,
+              all_nts,
+          };
+
+          crate::debug!(
+              5,
+              "Computed Below-Bottom Characterization for terminal {}:\n{}",
+              terminal_id.0,
+              result
+          );
+
+          result
+      }
+
+      fn collect_initial_actions(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> (BTreeSet<InitialShift>, BTreeSet<InitialReduce>) {
+          use Stage7ShiftsAndReducesLookaheadValue::*;
+
+          let mut initial_shifts = BTreeSet::new();
+          let mut initial_reduces = BTreeSet::new();
+
+          for (&initial_state, row) in &parser.table {
+              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
+                  match action {
+                      Shift(shift_state) => {
+                          initial_shifts.insert((initial_state, *shift_state));
+                      }
+                      Reduce { nonterminal_id, len, .. } => {
+                          if *len > 0 {
+                              initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                          }
+                      }
+                      Split { shift, reduces } => {
+                          if let Some(shift_state) = shift {
+                              initial_shifts.insert((initial_state, *shift_state));
+                          }
+
+                          for (len, nts) in reduces {
+                              if *len > 0 {
+                                  for (nt_id, _) in nts {
+                                      initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                                  }
+                              }
+                          }
                       }
                   }
               }
           }
 
-          let mut q: VecDeque<NWAStateID> = VecDeque::new();
-          for s in 0..n {
-              if let Some(ref fw) = states[s].final_weight {
-                  if !fw.is_empty() {
-                      fut[s] = fw.clone();
-                      q.push_back(s);
+          (initial_shifts, initial_reduces)
+      }
+
+      fn collect_reduce_characterizations(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+          all_nts: &BTreeSet<NonTerminalID>,
+      ) -> BTreeMap<NonTerminalID, ReduceCharacterization> {
+          let mut result = BTreeMap::new();
+
+          for &nt_id in all_nts {
+              let mut reduce_char = ReduceCharacterization::new(terminal_id, nt_id);
+
+              for (&revealed_state, row) in &parser.table {
+                  if let Some(goto) = row.gotos.get(&nt_id) {
+                      if let Some(goto_state) = goto.state_id {
+                          explore_from_goto(
+                              parser,
+                              terminal_id,
+                              revealed_state,
+                              goto_state,
+                              &mut reduce_char,
+                          );
+                      }
                   }
+              }
+
+              if !reduce_char.is_empty() {
+                  result.insert(nt_id, reduce_char);
               }
           }
 
-          while let Some(v) = q.pop_front() {
-              let fv = fut[v].clone();
-              if fv.is_empty() { continue; }
-              for &(u, ref w_uv) in &rev[v] {
-                  let add = &fv & w_uv;
-                  if add.is_empty() { continue; }
-                  let old = &fut[u];
-                  if (&add & old) != add {
-                      fut[u] |= &add;
-                      q.push_back(u);
+          result
+      }
+
+      fn explore_from_goto(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+          revealed_state: StateID,
+          start_state: StateID,
+          reduce_char: &mut ReduceCharacterization,
+      ) {
+          let mut worklist = VecDeque::new();
+          let mut visited = BTreeSet::new();
+
+          worklist.push_back(start_state);
+          visited.insert(start_state);
+
+          while let Some(current_state) = worklist.pop_front() {
+              let action_opt = parser
+                  .table
+                  .get(&current_state)
+                  .and_then(|row| row.shifts_and_reduces_full.get(&terminal_id));
+
+              if let Some(action) = action_opt {
+                  process_reduce_action(
+                      parser,
+                      revealed_state,
+                      current_state,
+                      action,
+                      reduce_char,
+                      &mut visited,
+                      &mut worklist,
+                  );
+              }
+          }
+      }
+
+      fn process_reduce_action(
+          parser: &GLRParser,
+          revealed_state: StateID,
+          current_state: StateID,
+          action: &Stage7ShiftsAndReducesLookaheadValue,
+          reduce_char: &mut ReduceCharacterization,
+          visited: &mut BTreeSet<StateID>,
+          worklist: &mut VecDeque<StateID>,
+      ) {
+          use Stage7ShiftsAndReducesLookaheadValue::*;
+
+          match action {
+              Shift(shift_state) => {
+                  reduce_char
+                      .reveal_goto_shift_escapes
+                      .insert((revealed_state, current_state, *shift_state));
+              }
+              Reduce {
+                  nonterminal_id: reduce_nt,
+                  len,
+                  ..
+              } => {
+                  handle_reduce(
+                      parser,
+                      revealed_state,
+                      *len,
+                      *reduce_nt,
+                      visited,
+                      worklist,
+                      reduce_char,
+                  );
+              }
+              Split { shift, reduces } => {
+                  if let Some(shift_state) = shift {
+                      reduce_char
+                          .reveal_goto_shift_escapes
+                          .insert((revealed_state, current_state, *shift_state));
+                  }
+
+                  for (len, nts) in reduces {
+                      for (reduce_nt, _) in nts {
+                          handle_reduce(
+                              parser,
+                              revealed_state,
+                              *len,
+                              *reduce_nt,
+                              visited,
+                              worklist,
+                              reduce_char,
+                          );
+                      }
                   }
               }
           }
-          fut
+      }
+
+      fn handle_reduce(
+          parser: &GLRParser,
+          revealed_state: StateID,
+          len: usize,
+          reduce_nt: NonTerminalID,
+          visited: &mut BTreeSet<StateID>,
+          worklist: &mut VecDeque<StateID>,
+          reduce_char: &mut ReduceCharacterization,
+      ) {
+          if len == 1 {
+              if let Some(next_goto_state) = parser
+                  .table
+                  .get(&revealed_state)
+                  .and_then(|row| row.gotos.get(&reduce_nt))
+                  .and_then(|goto| goto.state_id)
+              {
+                  if visited.insert(next_goto_state) {
+                      worklist.push_back(next_goto_state);
+                  }
+              }
+          } else if len > 1 {
+              reduce_char
+                  .reveal_and_rereduces
+                  .insert((revealed_state, len - 2, reduce_nt));
+          }
       }
 
       ```
     metadata:
-      filename: src/precompute4/resolve_negatives.rs
+      filename: src/precompute4/characterize.rs
   - user: |-
       Clean up this code. You can organize it into files, create new files, move things around, anything. Make sure it's consistent.
       Make it concise and elegant. Try to keep it functionally equivalent.
@@ -977,604 +1155,601 @@ messages:
       mode: simple
       phase: default
   - assistant: |-
-      ### High-level overview
+      ### Step-by-step editing instructions
 
-      I keep the core algorithms exactly the same, and only:
+      1. Open the file `src/precompute4/characterize.rs`.
 
-      1. Factor out a small helper to recognize negative labels (`is_negative_symbol`), used consistently in all three places that dealt with negative transitions.
-      2. Factor out progress-bar construction and step updates into `make_progress_bar` and `progress_step`, removing duplicated boilerplate.
-      3. Introduce simple type aliases (`Code`, `QueryKey`) for clarity in `compute_cancellations`.
-      4. Do minor variable renaming and formatting to make the logic easier to read without changing behavior.
+      2. Select the entire contents of `src/precompute4/characterize.rs` and delete them.
 
-      No public function signatures or semantic logic are changed. Only `src/precompute4/resolve_negatives.rs` is modified; `src/precompute4/mod.rs` stays as-is.
+      3. Replace them with the complete code I provide below in the section titled “Final code: `src/precompute4/characterize.rs`”.
 
-      ---
+      4. Do not change `src/precompute4/mod.rs`; it already correctly exposes the `characterize` module.
 
-      ## Hypotheses and correctness argument
+      5. Rebuild your project to confirm everything compiles and that existing tests (if any) still pass.
 
-      ### Hypothesis 1: Refactoring negative-label checks is behaviorally neutral
+      That is all that is required; the refactor is entirely contained in `characterize.rs` and is designed to be functionally equivalent but more efficient and slightly cleaner.
 
-      Original code used three logically equivalent patterns:
-
-      ```rust
-      // In compute_cancellations and compute_finality_fixpoint:
-      if *label < 0 && *label != DEFAULT_TRANSITION_SYMBOL {
-          ...
-      }
-
-      // In remove_negative_transitions:
-      st.transitions.retain(|k, _| *k >= 0 || *k == DEFAULT_TRANSITION_SYMBOL);
-      ```
-
-      I introduce:
-
-      ```rust
-      type Code = i16;
-
-      #[inline]
-      fn is_negative_symbol(label: Code) -> bool {
-          label < 0 && label != DEFAULT_TRANSITION_SYMBOL
-      }
-      ```
-
-      and then:
-
-      ```rust
-      // Places that used the first condition
-      if !is_negative_symbol(label) { continue; }
-
-      // Place that used the second condition (logical negation)
-      st.transitions.retain(|&label, _| !is_negative_symbol(label));
-      ```
-
-      **Claim**: For any label `x: i16`, the new code behaves exactly as before.
-
-      1. By definition,
-         `is_negative_symbol(x)` is equivalent to `x < 0 && x != DEFAULT_TRANSITION_SYMBOL`.
-
-         Therefore,
-         `!is_negative_symbol(x)` is equivalent to `!(x < 0 && x != DEFAULT_TRANSITION_SYMBOL)`.
-
-      2. Apply De Morgan:
-         `!(x < 0 && x != DEFAULT_TRANSITION_SYMBOL)` is equivalent to  
-         `(x >= 0) || (x == DEFAULT_TRANSITION_SYMBOL)`.
-
-      3. That is exactly the predicate previously used in `remove_negative_transitions`.
-
-      Thus:
-
-      • Every place that used `x < 0 && x != DEFAULT_TRANSITION_SYMBOL` now uses `is_negative_symbol(x)` (identical).  
-      • `remove_negative_transitions` now uses `!is_negative_symbol(x)`, which is exactly the old predicate.
-
-      Therefore, **no behavior changes** in which transitions are treated as “negative” or which ones are removed.
 
       ---
 
-      ### Hypothesis 2: Progress-bar refactoring is purely cosmetic
+      ### Why this refactor is functionally equivalent
 
-      Original pattern in each function:
+      This section states explicit hypotheses about your data structures and then argues, step by step, that the new implementation computes exactly the same mathematical objects as the original one.
 
-      ```rust
-      let pb = if PROGRESS_BAR_ENABLED {
-          let p = ProgressBar::new(LEN);
-          p.set_style(
-              ProgressStyle::default_bar()
-                  .template(TEMPLATE_STR)
-                  .expect("progress-bar"),
-          );
-          Some(p)
-      } else {
-          None
+      #### 1. Setting and notation
+
+      Fix a parser `P` and a terminal `t`.
+
+      Let:
+
+      1. `P.table` be a mapping from states `q ∈ Q` to rows.
+      2. Each row contains:
+         1. `row.shifts_and_reduces_full : TerminalID → Action`, where  
+            `Action = Shift(q') ∣ Reduce{nonterminal_id, len, …} ∣ Split{shift, reduces}`.
+         2. `row.gotos : NonTerminalID → { state_id: Option<StateID>, … }`.
+
+      We only care about:
+
+      1. For each state `q` and terminal `t`, the action `A(q, t)`, if any.
+      2. For each state `q` and nonterminal `X`, the goto target `G(q, X) ∈ Option<StateID>`.
+
+      We define the following sets (for fixed `t`):
+
+      1. `InitialShifts(t)` is the set of pairs `(q0, q1)` such that, in `q0` on lookahead `t`, there is a shift to `q1`.
+      2. `InitialReduces(t)` is the set of triples `(q0, L-1, X)` such that, in `q0` on lookahead `t`, there is a reduce with length `L > 0` to nonterminal `X`. The code stores `L-1` instead of `L`; this encoding is preserved.
+
+      For each nonterminal `X`, the reduce characterization for terminal `t` is a pair of sets:
+
+      1. `RA(t, X)` (reveal-and-rereduce triples):  
+         triples `(q_revealed, k, Y)` denoting that from revealed state `q_revealed`, there is a reduction by nonterminal `Y` of length `L ≥ 2`, and we store `k = L-2`.
+      2. `RGS(t, X)` (reveal-goto-shift escapes):  
+         triples `(q_revealed, q_goto_state, q_shift_state)` indicating that from `q_goto_state` (reachable via a goto on `X` from `q_revealed`) on lookahead `t` we can shift to `q_shift_state`.
+
+      The exported type `BelowBottomCharacterization` for terminal `t` wraps:
+
+      1. `InitialShifts(t)`.
+      2. `InitialReduces(t)`.
+      3. For each nonterminal `X`, `RA(t, X)` and `RGS(t, X)`.
+      4. `all_nts`, the set of all nonterminals in the grammar (unchanged).
+
+      The only real algorithmic change is in `collect_reduce_characterizations`; the other differences are stylistic (inlining `process_reduce_action` into `explore_from_goto`, minor style cleanups, and a small optimization).
+
+
+      #### 2. Hypotheses about the parser and table
+
+      We assume the following, which matches how GLR tables are typically structured and how the original code uses them:
+
+      1. For each state `q` and terminal `t`, there is at most one `Action` in `row.shifts_and_reduces_full`.
+      2. `len` in a `Reduce` action is the number of stack elements popped (a nonnegative integer).
+      3. For a `Split` action:
+         1. `shift: Option<StateID>` is an optional shift successor.
+         2. `reduces` is a collection of pairs `(len, nts)`, where `nts` maps nonterminals to some associated payload (ignored here).
+      4. `parser.table` defines all states we care about; if `parser.table.get(&q)` returns `None`, then there are no relevant actions from state `q` in the computation.
+
+      These are the same assumptions implicit in the original code, and the refactored code does not add any new assumptions.
+
+
+      #### 3. Unchanged parts
+
+      The following functions and behaviors are unchanged (up to minor cosmetic tweaks):
+
+      1. `compute_all_characterizations`  
+         It still:
+         1. Iterates over all `TerminalID`s using `parser.terminal_map.right_values().cloned()`.
+         2. For each terminal `t`, calls `compute_below_bottom_characterization(parser, t)`.
+         3. Collects the results into a `BTreeMap<TerminalID, BelowBottomCharacterization>`.
+
+      2. `collect_initial_actions`  
+         This function is unchanged, both structurally and semantically. For each table row `(q0, row)`:
+
+         1. If `A(q0, t) = Shift(q1)`, it inserts `(q0, q1)` into `initial_shifts`.
+         2. If `A(q0, t) = Reduce{nonterminal_id = X, len = L, …}` with `L > 0`, it inserts `(q0, L-1, X)` into `initial_reduces`.
+         3. If `A(q0, t) = Split{shift, reduces}`, it:
+            1. If `shift = Some(q1)`, inserts `(q0, q1)` into `initial_shifts`.
+            2. For each `(L, nts)` with `L > 0`, and each `(X, _) ∈ nts`, inserts `(q0, L-1, X)` into `initial_reduces`.
+
+         The important detail: epsilon reductions (`len == 0`) are ignored, as before.
+
+      3. `handle_reduce`  
+         The helper `handle_reduce` is unchanged in logic:
+
+         1. If `len == 1`:
+            1. It looks up `G(q_revealed, reduce_nt)`.
+            2. If `G(q_revealed, reduce_nt) = Some(q_next)`, and `q_next` is not in `visited`, it marks `q_next` visited and enqueues it in `worklist`.
+         2. If `len > 1`:
+            1. It records `(q_revealed, len - 2, reduce_nt)` in `reveal_and_rereduces`.
+         3. If `len == 0`:
+            1. It does nothing.
+
+         This exactly matches the original behavior.
+
+      4. `compute_below_bottom_characterization` except for how it obtains `reduce_characterizations`:
+         1. It still computes `all_nts` from `parser.non_terminal_map.right_values().cloned().collect()`.
+         2. It still calls `collect_initial_actions` to get `initial_shifts` and `initial_reduces`.
+         3. It now calls our optimized `collect_reduce_characterizations` instead of the original version, but uses its result in the same way.
+         4. It still logs the same debug string via `crate::debug!` with `result`’s `Display` output.
+
+      The only semantic point to check is that the new `collect_reduce_characterizations` yields exactly the same mapping as the old version.
+
+
+      #### 4. Old vs new `collect_reduce_characterizations`
+
+      Let `T` be our fixed terminal ID.
+
+      Define the set:
+
+      \[
+      G = \{ (q_{\text{revealed}}, X, q_{\text{goto}}) \mid 
+             \text{for state } q_{\text{revealed}} \text{ and nonterminal } X, 
+             G(q_{\text{revealed}}, X) = \text{Some}(q_{\text{goto}})\}.
+      \]
+
+      This is the set of all “goto edges” labeled by a nonterminal, with a defined target.
+
+      ##### 4.1 Original algorithm
+
+      Original `collect_reduce_characterizations` (paraphrased):
+
+      1. For every nonterminal `X` in `all_nts`:
+         1. Initialize `reduce_char_X` as an empty `ReduceCharacterization`.
+         2. For every state `q_revealed` in `parser.table`:
+            1. Look up `row.gotos.get(&X)`.
+            2. If it returns a `goto` with `goto.state_id = Some(q_goto)`:
+               1. Call `explore_from_goto(parser, T, q_revealed, q_goto, &mut reduce_char_X)`.
+         3. If `reduce_char_X` is not empty, insert `X ↦ reduce_char_X` into `result`.
+
+      Consequences:
+
+      1. For each triple `(q_revealed, X, q_goto) ∈ G`, it calls `explore_from_goto(P, T, q_revealed, q_goto, reduce_char_X)`.
+      2. For each triple not in `G`, it calls nothing.
+      3. `reduce_char_X` is the union over all such calls of the sets added by `explore_from_goto`.
+      4. If no calls were made (i.e., `X` is not in the domain of `G` or all gotos for `X` had `state_id = None`), `reduce_char_X` stays empty and is not inserted into the map.
+
+      ##### 4.2 New algorithm
+
+      New `collect_reduce_characterizations`:
+
+      1. Initialize an empty map `result: BTreeMap<NonTerminalID, ReduceCharacterization>`.
+      2. For each `(q_revealed, row)` in `parser.table`:
+         1. For each `(&X, goto)` in `row.gotos`:
+            1. If `goto.state_id = Some(q_goto)`:
+               1. Get or insert `reduce_char_X = result.entry(X).or_insert_with(|| ReduceCharacterization::new(T, X))`.
+               2. Call `explore_from_goto(parser, T, q_revealed, q_goto, reduce_char_X)`.
+      3. After the loop, call `result.retain(|_, rc| !rc.is_empty())`.
+
+      Consequences:
+
+      1. For each triple `(q_revealed, X, q_goto) ∈ G`, there is exactly one corresponding iteration where `goto.state_id = Some(q_goto)`, and in that iteration we call `explore_from_goto(P, T, q_revealed, q_goto, reduce_char_X)`, with the same parameters as in the original version.
+      2. Therefore the set of `explore_from_goto` calls is exactly the same multiset as before, just with nested loops reversed (first over states, then over gotos instead of first over nonterminals, then over states).
+      3. Because `ReduceCharacterization` only stores results in `BTreeSet`s (set union is commutative and idempotent), the final content of each `reduce_char_X` depends only on the set of arguments passed to `explore_from_goto`, not on the order in which they are processed or interleaved.
+      4. The `retain` call removes entries where `rc.is_empty()` is true. In the original version, such entries were never inserted. Thus in both versions, the domain of the resulting map is:
+         1. exactly those nonterminals `X` for which there exists at least one `(q_revealed, X, q_goto) ∈ G` that yields at least one recorded shift or reduce via `explore_from_goto`.
+
+      Therefore the new `collect_reduce_characterizations` produces a map that is mathematically identical to the original, but it does so in `O(|G|)` time instead of `O(|all_nts| · |Q|)`: it iterates only over existing goto edges.
+
+      #### 5. Inlining `process_reduce_action` into `explore_from_goto`
+
+      Original `explore_from_goto` (simplified):
+
+      1. Initialize
+         1. `visited = { start_state }`.
+         2. `worklist = [ start_state ]`.
+      2. While `worklist` is not empty:
+         1. Pop `current_state`.
+         2. Compute:
+            1. `row = parser.table.get(&current_state)`.
+            2. `action_opt = row.and_then(|r| r.shifts_and_reduces_full.get(&T))`.
+         3. If `action_opt = Some(action)`:
+            1. Call `process_reduce_action(parser, q_revealed, current_state, action, reduce_char, visited, worklist)`.
+
+      `process_reduce_action` then pattern-matches on `action`:
+
+      1. If `action = Shift(shift_state)`, insert `(q_revealed, current_state, shift_state)` into `reveal_goto_shift_escapes`.
+      2. If `action = Reduce{nonterminal_id = Y, len = L, …}`, call `handle_reduce(parser, q_revealed, L, Y, visited, worklist, reduce_char)`.
+      3. If `action = Split{shift, reduces}`:
+         1. If `shift = Some(shift_state)`, record `(q_revealed, current_state, shift_state)` as above.
+         2. For each `(L, nts)` and each `(Y, _) ∈ nts`, call `handle_reduce(parser, q_revealed, L, Y, visited, worklist, reduce_char)`.
+
+      The new `explore_from_goto` simply moves that match directly into the body of the loop, using the same pattern and the same call to `handle_reduce`. The calls to `handle_reduce` and the insertion into `reveal_goto_shift_escapes` are byte-for-byte the same; thus, for any fixed worklist traversal, the observable side-effects on:
+
+      1. `reveal_goto_shift_escapes`,
+      2. `reveal_and_rereduces`,
+      3. `visited` and `worklist`
+
+      are identical.
+
+      The only other tiny change is syntactic sugar:
+
+      1. Instead of:
+
+         ```rust
+         let action_opt = parser
+             .table
+             .get(&current_state)
+             .and_then(|row| row.shifts_and_reduces_full.get(&terminal_id));
+
+         if let Some(action) = action_opt {
+             // ...
+         }
+         ```
+
+      2. We use Rust’s `let-else`:
+
+         ```rust
+         let Some(row) = parser.table.get(&current_state) else {
+             continue;
+         };
+         let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) else {
+             continue;
+         };
+         ```
+
+      Logical equivalence:
+
+      1. If `parser.table.get(&current_state)` returns `None`, both versions do nothing for this `current_state` and continue to the next loop iteration.
+      2. If it returns `Some(row)` but `row.shifts_and_reduces_full.get(&terminal_id)` returns `None`, both versions again skip.
+      3. If both lookups succeed, we bind the same `action` and perform the same match.
+
+      Thus the BFS traversal and the sets it computes are unchanged.
+
+      #### 6. Displays and debug output
+
+      The `Display` implementations for `ReduceCharacterization` and `BelowBottomCharacterization` are preserved, except for one tiny stylistic tweak:
+
+      1. Where it previously used `write!(f, "{}", rc)?;`, it now uses `write!(f, "{rc}")?;`. This uses the same `Display` implementation for `rc` and is therefore identical in output.
+
+      All printed text and field order remain the same, so any logs or debug output that relied on them remain consistent.
+
+
+      ---
+
+      ### Final code: `src/precompute4/characterize.rs`
+
+      ```rust "src/precompute4/characterize.rs"
+      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::fmt::{self, Display, Formatter};
+
+      use crate::glr::parser::GLRParser;
+      use crate::glr::table::{
+          NonTerminalID,
+          Stage7ShiftsAndReducesLookaheadValue,
+          StateID,
+          TerminalID,
       };
 
-      if let Some(p) = &pb { p.set_message("..."); p.set_position(k); }
-      // ...
-      if let Some(p) = &pb { p.finish_with_message("Done"); }
-      ```
+      /// (initial_state, shift_state)
+      type InitialShift = (StateID, StateID);
+      /// (initial_state, reduction_len_minus_one, reduced_nonterminal)
+      type InitialReduce = (StateID, usize, NonTerminalID);
+      /// (revealed_state, remaining_len_minus_one, reduced_nonterminal)
+      type RevealAndRereduce = (StateID, usize, NonTerminalID);
+      /// (revealed_state, goto_state, shift_state)
+      type RevealGotoShiftEscape = (StateID, StateID, StateID);
 
-      New code:
-
-      ```rust
-      fn make_progress_bar(length: u64, template: &str) -> Option<ProgressBar> {
-          if !PROGRESS_BAR_ENABLED {
-              return None;
-          }
-          let pb = ProgressBar::new(length);
-          pb.set_style(
-              ProgressStyle::default_bar()
-                  .template(template)
-                  .expect("progress-bar"),
-          );
-          Some(pb)
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      pub struct ReduceCharacterization {
+          pub terminal: TerminalID,
+          pub nonterminal: NonTerminalID,
+          // (revealed_state, len, nonterminal)
+          pub reveal_and_rereduces: BTreeSet<RevealAndRereduce>,
+          // (revealed_state, goto_state, shift_state)
+          pub reveal_goto_shift_escapes: BTreeSet<RevealGotoShiftEscape>,
       }
 
-      fn progress_step(pb: &Option<ProgressBar>, step: u64, msg: &str) {
-          if let Some(p) = pb {
-              p.set_message(msg.to_string());
-              p.set_position(step);
-          }
-      }
-
-      // Usage
-      let pb = make_progress_bar(3, "...exact same template...");
-      progress_step(&pb, 1, "Compute cancellations");
-      ...
-      if let Some(p) = &pb {
-          p.finish_with_message("Done");
-      }
-      ```
-
-      Logical changes:
-
-      1. `make_progress_bar` returns exactly `None` when `PROGRESS_BAR_ENABLED` was false, and `Some(ProgressBar)` with identical style and length when true, using the same template strings as before. This matches the previous `if PROGRESS_BAR_ENABLED { ... } else { None }`.
-
-      2. `progress_step` performs exactly the previous `if let Some(p) = &pb { p.set_message(...); p.set_position(step); }` block.
-
-      3. Only minor difference: message strings now go through `msg.to_string()` instead of using a `&'static str`. `indicatif`'s `set_message` takes `impl Into<Cow<'static, str>>`, so both are acceptable; the only effect is that we now allocate a `String` rather than relying on a static literal. This does not affect program semantics (only a tiny performance detail).
-
-      Thus the progress-bar refactor is **purely cosmetic** and cannot affect the automata semantics.
-
-      ---
-
-      ### Hypothesis 3: Type aliases and renaming do not affect semantics
-
-      I introduce:
-
-      ```rust
-      type Code = i16;
-      type QueryKey = (NWAStateID, Code);
-      ```
-
-      and use `Code` instead of `i16` in a handful of local variable declarations and `QueryKey` instead of `(NWAStateID, i16)` for the map key.
-
-      This is syntactic sugar only: in Rust, `type Code = i16;` is not a newtype, it is exactly the same type. All operations, including `wrapping_sub`, comparisons, indexing, and hash map keys, behave identically.
-
-      Variable renamings (`fut` → `future_final`, `rev` → `predecessors`, etc.) do not change code logic.
-
-      Hence, **no semantic change**.
-
-      ---
-
-      ### Hypothesis 4: Core algorithms remain identical
-
-      The core functions:
-
-      • `resolve_negative_codes_in_nwa`  
-      • `resolve_negative_codes_in_dwa`  
-      • `compute_cancellations`  
-      • `compute_finality_fixpoint`  
-      • `apply_cancellations`  
-      • `apply_finality_fixpoint`  
-      • `remove_negative_transitions`
-
-      are preserved in the following sense:
-
-      1. **Control-flow structure**  
-         The loops (`for`, `while let Some(...)`) and branch conditions (`if`, `if let`) are unchanged, except for factoring shared predicates into `is_negative_symbol`, whose behavior is proven equivalent in Hypothesis 1.
-
-      2. **State updates and operations on `Weight`**  
-         All uses of `|`, `&`, `.is_empty()`, `.zeros()`, and `.clone()` on `Weight` objects are in the same places and in the same order as before. For instance:
-
-         • The condition `let add = &fv & w_uv; if add.is_empty() { continue; }` in `compute_finality_fixpoint` is unchanged.  
-         • The condition `if (&add & old) != add` is unchanged; this guards when a state’s future_final weight truly grows.  
-         • In `compute_cancellations`, combining weights as `let new_eps_w = &w_as & w_st;` and `prop_w = w_a_prime_a & &*eps_weight;` is identical.
-
-      3. **Data structures and their evolution**  
-         In `compute_cancellations`:
-
-         • `queries` remains a `Vec<HashMap<QueryKey, Weight>>` with identical semantics.  
-         • `worklist` remains a `VecDeque` of the same tuple type `(s, a, c, w_as)`.  
-         • `new_epsilons` remains a `HashMap<(from, to), Weight>`.  
-         • The initialization phase populating `queries` and `worklist` by iterating over negative transitions is unchanged except for calling `is_negative_symbol`.  
-         • The main `while let Some(...)` loop performs the same sequence of:
-           1. Looking for positive or default transitions to cancel with `c`.
-           2. Updating `new_epsilons`.
-           3. Propagating all existing searches through any strengthened epsilon.
-           4. Propagating the current search over original epsilon edges.
-
-         No new edges are explored, nor are any old ones ignored.
-
-      4. **Output types and side effects**
-
-         • `compute_cancellations` still returns exactly the set of epsilon transitions `(from, to, weight)` implied by the fixpoint.  
-         • `compute_finality_fixpoint` still returns a `Vec<Weight>` of length `states.len()` with the same propagation semantics.  
-         • `apply_cancellations` still calls `add_epsilon` with each tuple from `compute_cancellations`.  
-         • `apply_finality_fixpoint` merges final weights with `|=` as before.  
-         • `remove_negative_transitions` removes exactly the same transitions as previously shown in Hypothesis 1.
-
-      Therefore, the refactored code implements **the same mathematical transformation** on the automata, while being a bit more organized and readable.
-
-      ---
-
-      ## Step-by-step instructions
-
-      1. Leave `src/precompute4/mod.rs` exactly as it is. No changes are required there.
-
-      2. Open `src/precompute4/resolve_negatives.rs`.
-
-      3. Replace the entire contents of `src/precompute4/resolve_negatives.rs` with the code in the next section titled “Final code: `src/precompute4/resolve_negatives.rs`”.
-
-      4. Save the file and recompile your project. All existing callers of this module will continue to work, and the behavior of negative-code resolution remains unchanged.
-
-      ---
-
-      ## Final code: `src/precompute4/resolve_negatives.rs`
-
-      ```rust "src/precompute4/resolve_negatives.rs"
-      use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
-      use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
-      use crate::profiler::PROGRESS_BAR_ENABLED;
-      use indicatif::{ProgressBar, ProgressStyle};
-      use std::collections::{HashMap, VecDeque};
-      use std::time::Instant;
-
-      /// Convenience alias for transition labels (both positive and negative codes).
-      type Code = i16;
-
-      /// Key identifying an in-flight cancellation search:
-      /// `(origin_state, positive_code_being_cancelled)`.
-      type QueryKey = (NWAStateID, Code);
-
-      #[inline]
-      fn is_negative_symbol(label: Code) -> bool {
-          label < 0 && label != DEFAULT_TRANSITION_SYMBOL
-      }
-
-      /// Optionally construct a configured progress bar.
-      fn make_progress_bar(length: u64, template: &str) -> Option<ProgressBar> {
-          if !PROGRESS_BAR_ENABLED {
-              return None;
-          }
-          let pb = ProgressBar::new(length);
-          pb.set_style(
-              ProgressStyle::default_bar()
-                  .template(template)
-                  .expect("progress-bar"),
-          );
-          Some(pb)
-      }
-
-      /// Helper to advance the progress bar if it is enabled.
-      fn progress_step(pb: &Option<ProgressBar>, step: u64, msg: &str) {
-          if let Some(p) = pb {
-              p.set_message(msg.to_string());
-              p.set_position(step);
-          }
-      }
-
-      pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-          let pb = make_progress_bar(
-              3,
-              "{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] \
-               [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
-          );
-
-          progress_step(&pb, 1, "Compute cancellations");
-          apply_cancellations(nwa);
-
-          progress_step(&pb, 2, "Propagate finality");
-          apply_finality_fixpoint(nwa);
-
-          progress_step(&pb, 3, "Apply changes & remove negatives");
-          remove_negative_transitions(nwa);
-          crate::debug!(4, "Applied changes to NWA.");
-
-          if let Some(p) = &pb {
-              p.finish_with_message("Done");
-          }
-      }
-
-      pub fn apply_cancellations(nwa: &mut NWA) {
-          let epsilons_to_add = compute_cancellations(&nwa.states);
-          crate::debug!(
-              4,
-              "Computed {} new epsilon transitions from cancellations.",
-              epsilons_to_add.len()
-          );
-          for (from, to, w) in epsilons_to_add {
-              nwa.states.add_epsilon(from, to, w);
-          }
-      }
-
-      pub fn apply_finality_fixpoint(nwa: &mut NWA) {
-          let final_fix = compute_finality_fixpoint(&nwa.states);
-          for sid in 0..nwa.states.len() {
-              if final_fix[sid].is_empty() {
-                  continue;
-              }
-              let st = &mut nwa.states.0[sid];
-              if let Some(fw) = &mut st.final_weight {
-                  *fw |= &final_fix[sid];
-              } else {
-                  st.final_weight = Some(final_fix[sid].clone());
-              }
-          }
-      }
-
-      pub fn remove_negative_transitions(nwa: &mut NWA) {
-          for st in &mut nwa.states.0 {
-              st.transitions.retain(|&label, _| !is_negative_symbol(label));
-          }
-      }
-
-      /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
-      /// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
-      /// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
-      /// correctly represents the language defined by these complex interactions.
-      ///
-      /// The process is as follows:
-      /// 1.  Convert to NWA: The DWA is first converted to an NWA to allow for flexible graph manipulations,
-      ///     such as adding epsilon transitions.
-      /// 2.  Resolve cancellations: The algorithm identifies all `A --neg(c)--> B --c--> C` sequences
-      ///     (optionally using epsilon and default transitions).
-      ///     Each such cancellation is resolved by adding a new epsilon transition `A --eps--> C`, with
-      ///     weights combined along the path.
-      /// 3.  Propagate finality: Finality is propagated backward across all negative, epsilon,
-      ///     and default transitions. If a state `A` can reach a final state `F` through such a path,
-      ///     `A` inherits finality from `F`.
-      /// 4.  Apply changes and clean up: The newly computed final weights are applied and all
-      ///     negative-code transitions are removed.
-      /// 5.  Determinize: The resulting NWA, now free of negative codes, is determinized and simplified
-      ///     back into a DWA.
-      pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          let now = Instant::now();
-          crate::debug!(
-              4,
-              "Resolving negative codes in DWA with {} states...",
-              dwa.states.len()
-          );
-
-          let pb = make_progress_bar(
-              4,
-              "{spinner:.green} [Resolving negative codes: {elapsed_precise}] \
-               [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
-          );
-
-          progress_step(&pb, 1, "DWA -> NWA");
-          let mut nwa = NWA::from_dwa(dwa);
-          crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
-          crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
-
-          progress_step(&pb, 2, "Resolve negatives in NWA");
-          resolve_negative_codes_in_nwa(&mut nwa);
-          crate::debug!(
-              4,
-              "Applied changes, NWA has {} states before determinization.",
-              nwa.states.len()
-          );
-          crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
-
-          progress_step(&pb, 3, "Determinize");
-          let mut result = nwa.determinize_to_dwa();
-
-          progress_step(&pb, 4, "Simplify");
-          result.simplify();
-          *dwa = result;
-          crate::debug!(
-              4,
-              "Stats for final DWA after negative resolution:\n{}",
-              dwa.stats()
-          );
-
-          if let Some(p) = &pb {
-              p.finish_with_message("Done");
-          }
-          crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-      }
-
-      /// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
-      /// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
-      fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-          let n = states.len();
-
-          // `queries[s]` stores cancellation searches that have reached state `s`.
-          // A search is identified by its origin state `a` and the positive code `c` it is looking for.
-          // The map stores the accumulated weight of the path `a --neg(c)--> ... --eps*--> s`.
-          let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
-          let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
-          let mut new_epsilons: HashMap<(NWAStateID, NWAStateID), Weight> = HashMap::new();
-
-          // 1. Initialize worklist with all negative transitions.
-          // Each `a --neg(c)--> b` starts a search at `b` for a matching `c`.
-          for a in 0..n {
-              for (&label, targets) in &states[a].transitions {
-                  if !is_negative_symbol(label) {
-                      continue;
-                  }
-                  let c = label.wrapping_sub(Code::MIN);
-                  for (b, w_ab) in targets {
-                      if *b >= n {
-                          continue;
-                      }
-                      let query_key: QueryKey = (a, c);
-                      let query_weight = queries[*b].entry(query_key).or_default();
-                      let old_w = query_weight.clone();
-                      *query_weight |= w_ab;
-                      if *query_weight != old_w {
-                          worklist.push_back((*b, a, c, query_weight.clone()));
-                      }
-                  }
+      impl ReduceCharacterization {
+          fn new(terminal: TerminalID, nonterminal: NonTerminalID) -> Self {
+              Self {
+                  terminal,
+                  nonterminal,
+                  reveal_and_rereduces: BTreeSet::new(),
+                  reveal_goto_shift_escapes: BTreeSet::new(),
               }
           }
 
-          // 2. Main fixpoint loop: propagate searches and generate new epsilon shortcuts.
-          while let Some((s, a, c, w_as)) = worklist.pop_front() {
-              // Check for cancellations at the current state `s`.
-              // A cancellation occurs if `s` has an outgoing transition on `c`,
-              // or on the default symbol.
-              let mut check_cancellations = |target: NWAStateID,
-                                             w_st: &Weight,
-                                             worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code, Weight)>| {
-                  let new_eps_w = &w_as & w_st;
-                  if new_eps_w.is_empty() {
-                      return;
-                  }
-
-                  let eps_key = (a, target);
-                  let eps_weight = new_epsilons.entry(eps_key).or_default();
-                  let old_eps_w = eps_weight.clone();
-                  *eps_weight |= &new_eps_w;
-
-                  // If this epsilon is new or strengthened, it can propagate existing searches.
-                  if *eps_weight != old_eps_w {
-                      // Any search that has reached `a` can now cross this new epsilon to `target`.
-                      let queries_at_a = queries[a].clone();
-                      for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
-                          let prop_w = w_a_prime_a & &*eps_weight;
-                          if prop_w.is_empty() {
-                              continue;
-                          }
-
-                          let query_key: QueryKey = (a_prime, c_prime);
-                          let query_weight = queries[target].entry(query_key).or_default();
-                          let old_qw = query_weight.clone();
-                          *query_weight |= &prop_w;
-                          if *query_weight != old_qw {
-                              worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-                          }
-                      }
-                  }
-              };
-
-              if let Some(pos_targets) = states[s].transitions.get(&c) {
-                  for (t, w_st) in pos_targets {
-                      if *t < n {
-                          check_cancellations(*t, w_st, &mut worklist);
-                      }
-                  }
-              }
-              if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-                  for (target, weight) in default_targets {
-                      check_cancellations(*target, weight, &mut worklist);
-                  }
-              }
-
-              // 2b. Propagate the current search forward over original epsilon edges.
-              for (t, w_st) in &states[s].epsilons {
-                  if *t >= n {
-                      continue;
-                  }
-                  let prop_w = &w_as & w_st;
-                  if prop_w.is_empty() {
-                      continue;
-                  }
-
-                  let query_key: QueryKey = (a, c);
-                  let query_weight = queries[*t].entry(query_key).or_default();
-                  let old_qw = query_weight.clone();
-                  *query_weight |= &prop_w;
-                  if *query_weight != old_qw {
-                      worklist.push_back((*t, a, c, query_weight.clone()));
-                  }
-              }
+          fn is_empty(&self) -> bool {
+              self.reveal_and_rereduces.is_empty()
+                  && self.reveal_goto_shift_escapes.is_empty()
           }
+      }
 
-          new_epsilons
-              .into_iter()
-              .map(|((from, to), w)| (from, to, w))
+      impl Display for ReduceCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
+
+              if !self.reveal_and_rereduces.is_empty() {
+                  writeln!(f, "      Reveal-and-rereduces:")?;
+                  for (revealed, len, nt) in &self.reveal_and_rereduces {
+                      writeln!(
+                          f,
+                          "        - revealed: {}, len: {}, reduce_nt: {}",
+                          revealed.0, len, nt.0
+                      )?;
+                  }
+              }
+
+              if !self.reveal_goto_shift_escapes.is_empty() {
+                  writeln!(f, "      Reveal-goto-shift escapes:")?;
+                  for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
+                      writeln!(
+                          f,
+                          "        - revealed: {}, goto: {}, shift: {}",
+                          revealed.0, goto.0, shift.0
+                      )?;
+                  }
+              }
+
+              Ok(())
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct BelowBottomCharacterization {
+          pub terminal: TerminalID,
+          // (initial_state, shift_state)
+          pub initial_shifts: BTreeSet<InitialShift>,
+          // (initial_state, len, nonterminal)
+          pub initial_reduces: BTreeSet<InitialReduce>,
+          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+          pub all_nts: BTreeSet<NonTerminalID>,
+      }
+
+      impl Display for BelowBottomCharacterization {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
+
+              if !self.initial_shifts.is_empty() {
+                  writeln!(f, "  Initial Shifts:")?;
+                  for (initial, shift) in &self.initial_shifts {
+                      writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
+                  }
+              }
+
+              if !self.initial_reduces.is_empty() {
+                  writeln!(f, "  Initial Reduces:")?;
+                  for (initial, len, nt) in &self.initial_reduces {
+                      writeln!(
+                          f,
+                          "    - initial: {}, len: {}, nt: {}",
+                          initial.0, len, nt.0
+                      )?;
+                  }
+              }
+
+              if !self.reduce_characterizations.is_empty() {
+                  writeln!(f, "  Reduce Characterizations:")?;
+                  for rc in self.reduce_characterizations.values() {
+                      write!(f, "{rc}")?;
+                  }
+              }
+
+              Ok(())
+          }
+      }
+
+      pub fn compute_all_characterizations(
+          parser: &GLRParser,
+      ) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
+          parser
+              .terminal_map
+              .right_values()
+              .cloned()
+              .map(|terminal_id| {
+                  (
+                      terminal_id,
+                      compute_below_bottom_characterization(parser, terminal_id),
+                  )
+              })
               .collect()
       }
 
-      /// Compute the least fixpoint of final weights propagated backward along all epsilon edges
-      /// (original and new) and all negative-labeled edges.
-      fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
-          let n = states.len();
-          let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
+      pub fn compute_below_bottom_characterization(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> BelowBottomCharacterization {
+          let all_nts: BTreeSet<_> = parser
+              .non_terminal_map
+              .right_values()
+              .cloned()
+              .collect();
 
-          // Build reverse graph for propagation.
-          for u in 0..n {
-              // All epsilons.
-              for &(v, ref w) in &states[u].epsilons {
-                  if v < n {
-                      predecessors[v].push((u, w.clone()));
-                  }
-              }
-              // Negative edges.
-              for (&label, targets) in &states[u].transitions {
-                  if !is_negative_symbol(label) {
-                      continue;
-                  }
-                  for (v, w) in targets {
-                      if *v < n {
-                          predecessors[*v].push((u, w.clone()));
+          let (initial_shifts, initial_reduces) = collect_initial_actions(parser, terminal_id);
+          let reduce_characterizations = collect_reduce_characterizations(parser, terminal_id);
+
+          let result = BelowBottomCharacterization {
+              terminal: terminal_id,
+              initial_shifts,
+              initial_reduces,
+              reduce_characterizations,
+              all_nts,
+          };
+
+          crate::debug!(
+              5,
+              "Computed Below-Bottom Characterization for terminal {}:\n{}",
+              terminal_id.0,
+              result
+          );
+
+          result
+      }
+
+      fn collect_initial_actions(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> (BTreeSet<InitialShift>, BTreeSet<InitialReduce>) {
+          use Stage7ShiftsAndReducesLookaheadValue::*;
+
+          let mut initial_shifts = BTreeSet::new();
+          let mut initial_reduces = BTreeSet::new();
+
+          for (&initial_state, row) in &parser.table {
+              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
+                  match action {
+                      Shift(shift_state) => {
+                          initial_shifts.insert((initial_state, *shift_state));
+                      }
+                      Reduce { nonterminal_id, len, .. } => {
+                          if *len > 0 {
+                              initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                          }
+                      }
+                      Split { shift, reduces } => {
+                          if let Some(shift_state) = shift {
+                              initial_shifts.insert((initial_state, *shift_state));
+                          }
+
+                          for (len, nts) in reduces {
+                              if *len > 0 {
+                                  for (nt_id, _) in nts {
+                                      initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                                  }
+                              }
+                          }
                       }
                   }
               }
           }
 
-          // Initialize with already-final states.
-          let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-          for s in 0..n {
-              if let Some(ref fw) = states[s].final_weight {
-                  if !fw.is_empty() {
-                      future_final[s] = fw.clone();
-                      queue.push_back(s);
+          (initial_shifts, initial_reduces)
+      }
+
+      fn collect_reduce_characterizations(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> BTreeMap<NonTerminalID, ReduceCharacterization> {
+          let mut result: BTreeMap<NonTerminalID, ReduceCharacterization> = BTreeMap::new();
+
+          for (&revealed_state, row) in &parser.table {
+              for (&nt_id, goto) in &row.gotos {
+                  if let Some(goto_state) = goto.state_id {
+                      let reduce_char = result
+                          .entry(nt_id)
+                          .or_insert_with(|| ReduceCharacterization::new(terminal_id, nt_id));
+                      explore_from_goto(
+                          parser,
+                          terminal_id,
+                          revealed_state,
+                          goto_state,
+                          reduce_char,
+                      );
                   }
               }
           }
 
-          // Standard worklist fixpoint.
-          while let Some(v) = queue.pop_front() {
-              let fv = future_final[v].clone();
-              if fv.is_empty() {
+          result.retain(|_, rc| !rc.is_empty());
+          result
+      }
+
+      fn explore_from_goto(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+          revealed_state: StateID,
+          start_state: StateID,
+          reduce_char: &mut ReduceCharacterization,
+      ) {
+          use Stage7ShiftsAndReducesLookaheadValue::*;
+
+          let mut worklist = VecDeque::new();
+          let mut visited = BTreeSet::new();
+
+          visited.insert(start_state);
+          worklist.push_back(start_state);
+
+          while let Some(current_state) = worklist.pop_front() {
+              let Some(row) = parser.table.get(&current_state) else {
                   continue;
-              }
-              for &(u, ref w_uv) in &predecessors[v] {
-                  let add = &fv & w_uv;
-                  if add.is_empty() {
-                      continue;
+              };
+              let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) else {
+                  continue;
+              };
+
+              match action {
+                  Shift(shift_state) => {
+                      reduce_char
+                          .reveal_goto_shift_escapes
+                          .insert((revealed_state, current_state, *shift_state));
                   }
-                  let old = &future_final[u];
-                  if (&add & old) != add {
-                      future_final[u] |= &add;
-                      queue.push_back(u);
+                  Reduce {
+                      nonterminal_id: reduce_nt,
+                      len,
+                      ..
+                  } => {
+                      handle_reduce(
+                          parser,
+                          revealed_state,
+                          *len,
+                          *reduce_nt,
+                          &mut visited,
+                          &mut worklist,
+                          reduce_char,
+                      );
+                  }
+                  Split { shift, reduces } => {
+                      if let Some(shift_state) = shift {
+                          reduce_char
+                              .reveal_goto_shift_escapes
+                              .insert((revealed_state, current_state, *shift_state));
+                      }
+
+                      for (len, nts) in reduces {
+                          for (reduce_nt, _) in nts {
+                              handle_reduce(
+                                  parser,
+                                  revealed_state,
+                                  *len,
+                                  *reduce_nt,
+                                  &mut visited,
+                                  &mut worklist,
+                                  reduce_char,
+                              );
+                          }
+                      }
                   }
               }
           }
+      }
 
-          future_final
+      fn handle_reduce(
+          parser: &GLRParser,
+          revealed_state: StateID,
+          len: usize,
+          reduce_nt: NonTerminalID,
+          visited: &mut BTreeSet<StateID>,
+          worklist: &mut VecDeque<StateID>,
+          reduce_char: &mut ReduceCharacterization,
+      ) {
+          if len == 1 {
+              if let Some(next_goto_state) = parser
+                  .table
+                  .get(&revealed_state)
+                  .and_then(|row| row.gotos.get(&reduce_nt))
+                  .and_then(|goto| goto.state_id)
+              {
+                  if visited.insert(next_goto_state) {
+                      worklist.push_back(next_goto_state);
+                  }
+              }
+          } else if len > 1 {
+              reduce_char
+                  .reveal_and_rereduces
+                  .insert((revealed_state, len - 2, reduce_nt));
+          }
       }
       ```
     metadata:
   - user: |
-      Could not identify target file on fence open line 1:
-      ```rust
-      Could not identify target file on fence open line 2:
-      ```rust
-      Could not identify target file on fence open line 3:
-      ```rust
-      Could not identify target file on fence open line 4:
-      ```rust
-      Could not identify target file on fence open line 5:
-      ```rust
-      Could not identify target file on fence open line 6:
-      ```rust
-      Identified target file 'src/precompute4/resolve_negatives.rs' on fence open line 7:
-      ```rust "src/precompute4/resolve_negatives.rs"
-      Found 7 code blocks.
+      Identified target file 'src/precompute4/characterize.rs' on fence open line 1:
+      ```rust "src/precompute4/characterize.rs"
+      Found 1 code blocks.
       Matching against available files:
-        1: src/precompute4/mod.rs
-        2: src/precompute4/resolve_negatives.rs
+        1: src/precompute4/characterize.rs
+        2: src/precompute4/mod.rs
       --- Phase 1: Processing explicit file paths in fences ---
-      Assigned block to src/precompute4/resolve_negatives.rs based on explicit fence path.
-      Remaining unassigned blocks: 6, Available files: 1
-      --- Phase 2: Checking preceding lines for hints ---
-      Remaining unassigned blocks: 6, Available files: 1
-      --- Phase 3: Checking first lines inside blocks for hints ---
-      Remaining unassigned blocks: 6, Available files: 1
-      --- Phase 5: Applying fuzzy matching for 6 blocks and 1 files ---
-      Remaining unassigned blocks: 6, Available files: 1
+      Assigned block to src/precompute4/characterize.rs based on explicit fence path.
+      Remaining unassigned blocks: 0, Available files: 1
       --- Phase 6: Applying changes to assigned files ---
-      Warning: Code block starting near line 1 was not assigned to any file.
-      Warning: Code block starting near line 1 was not assigned to any file.
-      Warning: Code block starting near line 1 was not assigned to any file.
-      Warning: Code block starting near line 1 was not assigned to any file.
-      Warning: Code block starting near line 1 was not assigned to any file.
-      Warning: Code block starting near line 1 was not assigned to any file.
-      Successfully updated file: src/precompute4/resolve_negatives.rs
     metadata:
-  - user: 'Changes committed with message: "Refactor: Clean up `resolve_negatives.rs`
-      with helpers and aliases; add new modules to `precompute4`"'
+  - user: 'Changes committed with message: "Refactor: Optimize and clean up reduce
+      characterization collection in characterize.rs"'
     metadata:
 ...
