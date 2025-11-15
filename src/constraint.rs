@@ -4962,6 +4962,7 @@ impl<'a> GrammarConstraintState<'a> {
         let mut pending_states: BTreeMap<WAStateID, GLRParserState<'a>> = BTreeMap::new();
         let dwa = &self.parent.precomputed4;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
+        let mut start_dwa_ids: HashSet<WAStateID> = HashSet::new();
 
         // 1. Seed initial states
         for (&tokenizer_state_id, glr_state) in &self.state {
@@ -4982,6 +4983,7 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some((target_wa_state_id, weight)) =
                 dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
             {
+                start_dwa_ids.insert(target_wa_state_id);
                 allow_only_llm_tokens_and_prune_arc(
                     &mut glr_state.active_state.stack,
                     &simple_bitset_to_hybrid_bitset(weight),
@@ -5003,6 +5005,7 @@ impl<'a> GrammarConstraintState<'a> {
 
             for (current_wa_state_id, mut current_glr_state) in worklist {
                 let dwa_state = &dwa.states[current_wa_state_id];
+                let pop_len = if start_dwa_ids.contains(&current_wa_state_id) { 0 } else { 1 };
 
                 // Apply state weight
                 if let Some(sw) = &dwa_state.state_weight {
@@ -5016,7 +5019,7 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
 
-                // Process final weight
+                // Process final weight (pop 0)
                 if let Some(fw) = &dwa_state.final_weight {
                     let mut final_glr_state = current_glr_state.clone();
                     allow_only_llm_tokens_and_prune_arc(
@@ -5030,40 +5033,60 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
 
-                // Process transitions (pop 1)
-                let popped = current_glr_state.active_state.stack.popn(1);
-                if popped.num_predecessors() == 0 {
-                    continue;
-                }
+                // Process transitions
+                if pop_len == 0 {
+                    // Pop 0: Peek at current stack top, do not pop.
+                    for peek in GSSNode::peek_iter(&current_glr_state.active_state.stack) {
+                        let parser_state_id = peek.edge_value().state_id.0;
+                        if let Some((target_wa_state_id, trans_weight)) =
+                            dwa_state.get_transition(parser_state_id as i16)
+                        {
+                            let mut new_glr_state = current_glr_state.clone();
+                            // Apply weight to the GSS isolated for this path, but do not pop.
+                            let isolated_gss = peek.isolated_parent();
+                            new_glr_state.active_state.stack = isolated_gss;
 
-                for (label, target_wa_state_id, trans_weight) in dwa_state.iter_edges() {
-                    let parser_state_id = label as usize;
+                            allow_only_llm_tokens_and_prune_arc(
+                                &mut new_glr_state.active_state.stack,
+                                &simple_bitset_to_hybrid_bitset(trans_weight),
+                                &mut HashMap::new(),
+                            );
 
-                    let mut valid_gss_nodes = Vec::new();
-                    for popper_item in popped.iter() {
-                        for peek in popper_item.peek_iter() {
-                            if peek.edge_value().state_id.0 == parser_state_id {
-                                valid_gss_nodes.push(peek.isolated_parent());
+                            if new_glr_state.is_ok() {
+                                pending_states
+                                    .entry(target_wa_state_id)
+                                    .and_modify(|existing| existing.merge_with(new_glr_state.clone()))
+                                    .or_insert(new_glr_state);
                             }
                         }
                     }
+                } else { // pop_len == 1
+                    // Pop 1: Pop the stack, then peek at the new top.
+                    let popped = current_glr_state.active_state.stack.popn(1);
+                    for popper_item in popped.iter() {
+                        for peek in popper_item.peek_iter() {
+                            let parser_state_id = peek.edge_value().state_id.0;
+                            if let Some((target_wa_state_id, trans_weight)) =
+                                dwa_state.get_transition(parser_state_id as i16)
+                            {
+                                let mut new_glr_state = current_glr_state.clone();
+                                new_glr_state.active_state.stack = peek.isolated_parent();
 
-                    if !valid_gss_nodes.is_empty() {
-                        let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes);
-                        let mut new_glr_state = current_glr_state.clone();
-                        new_glr_state.active_state.stack = merged_gss;
+                                allow_only_llm_tokens_and_prune_arc(
+                                    &mut new_glr_state.active_state.stack,
+                                    &simple_bitset_to_hybrid_bitset(trans_weight),
+                                    &mut HashMap::new(),
+                                );
 
-                        allow_only_llm_tokens_and_prune_arc(
-                            &mut new_glr_state.active_state.stack,
-                            &simple_bitset_to_hybrid_bitset(trans_weight),
-                            &mut HashMap::new(),
-                        );
-
-                        if new_glr_state.is_ok() {
-                            pending_states
-                                .entry(target_wa_state_id)
-                                .and_modify(|existing| existing.merge_with(new_glr_state.clone()))
-                                .or_insert(new_glr_state);
+                                if new_glr_state.is_ok() {
+                                    pending_states
+                                        .entry(target_wa_state_id)
+                                        .and_modify(|existing| {
+                                            existing.merge_with(new_glr_state.clone())
+                                        })
+                                        .or_insert(new_glr_state);
+                                }
+                            }
                         }
                     }
                 }
