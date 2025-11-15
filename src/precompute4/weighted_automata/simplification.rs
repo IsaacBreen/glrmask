@@ -49,7 +49,7 @@ impl DWA {
 // --- Core Minimization Pipeline ---
 
 impl DWA {
-    /// The main minimization pipeline, faithfully adapting the rustfst approach for weighted acceptors.
+    /// The main minimization pipeline, adapting the rustfst approach for idempotent weighted acceptors.
     fn minimize(&mut self) -> bool {
         let initial_n = self.states.len();
         if initial_n == 0 {
@@ -57,8 +57,8 @@ impl DWA {
         }
 
         // 1. PREPROCESSING
-        // `push_weights`: Redistribute weights to normalize the automaton.
-        push_weights(&mut self.states, &mut self.body);
+        // For idempotent semirings, weight pushing is not performed. Equivalence is
+        // handled by encoding weights as part of the labels.
 
         // `encode`: Convert the weighted DWA to an unweighted graph representation.
         let (encoded_graph, encode_table) = encode(&self.states);
@@ -218,19 +218,6 @@ fn merge_and_decode(
     (new_states, new_start)
 }
 
-/// Pushes weights towards the start state to normalize the automaton for minimization.
-fn push_weights(states: &mut DWAStates, _body: &mut DWABody) {
-    let distance = shortest_distance::calculate(states, true); // Reversed shortest distance
-
-    // Guard: If all distances are ZERO, it means there are no final states or no paths
-    // to them. Pushing weights would incorrectly relax all weights to ALL.
-    if distance.iter().all(|w| w.is_empty()) {
-        return;
-    }
-
-    reweight::apply(states, &distance);
-}
-
 /// Checks if the encoded graph is acyclic.
 fn is_acyclic_encoded(graph: &EncodedGraph) -> bool {
     let n = graph.transitions.len();
@@ -261,72 +248,6 @@ fn dfs_cycle_check_encoded(u: StateID, graph: &EncodedGraph, visited: &mut [u8])
     }
     visited[u] = 2; // Mark as visited
     false
-}
-
-// --- Shortest Distance Module ---
-mod shortest_distance {
-    use super::*;
-
-    pub fn calculate(states: &DWAStates, reverse: bool) -> Vec<Weight> {
-        let n = states.len();
-        let mut distance = vec![Weight::zeros(); n];
-        let mut worklist = VecDeque::new();
-
-        if reverse {
-            let mut rev_adj: Vec<Vec<(StateID, Weight)>> = vec![vec![]; n];
-            for u in 0..n {
-                for (_label, v, weight) in states[u].iter_edges() {
-                    if v < n {
-                        rev_adj[v].push((u, weight.clone()));
-                    }
-                }
-            }
-            for i in 0..n {
-                if let Some(fw) = &states[i].final_weight {
-                    distance[i] = fw.clone();
-                    worklist.push_back(i);
-                }
-            }
-            while let Some(v) = worklist.pop_front() {
-                for (u, weight) in &rev_adj[v] {
-                    let new_dist = &distance[v] & weight;
-                    if !new_dist.is_subset_of(&distance[*u]) {
-                        distance[*u] |= &new_dist;
-                        worklist.push_back(*u);
-                    }
-                }
-            }
-        } else {
-            unimplemented!("Forward shortest distance is not implemented");
-        }
-        distance
-    }
-}
-
-// --- Reweight (Weight Pushing) Module ---
-mod reweight {
-    use super::*;
-
-    pub fn apply(states: &mut DWAStates, potential: &[Weight]) {
-        let n = states.len();
-        for i in 0..n {
-            let state = &mut states[i];
-            let inv_potential = !&potential[i];
-
-            // Final weights are not reweighted to preserve equivalence.
-            // The original logic `*fw |= &inv_potential` was incorrect.
-
-            // Reweight transitions: w'(s, t) = (w(s, t) & potential(t)) | !potential(s)
-            for (label, weight) in &mut state.trans_weights {
-                if let Some(&target) = state.transitions.get(label) {
-                    if target < n {
-                        *weight &= &potential[target];
-                        *weight |= &inv_potential;
-                    }
-                }
-            }
-        }
-    }
 }
 
 // --- Acyclic Minimization Module ---
