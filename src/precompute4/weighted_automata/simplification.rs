@@ -5,8 +5,7 @@
 use super::common::{StateID, Weight};
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::NWA;
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 // --- Top-Level API ---
 
@@ -61,12 +60,8 @@ impl DWA {
         // 1. PREPROCESSING: Convert the weighted DWA to an unweighted graph representation.
         let (encoded_graph, encode_table) = encode(&self.states);
 
-        // 2. CORE MINIMIZATION: Dispatch to the appropriate algorithm based on graph structure.
-        let partition = if is_acyclic_encoded(&encoded_graph) {
-            acyclic_minimize::minimize(&encoded_graph)
-        } else {
-            cyclic_minimize::minimize(&encoded_graph)
-        };
+        // 2. CORE MINIMIZATION: Use Hopcroft's algorithm for all cases.
+        let partition = cyclic_minimize::minimize(&encoded_graph);
 
         // The encoded graph includes a super-final state. If no states were merged,
         // the number of classes will equal the number of original states + 1.
@@ -100,7 +95,6 @@ struct EncodeTable {
 
 /// An unweighted representation of the DWA for minimization algorithms.
 struct EncodedGraph {
-    start_state: StateID,
     transitions: Vec<BTreeMap<i16, StateID>>,
     is_final: Vec<bool>,
 }
@@ -133,7 +127,6 @@ fn encode(states: &DWAStates) -> (EncodedGraph, EncodeTable) {
         }
     }
     let graph = EncodedGraph {
-        start_state: 0, // Placeholder, start is handled by DWA body
         transitions: encoded_transitions,
         is_final,
     };
@@ -178,10 +171,23 @@ fn merge_and_decode(
         }
 
         let new_id = class_to_new_id[class_id];
-        if rep_id < n {
-            new_states[new_id].state_weight = dwa.states[rep_id].state_weight.clone();
-        }
 
+        // Correctly merge state weights by taking the union of all states in the class.
+        let mut new_state_weight = None;
+        for old_id in partition.iter(*class_id) {
+            if old_id < n {
+                if let Some(sw) = &dwa.states[old_id].state_weight {
+                    if let Some(nsw) = &mut new_state_weight {
+                        *nsw |= sw;
+                    } else {
+                        new_state_weight = Some(sw.clone());
+                    }
+                }
+            }
+        }
+        new_states[new_id].state_weight = new_state_weight;
+
+        // Reconstruct transitions from the representative state.
         for (&encoded_label, &target) in &encoded_graph.transitions[rep_id] {
             let target_class = partition.get_class_id(target);
             let (original_label, original_weight) = &table.vec[encoded_label as usize];
@@ -204,34 +210,6 @@ fn merge_and_decode(
     let new_start = class_to_new_id[&start_class];
 
     (new_states, new_start)
-}
-
-/// Checks if the encoded graph is acyclic.
-fn is_acyclic_encoded(graph: &EncodedGraph) -> bool {
-    let n = graph.transitions.len();
-    let mut visited = vec![0; n]; // 0: unvisited, 1: visiting, 2: visited
-    for i in 0..n {
-        if visited[i] == 0 && dfs_cycle_check_encoded(i, graph, &mut visited) {
-            return false; // Cycle detected
-        }
-    }
-    true
-}
-
-fn dfs_cycle_check_encoded(u: StateID, graph: &EncodedGraph, visited: &mut [u8]) -> bool {
-    visited[u] = 1; // Mark as visiting
-    for (_, &v) in &graph.transitions[u] {
-        if v < graph.transitions.len() {
-            if visited[v] == 1 {
-                return true; // Cycle detected
-            }
-            if visited[v] == 0 && dfs_cycle_check_encoded(v, graph, visited) {
-                return true;
-            }
-        }
-    }
-    visited[u] = 2; // Mark as visited
-    false
 }
 
 // --- Partition Data Structure (Ported from rustfst) ---
@@ -280,6 +258,39 @@ struct Partition {
     classes: Vec<Class>,
     visited_classes: Vec<usize>,
     yes_counter: usize,
+}
+
+struct PartitionIterator<'a> {
+    partition: &'a Partition,
+    class_id: usize,
+    last_element_id: Option<i32>,
+}
+
+impl<'a> PartitionIterator<'a> {
+    fn new(partition: &'a Partition, class_id: usize) -> Self {
+        PartitionIterator {
+            partition,
+            class_id,
+            last_element_id: None,
+        }
+    }
+}
+
+impl<'a> Iterator for PartitionIterator<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let new_element_id = match self.last_element_id {
+            None => self.partition.classes[self.class_id].no_head,
+            Some(e) => self.partition.elements[e as usize].next_element,
+        };
+        if new_element_id < 0 {
+            None
+        } else {
+            self.last_element_id = Some(new_element_id);
+            Some(new_element_id as usize)
+        }
+    }
 }
 
 impl Partition {
@@ -362,7 +373,9 @@ impl Partition {
                 } else {
                     (visited_class, new_class_id)
                 };
-                queue.push_back(smaller_class);
+                if !queue.contains(&larger_class) {
+                    queue.push_back(smaller_class);
+                }
 
                 if no_size < yes_size {
                     self.classes[new_class_id].no_head = self.classes[visited_class].no_head;
@@ -396,146 +409,12 @@ impl Partition {
     fn num_classes(&self) -> usize {
         self.classes.len()
     }
-}
-
-// --- Acyclic Minimization Module ---
-mod acyclic_minimize {
-    use super::*;
-
-    pub fn minimize(graph: &EncodedGraph) -> Partition {
-        let n = graph.transitions.len();
-        let heights = compute_heights(graph);
-        let max_height = heights.iter().max().copied().unwrap_or(0);
-
-        let mut partition = Partition::new(n);
-        partition.classes.resize_with(max_height + 1, Class::default);
-        for i in 0..n {
-            partition.add(i, heights[i]);
-        }
-
-        for h in 0..=max_height {
-            let mut states_at_height: Vec<_> = (0..n).filter(|&i| heights[i] == h).collect();
-            if states_at_height.is_empty() {
-                continue;
-            }
-
-            let mut equiv_classes: BTreeMap<StateID, usize> = BTreeMap::new();
-            let mut next_class_id = partition.num_classes();
-
-            states_at_height.sort_by(|&a, &b| state_comparator(a, b, graph, &partition));
-
-            let mut current_class_id = partition.get_class_id(states_at_height[0]);
-            for i in 1..states_at_height.len() {
-                let s1 = states_at_height[i - 1];
-                let s2 = states_at_height[i];
-                if state_comparator(s1, s2, graph, &partition) != Ordering::Equal {
-                    current_class_id = next_class_id;
-                    next_class_id += 1;
-                }
-                if partition.get_class_id(s2) != current_class_id {
-                    // This state needs to move to a new class.
-                    // This is inefficient but simple. A better Partition would help.
-                    // For now, we just record the new class assignments.
-                    equiv_classes.insert(s2, current_class_id);
-                }
-            }
-            // This part is tricky without a `move_element` method.
-            // A full port of rustfst's Partition would be better.
-            // The logic here is simplified: we re-build a partition.
-        }
-        // The above logic is complex to implement without a full Partition struct.
-        // A simpler, correct version:
-        let mut p = Partition::new(n);
-        p.add_class(); // class 0
-        let mut state_map: HashMap<StateID, StateID> = HashMap::new();
-        let mut sorted_states: Vec<_> = (0..n).collect();
-        sorted_states.sort_by(|&a, &b| {
-            heights[a].cmp(&heights[b]).then_with(|| {
-                // A simplified comparator for acyclic case
-                graph.is_final[a].cmp(&graph.is_final[b]).then_with(|| {
-                    graph.transitions[a]
-                        .iter()
-                        .cmp(graph.transitions[b].iter())
-                })
-            })
-        });
-
-        let mut classes = vec![0; n];
-        let mut num_classes = 1;
-        if n > 0 {
-            for i in 1..n {
-                let s1 = sorted_states[i - 1];
-                let s2 = sorted_states[i];
-                if heights[s1] != heights[s2]
-                    || graph.is_final[s1] != graph.is_final[s2]
-                    || graph.transitions[s1] != graph.transitions[s2]
-                {
-                    num_classes += 1;
-                }
-                classes[s2] = num_classes - 1;
-            }
-        }
-        p.classes = vec![Class::default(); num_classes];
-        for i in 0..n {
-            p.elements[i].class_id = classes[i];
-        }
-        p
-    }
-
-    fn compute_heights(graph: &EncodedGraph) -> Vec<usize> {
-        let n = graph.transitions.len();
-        let mut heights = vec![usize::MAX; n];
-        let mut q = VecDeque::new();
-        for i in 0..n {
-            if graph.is_final[i] {
-                heights[i] = 0;
-                q.push_back(i);
-            }
-        }
-        // This requires reversed graph, let's build it
-        let mut rev_adj = vec![vec![]; n];
-        for i in 0..n {
-            for (_, &target) in &graph.transitions[i] {
-                if target < n {
-                    rev_adj[target].push(i);
-                }
-            }
-        }
-        while let Some(u) = q.pop_front() {
-            for &v in &rev_adj[u] {
-                if heights[v] == usize::MAX {
-                    heights[v] = heights[u] + 1;
-                    q.push_back(v);
-                }
-            }
-        }
-        heights.iter_mut().for_each(|h| if *h == usize::MAX { *h = n; }); // Unreachable from final
-        heights
-    }
-
-    fn state_comparator(a: StateID, b: StateID, graph: &EncodedGraph, p: &Partition) -> Ordering {
-        if a == b {
-            return Ordering::Equal;
-        }
-        graph.is_final[a]
-            .cmp(&graph.is_final[b])
-            .then_with(|| graph.transitions[a].len().cmp(&graph.transitions[b].len()))
-            .then_with(|| {
-                let (ta, tb) = (&graph.transitions[a], &graph.transitions[b]);
-                for ((la, na), (lb, nb)) in ta.iter().zip(tb.iter()) {
-                    let cmp = la
-                        .cmp(lb)
-                        .then_with(|| p.get_class_id(*na).cmp(&p.get_class_id(*nb)));
-                    if cmp != Ordering::Equal {
-                        return cmp;
-                    }
-                }
-                Ordering::Equal
-            })
+    fn iter(&self, class_id: usize) -> PartitionIterator {
+        PartitionIterator::new(self, class_id)
     }
 }
 
-// --- Cyclic Minimization Module ---
+// --- Cyclic Minimization Module (Hopcroft's Algorithm) ---
 mod cyclic_minimize {
     use super::*;
 
@@ -569,16 +448,11 @@ mod cyclic_minimize {
         }
 
         while let Some(class_id) = worklist.pop_front() {
-            let mut splitters: BTreeMap<i16, BTreeSet<StateID>> = BTreeMap::new();
-            let mut current_element = partition.classes[class_id].no_head;
-            while current_element >= 0 {
-                let state_id = current_element as usize;
+            let mut splitters: BTreeMap<i16, Vec<StateID>> = BTreeMap::new();
+            for state_id in partition.iter(class_id) {
                 for (label, sources) in &rev_adj[state_id] {
-                    for &source in sources {
-                        splitters.entry(*label).or_default().insert(source);
-                    }
+                    splitters.entry(*label).or_default().extend(sources);
                 }
-                current_element = partition.elements[state_id].next_element;
             }
 
             for (_, sources) in splitters {
