@@ -42,7 +42,7 @@ impl Default for Trie1Config {
         Self {
             enabled: true,
             break_cycles: true,
-            early_flatten_epsilon: true,
+            early_flatten_epsilon: false,
             minimize_by_signature: true,
             merge_equivalent_llm_tokens: true,
             reorder_llm_tokens: true,

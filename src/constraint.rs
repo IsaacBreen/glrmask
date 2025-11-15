@@ -864,7 +864,7 @@ impl Default for GrammarConstraintConfig {
             skip_precomputation: false,
             precompute0_only: false,
             trie0: Trie0Config::off(),
-            trie1: Trie1Config::off(),
+            trie1: Trie1Config::default(),
             trie2: Trie2Config::off(),
             trie3: Trie3Config::default(),
             skip_precompute3: true,
