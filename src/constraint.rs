@@ -844,6 +844,7 @@ impl Into<PrecomputedNodeContents> for PrecomputedNodeContents0 {
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintConfig {
     pub skip_precomputation: bool,
+    pub skip_precompute3: bool,
     pub precompute0_only: bool,
     pub trie0: Trie0Config,
     pub trie1: Trie1Config,
@@ -861,6 +862,7 @@ impl Default for GrammarConstraintConfig {
     fn default() -> Self {
         Self {
             skip_precomputation: false,
+            skip_precompute3: true,
             precompute0_only: false,
             trie0: Trie0Config::off(),
             trie1: Trie1Config::default(),
@@ -880,6 +882,7 @@ impl GrammarConstraintConfig {
     pub fn off() -> Self {
         Self {
             skip_precomputation: false,
+            skip_precompute3: true,
             precompute0_only: false,
             trie0: Trie0Config::off(),
             trie1: Trie1Config::off(),
@@ -2008,25 +2011,20 @@ impl GrammarConstraint {
             &config.trie2,
         );
         let precompute3_vocab_before = precompute3_vocab.clone();
-        let (mut precomputed3, trie3_god, precomputed4) = if config.run_precompute4 {
-            let precomputed4_dwa =
-                precompute4(&parser, &precomputed1, &trie1_god);
-            let max_parser_state_id = parser
-                .table
-                .keys()
-                .map(|s| s.0)
-                .max()
-                .unwrap_or(0);
-
-            let (mut precomputed3, trie3_god) =
-                crate::precompute4::conversion::dwa_to_precompute3(
-                    &precomputed4_dwa,
-                    internal_max_llm_token,
-                    max_parser_state_id,
-                );
-
-            let max_state_id =
+        let (mut precomputed3, trie3_god, precomputed4) = if config.skip_precompute3 {
+            (BTreeMap::new(), Trie3GodWrapper::new(), Precomputed4::new())
+        } else if config.run_precompute4 {
+            let precomputed4_dwa = precompute4(&parser, &precomputed1, &trie1_god);
+            let max_parser_state_id =
                 parser.table.keys().map(|s| s.0).max().unwrap_or(0);
+
+            let (mut precomputed3, trie3_god) = crate::precompute4::conversion::dwa_to_precompute3(
+                &precomputed4_dwa,
+                internal_max_llm_token,
+                max_parser_state_id,
+            );
+
+            let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
             optimize_trie3_size(
                 &mut precomputed3,
                 &trie3_god,
@@ -4826,6 +4824,11 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn get_mask3(&self) -> LLMTokenBV {
+        if self.parent.precomputed3.is_empty() {
+            return self.parent.internal_bv_to_original_precompute3(
+                &self.parent.all_internal_llm_tokens_bitset_precompute3(),
+            );
+        }
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
         if self.state.is_empty() {
             return self
@@ -4950,6 +4953,12 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn get_mask4(&self) -> LLMTokenBV {
+        if self.parent.precomputed4.states.is_empty() {
+            return self.parent.internal_bv_to_original_precompute1(
+                &self.parent.all_internal_llm_tokens_bitset_precompute1(),
+            );
+        }
+
         impl Merge for RangeSetBlaze<usize> {
             fn merge(&self, other: &Self) -> Self {
                 self | other
