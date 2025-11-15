@@ -56,9 +56,6 @@ fn convert_dwa_subgraph(
     let root_trie_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::root(internal_max_llm_token))));
     dwa_state_to_trie_node.insert(start_dwa_id, root_trie_node);
 
-    let mut processed_dwa_states = BTreeMap::new();
-    processed_dwa_states.insert(start_dwa_id, root_trie_node);
-
     while let Some(dwa_id) = q.pop() {
         let src_trie_node = *dwa_state_to_trie_node.get(&dwa_id).unwrap();
         let dwa_state = &dwa.states[dwa_id];
@@ -79,10 +76,14 @@ fn convert_dwa_subgraph(
             }
         }
 
+        // Group transitions by (target_dwa_id, weight) to create fewer, more compact trie edges.
+        let mut grouped_transitions: BTreeMap<(StateID, Weight), StateIDBV> = BTreeMap::new();
         let mut handled_exceptions = StateIDBV::zeros();
 
         for (&char_code, &target_dwa_id) in &dwa_state.transitions {
-            if char_code == DEFAULT_TRANSITION_SYMBOL { continue; }
+            if char_code == DEFAULT_TRANSITION_SYMBOL {
+                continue;
+            }
             if char_code < 0 {
                 eprint!("All exceptions: {:?}", dwa_state.transitions.keys());
                 panic!("Encountered negative transition code {} during conversion. Please run negative-resolution pass before conversion.", char_code);
@@ -90,24 +91,40 @@ fn convert_dwa_subgraph(
             let parser_state_id = char_code as usize;
             handled_exceptions.insert(parser_state_id);
 
-            let mut weight = dwa_state.trans_weights.get(&char_code).cloned().unwrap_or_else(Weight::zeros);
+            let mut weight = dwa_state
+                .trans_weights
+                .get(&char_code)
+                .cloned()
+                .unwrap_or_else(Weight::zeros);
             if dwa_id == start_dwa_id {
                 weight &= &start_weight;
             }
+
+            if !weight.is_empty() {
+                grouped_transitions
+                    .entry((target_dwa_id, weight))
+                    .or_default()
+                    .insert(parser_state_id);
+            }
+        }
+
+        for ((target_dwa_id, mut weight), parser_states) in grouped_transitions {
             weight.clip_max(internal_max_llm_token);
             let weight_bv = LLMTokenBV::from(weight.rsb);
 
             if !weight_bv.is_empty() {
                 let target_trie_node = get_or_create_trie_node(target_dwa_id, &mut q, &mut dwa_state_to_trie_node, trie3_god);
-                let edge_key = (pop_len as isize, weight_bv); // pop 1
-                let mut edge_val = StateIDBV::zeros();
-                edge_val.insert(parser_state_id);
-                trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
+                let edge_key = (pop_len as isize, weight_bv);
+                trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, parser_states);
             }
         }
 
         if let Some(&target_dwa_id) = dwa_state.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-            let mut weight = dwa_state.trans_weights.get(&DEFAULT_TRANSITION_SYMBOL).cloned().unwrap_or_else(Weight::zeros);
+            let mut weight = dwa_state
+                .trans_weights
+                .get(&DEFAULT_TRANSITION_SYMBOL)
+                .cloned()
+                .unwrap_or_else(Weight::zeros);
             if dwa_id == start_dwa_id {
                 weight &= &start_weight;
             }
@@ -116,7 +133,7 @@ fn convert_dwa_subgraph(
 
             if !weight_bv.is_empty() {
                 let target_trie_node = get_or_create_trie_node(target_dwa_id, &mut q, &mut dwa_state_to_trie_node, trie3_god);
-                let edge_key = (pop_len as isize, weight_bv); // pop 1
+                let edge_key = (pop_len as isize, weight_bv);
                 let edge_val = &all_parser_states - &handled_exceptions;
                 if !edge_val.is_empty() {
                     trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
