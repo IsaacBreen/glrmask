@@ -1440,6 +1440,21 @@ impl GrammarConstraint {
                 dist_str.push_str("\n    - ...");
             }
             crate::debug!(2, "{}", dist_str);
+
+            if num_original_tokens < 1000 {
+                println!("All equivalence classes:");
+                for (signature, string_indices) in &equivalence_classes {
+                    let member_ids: Vec<usize> = string_indices
+                        .iter()
+                        .map(|&idx| original_ids[idx].0)
+                        .collect();
+                    println!(
+                        "  - Class (signature: {:?}): {:?}",
+                        signature, member_ids
+                    );
+                }
+            }
+
         }
 
         // 3. Build the mapping from original to internal IDs based on the computed classes.
