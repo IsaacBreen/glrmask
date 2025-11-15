@@ -5070,6 +5070,36 @@ impl<'a> GrammarConstraintState<'a> {
                                 .or_insert(final_gss);
                         }
                     }
+
+                    if let Some((target_wa_state_id, trans_weight)) =
+                        dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL)
+                    {
+                        let isolated_gss = gss.isolate(Some(peeked_edge));
+                        let popped_gss = isolated_gss.pop();
+
+                        if popped_gss.is_empty() {
+                            continue;
+                        }
+
+                        let f = |rsb: &RangeSetBlaze<usize>| {
+                            let new_rsb = rsb & &trans_weight.rsb;
+                            if new_rsb.is_empty() {
+                                None
+                            } else {
+                                Some(new_rsb)
+                            }
+                        };
+                        let final_gss = popped_gss.apply_and_prune(f);
+
+                        if !final_gss.is_empty() {
+                            queue
+                                .entry(final_gss.max_depth() as usize)
+                                .or_default()
+                                .entry(target_wa_state_id)
+                                .and_modify(|existing| *existing = existing.merge(&final_gss))
+                                .or_insert(final_gss);
+                        }
+                    }
                 }
             }
         }

@@ -4,7 +4,7 @@ pub mod full_dwa;
 pub mod conversion;
 pub mod resolve_negatives;
 
-mod utils;
+pub(crate) mod utils;
 mod template_nwa;
 mod nwa_optimizations;
 
