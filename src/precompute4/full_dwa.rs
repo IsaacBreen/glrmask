@@ -18,10 +18,50 @@ use crate::precompute4::resolve_negatives::{
 use crate::precompute4::template_nwa::{
     build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas,
 };
-use crate::precompute4::weighted_automata::nwa::SimplifyRustfstConfig;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStates, NWABody, Weight};
 use crate::r#macro::is_debug_level_enabled;
 use crate::tokenizer::TokenizerStateID;
+
+
+
+struct SimplifyRustfstConfig {
+    rm_epsilon: bool,
+    determinize: bool,
+}
+
+impl SimplifyRustfstConfig {
+    fn default() -> Self {
+        Self {
+            rm_epsilon: false,
+            determinize: false,
+        }
+    }
+
+    fn with_rm_epsilon(mut self, val: bool) -> Self {
+        self.rm_epsilon = val;
+        self
+    }
+
+    fn with_determinize(mut self, val: bool) -> Self {
+        self.determinize = val;
+        self
+    }
+}
+
+impl NWA {
+    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA {
+        self.determinize_to_dwa()
+    }
+
+    pub fn simplify_rustfst(&mut self) {
+        self.simplify();
+    }
+
+    pub fn simplify_rustfst_with_config(&mut self, config: SimplifyRustfstConfig) {
+        self.simplify();
+    }
+}
+
 
 // Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
 pub use crate::precompute4::template_nwa::FullDWABuildError;
