@@ -111,35 +111,6 @@ fn minimize_dwa_partition(states: &DWAStates) -> Partition {
         };
     }
 
-    // Intern all (ArcLabel, Weight) pairs to cheap integer IDs.
-    let mut interner: HashMap<(ArcLabel, Weight), usize> = HashMap::new();
-    for s in 0..n {
-        let st = &states[s];
-        // Epsilon transitions
-        for &(_, ref w) in &st.epsilons {
-            if !w.is_empty() {
-                let key = (ArcLabel::Eps, w.clone());
-                if !interner.contains_key(&key) {
-                    let id = interner.len();
-                    interner.insert(key, id);
-                }
-            }
-        }
-        // Labeled transitions
-        for (&lbl, targets) in &st.transitions {
-            let label = ArcLabel::Label(lbl);
-            for &(_, ref w) in targets {
-                if !w.is_empty() {
-                    let key = (label, w.clone());
-                    if !interner.contains_key(&key) {
-                        let id = interner.len();
-                        interner.insert(key, id);
-                    }
-                }
-            }
-        }
-    }
-
     let mut partition = Partition::new(n);
 
     loop {
@@ -554,6 +525,35 @@ fn minimize_nwa_partition(states: &NWAStates) -> Partition {
             classes: vec![],
             num_classes: 0,
         };
+    }
+
+    // Intern all (ArcLabel, Weight) pairs to cheap integer IDs.
+    let mut interner: HashMap<(ArcLabel, Weight), usize> = HashMap::new();
+    for s in 0..n {
+        let st = &states[s];
+        // Epsilon transitions
+        for &(_, ref w) in &st.epsilons {
+            if !w.is_empty() {
+                let key = (ArcLabel::Eps, w.clone());
+                if !interner.contains_key(&key) {
+                    let id = interner.len();
+                    interner.insert(key, id);
+                }
+            }
+        }
+        // Labeled transitions
+        for (&lbl, targets) in &st.transitions {
+            let label = ArcLabel::Label(lbl);
+            for &(_, ref w) in targets {
+                if !w.is_empty() {
+                    let key = (label, w.clone());
+                    if !interner.contains_key(&key) {
+                        let id = interner.len();
+                        interner.insert(key, id);
+                    }
+                }
+            }
+        }
     }
 
     let mut partition = Partition::new(n);
