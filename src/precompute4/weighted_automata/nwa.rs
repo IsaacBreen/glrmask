@@ -12,7 +12,7 @@ use std::ops::{Index, IndexMut};
 use rustfst::algorithms::determinize::{
     determinize_with_config, DeterminizeConfig, DeterminizeType,
 };
-use rustfst::algorithms::minimize::{minimize_with_config, MinimizeConfig};
+use rustfst::algorithms::{minimize_with_config, MinimizeConfig};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
 
 use crate::precompute4::weighted_automata::determinization_rustfst::{
