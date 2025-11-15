@@ -580,17 +580,62 @@ struct NwaStateBuilder {
     trans: BTreeMap<i16, BTreeMap<NWAStateID, Weight>>,
 }
 
+/// A signature representing the exact structural properties of an NWA state.
+/// Used for a fast deduplication pre-pass.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct NwaStructuralSignature {
+    final_weight: Option<Weight>,
+    // Sorted list of (dest, weight)
+    epsilons: Vec<(NWAStateID, Weight)>,
+    // Sorted map of label -> sorted list of (dest, weight)
+    transitions: BTreeMap<i16, Vec<(NWAStateID, Weight)>>,
+}
+
+impl NwaStructuralSignature {
+    /// Creates a canonical signature from a state.
+    fn from_state(state_id: NWAStateID, states: &NWAStates) -> Self {
+        let st = &states[state_id];
+
+        // To make the signature canonical, we must sort the transition lists.
+        let mut epsilons = st.epsilons.clone();
+        epsilons.sort_unstable(); // Sorts by NWAStateID, then by Weight
+
+        let mut transitions = BTreeMap::new();
+        for (&lbl, targets) in &st.transitions {
+            let mut sorted_targets = targets.clone();
+            sorted_targets.sort_unstable();
+            transitions.insert(lbl, sorted_targets);
+        }
+
+        NwaStructuralSignature {
+            final_weight: st.final_weight.clone(),
+            epsilons,
+            transitions,
+        }
+    }
+}
+
 impl NWA {
     /// Simplify the NWA in-place:
     /// 1. Prune unreachable and dead-end states.
-    /// 2. Compute a weighted forward-bisimulation partition.
-    /// 3. Build the quotient NWA by merging equivalent states.
-    /// 4. Prune again.
+    /// 2. Perform a fast merge of structurally identical states.
+    /// 3. Compute a weighted forward-bisimulation partition.
+    /// 4. Build the quotient NWA by merging equivalent states.
+    /// 5. Prune again.
     ///
     /// Returns `true` if the automaton changed structurally.
     pub fn simplify(&mut self) -> bool {
         let mut changed = self.prune_unreachable();
         changed |= self.prune_dead_ends();
+
+        let deduplicated = self.deduplicate_states();
+        changed |= deduplicated;
+        if deduplicated {
+            // Re-prune after merging states, as some may become unreachable/dead.
+            changed |= self.prune_unreachable();
+            changed |= self.prune_dead_ends();
+        }
+        // ---------------------------
 
         let n = self.states.len();
         if n <= 1 {
@@ -599,7 +644,7 @@ impl NWA {
 
         let partition = minimize_nwa_partition(&self.states);
         if partition.num_classes() >= n {
-            // No merges.
+            // No merges from bisimulation.
             return changed;
         }
 
@@ -610,6 +655,45 @@ impl NWA {
         changed |= self.prune_unreachable();
         changed |= self.prune_dead_ends();
         changed
+    }
+
+    /// Fast pre-pass to merge structurally identical states.
+    /// Two states are structurally identical if they have the same final weight
+    /// and the exact same set of outgoing transitions (to the same destinations
+    /// with the same weights). This is a stronger condition than bisimilarity
+    /// but is much faster to compute.
+    fn deduplicate_states(&mut self) -> bool {
+        let n = self.states.len();
+        if n <= 1 {
+            return false;
+        }
+
+        let mut sig_to_class: HashMap<NwaStructuralSignature, usize> = HashMap::new();
+        let mut classes = vec![0; n];
+        let mut next_class = 0;
+
+        for s in 0..n {
+            let sig = NwaStructuralSignature::from_state(s, &self.states);
+            let entry = sig_to_class.entry(sig).or_insert_with(|| {
+                let id = next_class;
+                next_class += 1;
+                id
+            });
+            classes[s] = *entry;
+        }
+
+        if next_class >= n {
+            // No two states were identical.
+            return false;
+        }
+
+        let partition = Partition {
+            classes,
+            num_classes: next_class,
+        };
+
+        self.rebuild_from_partition(partition);
+        true
     }
 
     fn rebuild_from_partition(&mut self, partition: Partition) {
