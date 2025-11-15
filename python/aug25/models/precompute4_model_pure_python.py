@@ -328,7 +328,7 @@ class Model(GraphProvider):
         parser_table = ParserTable(parser_data['start_state_id'], py_table)
 
         # Misc data
-        pmc_json = data['possible_matches']
+        pmc_json = data['possible_matches_precompute1']
         possible_matches_cache = {}
         for tsid_json, term_map_json in pmc_json:
             tsid = int(tsid_json)
