@@ -1,7 +1,6 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::r#macro::is_debug_level_enabled;
 use std::cell::RefCell;
@@ -71,7 +70,7 @@ use crate::glr::table::StateID;
 use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue};
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use crate::precompute4::weighted_automata::{StateID, Weight};
+use crate::precompute4::weighted_automata::{StateID as WAStateID, Weight};
 use crate::precompute4::full_dwa::{precompute4, Precomputed4};
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
@@ -4942,8 +4941,8 @@ impl<'a> GrammarConstraintState<'a> {
             return LLMTokenBV::zeros();
         }
 
-        let mut weights: HashMap<(ArcPtrWrapper<GSSNode>, StateID), Weight> = HashMap::new();
-        let mut worklist: VecDeque<(Arc<GSSNode>, StateID)> = VecDeque::new();
+        let mut weights: HashMap<(ArcPtrWrapper<GSSNode>, WAStateID), Weight> = HashMap::new();
+        let mut worklist: VecDeque<(Arc<GSSNode>, WAStateID)> = VecDeque::new();
 
         // Initialization: For each active tokenizer state, find the starting DWA node.
         let dwa_start_state = &dwa.states[dwa.body.start_state];
@@ -4960,13 +4959,13 @@ impl<'a> GrammarConstraintState<'a> {
 
                 if !initial_weight.is_empty() {
                     let gss_root = glr_state.active_state.stack.clone();
-                    let key = (ArcPtrWrapper(gss_root.clone()), *target_dwa_id);
+                    let key = (ArcPtrWrapper::new(gss_root.clone()), target_dwa_id);
 
                     let w = weights.entry(key).or_insert_with(Weight::zeros);
                     let old_w = w.clone();
                     *w |= &initial_weight;
                     if *w != old_w {
-                        worklist.push_back((gss_root, *target_dwa_id));
+                        worklist.push_back((gss_root, target_dwa_id));
                     }
                 }
             }
@@ -4975,7 +4974,7 @@ impl<'a> GrammarConstraintState<'a> {
         // Fixed-point iteration: Traverse GSS and DWA simultaneously.
         while let Some((gss_node, current_dwa_id)) = worklist.pop_front() {
             let current_weight_at_entry = weights
-                .get(&(ArcPtrWrapper(gss_node.clone()), current_dwa_id))
+                .get(&(ArcPtrWrapper::new(gss_node.clone()), current_dwa_id))
                 .unwrap()
                 .clone();
             let current_dwa_state = &dwa.states[current_dwa_id];
@@ -4988,14 +4987,10 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
 
-            if gss_node.is_bottom() {
-                continue;
-            }
-
             let parser_state_id = gss_node.state_id().0 as i16;
             let mut transition_found = false;
 
-            let mut propagate = |next_dwa_id: StateID, trans_weight: &Weight| {
+            let mut propagate = |next_dwa_id: WAStateID, trans_weight: &Weight| {
                 let weight_to_propagate = &path_weight & trans_weight;
                 if weight_to_propagate.is_empty() {
                     return;
