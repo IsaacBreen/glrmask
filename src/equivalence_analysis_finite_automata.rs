@@ -16,7 +16,6 @@ struct CanonicalSignature {
     // All possible matches and the signature of their remainders (sorted and deduped).
     matches: Vec<(GroupID, usize, SignatureId)>,
     // If the string can be fully consumed without a match, the final DFA state.
-    // Note: We only record final_state when there are NO matches (consistent with the intent).
     final_state: Option<usize>,
 }
 
@@ -48,12 +47,12 @@ impl SignatureInterner {
             let id = self.signatures.len();
             self.signatures.push(sig);
             ids.push(id);
-            id
+            return id;
         } else {
             let id = self.signatures.len();
             self.signatures.push(sig);
             self.buckets.insert(fp, vec![id]);
-            id
+            return id;
         }
     }
 }
@@ -191,151 +190,144 @@ impl<'a> EquivalenceAnalyzer<'a> {
         }
     }
 
-    // New accelerated analysis:
-    // 1) Deduplicate all suffixes by content.
-    // 2) Compute canonical signatures for all unique suffixes once (from start_state) bottom-up by length.
-    // 3) For each token and each initial state, run the DFA once to enumerate match positions; remainder signatures come from step 2.
-    //    This removes recursive engine calls on remainders entirely.
+    // Compute the canonical signature for a given canonical suffix node and DFA state,
+    // using on-demand recursion and memoization. Remainders always recurse into start_state.
+    fn compute_signature_for_state(
+        &self,
+        deduper: &mut SuffixDeduper<'a>,
+        cache_start: &mut Vec<Option<SignatureId>>,
+        cache_other: &mut Vec<HashMap<usize, SignatureId>>,
+        interner: &mut SignatureInterner,
+        node_id: usize,
+        dfa_state: usize,
+    ) -> SignatureId {
+        // Ensure cache capacity for current node
+        if cache_start.len() <= node_id {
+            let missing = node_id + 1 - cache_start.len();
+            cache_start.reserve(missing);
+            cache_other.reserve(missing);
+            for _ in 0..missing {
+                cache_start.push(None);
+                cache_other.push(HashMap::new());
+            }
+        }
+        if dfa_state == self.regex.dfa.start_state {
+            if let Some(sid) = cache_start[node_id] {
+                return sid;
+            }
+        } else {
+            if let Some(sid) = cache_other[node_id].get(&dfa_state) {
+                return *sid;
+            }
+        }
+
+        let bytes = deduper.slice_of(node_id);
+        let result = self.regex.execute_from_state2(bytes, dfa_state);
+
+        let mut matches_vec: SmallVec<[(GroupID, usize, SignatureId); 4]> = SmallVec::new();
+        for m in result.matches {
+            // Filter out zero-width tokens to avoid infinite recursion.
+            if m.position == 0 {
+                continue;
+            }
+            let remainder_node = deduper.remainder_of(node_id, m.position);
+            // Ensure caches for the remainder node
+            if cache_start.len() <= remainder_node {
+                let missing = remainder_node + 1 - cache_start.len();
+                cache_start.reserve(missing);
+                cache_other.reserve(missing);
+                for _ in 0..missing {
+                    cache_start.push(None);
+                    cache_other.push(HashMap::new());
+                }
+            }
+            let remainder_sig = self.compute_signature_for_state(
+                deduper,
+                cache_start,
+                cache_other,
+                interner,
+                remainder_node,
+                self.regex.dfa.start_state,
+            );
+            matches_vec.push((m.group_id, m.position, remainder_sig));
+        }
+        // Canonicalize matches ordering and dedup identical entries if any.
+        matches_vec.sort_unstable();
+        matches_vec.dedup();
+
+        let sig = CanonicalSignature {
+            matches: matches_vec.into_vec(),
+            final_state: result.end_state,
+        };
+        let sid = interner.intern(sig);
+
+        if dfa_state == self.regex.dfa.start_state {
+            cache_start[node_id] = Some(sid);
+        } else {
+            cache_other[node_id].insert(dfa_state, sid);
+        }
+        sid
+    }
+
     pub fn find_equivalence_classes(&mut self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
+        // On-demand analysis: dedupe suffixes globally; compute signatures lazily.
         crate::debug!(
             2,
-            "Starting accelerated LLM token equivalence analysis for {} strings...",
+            "Starting LLM token equivalence analysis (on-demand) for {} strings...",
             self.strings.len()
         );
-
-        // Phase 0: Build suffix deduper over all (string, offset) pairs.
-        let mut deduper = SuffixDeduper::new(self.strings);
-        // Insert all suffixes (including empty) for all strings.
-        let pb_build = ProgressBar::new(self.strings.len() as u64);
-        pb_build.set_style(
+        let pb = ProgressBar::new(self.strings.len() as u64);
+        pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Build Suffix Set)")
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Equivalence Analysis)")
                 .expect("progress-bar"),
         );
         if !PROGRESS_BAR_ENABLED {
-            pb_build.set_draw_target(ProgressDrawTarget::hidden());
+            pb.set_draw_target(ProgressDrawTarget::hidden());
         }
-        for (i, s) in self.strings.iter().enumerate() {
-            // Insert all suffixes of s: offsets 0..=len
-            for off in 0..=s.len() {
-                let _ = deduper.get_or_intern(i, off);
-            }
-            pb_build.inc(1);
-        }
-        pb_build.finish();
-
-        // Phase 1: Compute canonical signatures for all unique suffixes from start_state, bottom-up by length.
-        let total_nodes = deduper.nodes.len();
-        let mut node_ids: Vec<usize> = (0..total_nodes).collect();
-        // Sort by suffix length increasing.
-        node_ids.sort_unstable_by_key(|&nid| deduper.slice_of(nid).len());
 
         let mut signature_interner = SignatureInterner::new();
-        let mut suffix_sig_ids: Vec<Option<SignatureId>> = vec![None; total_nodes];
+        let mut deduper = SuffixDeduper::new(self.strings);
+        // Cache for signatures at start_state and at other states.
+        let mut cache_start: Vec<Option<SignatureId>> = Vec::new();
+        let mut cache_other: Vec<HashMap<usize, SignatureId>> = Vec::new();
 
-        let pb_suffix = ProgressBar::new(total_nodes as u64);
-        pb_suffix.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Suffix Signatures)")
-                .expect("progress-bar"),
-        );
-        if !PROGRESS_BAR_ENABLED {
-            pb_suffix.set_draw_target(ProgressDrawTarget::hidden());
-        }
-
-        for &nid in &node_ids {
-            pb_suffix.inc(1);
-            let bytes = deduper.slice_of(nid);
-            let result = self.regex.execute_from_state2(bytes, self.regex.dfa.start_state);
-
-            // Gather matches; for each match, remainder signature must already be computed.
-            let mut matches_vec: SmallVec<[(GroupID, usize, SignatureId); 4]> = SmallVec::new();
-            for m in result.matches {
-                // Filter out zero-width tokens to avoid cycles and spurious recursion.
-                if m.position == 0 {
-                    continue;
-                }
-                let remainder_node = deduper.remainder_of(nid, m.position);
-                let remainder_sig = suffix_sig_ids[remainder_node]
-                    .expect("BUG: remainder signature should be available (processed earlier)");
-                matches_vec.push((m.group_id, m.position, remainder_sig));
-            }
-            matches_vec.sort_unstable();
-            matches_vec.dedup();
-
-            // Only record final_state if there are no matches (canonical per design intent).
-            let final_state = if matches_vec.is_empty() {
-                result.end_state
-            } else {
-                None
-            };
-
-            let sig = CanonicalSignature {
-                matches: matches_vec.into_vec(),
-                final_state,
-            };
-            let sid = signature_interner.intern(sig);
-            suffix_sig_ids[nid] = Some(sid);
-        }
-        pb_suffix.finish();
-
-        // Phase 2: Classify original strings based on their signature vectors for the provided initial states.
-        let pb_class = ProgressBar::new(self.strings.len() as u64);
-        pb_class.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Token Classification)")
-                .expect("progress-bar"),
-        );
-        if !PROGRESS_BAR_ENABLED {
-            pb_class.set_draw_target(ProgressDrawTarget::hidden());
-        }
-
+        // Classify original strings based on their signature vectors for the provided initial states.
         let mut equivalence_classes: HashMap<Vec<SignatureId>, Vec<usize>> = HashMap::new();
-        for (i, s) in self.strings.iter().enumerate() {
-            pb_class.inc(1);
-            let base_node = deduper.get_or_intern(i, 0);
-
+        for (i, _s) in self.strings.iter().enumerate() {
+            pb.inc(1);
+            let node_id = deduper.get_or_intern(i, 0);
+            // Ensure cache capacity for this node
+            if cache_start.len() <= node_id {
+                let missing = node_id + 1 - cache_start.len();
+                cache_start.reserve(missing);
+                cache_other.reserve(missing);
+                for _ in 0..missing {
+                    cache_start.push(None);
+                    cache_other.push(HashMap::new());
+                }
+            }
             let mut signature_vector = Vec::with_capacity(self.initial_states.len());
             for &initial_state in self.initial_states {
-                // Execute once per (token, initial_state) to enumerate match positions,
-                // but remainder handling is fully shared via suffix_sig_ids computed from start_state.
-                let result = self.regex.execute_from_state2(s, initial_state);
-
-                let mut matches_vec: SmallVec<[(GroupID, usize, SignatureId); 4]> = SmallVec::new();
-                for m in result.matches {
-                    if m.position == 0 {
-                        continue;
-                    }
-                    let remainder_node = deduper.remainder_of(base_node, m.position);
-                    let remainder_sig = suffix_sig_ids[remainder_node]
-                        .expect("BUG: suffix signature should have been computed");
-                    matches_vec.push((m.group_id, m.position, remainder_sig));
-                }
-                matches_vec.sort_unstable();
-                matches_vec.dedup();
-
-                let final_state = if matches_vec.is_empty() {
-                    result.end_state
-                } else {
-                    None
-                };
-
-                let sig = CanonicalSignature {
-                    matches: matches_vec.into_vec(),
-                    final_state,
-                };
-                let sid = signature_interner.intern(sig);
-                signature_vector.push(sid);
+                let sig_id = self.compute_signature_for_state(
+                    &mut deduper,
+                    &mut cache_start,
+                    &mut cache_other,
+                    &mut signature_interner,
+                    node_id,
+                    initial_state,
+                );
+                signature_vector.push(sig_id);
             }
             equivalence_classes.entry(signature_vector).or_default().push(i);
         }
-        pb_class.finish();
+        pb.finish();
 
         if VERIFY_EQUIVALENCE_CLASSES {
             verify_equivalence_classes(self.regex, self.strings, self.initial_states, &equivalence_classes);
         }
 
-        // Convert to BTreeMap to preserve determinism of output ordering.
+        // Convert to BTreeMap to preserve the original return type determinism.
         let mut out: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
         for (k, v) in equivalence_classes {
             out.entry(k).or_default().extend(v);
@@ -453,16 +445,9 @@ fn verify_equivalence_classes(
                 matches.insert((m.group_id, m.position, remainder_sig_id));
             }
 
-            // Only record final_state if there are no matches (align with production path).
-            let final_state = if matches.is_empty() {
-                result.end_state
-            } else {
-                None
-            };
-
             let sig = InternedVerificationSignature {
                 matches,
-                final_state,
+                final_state: result.end_state,
             };
             let sig_id = interner.intern(sig);
             state_sigs.insert(dfa_state, sig_id);
@@ -504,3 +489,4 @@ fn verify_equivalence_classes(
         panic!("Equivalence class verification failed.");
     }
 }
+
