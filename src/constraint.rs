@@ -2013,37 +2013,7 @@ impl GrammarConstraint {
             original_to_dummy_map.clone(),
         );
 
-        // Create possible_matches_precompute1 by remapping from precompute0 vocab to precompute1 vocab.
-        let possible_matches_precompute1 = if precompute0_vocab.original_to_internal
-            != precompute_vocab.original_to_internal
-        {
-            let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
-            for (original_id, old_internal_id) in &precompute0_vocab.original_to_internal {
-                if let Some(new_internal_id) =
-                    precompute_vocab.original_to_internal.get(original_id)
-                {
-                    old_to_new_map.insert(*old_internal_id, *new_internal_id);
-                }
-            }
-
-            let mut new_possible_matches = BTreeMap::new();
-            for (sid, terminal_map) in &computed_possible_matches {
-                let mut new_terminal_map = BTreeMap::new();
-                for (tid, llm_token_bv) in terminal_map {
-                    let mut new_bv = LLMTokenBV::zeros();
-                    for old_id in llm_token_bv.iter() {
-                        if let Some(new_id) = old_to_new_map.get(&old_id) {
-                            new_bv.insert(*new_id);
-                        }
-                    }
-                    new_terminal_map.insert(*tid, new_bv);
-                }
-                new_possible_matches.insert(*sid, new_terminal_map);
-            }
-            new_possible_matches
-        } else {
-            computed_possible_matches.clone()
-        };
+        let possible_matches_precompute1 = computed_possible_matches.clone();
 
         precompute2_vocab = precompute_vocab.clone();
         precompute3_vocab = precompute_vocab.clone();
