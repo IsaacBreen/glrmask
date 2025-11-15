@@ -287,6 +287,12 @@ pub fn precompute4(
         },
     };
 
+    crate::debug!(
+        4,
+        "Combined NWA has {} states after merging all final bodies.",
+        combined_nwa.states.len()
+    );
+
     let final_dwa = optimize_and_determinize(parser, combined_nwa);
     crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
     final_dwa
