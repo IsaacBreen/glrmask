@@ -333,7 +333,9 @@ fn test_simplify_redundant_states() {
     d.set_final_weight(s4, Weight::from_item(1)).unwrap();
 
     assert_eq!(d.states.len(), 6);
+    println!("Before simplification:\n{}", d);
     d.simplify();
+    println!("After simplification:\n{}", d);
     // s5 pruned (unreachable). s2 and s3 merged.
     // Expected states: start, 'a'-state, 'b'/'c'-state, final-state. Total 4.
     assert_eq!(d.states.len(), 4);
@@ -1292,7 +1294,9 @@ fn test_simplify_complex_dwa_from_attachment() {
     left.add_transition(25, 10, 5, w_01.clone()).unwrap();
 
     let mut simplified = left.clone();
+    println!("Before simplification: {} states", simplified.states.len());
     simplified.simplify();
+    println!("After simplification: {} states", simplified.states.len());
 
     stochastic_equivalence_test(left, simplified);
 }

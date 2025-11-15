@@ -5,7 +5,7 @@
 use super::common::{StateID, Weight};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use super::nwa::NWA;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::cmp::Ordering;
 
 // --- Top-Level API ---
@@ -65,7 +65,7 @@ impl DWA {
 
         // 2. CORE MINIMIZATION
         // Dispatch to the appropriate algorithm based on graph structure.
-        let partition = if is_acyclic(&self.states) {
+        let partition = if is_acyclic_encoded(&encoded_graph) {
             acyclic_minimize::minimize(&encoded_graph)
         } else {
             cyclic_minimize::minimize(&encoded_graph)
@@ -76,14 +76,11 @@ impl DWA {
         }
 
         // 3. POST-PROCESSING
-        // `merge_states`: Build a new, smaller DWA based on the state partitions.
+        // `merge_states` and `decode` are combined into one step.
         let (new_states, new_start) =
-            merge_states_from_partition(self, &partition, &encoded_graph);
+            merge_and_decode(self, &partition, &encoded_graph, &encode_table);
         self.states = new_states;
         self.body.start_state = new_start;
-
-        // `decode`: Restore the original labels and weights.
-        decode(&mut self.states, &encode_table);
 
         self.states.len() < initial_n
     }
@@ -119,20 +116,29 @@ struct Partition {
 
 // --- Pipeline Stages ---
 
-/// Encodes a weighted DWA into an unweighted graph representation.
+/// Encodes a weighted DWA into an unweighted graph representation using a super-final state.
 fn encode(states: &DWAStates) -> (EncodedGraph, EncodeTable) {
     let n = states.len();
+    let super_final_id = n;
     let mut table = EncodeTable::new();
-    let mut encoded_transitions = vec![BTreeMap::new(); n];
-    let mut is_final = vec![false; n];
+    let mut encoded_transitions = vec![BTreeMap::new(); n + 1];
+    let mut is_final = vec![false; n + 1];
+    is_final[super_final_id] = true;
 
     for i in 0..n {
         let state = &states[i];
-        is_final[i] = state.final_weight.as_ref().map_or(false, |w| !w.is_empty());
-
+        // Normal transitions
         for (label, target, weight) in state.iter_edges() {
             let encoded_label = table.encode(label, weight.clone());
             encoded_transitions[i].insert(encoded_label, target);
+        }
+        // Final weight as transition to super-final state
+        if let Some(fw) = &state.final_weight {
+            if !fw.is_empty() {
+                // Use a reserved label for final weight transitions
+                let encoded_label = table.encode(-1, fw.clone());
+                encoded_transitions[i].insert(encoded_label, super_final_id);
+            }
         }
     }
     let graph = EncodedGraph {
@@ -142,35 +148,67 @@ fn encode(states: &DWAStates) -> (EncodedGraph, EncodeTable) {
     (graph, table)
 }
 
-/// Builds a new, minimized DWA from the state partitions.
-fn merge_states_from_partition(
+/// Builds a new, minimized DWA from partitions and decodes weights in one pass.
+fn merge_and_decode(
     dwa: &DWA,
     partition: &Partition,
     encoded_graph: &EncodedGraph,
+    table: &EncodeTable,
 ) -> (DWAStates, StateID) {
-    let mut new_states = DWAStates::default();
+    let n = dwa.states.len();
+    let super_final_id = n;
+    let super_final_class = partition.classes[super_final_id];
+
     let mut class_to_new_id = HashMap::new();
     let mut representatives = BTreeMap::new();
-
-    for i in 0..dwa.states.len() {
+    // The partition includes the super-final state, so iterate up to n.
+    for i in 0..=n {
         representatives.entry(partition.classes[i]).or_insert(i);
     }
 
-    for (class_id, &rep_id) in &representatives {
-        let new_id = new_states.add_state();
-        class_to_new_id.insert(*class_id, new_id);
-        new_states[new_id].final_weight = dwa.states[rep_id].final_weight.clone();
-        new_states[new_id].state_weight = dwa.states[rep_id].state_weight.clone();
+    // Map old classes to temporary new IDs, excluding the super-final class.
+    let mut temp_id_counter = 0;
+    for (class_id, _) in &representatives {
+        if *class_id != super_final_class {
+            class_to_new_id.insert(*class_id, temp_id_counter);
+            temp_id_counter += 1;
+        }
     }
 
+    let mut new_states = DWAStates::default();
+    new_states
+        .0
+        .resize_with(class_to_new_id.len(), DWAState::default);
+
     for (class_id, &rep_id) in &representatives {
+        if *class_id == super_final_class {
+            continue;
+        }
+
         let new_id = class_to_new_id[class_id];
+        // Don't copy from the placeholder super-final state.
+        if rep_id < n {
+            new_states[new_id].state_weight = dwa.states[rep_id].state_weight.clone();
+        }
+
         for (&encoded_label, &target) in &encoded_graph.transitions[rep_id] {
             let target_class = partition.classes[target];
-            let new_target_id = class_to_new_id[&target_class];
-            new_states[new_id]
-                .transitions
-                .insert(encoded_label, new_target_id);
+            if target_class == super_final_class {
+                // This transition represents a final weight.
+                let (_label, weight) = &table.vec[encoded_label as usize];
+                new_states[new_id].final_weight = Some(weight.clone());
+            } else {
+                // This is a normal transition.
+                let new_target_id = class_to_new_id[&target_class];
+                let (original_label, original_weight) = &table.vec[encoded_label as usize];
+
+                new_states[new_id]
+                    .transitions
+                    .insert(*original_label, new_target_id);
+                new_states[new_id]
+                    .trans_weights
+                    .insert(*original_label, original_weight.clone());
+            }
         }
     }
 
@@ -180,37 +218,19 @@ fn merge_states_from_partition(
     (new_states, new_start)
 }
 
-/// Restores original labels and weights to a minimized DWA.
-fn decode(states: &mut DWAStates, table: &EncodeTable) {
-    for state in &mut states.0 {
-        let mut new_transitions = BTreeMap::new();
-        let mut new_weights = BTreeMap::new();
-        for (&encoded_label, &target) in &state.transitions {
-            let (original_label, original_weight) = &table.vec[encoded_label as usize];
-            new_transitions.insert(*original_label, target);
-            let weight_entry = new_weights
-                .entry(*original_label)
-                .or_insert_with(Weight::zeros);
-            *weight_entry |= original_weight;
-        }
-        state.transitions = new_transitions;
-        state.trans_weights = new_weights;
-    }
-}
-
 /// Pushes weights towards the start state to normalize the automaton for minimization.
-fn push_weights(states: &mut DWAStates, body: &mut DWABody) {
+fn push_weights(states: &mut DWAStates, _body: &mut DWABody) {
     let distance = shortest_distance::calculate(states, true); // Reversed shortest distance
     reweight::apply(states, &distance);
 }
 
-/// Checks if the DWA's graph is acyclic.
-fn is_acyclic(states: &DWAStates) -> bool {
-    let n = states.len();
+/// Checks if the encoded graph is acyclic.
+fn is_acyclic_encoded(graph: &EncodedGraph) -> bool {
+    let n = graph.transitions.len();
     let mut visited = vec![0; n]; // 0: unvisited, 1: visiting, 2: visited
     for i in 0..n {
         if visited[i] == 0 {
-            if dfs_cycle_check(i, states, &mut visited) {
+            if dfs_cycle_check_encoded(i, graph, &mut visited) {
                 return false; // Cycle detected
             }
         }
@@ -218,15 +238,15 @@ fn is_acyclic(states: &DWAStates) -> bool {
     true
 }
 
-fn dfs_cycle_check(u: StateID, states: &DWAStates, visited: &mut [u8]) -> bool {
+fn dfs_cycle_check_encoded(u: StateID, graph: &EncodedGraph, visited: &mut [u8]) -> bool {
     visited[u] = 1; // Mark as visiting
-    for (_, v, _) in states[u].iter_edges() {
-        if v < states.len() {
+    for (_, &v) in &graph.transitions[u] {
+        if v < graph.transitions.len() {
             if visited[v] == 1 {
                 return true; // Cycle detected
             }
             if visited[v] == 0 {
-                if dfs_cycle_check(v, states, visited) {
+                if dfs_cycle_check_encoded(v, graph, visited) {
                     return true;
                 }
             }
@@ -240,9 +260,6 @@ fn dfs_cycle_check(u: StateID, states: &DWAStates, visited: &mut [u8]) -> bool {
 mod shortest_distance {
     use super::*;
 
-    /// Calculates the shortest distance from each state to a final state (if reverse=true)
-    /// or from the start state to each state (if reverse=false).
-    /// For the SimpleBitset semiring, "shortest" means the union of all path weights.
     pub fn calculate(states: &DWAStates, reverse: bool) -> Vec<Weight> {
         let n = states.len();
         let mut distance = vec![Weight::zeros(); n];
@@ -273,8 +290,6 @@ mod shortest_distance {
                 }
             }
         } else {
-            // Forward version would be needed for pushing to final states.
-            // Not implemented as we only need reverse for this pipeline.
             unimplemented!("Forward shortest distance is not implemented");
         }
         distance
@@ -285,16 +300,14 @@ mod shortest_distance {
 mod reweight {
     use super::*;
 
-    /// Applies the reweighting algorithm to push weights.
     pub fn apply(states: &mut DWAStates, potential: &[Weight]) {
         let n = states.len();
         for i in 0..n {
             let state = &mut states[i];
             let inv_potential = !&potential[i];
 
-            // Final weights are not reweighted in this scheme to preserve equivalence
-            // under the simple path evaluation logic. The original logic `*fw |= &inv_potential`
-            // was incorrect as it made the automaton more accepting.
+            // Final weights are not reweighted to preserve equivalence.
+            // The original logic `*fw |= &inv_potential` was incorrect.
 
             // Reweight transitions: w'(s, t) = (w(s, t) & potential(t)) | !potential(s)
             for (label, weight) in &mut state.trans_weights {
@@ -312,7 +325,6 @@ mod reweight {
 // --- Acyclic Minimization Module ---
 mod acyclic_minimize {
     use super::*;
-    use std::cmp::Ordering;
 
     pub fn minimize(graph: &EncodedGraph) -> Partition {
         let n = graph.transitions.len();
@@ -320,10 +332,7 @@ mod acyclic_minimize {
             return Partition::new(0, 0);
         }
 
-        // 1. Compute height of each state (longest path to a final state).
         let heights = compute_heights(graph);
-
-        // 2. Initial partition by height.
         let mut states_by_height: BTreeMap<usize, Vec<StateID>> = BTreeMap::new();
         for i in 0..n {
             states_by_height.entry(heights[i]).or_default().push(i);
@@ -332,26 +341,19 @@ mod acyclic_minimize {
         let mut partition = Partition::new(n, 0);
         let mut num_classes = 0;
 
-        // 3. Refine partitions level by level.
         for (_, mut states) in states_by_height {
             if states.is_empty() {
                 continue;
             }
-
-            // Sort states within this height level according to their equivalence signature.
             states.sort_by(|&a, &b| state_comparator(a, b, graph, &partition));
 
-            // Iterate through the sorted states to assign partition classes.
-            // States that compare as `Equal` will be in the same new class.
             partition.classes[states[0]] = num_classes;
             for i in 1..states.len() {
-                let prev = states[i - 1];
-                let curr = states[i];
-                // If the current state is not equivalent to the previous one, start a new class.
-                if state_comparator(prev, curr, graph, &partition) != Ordering::Equal {
+                if state_comparator(states[i - 1], states[i], graph, &partition) != Ordering::Equal
+                {
                     num_classes += 1;
                 }
-                partition.classes[curr] = num_classes;
+                partition.classes[states[i]] = num_classes;
             }
             num_classes += 1;
         }
@@ -368,50 +370,35 @@ mod acyclic_minimize {
                 rev_adj[target].push(i);
             }
         }
-
         let mut q = VecDeque::new();
         for i in 0..n {
             if graph.is_final[i] {
+                heights[i] = 0;
                 q.push_back(i);
+            } else {
+                heights[i] = usize::MAX;
             }
         }
-
-        let mut visited = vec![false; n];
         while let Some(u) = q.pop_front() {
-            if visited[u] { continue; }
-            visited[u] = true;
             for &v in &rev_adj[u] {
-                heights[v] = heights[v].max(heights[u] + 1);
-                q.push_back(v);
+                if heights[v] == usize::MAX { // A simple form of Dijkstra/BFS
+                    heights[v] = heights[u] + 1;
+                    q.push_back(v);
+                }
             }
         }
         heights
     }
 
-    fn state_comparator(
-        a: StateID,
-        b: StateID,
-        graph: &EncodedGraph,
-        partition: &Partition,
-    ) -> Ordering {
+    fn state_comparator(a: StateID, b: StateID, graph: &EncodedGraph, p: &Partition) -> Ordering {
         if a == b { return Ordering::Equal; }
-
-        // Compare final status
         graph.is_final[a].cmp(&graph.is_final[b])
+            .then_with(|| graph.transitions[a].len().cmp(&graph.transitions[b].len()))
             .then_with(|| {
-                // Compare number of transitions
-                graph.transitions[a].len().cmp(&graph.transitions[b].len())
-            })
-            .then_with(|| {
-                // Lexicographically compare transitions
-                let trans_a = &graph.transitions[a];
-                let trans_b = &graph.transitions[b];
-                for ((label_a, target_a), (label_b, target_b)) in trans_a.iter().zip(trans_b.iter()) {
-                    let cmp = label_a.cmp(label_b)
-                        .then_with(|| partition.classes[*target_a].cmp(&partition.classes[*target_b]));
-                    if cmp != Ordering::Equal {
-                        return cmp;
-                    }
+                let (ta, tb) = (&graph.transitions[a], &graph.transitions[b]);
+                for ((la, na), (lb, nb)) in ta.iter().zip(tb.iter()) {
+                    let cmp = la.cmp(lb).then_with(|| p.classes[*na].cmp(&p.classes[*nb]));
+                    if cmp != Ordering::Equal { return cmp; }
                 }
                 Ordering::Equal
             })
@@ -420,8 +407,8 @@ mod acyclic_minimize {
 
 // --- Cyclic Minimization Module ---
 mod cyclic_minimize {
-    use std::collections::BTreeSet;
     use super::*;
+    use std::collections::BTreeSet;
 
     pub fn minimize(graph: &EncodedGraph) -> Partition {
         let n = graph.transitions.len();
@@ -429,7 +416,6 @@ mod cyclic_minimize {
             return Partition::new(0, 0);
         }
 
-        // 1. Initial partition: final vs. non-final states.
         let mut num_classes = if graph.is_final.iter().any(|&f| f) { 2 } else { 1 };
         let mut partition = Partition::new(n, num_classes);
         if num_classes == 2 {
@@ -440,7 +426,6 @@ mod cyclic_minimize {
             return partition;
         }
 
-        // 2. Build reverse adjacency list.
         let mut rev_adj: Vec<BTreeMap<i16, Vec<StateID>>> = vec![BTreeMap::new(); n];
         for i in 0..n {
             for (&label, &target) in &graph.transitions[i] {
@@ -448,7 +433,6 @@ mod cyclic_minimize {
             }
         }
 
-        // 3. Worklist contains partitions to refine.
         let mut worklist: VecDeque<usize> = (0..partition.num_classes).collect();
 
         while let Some(class_id) = worklist.pop_front() {
@@ -480,10 +464,10 @@ mod cyclic_minimize {
                         partition.classes[state_to_move] = new_class_id;
                     }
 
-                    if let Some(_pos) = worklist.iter().position(|&id| id == source_class_id) {
+                    if worklist.contains(&source_class_id) {
                         worklist.push_back(new_class_id);
                     } else {
-                        if split_off.len() <= total_in_class_count / 2 {
+                        if split_off.len() <= (total_in_class_count - split_off.len()) {
                             worklist.push_back(new_class_id);
                         } else {
                             worklist.push_back(source_class_id);
