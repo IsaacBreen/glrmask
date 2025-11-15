@@ -1,18 +1,18 @@
 // src/precompute4/weighted_automata/simplification.rs
 
 #![allow(dead_code)]
-#![allow(clippy::needless_borrow)]
 
 use super::common::{StateID, Weight};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use super::nwa::NWA;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use crate::precompute4::weighted_automata::NWAStateID;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+
+// --- Top-Level API ---
 
 impl NWA {
-    /// Simplifies the NWA by determinizing it to a DWA, minimizing the DWA,
-    /// and then converting it back to an NWA. This is a powerful simplification
-    /// that often results in a much smaller and more efficient automaton.
+    /// Simplifies the NWA by determinizing it to a DWA, minimizing the DWA using a
+    /// high-fidelity port of the rustfst minimization pipeline, and then converting
+    /// it back to an NWA.
     pub fn simplify(&mut self) -> bool {
         let initial_n = self.states.len();
         let initial_body = self.body;
@@ -20,13 +20,13 @@ impl NWA {
         // 1. Determinize the NWA to a DWA.
         let mut dwa = self.determinize();
 
-        // 2. Simplify the DWA using the minimization pipeline.
+        // 2. Simplify the DWA using the full minimization pipeline.
         dwa.simplify();
 
         // 3. Convert the simplified DWA back to an NWA.
         *self = NWA::from_dwa(&dwa);
 
-        // 4. Run final structural cleanups on the resulting NWA.
+        // 4. Final structural cleanup.
         let mut changed = self.prune_unreachable();
         changed |= self.prune_dead_ends();
 
@@ -35,75 +35,20 @@ impl NWA {
 }
 
 impl DWA {
-    /// Simplifies the DWA in-place by running a pipeline of optimization passes
-    /// until a fixpoint is reached.
+    /// Simplifies the DWA in-place by running a full minimization pipeline.
     pub fn simplify(&mut self) {
-        // Run a few passes of the simplification pipeline to reach a fixpoint,
-        // as some optimizations can enable others.
-        for _ in 0..3 {
-            let mut changed = false;
-            changed |= self.prune_unreachable();
-            changed |= self.prune_dead_ends();
-            changed |= self.minimize();
-            if !changed {
-                break;
-            }
-        }
-        // Final cleanup pass.
-        self.prune_unreachable();
+        // The core pipeline: connect, then minimize.
+        self.connect();
+        self.minimize();
+        // Final cleanup after minimization.
+        self.connect();
     }
 }
 
-/// Helper struct for the encode/decode process.
-struct EncodeTable {
-    map: HashMap<(i16, Weight), i16>,
-    vec: Vec<(i16, Weight)>,
-}
-
-impl EncodeTable {
-    fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-            vec: Vec::new(),
-        }
-    }
-    fn encode(&mut self, label: i16, weight: Weight) -> i16 {
-        let key = (label, weight);
-        if let Some(&id) = self.map.get(&key) {
-            return id;
-        }
-        let new_id = self.vec.len() as i16;
-        self.vec.push(key.clone());
-        self.map.insert(key, new_id);
-        new_id
-    }
-}
-
-/// An unweighted representation of the DWA for minimization.
-struct EncodedGraph {
-    transitions: Vec<BTreeMap<i16, StateID>>,
-    is_final: Vec<bool>,
-}
-
-/// Manages state partitions during minimization.
-struct Partition {
-    classes: Vec<usize>,
-    num_classes: usize,
-}
-impl Partition {
-    fn new(n: usize, num_classes: usize) -> Self {
-        Self {
-            classes: vec![0; n],
-            num_classes,
-        }
-    }
-    fn num_classes(&self) -> usize {
-        self.num_classes
-    }
-}
+// --- Core Minimization Pipeline ---
 
 impl DWA {
-    /// The core minimization pipeline for a DWA, inspired by rustfst's approach for weighted acceptors.
+    /// The main minimization pipeline, faithfully adapting the rustfst approach for weighted acceptors.
     fn minimize(&mut self) -> bool {
         let initial_n = self.states.len();
         if initial_n == 0 {
@@ -111,82 +56,391 @@ impl DWA {
         }
 
         // 1. PREPROCESSING
-        // `connect` (prune_unreachable/dead_ends) is handled in the main simplify loop.
-        // `push_weights` equivalent: propagate future weight constraints to relax edge weights.
-        Self::push_weights_and_relax_edges(&mut self.states);
+        // `push_weights`: Redistribute weights to normalize the automaton.
+        push_weights(&mut self.states, &mut self.body);
 
-        // `encode`: Convert the weighted DWA to an unweighted DFA representation.
-        let (encoded_graph, encode_table) = Self::encode(&self.states);
+        // `encode`: Convert the weighted DWA to an unweighted graph representation.
+        let (encoded_graph, encode_table) = encode(&self.states);
 
         // 2. CORE MINIMIZATION
-        // `cyclic_minimize`: Use partition refinement to find equivalent states in the unweighted graph.
-        let partition = Self::cyclic_minimize(&encoded_graph);
+        // Dispatch to the appropriate algorithm based on graph structure.
+        let partition = if is_acyclic(&self.states) {
+            acyclic_minimize::minimize(&encoded_graph)
+        } else {
+            cyclic_minimize::minimize(&encoded_graph)
+        };
 
         if partition.num_classes() == initial_n {
             return false; // No states were merged.
         }
 
         // 3. POST-PROCESSING
-        // `merge_states`: Build a new DWA based on the partitions, with encoded transitions.
+        // `merge_states`: Build a new, smaller DWA based on the state partitions.
         let (new_states, new_start) =
-            Self::merge_states_from_partition(self, &partition, &encoded_graph);
+            merge_states_from_partition(self, &partition, &encoded_graph);
         self.states = new_states;
         self.body.start_state = new_start;
 
-        // `decode`: Restore the original labels and weights from the encode table.
-        Self::decode(&mut self.states, &encode_table);
+        // `decode`: Restore the original labels and weights.
+        decode(&mut self.states, &encode_table);
 
         self.states.len() < initial_n
     }
 
-    /// Encodes a weighted DWA into an unweighted graph representation.
-    fn encode(states: &DWAStates) -> (EncodedGraph, EncodeTable) {
+    /// Removes states that are not on a successful path from start to a final state.
+    fn connect(&mut self) -> bool {
+        let changed = self.prune_unreachable();
+        changed | self.prune_dead_ends()
+    }
+}
+
+// --- Helper Structs ---
+
+/// Helper for the encode/decode process.
+struct EncodeTable {
+    map: HashMap<(i16, Weight), i16>,
+    vec: Vec<(i16, Weight)>,
+}
+
+/// An unweighted representation of the DWA for minimization algorithms.
+struct EncodedGraph {
+    transitions: Vec<BTreeMap<i16, StateID>>,
+    is_final: Vec<bool>,
+}
+
+/// Manages state partitions during minimization.
+#[derive(Debug)]
+struct Partition {
+    /// `classes[i]` stores the class ID of state `i`.
+    classes: Vec<usize>,
+    num_classes: usize,
+}
+
+// --- Pipeline Stages ---
+
+/// Encodes a weighted DWA into an unweighted graph representation.
+fn encode(states: &DWAStates) -> (EncodedGraph, EncodeTable) {
+    let n = states.len();
+    let mut table = EncodeTable::new();
+    let mut encoded_transitions = vec![BTreeMap::new(); n];
+    let mut is_final = vec![false; n];
+
+    for i in 0..n {
+        let state = &states[i];
+        is_final[i] = state.final_weight.as_ref().map_or(false, |w| !w.is_empty());
+
+        for (label, target, weight) in state.iter_edges() {
+            let encoded_label = table.encode(label, weight.clone());
+            encoded_transitions[i].insert(encoded_label, target);
+        }
+    }
+    let graph = EncodedGraph {
+        transitions: encoded_transitions,
+        is_final,
+    };
+    (graph, table)
+}
+
+/// Builds a new, minimized DWA from the state partitions.
+fn merge_states_from_partition(
+    dwa: &DWA,
+    partition: &Partition,
+    encoded_graph: &EncodedGraph,
+) -> (DWAStates, StateID) {
+    let mut new_states = DWAStates::default();
+    let mut class_to_new_id = HashMap::new();
+    let mut representatives = BTreeMap::new();
+
+    for i in 0..dwa.states.len() {
+        representatives.entry(partition.classes[i]).or_insert(i);
+    }
+
+    for (class_id, &rep_id) in &representatives {
+        let new_id = new_states.add_state();
+        class_to_new_id.insert(*class_id, new_id);
+        new_states[new_id].final_weight = dwa.states[rep_id].final_weight.clone();
+        new_states[new_id].state_weight = dwa.states[rep_id].state_weight.clone();
+    }
+
+    for (class_id, &rep_id) in &representatives {
+        let new_id = class_to_new_id[class_id];
+        for (&encoded_label, &target) in &encoded_graph.transitions[rep_id] {
+            let target_class = partition.classes[target];
+            let new_target_id = class_to_new_id[&target_class];
+            new_states[new_id]
+                .transitions
+                .insert(encoded_label, new_target_id);
+        }
+    }
+
+    let start_class = partition.classes[dwa.body.start_state];
+    let new_start = class_to_new_id[&start_class];
+
+    (new_states, new_start)
+}
+
+/// Restores original labels and weights to a minimized DWA.
+fn decode(states: &mut DWAStates, table: &EncodeTable) {
+    for state in &mut states.0 {
+        let mut new_transitions = BTreeMap::new();
+        let mut new_weights = BTreeMap::new();
+        for (&encoded_label, &target) in &state.transitions {
+            let (original_label, original_weight) = &table.vec[encoded_label as usize];
+            new_transitions.insert(*original_label, target);
+            let weight_entry = new_weights
+                .entry(*original_label)
+                .or_insert_with(Weight::zeros);
+            *weight_entry |= original_weight;
+        }
+        state.transitions = new_transitions;
+        state.trans_weights = new_weights;
+    }
+}
+
+/// Pushes weights towards the start state to normalize the automaton for minimization.
+fn push_weights(states: &mut DWAStates, body: &mut DWABody) {
+    let distance = shortest_distance::calculate(states, true); // Reversed shortest distance
+    reweight::apply(states, &distance);
+}
+
+/// Checks if the DWA's graph is acyclic.
+fn is_acyclic(states: &DWAStates) -> bool {
+    let n = states.len();
+    let mut visited = vec![0; n]; // 0: unvisited, 1: visiting, 2: visited
+    for i in 0..n {
+        if visited[i] == 0 {
+            if dfs_cycle_check(i, states, &mut visited) {
+                return false; // Cycle detected
+            }
+        }
+    }
+    true
+}
+
+fn dfs_cycle_check(u: StateID, states: &DWAStates, visited: &mut [u8]) -> bool {
+    visited[u] = 1; // Mark as visiting
+    for (_, v, _) in states[u].iter_edges() {
+        if v < states.len() {
+            if visited[v] == 1 {
+                return true; // Cycle detected
+            }
+            if visited[v] == 0 {
+                if dfs_cycle_check(v, states, visited) {
+                    return true;
+                }
+            }
+        }
+    }
+    visited[u] = 2; // Mark as visited
+    false
+}
+
+// --- Shortest Distance Module ---
+mod shortest_distance {
+    use super::*;
+
+    /// Calculates the shortest distance from each state to a final state (if reverse=true)
+    /// or from the start state to each state (if reverse=false).
+    /// For the SimpleBitset semiring, "shortest" means the union of all path weights.
+    pub fn calculate(states: &DWAStates, reverse: bool) -> Vec<Weight> {
         let n = states.len();
-        let mut table = EncodeTable::new();
-        let mut encoded_transitions = vec![BTreeMap::new(); n];
-        let mut is_final = vec![false; n];
+        let mut distance = vec![Weight::zeros(); n];
+        let mut worklist = VecDeque::new();
 
+        if reverse {
+            let mut rev_adj: Vec<Vec<(StateID, Weight)>> = vec![vec![]; n];
+            for u in 0..n {
+                for (label, v, weight) in states[u].iter_edges() {
+                    if v < n {
+                        rev_adj[v].push((u, weight.clone()));
+                    }
+                }
+            }
+            for i in 0..n {
+                if let Some(fw) = &states[i].final_weight {
+                    distance[i] = fw.clone();
+                    worklist.push_back(i);
+                }
+            }
+            while let Some(v) = worklist.pop_front() {
+                for (u, weight) in &rev_adj[v] {
+                    let new_dist = &distance[v] & weight;
+                    if !new_dist.is_subset_of(&distance[*u]) {
+                        distance[*u] |= &new_dist;
+                        worklist.push_back(*u);
+                    }
+                }
+            }
+        } else {
+            // Forward version would be needed for pushing to final states.
+            // Not implemented as we only need reverse for this pipeline.
+            unimplemented!("Forward shortest distance is not implemented");
+        }
+        distance
+    }
+}
+
+// --- Reweight (Weight Pushing) Module ---
+mod reweight {
+    use super::*;
+
+    /// Applies the reweighting algorithm to push weights.
+    pub fn apply(states: &mut DWAStates, potential: &[Weight]) {
+        let n = states.len();
         for i in 0..n {
-            let state = &states[i];
-            is_final[i] = state.final_weight.as_ref().map_or(false, |w| !w.is_empty());
+            let state = &mut states[i];
+            let inv_potential = !&potential[i];
 
-            for (label, target, weight) in state.iter_edges() {
-                let encoded_label = table.encode(label, weight.clone());
-                encoded_transitions[i].insert(encoded_label, target);
+            // Reweight final weight: ρ'(s) = ρ(s) | !potential(s)
+            if let Some(fw) = &mut state.final_weight {
+                *fw |= &inv_potential;
+            }
+
+            // Reweight transitions: w'(s, t) = (w(s, t) & potential(t)) | !potential(s)
+            for (label, weight) in &mut state.trans_weights {
+                if let Some(&target) = state.transitions.get(label) {
+                    if target < n {
+                        *weight &= &potential[target];
+                        *weight |= &inv_potential;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- Acyclic Minimization Module ---
+mod acyclic_minimize {
+    use super::*;
+    use std::cmp::Ordering;
+
+    pub fn minimize(graph: &EncodedGraph) -> Partition {
+        let n = graph.transitions.len();
+        if n == 0 {
+            return Partition::new(0, 0);
+        }
+
+        // 1. Compute height of each state (longest path to a final state).
+        let heights = compute_heights(graph);
+
+        // 2. Initial partition by height.
+        let mut states_by_height: BTreeMap<usize, Vec<StateID>> = BTreeMap::new();
+        for i in 0..n {
+            states_by_height.entry(heights[i]).or_default().push(i);
+        }
+
+        let mut partition = Partition::new(n, 0);
+        let mut num_classes = 0;
+
+        // 3. Refine partitions level by level.
+        for (_, mut states) in states_by_height {
+            if states.is_empty() {
+                continue;
+            }
+
+            // Sort states within this height level according to their equivalence signature.
+            states.sort_by(|&a, &b| state_comparator(a, b, graph, &partition));
+
+            // Iterate through the sorted states to assign partition classes.
+            // States that compare as `Equal` will be in the same new class.
+            partition.classes[states[0]] = num_classes;
+            for i in 1..states.len() {
+                let prev = states[i - 1];
+                let curr = states[i];
+                // If the current state is not equivalent to the previous one, start a new class.
+                if state_comparator(prev, curr, graph, &partition) != Ordering::Equal {
+                    num_classes += 1;
+                }
+                partition.classes[curr] = num_classes;
+            }
+            num_classes += 1;
+        }
+        partition.num_classes = num_classes;
+        partition
+    }
+
+    fn compute_heights(graph: &EncodedGraph) -> Vec<usize> {
+        let n = graph.transitions.len();
+        let mut heights = vec![0; n];
+        let mut rev_adj: Vec<Vec<StateID>> = vec![vec![]; n];
+        for i in 0..n {
+            for (_, &target) in &graph.transitions[i] {
+                rev_adj[target].push(i);
             }
         }
 
-        let graph = EncodedGraph {
-            transitions: encoded_transitions,
-            is_final,
-        };
-        (graph, table)
+        let mut q = VecDeque::new();
+        for i in 0..n {
+            if graph.is_final[i] {
+                q.push_back(i);
+            }
+        }
+
+        let mut visited = vec![false; n];
+        while let Some(u) = q.pop_front() {
+            if visited[u] { continue; }
+            visited[u] = true;
+            for &v in &rev_adj[u] {
+                heights[v] = heights[v].max(heights[u] + 1);
+                q.push_back(v);
+            }
+        }
+        heights
     }
 
-    /// Minimizes an unweighted graph using Hopcroft's partition refinement algorithm.
-    fn cyclic_minimize(graph: &EncodedGraph) -> Partition {
+    fn state_comparator(
+        a: StateID,
+        b: StateID,
+        graph: &EncodedGraph,
+        partition: &Partition,
+    ) -> Ordering {
+        if a == b { return Ordering::Equal; }
+
+        // Compare final status
+        graph.is_final[a].cmp(&graph.is_final[b])
+            .then_with(|| {
+                // Compare number of transitions
+                graph.transitions[a].len().cmp(&graph.transitions[b].len())
+            })
+            .then_with(|| {
+                // Lexicographically compare transitions
+                let trans_a = &graph.transitions[a];
+                let trans_b = &graph.transitions[b];
+                for ((label_a, target_a), (label_b, target_b)) in trans_a.iter().zip(trans_b.iter()) {
+                    let cmp = label_a.cmp(label_b)
+                        .then_with(|| partition.classes[*target_a].cmp(&partition.classes[*target_b]));
+                    if cmp != Ordering::Equal {
+                        return cmp;
+                    }
+                }
+                Ordering::Equal
+            })
+    }
+}
+
+// --- Cyclic Minimization Module ---
+mod cyclic_minimize {
+    use std::collections::BTreeSet;
+    use super::*;
+
+    pub fn minimize(graph: &EncodedGraph) -> Partition {
         let n = graph.transitions.len();
         if n == 0 {
             return Partition::new(0, 0);
         }
 
         // 1. Initial partition: final vs. non-final states.
-        let mut num_classes = 1;
-        if graph.is_final.iter().any(|&f| f) {
-            num_classes = 2;
-        }
+        let mut num_classes = if graph.is_final.iter().any(|&f| f) { 2 } else { 1 };
         let mut partition = Partition::new(n, num_classes);
         if num_classes == 2 {
             for i in 0..n {
-                if graph.is_final[i] {
-                    partition.classes[i] = 1;
-                }
+                if graph.is_final[i] { partition.classes[i] = 1; }
             }
         } else {
-            return partition; // All states are in one class.
+            return partition;
         }
 
-        // 2. Build reverse adjacency list for the encoded graph.
+        // 2. Build reverse adjacency list.
         let mut rev_adj: Vec<BTreeMap<i16, Vec<StateID>>> = vec![BTreeMap::new(); n];
         for i in 0..n {
             for (&label, &target) in &graph.transitions[i] {
@@ -198,14 +452,9 @@ impl DWA {
         let mut worklist: VecDeque<usize> = (0..partition.num_classes).collect();
 
         while let Some(class_id) = worklist.pop_front() {
-            let states_in_class: Vec<_> = (0..n)
-                .filter(|&i| partition.classes[i] == class_id)
-                .collect();
-            if states_in_class.is_empty() {
-                continue;
-            }
+            let states_in_class: Vec<_> = (0..n).filter(|&i| partition.classes[i] == class_id).collect();
+            if states_in_class.is_empty() { continue; }
 
-            // Find all incoming transitions to this class, grouped by label.
             let mut incoming_by_label: BTreeMap<i16, BTreeSet<StateID>> = BTreeMap::new();
             for &state in &states_in_class {
                 for (label, sources) in &rev_adj[state] {
@@ -216,22 +465,14 @@ impl DWA {
             }
 
             for (_, sources) in incoming_by_label {
-                // Group sources by their current partition.
                 let mut sources_by_class: BTreeMap<usize, Vec<StateID>> = BTreeMap::new();
                 for &source in &sources {
-                    sources_by_class
-                        .entry(partition.classes[source])
-                        .or_default()
-                        .push(source);
+                    sources_by_class.entry(partition.classes[source]).or_default().push(source);
                 }
 
                 for (source_class_id, split_off) in sources_by_class {
-                    let total_in_class_count = (0..n)
-                        .filter(|&i| partition.classes[i] == source_class_id)
-                        .count();
-                    if split_off.len() == total_in_class_count {
-                        continue; // No split needed.
-                    }
+                    let total_in_class_count = (0..n).filter(|&i| partition.classes[i] == source_class_id).count();
+                    if split_off.len() == total_in_class_count { continue; }
 
                     let new_class_id = partition.num_classes;
                     partition.num_classes += 1;
@@ -239,7 +480,6 @@ impl DWA {
                         partition.classes[state_to_move] = new_class_id;
                     }
 
-                    // Update worklist: add the smaller of the two new partitions.
                     if let Some(pos) = worklist.iter().position(|&id| id == source_class_id) {
                         worklist.push_back(new_class_id);
                     } else {
@@ -254,108 +494,36 @@ impl DWA {
         }
         partition
     }
+}
 
-    /// Builds a new, minimized DWA from the state partitions.
-    fn merge_states_from_partition(
-        dwa: &DWA,
-        partition: &Partition,
-        encoded_graph: &EncodedGraph,
-    ) -> (DWAStates, StateID) {
-        let mut new_states = DWAStates::default();
-        let mut class_to_new_id = HashMap::new();
-        let mut representatives = BTreeMap::new();
+// --- Helper Implementations ---
 
-        for i in 0..dwa.states.len() {
-            representatives.entry(partition.classes[i]).or_insert(i);
-        }
-
-        for (class_id, &rep_id) in &representatives {
-            let new_id = new_states.add_state();
-            class_to_new_id.insert(*class_id, new_id);
-            new_states[new_id].final_weight = dwa.states[rep_id].final_weight.clone();
-            new_states[new_id].state_weight = dwa.states[rep_id].state_weight.clone();
-        }
-
-        for (class_id, &rep_id) in &representatives {
-            let new_id = class_to_new_id[class_id];
-            for (&encoded_label, &target) in &encoded_graph.transitions[rep_id] {
-                let target_class = partition.classes[target];
-                let new_target_id = class_to_new_id[&target_class];
-                new_states[new_id]
-                    .transitions
-                    .insert(encoded_label, new_target_id);
-            }
-        }
-
-        let start_class = partition.classes[dwa.body.start_state];
-        let new_start = class_to_new_id[&start_class];
-
-        (new_states, new_start)
+impl EncodeTable {
+    fn new() -> Self {
+        Self { map: HashMap::new(), vec: Vec::new() }
     }
-
-    /// Restores original labels and weights to a minimized DWA.
-    fn decode(states: &mut DWAStates, table: &EncodeTable) {
-        for state in &mut states.0 {
-            let mut new_transitions = BTreeMap::new();
-            let mut new_weights = BTreeMap::new();
-            for (&encoded_label, &target) in &state.transitions {
-                let (original_label, original_weight) = &table.vec[encoded_label as usize];
-                new_transitions.insert(*original_label, target);
-                let weight_entry = new_weights
-                    .entry(*original_label)
-                    .or_insert_with(Weight::zeros);
-                *weight_entry |= original_weight;
-            }
-            state.transitions = new_transitions;
-            state.trans_weights = new_weights;
-        }
+    fn encode(&mut self, label: i16, weight: Weight) -> i16 {
+        let key = (label, weight);
+        if let Some(&id) = self.map.get(&key) { return id; }
+        let new_id = self.vec.len() as i16;
+        self.vec.push(key.clone());
+        self.map.insert(key, new_id);
+        new_id
     }
+}
 
-    /// Propagates future weight constraints backward to relax edge weights,
-    /// making states with similar futures more likely to be identified as equivalent.
-    fn push_weights_and_relax_edges(states: &mut DWAStates) -> bool {
-        let n = states.len();
-        if n == 0 {
-            return false;
-        }
-        let mut upper_bounds: Vec<Weight> = Vec::with_capacity(n);
-        for i in 0..n {
-            let mut u = states[i].final_weight.clone().unwrap_or_else(Weight::zeros);
-            for w in states[i].trans_weights.values() {
-                u |= w;
-            }
-            if let Some(sw) = states[i].state_weight.as_ref() {
-                u &= sw;
-            }
-            upper_bounds.push(u);
-        }
-        let complements: Vec<Weight> = upper_bounds.iter().map(|w| !w).collect();
-        let mut changed = false;
-        for i in 0..n {
-            let st = &mut states[i];
-            let keys: Vec<i16> = st.transitions.keys().copied().collect();
-            for ch in keys {
-                if let Some(&v) = st.transitions.get(&ch) {
-                    if v < n {
-                        if let Some(w) = st.trans_weights.get_mut(&ch) {
-                            let new_w = &*w | &complements[v];
-                            if new_w != *w {
-                                *w = new_w;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        changed
+impl Partition {
+    fn new(n: usize, num_classes: usize) -> Self {
+        Self { classes: vec![0; n], num_classes }
     }
+    fn num_classes(&self) -> usize { self.num_classes }
+}
 
-    /// Removes states that are not reachable from the start state.
+// --- Pruning and Connectivity ---
+
+impl DWA {
     fn prune_unreachable(&mut self) -> bool {
-        if self.states.0.is_empty() {
-            return false;
-        }
+        if self.states.0.is_empty() { return false; }
         let n = self.states.0.len();
         let mut visited = vec![false; n];
         let mut q: VecDeque<usize> = VecDeque::new();
@@ -363,78 +531,48 @@ impl DWA {
             visited[self.body.start_state] = true;
             q.push_back(self.body.start_state);
         } else {
-            if n > 0 {
-                self.states.0.clear();
-                self.body.start_state = self.states.add_state();
-                return true;
-            }
+            if n > 0 { self.states.0.clear(); self.body.start_state = self.states.add_state(); return true; }
             return false;
         }
         while let Some(u) = q.pop_front() {
             for (_, v, _) in self.states[u].iter_edges() {
-                if v < n && !visited[v] {
-                    visited[v] = true;
-                    q.push_back(v);
-                }
+                if v < n && !visited[v] { visited[v] = true; q.push_back(v); }
             }
         }
         let num_reachable = visited.iter().filter(|&&b| b).count();
-        if num_reachable == n {
-            return false;
-        }
+        if num_reachable == n { return false; }
         let mut map = vec![usize::MAX; n];
         let mut new_states: Vec<DWAState> = Vec::with_capacity(num_reachable);
         for i in 0..n {
-            if visited[i] {
-                map[i] = new_states.len();
-                new_states.push(self.states[i].clone());
-            }
+            if visited[i] { map[i] = new_states.len(); new_states.push(self.states[i].clone()); }
         }
         for st in &mut new_states {
-            for tgt in st.transitions.values_mut() {
-                *tgt = map[*tgt];
-            }
+            for tgt in st.transitions.values_mut() { *tgt = map[*tgt]; }
         }
         self.states.0 = new_states;
-        if num_reachable > 0 {
-            self.body.start_state = map[self.body.start_state];
-        } else {
-            self.states.0.clear();
-            self.body.start_state = self.states.add_state();
-        }
+        if num_reachable > 0 { self.body.start_state = map[self.body.start_state]; }
+        else { self.states.0.clear(); self.body.start_state = self.states.add_state(); }
         true
     }
 
-    /// Removes states that cannot reach a final state.
     fn prune_dead_ends(&mut self) -> bool {
         let n = self.states.len();
-        if n == 0 {
-            return false;
-        }
+        if n == 0 { return false; }
         let mut live = vec![false; n];
         let mut q_live: VecDeque<usize> = VecDeque::new();
         let mut rev_adj: Vec<Vec<usize>> = vec![vec![]; n];
         for i in 0..n {
-            if self.states[i]
-                .final_weight
-                .as_ref()
-                .map_or(false, |w| !w.is_empty())
-            {
+            if self.states[i].final_weight.as_ref().map_or(false, |w| !w.is_empty()) {
                 live[i] = true;
                 q_live.push_back(i);
             }
             for (_, v, w) in self.states[i].iter_edges() {
-                if v < n && !w.is_empty() {
-                    rev_adj[v].push(i);
-                }
+                if v < n && !w.is_empty() { rev_adj[v].push(i); }
             }
         }
         while let Some(u) = q_live.pop_front() {
             for &v in &rev_adj[u] {
-                if !live[v] {
-                    live[v] = true;
-                    q_live.push_back(v);
-                }
+                if !live[v] { live[v] = true; q_live.push_back(v); }
             }
         }
         let mut changed = false;
@@ -444,8 +582,7 @@ impl DWA {
             st.transitions.retain(|_, tgt| *tgt < n && live[*tgt]);
             if st.transitions.len() != before {
                 changed = true;
-                st.trans_weights
-                    .retain(|ch, _| st.transitions.contains_key(ch));
+                st.trans_weights.retain(|ch, _| st.transitions.contains_key(ch));
             }
         }
         changed
@@ -496,7 +633,7 @@ impl NWA {
         if n == 0 { return false; }
         let mut live = vec![false; n];
         let mut q = VecDeque::new();
-        let mut rev_adj: Vec<Vec<NWAStateID>> = vec![vec![]; n];
+        let mut rev_adj: Vec<Vec<StateID>> = vec![vec![]; n];
 
         for p in 0..n {
             let st = &self.states[p];
