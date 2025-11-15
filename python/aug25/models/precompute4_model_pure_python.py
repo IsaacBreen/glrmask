@@ -346,20 +346,6 @@ class Model(GraphProvider):
         initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
 
-        print("Precompute4 Model loaded.")
-        print(f"  DWA states: {len(dwa.states)}")
-        for i, st in enumerate(dwa.states):
-            print(f"  DWA state {i}:")
-            print(f"    state weight: {st.state_weight}")
-            print(f"    final weight: {st.final_weight}")
-            print(f"    transitions:")
-            for label, (target, weight) in st.transitions.items():
-                print(f"      {label} -> {target} ({weight})")
-        print(f"  Tokenizer initial state: {tokenizer.initial_state_id()}")
-        print(f"  Parser table start state: {parser_table.start_state_id}")
-        print(f"  Original to dummy map: {original_to_dummy_map}")
-        print(f"  Possible matches cache: {len(possible_matches_cache)}")
-
         model = Model(
             dwa=dwa,
             parser_table=parser_table,
