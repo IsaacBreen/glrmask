@@ -999,6 +999,7 @@ pub struct GrammarConstraint {
     pub trie2_god: Trie2GodWrapper,
     pub trie3_god: Trie3GodWrapper,
     pub trie3_traversal_data: Option<TrieTraversalData>,
+    pub run_precompute4: bool,
     pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
     // Stage-local vocabularies for internal<->original mappings
     pub precompute0_vocab: StageVocab,
@@ -1106,6 +1107,10 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
         obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
         obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
+        obj.insert(
+            "run_precompute4".to_string(),
+            self.run_precompute4.to_json(),
+        );
         obj.insert(
             "post_commit_allow_check_mode".to_string(),
             self.post_commit_allow_check_mode.to_json(),
@@ -1217,6 +1222,11 @@ impl JSONConvertible for GrammarConstraint {
                 let trie3_traversal_data =
                     Trie::compute_traversal_data(&trie3_god, &trie3_roots);
 
+                let run_precompute4 = obj
+                    .remove("run_precompute4")
+                    .map(bool::from_json)
+                    .transpose()?
+                    .unwrap_or(false);
                 let post_commit_allow_check_mode =
                     match obj.remove("post_commit_allow_check_mode") {
                         Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
@@ -1279,6 +1289,7 @@ impl JSONConvertible for GrammarConstraint {
                     trie2_god,
                     trie3_god,
                     trie3_traversal_data,
+                    run_precompute4,
                     post_commit_allow_check_mode,
                     state_map_by_llm,
                     terminal_map_by_llm,
@@ -1875,6 +1886,7 @@ impl GrammarConstraint {
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
                 precomputed4: Precomputed4::new(),
+                run_precompute4: false,
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -1944,6 +1956,7 @@ impl GrammarConstraint {
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
                 precomputed4: Precomputed4::new(),
+                run_precompute4: false,
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -2132,6 +2145,7 @@ impl GrammarConstraint {
             trie2_god,
             trie3_god,
             trie3_traversal_data,
+            run_precompute4: config.run_precompute4,
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             state_map_by_llm,
             terminal_map_by_llm,
@@ -4711,7 +4725,11 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn get_mask(&self) -> LLMTokenBV {
-        self.get_mask3()
+        if self.parent.run_precompute4 {
+            self.get_mask4()
+        } else {
+            self.get_mask3()
+        }
     }
 
     pub fn print_gss_stats(&self) {
@@ -4931,7 +4949,129 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn get_mask4(&self) -> LLMTokenBV {
-        todo!()
+        let final_mask_internal = RefCell::new(HybridBitset::zeros());
+        if self.state.is_empty() {
+            return self
+                .parent
+                .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+        }
+
+        let mut pending_states: BTreeMap<WAStateID, GLRParserState<'a>> = BTreeMap::new();
+        let dwa = &self.parent.precomputed4;
+        let dwa_start_state = &dwa.states[dwa.body.start_state];
+
+        // 1. Seed initial states
+        for (&tokenizer_state_id, glr_state) in &self.state {
+            if glr_state.active_state.stack.is_empty() {
+                continue;
+            }
+            let mut glr_state = glr_state.clone();
+            prune_llm_tokens_by_disallowed_terminals(
+                &mut glr_state.active_state.stack,
+                &self.parent.possible_matches,
+                &mut HashMap::new(),
+            );
+
+            if !glr_state.is_ok() {
+                continue;
+            }
+
+            if let Some((target_wa_state_id, weight)) =
+                dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
+            {
+                allow_only_llm_tokens_and_prune_arc(
+                    &mut glr_state.active_state.stack,
+                    weight,
+                    &mut HashMap::new(),
+                );
+
+                if glr_state.is_ok() {
+                    pending_states
+                        .entry(target_wa_state_id)
+                        .and_modify(|existing| existing.merge_with(glr_state.clone()))
+                        .or_insert(glr_state);
+                }
+            }
+        }
+
+        // 2. Main worklist loop
+        while !pending_states.is_empty() {
+            let worklist = std::mem::take(&mut pending_states);
+
+            for (current_wa_state_id, mut current_glr_state) in worklist {
+                let dwa_state = &dwa.states[current_wa_state_id];
+
+                // Apply state weight
+                if let Some(sw) = &dwa_state.state_weight {
+                    allow_only_llm_tokens_and_prune_arc(
+                        &mut current_glr_state.active_state.stack,
+                        sw,
+                        &mut HashMap::new(),
+                    );
+                    if !current_glr_state.is_ok() {
+                        continue;
+                    }
+                }
+
+                // Process final weight
+                if let Some(fw) = &dwa_state.final_weight {
+                    let mut final_glr_state = current_glr_state.clone();
+                    allow_only_llm_tokens_and_prune_arc(
+                        &mut final_glr_state.active_state.stack,
+                        fw,
+                        &mut HashMap::new(),
+                    );
+                    if final_glr_state.is_ok() {
+                        *final_mask_internal.borrow_mut() |=
+                            &final_glr_state.active_state.stack.allowed_llm_tokens();
+                    }
+                }
+
+                // Process transitions (pop 1)
+                let popped = current_glr_state.active_state.stack.popn(1);
+                if popped.num_predecessors() == 0 {
+                    continue;
+                }
+
+                for (label, target_wa_state_id, trans_weight) in dwa_state.iter_edges() {
+                    let parser_state_id = label as usize;
+
+                    let mut valid_gss_nodes = Vec::new();
+                    for popper_item in popped.iter() {
+                        for peek in popper_item.peek_iter() {
+                            if peek.edge_value().state_id.0 == parser_state_id {
+                                valid_gss_nodes.push(peek.isolated_parent());
+                            }
+                        }
+                    }
+
+                    if !valid_gss_nodes.is_empty() {
+                        let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes);
+                        let mut new_glr_state = current_glr_state.clone();
+                        new_glr_state.active_state.stack = merged_gss;
+
+                        allow_only_llm_tokens_and_prune_arc(
+                            &mut new_glr_state.active_state.stack,
+                            trans_weight,
+                            &mut HashMap::new(),
+                        );
+
+                        if new_glr_state.is_ok() {
+                            pending_states
+                                .entry(target_wa_state_id)
+                                .and_modify(|existing| existing.merge_with(new_glr_state.clone()))
+                                .or_insert(new_glr_state);
+                        }
+                    }
+                }
+            }
+        }
+
+        let final_mask_mapped = self
+            .parent
+            .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+
+        final_mask_mapped
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
