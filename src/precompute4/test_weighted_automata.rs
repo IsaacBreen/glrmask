@@ -565,7 +565,9 @@ fn test_simplify_propagates_future_weights() {
     b.add_transition(s1_b, 'b' as i16, s2_b, Weight::all()).unwrap();
     b.set_final_weight(s2_b, Weight::from_item(2)).unwrap();
 
+    println!("Before simplification A:\n{}", a);
     a.simplify();
+    println!("After simplification A:\n{}", a);
 
     stochastic_equivalence_test(a, b);
 }
