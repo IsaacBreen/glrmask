@@ -70,7 +70,7 @@ use crate::glr::table::StateID;
 use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue};
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use crate::precompute4::weighted_automata::{StateID as WAStateID, Weight};
+use crate::precompute4::weighted_automata::{SimpleBitset, StateID as WAStateID, Weight};
 use crate::precompute4::full_dwa::{precompute4, Precomputed4};
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
@@ -4949,6 +4949,9 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn get_mask4(&self) -> LLMTokenBV {
+        fn simple_bitset_to_hybrid_bitset(sb: &SimpleBitset) -> HybridBitset {
+            HybridBitset::from(sb.rsb.clone())
+        }
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
         if self.state.is_empty() {
             return self
@@ -4981,7 +4984,7 @@ impl<'a> GrammarConstraintState<'a> {
             {
                 allow_only_llm_tokens_and_prune_arc(
                     &mut glr_state.active_state.stack,
-                    weight,
+                    &simple_bitset_to_hybrid_bitset(weight),
                     &mut HashMap::new(),
                 );
 
@@ -5005,7 +5008,7 @@ impl<'a> GrammarConstraintState<'a> {
                 if let Some(sw) = &dwa_state.state_weight {
                     allow_only_llm_tokens_and_prune_arc(
                         &mut current_glr_state.active_state.stack,
-                        sw,
+                        &simple_bitset_to_hybrid_bitset(sw),
                         &mut HashMap::new(),
                     );
                     if !current_glr_state.is_ok() {
@@ -5018,7 +5021,7 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut final_glr_state = current_glr_state.clone();
                     allow_only_llm_tokens_and_prune_arc(
                         &mut final_glr_state.active_state.stack,
-                        fw,
+                        &simple_bitset_to_hybrid_bitset(fw),
                         &mut HashMap::new(),
                     );
                     if final_glr_state.is_ok() {
@@ -5052,7 +5055,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                         allow_only_llm_tokens_and_prune_arc(
                             &mut new_glr_state.active_state.stack,
-                            trans_weight,
+                            &simple_bitset_to_hybrid_bitset(trans_weight),
                             &mut HashMap::new(),
                         );
 
