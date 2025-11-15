@@ -4,21 +4,11 @@
 #![allow(clippy::needless_borrow)]
 
 use super::common::{format_i16_char, NWAStateID, Weight};
+use super::dwa::{DWA, DWAState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
-
-use rustfst::algorithms::determinize::{
-    determinize_with_config, DeterminizeConfig, DeterminizeType,
-};
-use rustfst::algorithms::{minimize_with_config, MinimizeConfig};
-use rustfst::algorithms::rm_epsilon::rm_epsilon;
-
-use crate::precompute4::weighted_automata::determinization_rustfst::{
-    nwa_to_vector_fst, vector_fst_to_nwa,
-};
-use crate::precompute4::weighted_automata::DWA;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NWABuildError {
@@ -380,83 +370,118 @@ impl NWA {
         self.states.add_epsilon(from, to, w);
     }
 
-    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA {
-        super::determinization_rustfst::determinize_nwa_to_dwa(self)
+    pub fn determinize_to_dwa(&self) -> DWA {
+        self.determinize()
     }
-}
 
-#[derive(Clone, Debug)]
-pub struct SimplifyRustfstConfig {
-    pub determinize: bool,
-    pub minimize: bool,
-    pub connect: bool,
-    pub rm_epsilon: bool,
-}
+    /// Computes the epsilon-closure of a weighted subset of NWA states.
+    /// The weight of a state in the closure is the union of weights of all
+    /// epsilon-paths from the initial subset to that state.
+    fn epsilon_closure(
+        &self,
+        subset: &BTreeMap<NWAStateID, Weight>,
+    ) -> BTreeMap<NWAStateID, Weight> {
+        let mut closure = subset.clone();
+        let mut worklist: VecDeque<NWAStateID> = subset.keys().copied().collect();
 
-impl Default for SimplifyRustfstConfig {
-    fn default() -> Self {
-        Self {
-            determinize: false,
-            minimize: true,
-            connect: true,
-            rm_epsilon: false,
+        while let Some(u) = worklist.pop_front() {
+            let u_weight = closure.get(&u).unwrap().clone();
+            if u >= self.states.len() {
+                continue;
+            }
+            for (v, eps_weight) in &self.states[u].epsilons {
+                let v_new_weight = &u_weight & eps_weight;
+                if !v_new_weight.is_empty() {
+                    let v_current_weight = closure.entry(*v).or_insert_with(Weight::zeros);
+                    let combined = &*v_current_weight | &v_new_weight;
+                    if combined != *v_current_weight {
+                        *v_current_weight = combined;
+                        worklist.push_back(*v);
+                    }
+                }
+            }
         }
-    }
-}
-
-impl SimplifyRustfstConfig {
-    pub fn with_determinize(mut self, determinize: bool) -> Self {
-        self.determinize = determinize;
-        self
+        closure
     }
 
-    pub fn with_minimize(mut self, minimize: bool) -> Self {
-        self.minimize = minimize;
-        self
-    }
+    /// Determinizes the NWA into a DWA using subset construction.
+    /// The weights in this semiring (union for +, intersection for *) are
+    /// handled by tracking a weight for each NWA state within a DWA state subset.
+    pub fn determinize(&self) -> DWA {
+        let mut dwa = DWA::new();
+        dwa.states.0.clear(); // new() adds a start state, we'll manage it.
 
-    pub fn with_connect(mut self, connect: bool) -> Self {
-        self.connect = connect;
-        self
-    }
+        let mut subset_map: HashMap<BTreeMap<NWAStateID, Weight>, NWAStateID> = HashMap::new();
+        let mut worklist: VecDeque<BTreeMap<NWAStateID, Weight>> = VecDeque::new();
 
-    pub fn with_rm_epsilon(mut self, rm_epsilon: bool) -> Self {
-        self.rm_epsilon = rm_epsilon;
-        self
-    }
-}
+        // Initial state of DWA
+        let mut start_subset = BTreeMap::new();
+        if self.body.start_state < self.states.len() {
+            start_subset.insert(self.body.start_state, Weight::all());
+            let initial_subset = self.epsilon_closure(&start_subset);
 
-impl NWA {
-    pub fn simplify_rustfst(&mut self) {
-        let config = SimplifyRustfstConfig::default();
-        self.simplify_rustfst_with_config(config);
-    }
-
-    pub fn simplify_rustfst_with_config(&mut self, config: SimplifyRustfstConfig) {
-        crate::debug!(4, "NWA Simplify with rustfst");
-        let mut fst = nwa_to_vector_fst(self);
-
-        if config.minimize {
-            crate::debug!(4, "Minimize");
-            let config = MinimizeConfig::default().with_allow_nondet(true);
-            minimize_with_config(&mut fst, config).unwrap();
+            if !initial_subset.is_empty() {
+                let start_id = dwa.add_state();
+                dwa.body.start_state = start_id;
+                subset_map.insert(initial_subset.clone(), start_id);
+                worklist.push_back(initial_subset);
+            } else {
+                dwa.body.start_state = dwa.add_state(); // empty DWA
+            }
+        } else {
+            dwa.body.start_state = dwa.add_state(); // empty DWA
         }
-        if config.connect {
-            crate::debug!(4, "Connect");
-            rustfst::algorithms::connect(&mut fst).unwrap();
+
+        while let Some(subset) = worklist.pop_front() {
+            let from_dwa_id = *subset_map.get(&subset).unwrap();
+
+            // Final weight for this DWA state is the union of path weights to final NWA states.
+            let mut final_weight = Weight::zeros();
+            for (nwa_id, path_weight) in &subset {
+                if let Some(fw) = &self.states[*nwa_id].final_weight {
+                    final_weight |= &(path_weight & fw);
+                }
+            }
+            if !final_weight.is_empty() {
+                dwa.states[from_dwa_id].final_weight = Some(final_weight);
+            }
+
+            // Collect transitions out of the current subset, grouped by label.
+            let mut transitions: BTreeMap<i16, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
+            for (nwa_id, path_weight) in &subset {
+                for (label, targets) in &self.states[*nwa_id].transitions {
+                    for (target_nwa_id, trans_weight) in targets {
+                        let next_path_weight = path_weight & trans_weight;
+                        if !next_path_weight.is_empty() {
+                            let entry = transitions.entry(*label).or_default();
+                            *entry.entry(*target_nwa_id).or_insert_with(Weight::zeros) |=
+                                &next_path_weight;
+                        }
+                    }
+                }
+            }
+
+            // Create new DWA states and transitions for each label.
+            for (label, next_subset_pre_closure) in transitions {
+                let next_subset = self.epsilon_closure(&next_subset_pre_closure);
+                if next_subset.is_empty() {
+                    continue;
+                }
+
+                let to_dwa_id = *subset_map.entry(next_subset.clone()).or_insert_with(|| {
+                    let new_id = dwa.add_state();
+                    worklist.push_back(next_subset);
+                    new_id
+                });
+
+                // For this semiring, weights are pushed into the states. DWA transitions
+                // can be unweighted (or weight=ALL), as the path weights are tracked
+                // inside the subsets.
+                dwa.add_transition(from_dwa_id, label, to_dwa_id, Weight::all())
+                    .unwrap();
+            }
         }
-        if config.rm_epsilon {
-            crate::debug!(4, "Remove Epsilon");
-            rm_epsilon(&mut fst).unwrap();
-            crate::debug!(4, "Convert back to NWA");
-        }
-        if config.determinize {
-            crate::debug!(4, "Determinize");
-            let det_config = DeterminizeConfig::default()
-                .with_det_type(DeterminizeType::DeterminizeFunctional);
-            fst = determinize_with_config(&fst, det_config).unwrap();
-        }
-        *self = vector_fst_to_nwa(&fst);
+        dwa
     }
 }
 
