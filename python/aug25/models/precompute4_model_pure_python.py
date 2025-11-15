@@ -286,8 +286,7 @@ class Model(GraphProvider):
             weights_map = s['trans_weights']  # label -> weight
 
             merged_trans = {}
-            print(trans_map[0])
-            for label_str, target in trans_map.items():
+            for label_str, target in trans_map:
                 label = int(label_str)
                 w_json = weights_map.get(label_str)
                 weight = _parse_weight(w_json) if w_json is not None else all_internal_llm_tokens_bitset
