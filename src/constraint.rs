@@ -2001,6 +2001,7 @@ impl GrammarConstraint {
             };
         }
 
+        let precompute_vocab_before_p1 = precompute_vocab.clone();
         let (precomputed1, trie1_god) = Self::precompute1(
             &tokenizer,
             Some(&parser),
@@ -2013,7 +2014,32 @@ impl GrammarConstraint {
             original_to_dummy_map.clone(),
         );
 
-        let possible_matches_precompute1 = computed_possible_matches.clone();
+        let mut possible_matches_precompute1 = computed_possible_matches.clone();
+
+        if precompute_vocab_before_p1.original_to_internal != precompute_vocab.original_to_internal {
+            crate::debug!(
+                2,
+                "Remapping LLM token IDs in possible_matches_precompute1 due to Trie1 optimization."
+            );
+            let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
+            for (original_id, old_internal_id) in &precompute_vocab_before_p1.original_to_internal {
+                if let Some(new_internal_id) = precompute_vocab.original_to_internal.get(original_id) {
+                    old_to_new_map.insert(*old_internal_id, *new_internal_id);
+                }
+            }
+
+            for terminal_map in possible_matches_precompute1.values_mut() {
+                for llm_token_bv in terminal_map.values_mut() {
+                    let mut new_bv = LLMTokenBV::zeros();
+                    for old_id in llm_token_bv.iter() {
+                        if let Some(new_id) = old_to_new_map.get(&old_id) {
+                            new_bv.insert(*new_id);
+                        }
+                    }
+                    *llm_token_bv = new_bv;
+                }
+            }
+        }
 
         precompute2_vocab = precompute_vocab.clone();
         precompute3_vocab = precompute_vocab.clone();
