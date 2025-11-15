@@ -370,7 +370,7 @@ impl NWA {
         self.states.add_epsilon(from, to, w);
     }
 
-    pub fn determinize_to_dwa2(&self) -> DWA {
+    pub fn determinize_to_dwa(&self) -> DWA {
         self.determinize()
     }
 
