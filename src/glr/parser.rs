@@ -345,7 +345,7 @@ impl JSONConvertible for GLRParser {
 }
 
 impl Debug for GLRParser {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GLRParser")
             .field("table_len", &self.table.len())
             .field("productions_len", &self.productions.len())
