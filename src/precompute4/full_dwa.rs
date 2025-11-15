@@ -166,7 +166,7 @@ pub fn precompute4(
         // step function
         |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
             let (current_nwa_body, current_tokens) = current_val;
-            let terminal_id = edge_terminal_opt.map(|t| *t);
+            let terminal_id = *edge_terminal_opt;
 
             let mut results = Vec::new();
             for (dest_idx, llm_token_bv) in dest_map.iter() {
@@ -203,7 +203,7 @@ pub fn precompute4(
             for (right_body, term_map2) in bodies2 {
                 let term_map1 = bodies1.entry(right_body).or_default();
                 for (term, weight2) in term_map2 {
-                    term_map1.entry(term).or_insert_with(Weight::zeros) |= &weight2;
+                    *term_map1.entry(term).or_insert_with(Weight::zeros) |= &weight2;
                 }
             }
             *tokens1 |= &tokens2;
@@ -468,13 +468,13 @@ fn instantiate_template_nwa_with_weight(
     template_dwa: &DWA,
     weight: Weight,
 ) -> NWABody {
-    let concatenated_dwa = template_dwa.concatenate(&build_epsilon_dwa(weight));
-    let template_nwa = NWA::from_dwa(&concatenated_dwa);
     crate::debug!(
         5,
         "Applying template NWA with weight {:?}...",
         weight
     );
+    let concatenated_dwa = template_dwa.concatenate(&build_epsilon_dwa(weight));
+    let template_nwa = NWA::from_dwa(&concatenated_dwa);
     let mut states = states_arena.borrow_mut();
     let (template_start_in_arena, _) =
         states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
