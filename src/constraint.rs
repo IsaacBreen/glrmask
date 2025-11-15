@@ -5106,7 +5106,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         let final_mask_mapped = self
             .parent
-            .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+            .internal_bv_to_original_precompute1(&final_mask_internal.into_inner());
 
         final_mask_mapped
     }
