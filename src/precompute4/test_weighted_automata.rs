@@ -1293,10 +1293,10 @@ fn test_simplify_complex_dwa_from_attachment() {
     left.add_transition(25, 9, 4, w_01.clone()).unwrap();
     left.add_transition(25, 10, 5, w_01.clone()).unwrap();
 
+    println!("Before simplification:\n{}", left);
     let mut simplified = left.clone();
-    println!("Before simplification: {} states", simplified.states.len());
     simplified.simplify();
-    println!("After simplification: {} states", simplified.states.len());
+    println!("After simplification:\n{}", simplified);
 
     stochastic_equivalence_test(left, simplified);
 }

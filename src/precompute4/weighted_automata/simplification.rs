@@ -71,7 +71,7 @@ impl DWA {
             cyclic_minimize::minimize(&encoded_graph)
         };
 
-        if partition.num_classes() == initial_n {
+        if partition.num_classes() == initial_n + 1 { // +1 for super-final
             return false; // No states were merged.
         }
 
@@ -221,6 +221,13 @@ fn merge_and_decode(
 /// Pushes weights towards the start state to normalize the automaton for minimization.
 fn push_weights(states: &mut DWAStates, _body: &mut DWABody) {
     let distance = shortest_distance::calculate(states, true); // Reversed shortest distance
+
+    // Guard: If all distances are ZERO, it means there are no final states or no paths
+    // to them. Pushing weights would incorrectly relax all weights to ALL.
+    if distance.iter().all(|w| w.is_empty()) {
+        return;
+    }
+
     reweight::apply(states, &distance);
 }
 
