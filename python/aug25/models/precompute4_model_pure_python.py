@@ -501,6 +501,7 @@ class Model(GraphProvider):
             queue[depth][target_state_id] = gss
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
+        print(f"GSS: {self.state}")
         stats = Stats.get()
         stats.start('get_mask')
         
@@ -512,7 +513,7 @@ class Model(GraphProvider):
         
         # 1. Seed initial states
         start_node = self.dwa.states[self.dwa.start_state]
-        
+
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
             disallowed = RangeSet.empty()
@@ -545,19 +546,17 @@ class Model(GraphProvider):
             
             for dwa_id, gss in states_at_depth.items():
                 dwa_state = self.dwa.states[dwa_id]
-                
-                # Apply state weight
-                if dwa_state.state_weight is not None:
-                    gss = self._apply_weight(gss, dwa_state.state_weight)
-                    if gss.is_empty():
-                        continue
-                        
+
                 # Check for final state
                 if dwa_state.final_weight is not None:
+                    print("Checking final state at DWA state", dwa_id)
                     acc = gss.reduce_acc()
+                    print("  Accumulator at final state:", acc)
                     if acc:
                         final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
+                        print("  Final tokens after intersection:", final_tokens)
                         if not final_tokens.is_empty():
+                            print("  Merging into final mask.")
                             final_mask |= final_tokens
                             
                 # Process transitions
@@ -601,6 +600,9 @@ class Model(GraphProvider):
         if not self.suppress_stats_report:
             Stats.get().report(sort_by='alpha')
 
+        print(f"self.internal_to_original_map: {self.internal_to_original_map}")
+        print(f"final mask: {final_mask}")
+        print(f"get_mask() returning {original_indices}")
         return original_indices
 
     def finalize(self):
