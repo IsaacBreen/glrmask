@@ -18,7 +18,7 @@ impl NWA {
         let initial_body = self.body;
 
         // 1. Determinize the NWA to a DWA.
-        let mut dwa = self.determinize();
+        let mut dwa = self.determinize_to_dwa();
 
         // 2. Simplify the DWA using the full minimization pipeline.
         dwa.simplify();

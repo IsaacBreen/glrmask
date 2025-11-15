@@ -293,6 +293,10 @@ pub fn precompute4(
 }
 
 fn optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
+    crate::debug!(
+        4,
+        "Starting optimization and determinization of combined NWA..."
+    );
     combined_nwa.simplify_rustfst();
     crate::debug!(
         5,
