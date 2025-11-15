@@ -346,20 +346,6 @@ class Model(GraphProvider):
         initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
 
-        print("Precompute4 Model loaded.")
-        print(f"  DWA states: {len(dwa.states)}")
-        for i, st in enumerate(dwa.states):
-            print(f"  DWA state {i}:")
-            print(f"    state weight: {st.state_weight}")
-            print(f"    final weight: {st.final_weight}")
-            print(f"    transitions:")
-            for label, (target, weight) in st.transitions.items():
-                print(f"      {label} -> {target} ({weight})")
-        print(f"  Tokenizer initial state: {tokenizer.initial_state_id()}")
-        print(f"  Parser table start state: {parser_table.start_state_id}")
-        print(f"  Original to dummy map: {original_to_dummy_map}")
-        print(f"  Possible matches cache: {len(possible_matches_cache)}")
-
         model = Model(
             dwa=dwa,
             parser_table=parser_table,
@@ -501,10 +487,6 @@ class Model(GraphProvider):
             queue[depth][target_state_id] = gss
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
-        print(f"GSSs")
-        for dwa_id, gss in self.state.items():
-            print(f"  DWA state {dwa_id}:")
-            print(f"    {gss}")
         stats = Stats.get()
         stats.start('get_mask')
         
@@ -542,12 +524,6 @@ class Model(GraphProvider):
                 if not gss_next.is_empty():
                     self._merge_into_queue(queue, gss_next, target_state_id)
 
-        print(f"Initial items")
-        for depth, states in queue.items():
-            for dwa_id, gss in states.items():
-                print(f"  Depth {depth}, DWA state {dwa_id}:")
-                print(f"    {gss}")
-
         # 2. Main worklist loop
         while queue:
             max_depth = max(queue.keys())
@@ -558,14 +534,10 @@ class Model(GraphProvider):
 
                 # Check for final state
                 if dwa_state.final_weight is not None:
-                    print("Checking final state at DWA state", dwa_id)
                     acc = gss.reduce_acc()
-                    print("  Accumulator at final state:", acc)
                     if acc:
                         final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
-                        print("  Final tokens after intersection:", final_tokens)
                         if not final_tokens.is_empty():
-                            print("  Merging into final mask.")
                             final_mask |= final_tokens
                             
                 # Process transitions
@@ -609,9 +581,6 @@ class Model(GraphProvider):
         if not self.suppress_stats_report:
             Stats.get().report(sort_by='alpha')
 
-        print(f"self.internal_to_original_map: {self.internal_to_original_map}")
-        print(f"final mask: {final_mask}")
-        print(f"get_mask() returning {original_indices}")
         return original_indices
 
     def finalize(self):
