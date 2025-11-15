@@ -5,33 +5,21 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
-/// Convenience alias for transition labels (both positive and negative codes).
 type Code = i16;
-
-/// Key identifying an in-flight cancellation search:
-/// `(origin_state, positive_code_being_cancelled)`.
 type QueryKey = (NWAStateID, Code);
 
 #[inline]
-fn is_negative_symbol(label: Code) -> bool {
-    label < 0 && label != DEFAULT_TRANSITION_SYMBOL
-}
+fn is_negative_symbol(label: Code) -> bool { label < 0 && label != DEFAULT_TRANSITION_SYMBOL }
 
-/// Optionally construct a configured progress bar.
 fn make_progress_bar(length: u64, template: &str) -> Option<ProgressBar> {
     if !PROGRESS_BAR_ENABLED {
         return None;
     }
     let pb = ProgressBar::new(length);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(template)
-            .expect("progress-bar"),
-    );
+    pb.set_style(ProgressStyle::default_bar().template(template).expect("progress-bar"));
     Some(pb)
 }
 
-/// Helper to advance the progress bar if it is enabled.
 fn progress_step(pb: &Option<ProgressBar>, step: u64, msg: &str) {
     if let Some(p) = pb {
         p.set_message(msg.to_string());
@@ -63,11 +51,7 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
 
 pub fn apply_cancellations(nwa: &mut NWA) {
     let epsilons_to_add = compute_cancellations(&nwa.states);
-    crate::debug!(
-        4,
-        "Computed {} new epsilon transitions from cancellations.",
-        epsilons_to_add.len()
-    );
+    crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
     for (from, to, w) in epsilons_to_add {
         nwa.states.add_epsilon(from, to, w);
     }
@@ -95,31 +79,9 @@ pub fn remove_negative_transitions(nwa: &mut NWA) {
 }
 
 /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
-/// This function implements the delicately crafted semantics of negative codes, which represent a stack-like
-/// cancellation mechanism. The transformation ensures the final DWA is free of negative codes and
-/// correctly represents the language defined by these complex interactions.
-///
-/// The process is as follows:
-/// 1.  Convert to NWA: The DWA is first converted to an NWA to allow for flexible graph manipulations,
-///     such as adding epsilon transitions.
-/// 2.  Resolve cancellations: The algorithm identifies all `A --neg(c)--> B --c--> C` sequences
-///     (optionally using epsilon and default transitions).
-///     Each such cancellation is resolved by adding a new epsilon transition `A --eps--> C`, with
-///     weights combined along the path.
-/// 3.  Propagate finality: Finality is propagated backward across all negative, epsilon,
-///     and default transitions. If a state `A` can reach a final state `F` through such a path,
-///     `A` inherits finality from `F`.
-/// 4.  Apply changes and clean up: The newly computed final weights are applied and all
-///     negative-code transitions are removed.
-/// 5.  Determinize: The resulting NWA, now free of negative codes, is determinized and simplified
-///     back into a DWA.
 pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     let now = Instant::now();
-    crate::debug!(
-        4,
-        "Resolving negative codes in DWA with {} states...",
-        dwa.states.len()
-    );
+    crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
 
     let pb = make_progress_bar(
         4,
@@ -134,11 +96,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
 
     progress_step(&pb, 2, "Resolve negatives in NWA");
     resolve_negative_codes_in_nwa(&mut nwa);
-    crate::debug!(
-        4,
-        "Applied changes, NWA has {} states before determinization.",
-        nwa.states.len()
-    );
+    crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
     crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
 
     progress_step(&pb, 3, "Determinize");
@@ -147,11 +105,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     progress_step(&pb, 4, "Simplify");
     result.simplify();
     *dwa = result;
-    crate::debug!(
-        4,
-        "Stats for final DWA after negative resolution:\n{}",
-        dwa.stats()
-    );
+    crate::debug!(4, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
 
     if let Some(p) = &pb {
         p.finish_with_message("Done");
@@ -159,20 +113,14 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
 }
 
-/// Finds all `A --neg(c)--> B --c--> C` patterns, including those chained via epsilon transitions,
-/// by iteratively finding new cancellation shortcuts until a fixpoint is reached.
 fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
     let n = states.len();
 
-    // `queries[s]` stores cancellation searches that have reached state `s`.
-    // A search is identified by its origin state `a` and the positive code `c` it is looking for.
-    // The map stores the accumulated weight of the path `a --neg(c)--> ... --eps*--> s`.
     let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
     let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
     let mut new_epsilons: HashMap<(NWAStateID, NWAStateID), Weight> = HashMap::new();
 
-    // 1. Initialize worklist with all negative transitions.
-    // Each `a --neg(c)--> b` starts a search at `b` for a matching `c`.
+    // Seed from negative transitions.
     for a in 0..n {
         for (&label, targets) in &states[a].transitions {
             if !is_negative_symbol(label) {
@@ -194,11 +142,7 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
         }
     }
 
-    // 2. Main fixpoint loop: propagate searches and generate new epsilon shortcuts.
     while let Some((s, a, c, w_as)) = worklist.pop_front() {
-        // Check for cancellations at the current state `s`.
-        // A cancellation occurs if `s` has an outgoing transition on `c`,
-        // or on the default symbol.
         let mut check_cancellations = |target: NWAStateID,
                                        w_st: &Weight,
                                        worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code, Weight)>| {
@@ -212,16 +156,13 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
             let old_eps_w = eps_weight.clone();
             *eps_weight |= &new_eps_w;
 
-            // If this epsilon is new or strengthened, it can propagate existing searches.
             if *eps_weight != old_eps_w {
-                // Any search that has reached `a` can now cross this new epsilon to `target`.
                 let queries_at_a = queries[a].clone();
                 for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
                     let prop_w = w_a_prime_a & &*eps_weight;
                     if prop_w.is_empty() {
                         continue;
                     }
-
                     let query_key: QueryKey = (a_prime, c_prime);
                     let query_weight = queries[target].entry(query_key).or_default();
                     let old_qw = query_weight.clone();
@@ -246,7 +187,6 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
             }
         }
 
-        // 2b. Propagate the current search forward over original epsilon edges.
         for (t, w_st) in &states[s].epsilons {
             if *t >= n {
                 continue;
@@ -255,7 +195,6 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
             if prop_w.is_empty() {
                 continue;
             }
-
             let query_key: QueryKey = (a, c);
             let query_weight = queries[*t].entry(query_key).or_default();
             let old_qw = query_weight.clone();
@@ -266,28 +205,20 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
         }
     }
 
-    new_epsilons
-        .into_iter()
-        .map(|((from, to), w)| (from, to, w))
-        .collect()
+    new_epsilons.into_iter().map(|((from, to), w)| (from, to, w)).collect()
 }
 
-/// Compute the least fixpoint of final weights propagated backward along all epsilon edges
-/// (original and new) and all negative-labeled edges.
 fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
     let n = states.len();
     let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
     let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
 
-    // Build reverse graph for propagation.
     for u in 0..n {
-        // All epsilons.
         for &(v, ref w) in &states[u].epsilons {
             if v < n {
                 predecessors[v].push((u, w.clone()));
             }
         }
-        // Negative edges.
         for (&label, targets) in &states[u].transitions {
             if !is_negative_symbol(label) {
                 continue;
@@ -300,7 +231,6 @@ fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
         }
     }
 
-    // Initialize with already-final states.
     let mut queue: VecDeque<NWAStateID> = VecDeque::new();
     for s in 0..n {
         if let Some(ref fw) = states[s].final_weight {
@@ -311,7 +241,6 @@ fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
         }
     }
 
-    // Standard worklist fixpoint.
     while let Some(v) = queue.pop_front() {
         let fv = future_final[v].clone();
         if fv.is_empty() {

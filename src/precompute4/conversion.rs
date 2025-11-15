@@ -1,10 +1,9 @@
-// src/precompute4/conversion.rs
-use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
+use crate::constraint::{LLMTokenBV, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper};
 use crate::datastructures::trie::Trie;
+use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 use crate::precompute4::weighted_automata::{DWA, StateID, Weight};
 use crate::tokenizer::TokenizerStateID;
 use std::collections::BTreeMap;
-use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 
 pub fn dwa_to_precompute3(
     dwa: &DWA,
@@ -14,8 +13,6 @@ pub fn dwa_to_precompute3(
     let trie3_god = Trie3GodWrapper::new();
     let mut precomputed3 = BTreeMap::new();
 
-    // The root of the DWA has transitions on tokenizer state IDs.
-    // For each, we start a new Trie3 conversion.
     let start_dwa_state = &dwa.states[dwa.body.start_state];
 
     for (&char_code, &target_dwa_id) in &start_dwa_state.transitions {
@@ -51,7 +48,6 @@ fn convert_dwa_subgraph(
     let all_parser_states = StateIDBV::ones(max_parser_state_id + 1);
 
     let end_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::leaf())));
-
     let mut q = vec![start_dwa_id];
     let root_trie_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::root(internal_max_llm_token))));
     dwa_state_to_trie_node.insert(start_dwa_id, root_trie_node);
@@ -70,7 +66,7 @@ fn convert_dwa_subgraph(
             weight.clip_max(internal_max_llm_token);
             let weight_bv = LLMTokenBV::from(weight.rsb);
             if !weight_bv.is_empty() {
-                let edge_key = (0, weight_bv); // pop 0
+                let edge_key = (0, weight_bv);
                 let edge_val = all_parser_states.clone();
                 trie3_god.insert_edge_simple(src_trie_node, end_node, edge_key, edge_val);
             }
@@ -86,7 +82,10 @@ fn convert_dwa_subgraph(
             }
             if char_code < 0 {
                 eprint!("All exceptions: {:?}", dwa_state.transitions.keys());
-                panic!("Encountered negative transition code {} during conversion. Please run negative-resolution pass before conversion.", char_code);
+                panic!(
+                    "Encountered negative transition code {} during conversion. Please run negative-resolution pass before conversion.",
+                    char_code
+                );
             }
             let parser_state_id = char_code as usize;
             handled_exceptions.insert(parser_state_id);
@@ -101,17 +100,13 @@ fn convert_dwa_subgraph(
             }
 
             if !weight.is_empty() {
-                grouped_transitions
-                    .entry((target_dwa_id, weight))
-                    .or_default()
-                    .insert(parser_state_id);
+                grouped_transitions.entry((target_dwa_id, weight)).or_default().insert(parser_state_id);
             }
         }
 
         for ((target_dwa_id, mut weight), parser_states) in grouped_transitions {
             weight.clip_max(internal_max_llm_token);
             let weight_bv = LLMTokenBV::from(weight.rsb);
-
             if !weight_bv.is_empty() {
                 let target_trie_node = get_or_create_trie_node(target_dwa_id, &mut q, &mut dwa_state_to_trie_node, trie3_god);
                 let edge_key = (pop_len as isize, weight_bv);

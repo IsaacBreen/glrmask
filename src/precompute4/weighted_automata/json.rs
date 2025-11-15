@@ -26,10 +26,7 @@ impl JSONConvertible for SimpleBitset {
         let mut ranges = Vec::new();
         for mut v in ranges_vec {
             if v.len() != 2 {
-                return Err(format!(
-                    "Expected 2-element array for SimpleBitset range, got {:?}",
-                    v
-                ));
+                return Err(format!("Expected 2-element array for SimpleBitset range, got {:?}", v));
             }
             let end = v.pop().unwrap();
             let start = v.pop().unwrap();
@@ -51,22 +48,10 @@ impl JSONConvertible for DWAState {
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
-        let transitions = BTreeMap::<i16, StateID>::from_json(
-            obj.remove("transitions")
-                .ok_or("Missing 'transitions' field")?,
-        )?;
-        let final_weight = Option::<Weight>::from_json(
-            obj.remove("final_weight")
-                .ok_or("Missing 'final_weight' field")?,
-        )?;
-        let trans_weights = BTreeMap::<i16, Weight>::from_json(
-            obj.remove("trans_weights")
-                .ok_or("Missing 'trans_weights' field")?,
-        )?;
-        let state_weight = Option::<Weight>::from_json(
-            obj.remove("state_weight")
-                .ok_or("Missing 'state_weight' field")?,
-        )?;
+        let transitions = BTreeMap::<i16, StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
+        let final_weight = Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing 'final_weight' field")?)?;
+        let trans_weights = BTreeMap::<i16, Weight>::from_json(obj.remove("trans_weights").ok_or("Missing 'trans_weights' field")?)?;
+        let state_weight = Option::<Weight>::from_json(obj.remove("state_weight").ok_or("Missing 'state_weight' field")?)?;
         Ok(DWAState {
             transitions,
             final_weight,
@@ -86,12 +71,8 @@ impl JSONConvertible for DWA {
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
-        let states =
-            Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing 'states' field")?)?;
-        let start_state = StateID::from_json(
-            obj.remove("start_state")
-                .ok_or("Missing 'start_state' field")?,
-        )?;
+        let states = Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing 'states' field")?)?;
+        let start_state = StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
         Ok(DWA {
             states: DWAStates(states),
             body: DWABody { start_state },

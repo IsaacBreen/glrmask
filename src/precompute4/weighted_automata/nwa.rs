@@ -18,26 +18,15 @@ pub enum NWABuildError {
 impl Display for NWABuildError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            NWABuildError::StateOutOfBounds { state } => {
-                write!(f, "State {} is out of bounds", state)
-            }
+            NWABuildError::StateOutOfBounds { state } => write!(f, "State {} is out of bounds", state),
         }
     }
 }
 
-/// Non-deterministic weighted automaton state.
-///
-/// - Non-epsilon transitions: multiple targets per input symbol are allowed.
-/// - Each transition carries a weight, intersected along the path.
-/// - Final states carry a final weight intersected at acceptance.
-/// - Multiple alternative paths union their weights.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NWAState {
     pub final_weight: Option<Weight>,
-    /// Non-epsilon transitions: multiple targets per input symbol are allowed.
-    /// Map: label -> Vec<(target, weight)>
     pub transitions: BTreeMap<i16, Vec<(NWAStateID, Weight)>>,
-    /// Epsilon transitions: list of (target, weight).
     pub epsilons: Vec<(NWAStateID, Weight)>,
 }
 
@@ -45,9 +34,7 @@ pub struct NWAState {
 pub struct NWAStates(pub Vec<NWAState>);
 
 impl NWAStates {
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
+    pub fn len(&self) -> usize { self.0.len() }
 
     pub fn add_state(&mut self) -> NWAStateID {
         let id = self.0.len();
@@ -63,14 +50,10 @@ impl NWAStates {
     }
 
     pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
-        assert!(
-            from < self.len() && to < self.len(),
-            "add_epsilon: state id out of bounds"
-        );
+        assert!(from < self.len() && to < self.len(), "add_epsilon: state id out of bounds");
         self.0[from].epsilons.push((to, w));
     }
 
-    /// Add a labeled transition. Multiple transitions on the same label are allowed.
     pub fn add_transition(
         &mut self,
         from: NWAStateID,
@@ -88,30 +71,17 @@ impl NWAStates {
         Ok(())
     }
 
-    pub fn copy_subgraph_from_and_return_body(
-        &mut self,
-        other: &NWAStates,
-        body: NWABody,
-    ) -> NWABody {
+    pub fn copy_subgraph_from_and_return_body(&mut self, other: &NWAStates, body: NWABody) -> NWABody {
         let (new_start, _remap) = self.copy_subgraph_from(other, body.start_state);
-        NWABody {
-            start_state: new_start,
-        }
+        NWABody { start_state: new_start }
     }
 
     pub fn copy_subgraph_in_place_and_return_body(&mut self, body: NWABody) -> NWABody {
         let (new_start, _remap) = self.copy_subgraph_in_place(body.start_state);
-        NWABody {
-            start_state: new_start,
-        }
+        NWABody { start_state: new_start }
     }
 
-    /// Deep-copy a subgraph starting at `start_id` from within this `NWAStates` arena.
-    /// Returns `(new_start_id, remap_old_to_new)`.
-    pub fn copy_subgraph_in_place(
-        &mut self,
-        start_id: NWAStateID,
-    ) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
+    pub fn copy_subgraph_in_place(&mut self, start_id: NWAStateID) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
         let mut remap: HashMap<NWAStateID, NWAStateID> = HashMap::new();
         if start_id >= self.len() {
             let new_start = self.add_state();
@@ -125,7 +95,6 @@ impl NWAStates {
         q.push_back((start_id, new_start));
 
         while let Some((old, new)) = q.pop_front() {
-            // Epsilon edges
             let eps = self.0[old].epsilons.clone();
             self.0[new].epsilons.clear();
             for (to_old, w) in eps {
@@ -137,7 +106,6 @@ impl NWAStates {
                 });
                 self.0[new].epsilons.push((to_new, w.clone()));
             }
-            // Labeled edges
             let trans = self.0[old].transitions.clone();
             self.0[new].transitions.clear();
             for (lbl, targets) in trans {
@@ -148,11 +116,7 @@ impl NWAStates {
                         q.push_back((to_old, n));
                         n
                     });
-                    self.0[new]
-                        .transitions
-                        .entry(lbl)
-                        .or_default()
-                        .push((to_new, w.clone()));
+                    self.0[new].transitions.entry(lbl).or_default().push((to_new, w.clone()));
                 }
             }
         }
@@ -160,8 +124,6 @@ impl NWAStates {
         (new_start, remap)
     }
 
-    /// Deep-copy a subgraph starting at `start_id` from another `NWAStates` arena into self.
-    /// Returns `(new_start_id, remap_old_to_new)`.
     pub fn copy_subgraph_from(
         &mut self,
         other: &NWAStates,
@@ -180,7 +142,6 @@ impl NWAStates {
         q.push_back((start_id, new_start));
 
         while let Some((old, new)) = q.pop_front() {
-            // Epsilon edges
             let eps = other.0[old].epsilons.clone();
             self.0[new].epsilons.clear();
             for (to_old, w) in eps {
@@ -192,7 +153,6 @@ impl NWAStates {
                 });
                 self.0[new].epsilons.push((to_new, w.clone()));
             }
-            // Labeled edges
             let trans = other.0[old].transitions.clone();
             self.0[new].transitions.clear();
             for (lbl, targets) in trans {
@@ -203,11 +163,7 @@ impl NWAStates {
                         q.push_back((to_old, n));
                         n
                     });
-                    self.0[new]
-                        .transitions
-                        .entry(lbl)
-                        .or_default()
-                        .push((to_new, w.clone()));
+                    self.0[new].transitions.entry(lbl).or_default().push((to_new, w.clone()));
                 }
             }
         }
@@ -218,16 +174,11 @@ impl NWAStates {
 
 impl Index<NWAStateID> for NWAStates {
     type Output = NWAState;
-
-    fn index(&self, index: NWAStateID) -> &Self::Output {
-        &self.0[index]
-    }
+    fn index(&self, index: NWAStateID) -> &Self::Output { &self.0[index] }
 }
 
 impl IndexMut<NWAStateID> for NWAStates {
-    fn index_mut(&mut self, index: NWAStateID) -> &mut Self::Output {
-        &mut self.0[index]
-    }
+    fn index_mut(&mut self, index: NWAStateID) -> &mut Self::Output { &mut self.0[index] }
 }
 
 impl Display for NWAStates {
@@ -268,21 +219,9 @@ impl Display for NWAStats {
         writeln!(f, "  - States: {}", self.num_states)?;
         writeln!(f, "  - Final States: {}", self.num_final_states)?;
         writeln!(f, "  - Epsilon Transitions: {}", self.total_epsilon_transitions)?;
-        writeln!(
-            f,
-            "  - Labeled Transitions: {}",
-            self.total_labeled_transitions
-        )?;
-        writeln!(
-            f,
-            "  - Avg Epsilon/State: {:.2}",
-            self.avg_epsilon_per_state
-        )?;
-        writeln!(
-            f,
-            "  - Avg Labeled/State: {:.2}",
-            self.avg_labeled_per_state
-        )
+        writeln!(f, "  - Labeled Transitions: {}", self.total_labeled_transitions)?;
+        writeln!(f, "  - Avg Epsilon/State: {:.2}", self.avg_epsilon_per_state)?;
+        writeln!(f, "  - Avg Labeled/State: {:.2}", self.avg_labeled_per_state)
     }
 }
 
@@ -309,8 +248,7 @@ impl NWA {
                 num_final_states += 1;
             }
             total_epsilon_transitions += state.epsilons.len();
-            total_labeled_transitions +=
-                state.transitions.values().map(|v| v.len()).sum::<usize>();
+            total_labeled_transitions += state.transitions.values().map(|v| v.len()).sum::<usize>();
         }
 
         let avg_epsilon_per_state = total_epsilon_transitions as f64 / num_states as f64;
@@ -327,17 +265,13 @@ impl NWA {
     }
 }
 
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NWABody {
     pub start_state: NWAStateID,
 }
 
 impl Display for NWABody {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "NWABody (start: {})", self.start_state)
-    }
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { write!(f, "NWABody (start: {})", self.start_state) }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -350,10 +284,7 @@ impl NWA {
     pub fn new() -> Self {
         let mut states = NWAStates::default();
         let start = states.add_state();
-        Self {
-            states,
-            body: NWABody { start_state: start },
-        }
+        Self { states, body: NWABody { start_state: start } }
     }
 
     pub fn add_transition(
@@ -366,21 +297,11 @@ impl NWA {
         self.states.add_transition(from, on, to, w)
     }
 
-    pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
-        self.states.add_epsilon(from, to, w);
-    }
+    pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) { self.states.add_epsilon(from, to, w); }
 
-    pub fn determinize_to_dwa(&self) -> DWA {
-        self.determinize()
-    }
+    pub fn determinize_to_dwa(&self) -> DWA { self.determinize() }
 
-    /// Computes the epsilon-closure of a weighted subset of NWA states.
-    /// The weight of a state in the closure is the union of weights of all
-    /// epsilon-paths from the initial subset to that state.
-    fn epsilon_closure(
-        &self,
-        subset: &BTreeMap<NWAStateID, Weight>,
-    ) -> BTreeMap<NWAStateID, Weight> {
+    fn epsilon_closure(&self, subset: &BTreeMap<NWAStateID, Weight>) -> BTreeMap<NWAStateID, Weight> {
         let mut closure = subset.clone();
         let mut worklist: VecDeque<NWAStateID> = subset.keys().copied().collect();
 
@@ -404,17 +325,13 @@ impl NWA {
         closure
     }
 
-    /// Determinizes the NWA into a DWA using subset construction.
-    /// The weights in this semiring (union for +, intersection for *) are
-    /// handled by tracking a weight for each NWA state within a DWA state subset.
     pub fn determinize(&self) -> DWA {
         let mut dwa = DWA::new();
-        dwa.states.0.clear(); // new() adds a start state, we'll manage it.
+        dwa.states.0.clear();
 
         let mut subset_map: HashMap<BTreeMap<NWAStateID, Weight>, NWAStateID> = HashMap::new();
         let mut worklist: VecDeque<BTreeMap<NWAStateID, Weight>> = VecDeque::new();
 
-        // Initial state of DWA
         let mut start_subset = BTreeMap::new();
         if self.body.start_state < self.states.len() {
             start_subset.insert(self.body.start_state, Weight::all());
@@ -426,16 +343,15 @@ impl NWA {
                 subset_map.insert(initial_subset.clone(), start_id);
                 worklist.push_back(initial_subset);
             } else {
-                dwa.body.start_state = dwa.add_state(); // empty DWA
+                dwa.body.start_state = dwa.add_state();
             }
         } else {
-            dwa.body.start_state = dwa.add_state(); // empty DWA
+            dwa.body.start_state = dwa.add_state();
         }
 
         while let Some(subset) = worklist.pop_front() {
             let from_dwa_id = *subset_map.get(&subset).unwrap();
 
-            // Final weight for this DWA state is the union of path weights to final NWA states.
             let mut final_weight = Weight::zeros();
             for (nwa_id, path_weight) in &subset {
                 if let Some(fw) = &self.states[*nwa_id].final_weight {
@@ -446,7 +362,6 @@ impl NWA {
                 dwa.states[from_dwa_id].final_weight = Some(final_weight);
             }
 
-            // Collect transitions out of the current subset, grouped by label.
             let mut transitions: BTreeMap<i16, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
             for (nwa_id, path_weight) in &subset {
                 for (label, targets) in &self.states[*nwa_id].transitions {
@@ -454,31 +369,23 @@ impl NWA {
                         let next_path_weight = path_weight & trans_weight;
                         if !next_path_weight.is_empty() {
                             let entry = transitions.entry(*label).or_default();
-                            *entry.entry(*target_nwa_id).or_insert_with(Weight::zeros) |=
-                                &next_path_weight;
+                            *entry.entry(*target_nwa_id).or_insert_with(Weight::zeros) |= &next_path_weight;
                         }
                     }
                 }
             }
 
-            // Create new DWA states and transitions for each label.
             for (label, next_subset_pre_closure) in transitions {
                 let next_subset = self.epsilon_closure(&next_subset_pre_closure);
                 if next_subset.is_empty() {
                     continue;
                 }
-
                 let to_dwa_id = *subset_map.entry(next_subset.clone()).or_insert_with(|| {
                     let new_id = dwa.add_state();
                     worklist.push_back(next_subset);
                     new_id
                 });
-
-                // For this semiring, weights are pushed into the states. DWA transitions
-                // can be unweighted (or weight=ALL), as the path weights are tracked
-                // inside the subsets.
-                dwa.add_transition(from_dwa_id, label, to_dwa_id, Weight::all())
-                    .unwrap();
+                dwa.add_transition(from_dwa_id, label, to_dwa_id, Weight::all()).unwrap();
             }
         }
         dwa

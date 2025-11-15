@@ -1,26 +1,4 @@
 // src/precompute4/weighted_automata/determinization.rs
-//
-// Determinization of NWA -> DWA specialized to the Weight bitset semiring,
-// with an aggressively minimized construction following Mohri's insights:
-//   - General case: weighted-subset determinization with ε-closure integration,
-//     default/exception compression of labels, and compact state-entry/final weights.
-//   - Special optimized case (fast-path): if the NWA is a union of singleton-loop
-//     components reachable by ε from the start, whose per-component base weights
-//     are pairwise disjoint (the "hypercube" class), then we compile directly a
-//     1-state DWA. In that case, the entire "history" is tracked in the accumulating
-//     weight, not in the state space, avoiding 2^N blowup.
-//
-// Correctness sketch for the fast-path (bitset semiring):
-//   Let components C = {q}. Each q is a single state with self-loops only and no ε-out,
-//   and has a base weight B_q (start ε weight ∧ final weight at q). For each symbol a,
-//   let W_a = ⋁_{q allows a} (B_q ∧ w(q,a)) where w(q,a) is the (union of) loop weights at q.
-//   Then the 1-state DWA uses per-letter self-loops on a with weight W_a, and final weight
-//   F = ⋁_q B_q. For any input word x = a1...ak, the DWA assigns
-//       (W_a1 ∧ W_a2 ∧ ... ∧ W_ak) ∧ F
-//   The bitset semiring (∧ distributes over ⋁) and pairwise disjointness of the B_q guarantees
-//   this equals
-//       ⋁_q ( B_q ∧ w(q,a1) ∧ ... ∧ w(q,ak) )
-//   which is exactly the NWA semantics for this class (each q "reads" the sequence in-place).
 
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
@@ -34,43 +12,18 @@ use super::common::{DETERMINIZE_DEBUG, NWAStateID, Weight};
 use super::dwa::DWA;
 use super::nwa::{NWA, NWAStates};
 
-// Weighted subset and ε-closure maps -----------------------------------------
-
 type WeightedSubset = BTreeMap<NWAStateID, Weight>;
 type ClosureMap = BTreeMap<NWAStateID, Weight>;
 
-// Helper ops on `Weight` (bitset semiring)
+fn weight_union(a: Weight, b: &Weight) -> Weight { a | b.clone() }
+fn weight_union_in_place(dst: &mut Weight, src: &Weight) { *dst |= src; }
+fn weight_intersection(a: &Weight, b: &Weight) -> Weight { a & b }
+fn is_zero(w: &Weight) -> bool { w.is_empty() }
 
-fn weight_union(a: Weight, b: &Weight) -> Weight {
-    a | b.clone()
-}
-
-fn weight_union_in_place(dst: &mut Weight, src: &Weight) {
-    // In the bitset semiring, union is `|`. Using `|=` is equivalent to
-    // `*dst = dst.clone() | src.clone()` but avoids extra allocation.
-    *dst |= src;
-}
-
-fn weight_intersection(a: &Weight, b: &Weight) -> Weight {
-    a & b
-}
-
-fn is_zero(w: &Weight) -> bool {
-    w.is_empty()
-}
-
-// ε-closure -------------------------------------------------------------------
-
-/// Epsilon-closure from a weighted subset.
-///
-/// Input: initial weighted subset `seed` mapping NWA states to input weights (bitsets).
-/// Output: closure map mapping every reachable state via ε-paths to the union of all
-/// weights of those ε-paths (seed_weight ∧ ε-edges ∧ ...).
 fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap {
     let mut closure: ClosureMap = ClosureMap::new();
     let mut queue: VecDeque<NWAStateID> = VecDeque::new();
 
-    // Seed initialization
     for (sid, w) in seed {
         if !is_zero(w) {
             let prev = closure.get(sid).cloned().unwrap_or_else(Weight::zeros);
@@ -82,7 +35,6 @@ fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap 
         }
     }
 
-    // Propagate through ε-edges
     while let Some(u) = queue.pop_front() {
         let uw = closure.get(&u).cloned().unwrap_or_else(Weight::zeros);
         if is_zero(&uw) {
@@ -105,7 +57,6 @@ fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap 
     closure
 }
 
-/// Compute all explicit labels in this ε-closure.
 fn collect_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTreeSet<i16> {
     let mut labels: BTreeSet<i16> = BTreeSet::new();
     for (sid, cw) in closure {
@@ -117,12 +68,7 @@ fn collect_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTreeSet<i16>
     labels
 }
 
-/// Next weighted subset for a specific label `ch`.
-fn next_subset_for_label(
-    nwa_states: &NWAStates,
-    closure: &ClosureMap,
-    ch: i16,
-) -> WeightedSubset {
+fn next_subset_for_label(nwa_states: &NWAStates, closure: &ClosureMap, ch: i16) -> WeightedSubset {
     let mut next: WeightedSubset = WeightedSubset::new();
     for (sid, cw) in closure {
         if is_zero(cw) {
@@ -130,7 +76,6 @@ fn next_subset_for_label(
         }
         let st = &nwa_states[*sid];
         if let Some(targets) = st.transitions.get(&ch) {
-            // Explicit transition for `ch` exists: use it.
             for (to, w_edge) in targets {
                 let cand = weight_intersection(cw, w_edge);
                 if is_zero(&cand) {
@@ -146,7 +91,6 @@ fn next_subset_for_label(
     next
 }
 
-/// Union over values (for edge/default weights).
 fn union_over_values(map: &WeightedSubset) -> Weight {
     let mut acc = Weight::zeros();
     for w in map.values() {
@@ -155,13 +99,7 @@ fn union_over_values(map: &WeightedSubset) -> Weight {
     acc
 }
 
-/// Compute DWA state-entry and final weights from ε-closure.
-///
-/// Currently we do not use state-entry weights here; only final weights are derived.
-fn compute_state_and_final_weights(
-    nwa: &NWA,
-    closure: &ClosureMap,
-) -> (Option<Weight>, Option<Weight>) {
+fn compute_state_and_final_weights(nwa: &NWA, closure: &ClosureMap) -> (Option<Weight>, Option<Weight>) {
     let entry_opt = None;
     let mut finalw = Weight::zeros();
     for (sid, cw) in closure {
@@ -175,8 +113,6 @@ fn compute_state_and_final_weights(
     let final_opt = if finalw.is_empty() { None } else { Some(finalw) };
     (entry_opt, final_opt)
 }
-
-// Determinizer ---------------------------------------------------------------
 
 struct Determinizer<'a> {
     nwa: &'a NWA,
@@ -204,9 +140,7 @@ impl<'a> Determinizer<'a> {
         }
     }
 
-    /// Register a determinized state described by a weighted subset, returning its DWA id.
     fn register_state(&mut self, subset: WeightedSubset) -> usize {
-        // 1) Canonicalize incoming seed by dropping empty weights.
         let mut subset_clean: WeightedSubset = WeightedSubset::new();
         for (sid, w) in subset {
             if !is_zero(&w) {
@@ -214,18 +148,12 @@ impl<'a> Determinizer<'a> {
             }
         }
 
-        // 2) Compute ε-closure; determinized state identity depends on closure.
         let closure = epsilon_closure(&self.nwa.states, &subset_clean);
-
-        // Use the closure object itself as the key.
         if let Some(&id) = self.seen.get(&closure) {
             return id;
         }
 
-        // 3) Create brand-new DWA state for this closure.
         let id = self.dwa.add_state();
-
-        // 4) Install final weight from closure.
         let (_entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
         if let Some(w) = final_opt {
             let _ = self.dwa.set_final_weight(id, w);
@@ -262,7 +190,6 @@ impl<'a> Determinizer<'a> {
         };
 
         let labels = collect_labels(&self.nwa.states, closure);
-
         if let Some(pb) = &labels_pb {
             pb.set_length(labels.len() as u64);
         }
@@ -299,8 +226,6 @@ impl<'a> Determinizer<'a> {
     }
 }
 
-// Fast-path: try to build a 1-state DWA for a union of singleton-loop components.
-
 fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     if nwa.states.0.is_empty() || nwa.body.start_state >= nwa.states.len() {
         return None;
@@ -322,12 +247,11 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         }
         let st = &nwa.states[*sid];
 
-        // Each component must be a single state with only self-loops and no ε-out.
         if !st.epsilons.is_empty() {
             return None;
         }
         for (_lbl, vec_targets) in st.transitions.iter() {
-            for (to, _w) in vec_targets {
+            for (to, _) in vec_targets {
                 if *to != *sid {
                     return None;
                 }
@@ -346,7 +270,6 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         return None;
     }
 
-    // Pairwise disjointness of base weights.
     for i in 0..comps.len() {
         for j in (i + 1)..comps.len() {
             if !(comps[i].1.clone() & comps[j].1.clone()).is_empty() {
@@ -366,10 +289,7 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
             if !w_union.is_empty() {
                 let contrib = base.clone() & w_union;
                 if !contrib.is_empty() {
-                    let prev = label_to_weight
-                        .get(lbl)
-                        .cloned()
-                        .unwrap_or_else(Weight::zeros);
+                    let prev = label_to_weight.get(lbl).cloned().unwrap_or_else(Weight::zeros);
                     label_to_weight.insert(*lbl, prev | contrib);
                 }
             }
@@ -396,16 +316,14 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
 }
 
 impl NWA {
-    /// Determinize the subgraph reachable from `self.body.start_state` into a `DWA`.
     pub fn determinize_to_dwa2(&self) -> DWA {
         let custom_dwa = if let Some(dwa) = try_build_singleton_loop_union(self) {
             dwa
         } else {
             const STATE_LIMIT: usize = usize::MAX;
-
-            crate::debug!(5, 
-                "[DEBUG] Determinization: Using general-purpose subset construction \
-                 (fast-path not taken)."
+            crate::debug!(
+                5,
+                "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
             );
 
             if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
@@ -425,7 +343,6 @@ impl NWA {
                 main_pb.set_message("Determinizing NWA");
 
                 let mut det = Determinizer::new(self, Some(mp));
-
                 let mut start_subset: WeightedSubset = WeightedSubset::new();
                 start_subset.insert(self.body.start_state, Weight::all());
                 let start_id = det.register_state(start_subset);
@@ -436,32 +353,26 @@ impl NWA {
                     if det.seen.len() > STATE_LIMIT {
                         let timestamp = Local::now().format("%Y%m%d-%H%M%S");
                         let filename = format!("nwa_dump_{}.json", timestamp);
-                        crate::debug!(5, 
-                            "Determinization state limit ({}) exceeded. \
-                             Dumping NWA to {} and panicking.",
-                            STATE_LIMIT, filename
+                        crate::debug!(
+                            5,
+                            "Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.",
+                            STATE_LIMIT,
+                            filename
                         );
-                        let f = std::fs::File::create(&filename)
-                            .expect("Unable to create dump file");
-                        serde_json::to_writer(f, self)
-                            .expect("Unable to write NWA to file");
-                        panic!(
-                            "Determinization aborted after reaching {} states.",
-                            STATE_LIMIT
-                        );
+                        let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+                        serde_json::to_writer(f, self).expect("Unable to write NWA to file");
+                        panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
                     }
 
                     let total_states = det.seen.len();
                     main_pb.set_length(total_states as u64);
                     main_pb.set_position(processed_count as u64);
-                    main_pb
-                        .set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
+                    main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
 
                     det.expand_state(sid);
                     processed_count += 1;
                 }
                 main_pb.finish_with_message("Determinization complete");
-
                 det.dwa
             }
         };
@@ -470,18 +381,9 @@ impl NWA {
             let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
             crate::debug!(5, "[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
             crate::debug!(5, "[DETERMINIZE_DEBUG] Input NWA: {}", self);
-            crate::debug!(5, 
-                "[DETERMINIZE_DEBUG] Custom DWA stats: {}",
-                custom_dwa.stats()
-            );
-            crate::debug!(5, 
-                "[DETERMINIZE_DEBUG] Rustfst DWA stats: {}",
-                rustfst_dwa.stats()
-            );
-            test_weighted_automata::stochastic_equivalence_test(
-                custom_dwa.clone(),
-                rustfst_dwa,
-            );
+            crate::debug!(5, "[DETERMINIZE_DEBUG] Custom DWA stats: {}", custom_dwa.stats());
+            crate::debug!(5, "[DETERMINIZE_DEBUG] Rustfst DWA stats: {}", rustfst_dwa.stats());
+            test_weighted_automata::stochastic_equivalence_test(custom_dwa.clone(), rustfst_dwa);
             crate::debug!(5, "[DETERMINIZE_DEBUG] Stochastic equivalence test passed.");
         }
 
