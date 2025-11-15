@@ -2237,6 +2237,7 @@ impl GrammarConstraint {
         };
 
         gc.special_precomputation = gc.precompute_special();
+        gc.dump_precomputed1();
         gc
     }
 
