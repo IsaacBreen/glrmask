@@ -403,7 +403,7 @@ impl NWA {
         } else {
             const STATE_LIMIT: usize = usize::MAX;
 
-            eprintln!(
+            crate::debug!(5, 
                 "[DEBUG] Determinization: Using general-purpose subset construction \
                  (fast-path not taken)."
             );
@@ -436,7 +436,7 @@ impl NWA {
                     if det.seen.len() > STATE_LIMIT {
                         let timestamp = Local::now().format("%Y%m%d-%H%M%S");
                         let filename = format!("nwa_dump_{}.json", timestamp);
-                        eprintln!(
+                        crate::debug!(5, 
                             "Determinization state limit ({}) exceeded. \
                              Dumping NWA to {} and panicking.",
                             STATE_LIMIT, filename
@@ -468,13 +468,13 @@ impl NWA {
 
         if DETERMINIZE_DEBUG {
             let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
-            eprintln!("[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
-            eprintln!("[DETERMINIZE_DEBUG] Input NWA: {}", self);
-            eprintln!(
+            crate::debug!(5, "[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
+            crate::debug!(5, "[DETERMINIZE_DEBUG] Input NWA: {}", self);
+            crate::debug!(5, 
                 "[DETERMINIZE_DEBUG] Custom DWA stats: {}",
                 custom_dwa.stats()
             );
-            eprintln!(
+            crate::debug!(5, 
                 "[DETERMINIZE_DEBUG] Rustfst DWA stats: {}",
                 rustfst_dwa.stats()
             );
@@ -482,7 +482,7 @@ impl NWA {
                 custom_dwa.clone(),
                 rustfst_dwa,
             );
-            eprintln!("[DETERMINIZE_DEBUG] Stochastic equivalence test passed.");
+            crate::debug!(5, "[DETERMINIZE_DEBUG] Stochastic equivalence test passed.");
         }
 
         custom_dwa
