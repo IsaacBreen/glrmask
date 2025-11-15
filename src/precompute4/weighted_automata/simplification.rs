@@ -260,42 +260,6 @@ struct Partition {
     yes_counter: usize,
 }
 
-struct PartitionIterator<'a> {
-    partition: &'a Partition,
-    last_element_id: Option<i32>,
-}
-
-impl<'a> PartitionIterator<'a> {
-    fn new(partition: &'a Partition, class_id: usize) -> Self {
-        PartitionIterator {
-            partition,
-            last_element_id: Some(partition.classes[class_id].no_head)
-                .filter(|&h| h >= 0)
-                .map(|h| partition.elements[h as usize].prev_element),
-        }
-    }
-}
-
-impl<'a> Iterator for PartitionIterator<'a> {
-    type Item = usize;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let new_element_id = match self.last_element_id {
-            None => return None,
-            Some(e) if e < 0 => self.partition.classes[self.partition.elements[0].class_id].no_head,
-            Some(e) => self.partition.elements[e as usize].next_element,
-        };
-
-        if new_element_id < 0 {
-            self.last_element_id = None;
-            None
-        } else {
-            self.last_element_id = Some(new_element_id);
-            Some(new_element_id as usize)
-        }
-    }
-}
-
 impl Partition {
     fn new(num_elements: usize) -> Self {
         Self {
@@ -371,14 +335,14 @@ impl Partition {
                 self.classes[visited_class].no_head = self.classes[visited_class].yes_head;
             } else {
                 let new_class_id = self.add_class();
+                queue.push_back(new_class_id);
+
                 if no_size < yes_size {
-                    queue.push_back(new_class_id);
                     self.classes[new_class_id].no_head = self.classes[visited_class].no_head;
                     self.classes[new_class_id].size = no_size;
                     self.classes[visited_class].no_head = self.classes[visited_class].yes_head;
                     self.classes[visited_class].size = yes_size;
                 } else {
-                    queue.push_back(visited_class);
                     self.classes[new_class_id].no_head = self.classes[visited_class].yes_head;
                     self.classes[new_class_id].size = yes_size;
                     self.classes[visited_class].size = no_size;
@@ -438,7 +402,9 @@ mod cyclic_minimize {
         }
         // Handle super-final state (ID = original_n)
         let super_final_key = (true, None);
-        let super_final_class = *groups.entry(super_final_key).or_insert_with(|| partition.add_class());
+        let super_final_class = *groups
+            .entry(super_final_key)
+            .or_insert_with(|| partition.add_class());
         partition.add(original_n, super_final_class);
 
         // Populate worklist with all but the largest initial class
