@@ -111,6 +111,35 @@ fn minimize_dwa_partition(states: &DWAStates) -> Partition {
         };
     }
 
+    // Intern all (ArcLabel, Weight) pairs to cheap integer IDs.
+    let mut interner: HashMap<(ArcLabel, Weight), usize> = HashMap::new();
+    for s in 0..n {
+        let st = &states[s];
+        // Epsilon transitions
+        for &(_, ref w) in &st.epsilons {
+            if !w.is_empty() {
+                let key = (ArcLabel::Eps, w.clone());
+                if !interner.contains_key(&key) {
+                    let id = interner.len();
+                    interner.insert(key, id);
+                }
+            }
+        }
+        // Labeled transitions
+        for (&lbl, targets) in &st.transitions {
+            let label = ArcLabel::Label(lbl);
+            for &(_, ref w) in targets {
+                if !w.is_empty() {
+                    let key = (label, w.clone());
+                    if !interner.contains_key(&key) {
+                        let id = interner.len();
+                        interner.insert(key, id);
+                    }
+                }
+            }
+        }
+    }
+
     let mut partition = Partition::new(n);
 
     loop {
@@ -455,26 +484,9 @@ enum ArcLabel {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct NwaTransitionSig {
-    label: ArcLabel,
-    weight: Weight,
+    trans_id: usize,
     // Sorted list of destination classes.
     dest_classes: Vec<usize>,
-}
-
-impl NwaTransitionSig {
-    fn sort_key(&self) -> (u8, i16, u64, u64) {
-        let label_tag = match self.label {
-            ArcLabel::Eps => 0,
-            ArcLabel::Label(_) => 1,
-        };
-        let label_val = match self.label {
-            ArcLabel::Eps => 0,
-            ArcLabel::Label(v) => v,
-        };
-        let w_hash = hash_value(&self.weight);
-        let dest_hash = hash_value(&self.dest_classes);
-        (label_tag, label_val, w_hash, dest_hash)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -484,11 +496,16 @@ struct NwaStateSignature {
 }
 
 impl NwaStateSignature {
-    fn from_state(state_id: NWAStateID, states: &NWAStates, classes: &[usize]) -> Self {
+    fn from_state(
+        state_id: NWAStateID,
+        states: &NWAStates,
+        classes: &[usize],
+        interner: &HashMap<(ArcLabel, Weight), usize>,
+    ) -> Self {
         let st = &states[state_id];
 
-        // Map (ArcLabel, weight) -> set of destination classes.
-        let mut temp: HashMap<(ArcLabel, Weight), BTreeSet<usize>> = HashMap::new();
+        // Map trans_id -> set of destination classes.
+        let mut temp: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
 
         // Epsilon transitions.
         for &(dest, ref w) in &st.epsilons {
@@ -496,9 +513,8 @@ impl NwaStateSignature {
                 continue;
             }
             let key = (ArcLabel::Eps, w.clone());
-            temp.entry(key)
-                .or_insert_with(BTreeSet::new)
-                .insert(classes[dest]);
+            let trans_id = interner[&key];
+            temp.entry(trans_id).or_default().insert(classes[dest]);
         }
 
         // Labeled transitions.
@@ -509,23 +525,19 @@ impl NwaStateSignature {
                     continue;
                 }
                 let key = (label, w.clone());
-                temp.entry(key)
-                    .or_insert_with(BTreeSet::new)
-                    .insert(classes[dest]);
+                let trans_id = interner[&key];
+                temp.entry(trans_id).or_default().insert(classes[dest]);
             }
         }
 
         let mut outgoing = Vec::with_capacity(temp.len());
-        for ((label, weight), dest_set) in temp {
+        for (trans_id, dest_set) in temp {
             let dest_classes: Vec<usize> = dest_set.into_iter().collect();
             outgoing.push(NwaTransitionSig {
-                label,
-                weight,
+                trans_id,
                 dest_classes,
             });
         }
-
-        outgoing.sort_by_key(|t| t.sort_key());
 
         NwaStateSignature {
             final_weight: st.final_weight.clone(),
@@ -552,7 +564,7 @@ fn minimize_nwa_partition(states: &NWAStates) -> Partition {
         let mut next_class = 0;
 
         for s in 0..n {
-            let sig = NwaStateSignature::from_state(s, states, &partition.classes);
+            let sig = NwaStateSignature::from_state(s, states, &partition.classes, &interner);
             let entry = sig_to_class.entry(sig).or_insert_with(|| {
                 let id = next_class;
                 next_class += 1;
