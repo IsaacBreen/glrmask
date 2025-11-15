@@ -18,7 +18,7 @@ use crate::precompute4::resolve_negatives::{
 use crate::precompute4::template_nwa::{
     build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas,
 };
-use crate::precompute4::weighted_automata::{DWA, NWA, NWAStates, NWABody, Weight};
+use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStates, Weight};
 use crate::r#macro::is_debug_level_enabled;
 use crate::tokenizer::TokenizerStateID;
 
@@ -123,16 +123,14 @@ pub fn precompute4(
         NWABody { start_state: start }
     };
     let initial_tokens = LLMTokenBV::max_ones();
+    use crate::glr::table::TerminalID;
+    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> =
+        BTreeMap::from([(None, Weight::all())]);
+    let initial_body_map = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
     let initial_values: Vec<(
         Trie2Index,
-        (BTreeMap<NWABody, Vec<NWABody>>, LLMTokenBV),
-    )> = vec![(
-        reversed_trie_root,
-        (
-            BTreeMap::from([(initial_nwa_body, vec![initial_nwa_body])]),
-            initial_tokens,
-        ),
-    )];
+        (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV),
+    )> = vec![(reversed_trie_root, (initial_body_map, initial_tokens))];
     let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
         .expect("Failed to compute traversal data for reversed trie1");
     let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> =
@@ -168,52 +166,55 @@ pub fn precompute4(
         // step function
         |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
             let (current_nwa_body, current_tokens) = current_val;
-            let template_dwa: &DWA = match edge_terminal_opt {
-                Some(terminal_id) if Some(*terminal_id) != parser.ignore_terminal_id => template_dwas
-                    .get(&terminal_id)
-                    .expect_else(|| format!("No template DWA for terminal {:?}", terminal_id)),
-                _ => &ignore_dwa,
-            };
+            let terminal_id = edge_terminal_opt.map(|t| *t);
 
-            let mut results: Vec<(
-                PrecomputeNode1Index,
-                (BTreeMap<NWABody, Vec<NWABody>>, LLMTokenBV),
-            )> = Vec::new();
+            let mut results = Vec::new();
             for (dest_idx, llm_token_bv) in dest_map.iter() {
                 let next_tokens = current_tokens & llm_token_bv;
                 if next_tokens.is_empty() {
                     continue;
                 }
+                let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
 
-                let left_body = instantiate_template_nwa(
-                    &states_arena,
-                    template_dwa,
-                    &edge_terminal_opt,
-                    llm_token_bv,
-                );
+                let mut terminal_map = BTreeMap::new();
+                terminal_map.insert(terminal_id, weight);
+
+                let mut body_map = BTreeMap::new();
+                body_map.insert(*current_nwa_body, terminal_map);
 
                 results.push((
                     *dest_idx,
-                    (BTreeMap::from([(*current_nwa_body, vec![left_body])]), next_tokens),
+                    (body_map, next_tokens.clone()),
                 ));
             }
             results
         },
         // merge function: union them via epsilon
-        |val1: &mut (BTreeMap<NWABody, Vec<NWABody>>, LLMTokenBV),
-         val2: (BTreeMap<NWABody, Vec<NWABody>>, LLMTokenBV)| {
+        |val1: &mut (
+             BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>,
+             LLMTokenBV,
+         ),
+         val2: (
+             BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>,
+             LLMTokenBV,
+         )| {
             let (bodies1, tokens1) = val1;
             let (bodies2, tokens2) = val2;
-            for (right_body, left_bodies) in bodies2 {
-                bodies1
-                    .entry(right_body)
-                    .or_default()
-                    .extend(left_bodies);
+            for (right_body, term_map2) in bodies2 {
+                let term_map1 = bodies1.entry(right_body).or_default();
+                for (term, weight2) in term_map2 {
+                    term_map1.entry(term).or_insert_with(Weight::zeros) |= &weight2;
+                }
             }
             *tokens1 |= &tokens2;
         },
         // process function: capture at original roots
-        |_node_data, node_idx, val: (BTreeMap<NWABody, Vec<NWABody>>, LLMTokenBV)| {
+        |_node_data,
+         node_idx,
+         val: (
+             BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>,
+             LLMTokenBV,
+         )| {
             let (nwa_bodies_map, tokens) = val;
             // Combine all left bodies into a single NWA body via union (epsilon)
             let mut nwa_body = {
@@ -223,11 +224,29 @@ pub fn precompute4(
             };
             crate::debug!(6, "NWA states:\n{}", states_arena.borrow());
             crate::debug!(6, "{:?}", nwa_bodies_map);
-            for (right_body, left_bodies) in nwa_bodies_map {
+            for (right_body, terminal_map) in nwa_bodies_map {
+                let mut left_bodies = Vec::new();
+                for (terminal_id_opt, weight) in terminal_map {
+                    if weight.is_empty() {
+                        continue;
+                    }
+                    let template_dwa: &DWA = match terminal_id_opt {
+                        Some(terminal_id) if Some(terminal_id) != parser.ignore_terminal_id => {
+                            template_dwas.get(&terminal_id).expect_else(|| {
+                                format!("No template DWA for terminal {:?}", terminal_id)
+                            })
+                        }
+                        _ => &ignore_dwa,
+                    };
+
+                    let left_body =
+                        instantiate_template_nwa_with_weight(&states_arena, template_dwa, weight);
+                    left_bodies.push(left_body);
+                }
+
                 if left_bodies.is_empty() {
                     continue;
                 }
-
                 let left_bodies_union = union_left_bodies(&states_arena, left_bodies);
                 let mut states = states_arena.borrow_mut();
                 let composed_body = NWA::concatenate_components(
@@ -444,28 +463,17 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     final_dwa
 }
 
-fn instantiate_template_nwa<T: std::fmt::Debug>(
+fn instantiate_template_nwa_with_weight(
     states_arena: &RefCell<NWAStates>,
     template_dwa: &DWA,
-    edge_terminal_opt: &Option<T>,
-    llm_token_bv: &LLMTokenBV,
+    weight: Weight,
 ) -> NWABody {
-    let mut template_dwa = template_dwa.clone();
-    let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-    template_dwa = DWA::concatenate(&template_dwa, &build_epsilon_dwa(eps_weight));
-    let template_nwa = NWA::from_dwa(&template_dwa);
-    crate::debug!(
-        6,
-        "Template NWA for terminal {:?} with epsilon gate weight {:?}:\n{}",
-        edge_terminal_opt,
-        llm_token_bv,
-        template_nwa
-    );
+    let concatenated_dwa = template_dwa.concatenate(&build_epsilon_dwa(weight));
+    let template_nwa = NWA::from_dwa(&concatenated_dwa);
     crate::debug!(
         5,
-        "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...",
-        edge_terminal_opt,
-        llm_token_bv
+        "Applying template NWA with weight {:?}...",
+        weight
     );
     let mut states = states_arena.borrow_mut();
     let (template_start_in_arena, _) =
