@@ -1456,7 +1456,7 @@ impl GrammarConstraint {
                             )
                         })
                         .collect();
-                    println!("- Class {:?}: {}", signature, members.join(", "));
+                    println!("- {}", members.join(", "));
                 }
             }
 
