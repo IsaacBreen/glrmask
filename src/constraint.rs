@@ -1463,26 +1463,17 @@ impl GrammarConstraint {
         }
 
         // 3. Build the mapping from original to internal IDs based on the computed classes.
+        // All tokens within the same class will be mapped to the same internal ID.
         let mut original_to_internal_map = BTreeMap::new();
-        // The BTreeMap gives us a deterministic order for processing classes.
+        let mut internal_id_counter = 0;
+        // The BTreeMap gives us a deterministic order for assigning internal IDs.
         for (_signature, string_indices) in equivalence_classes {
-            // CORRECTED LOGIC:
-            // All tokens in this class are equivalent. We must choose one of them
-            // to be the "canonical representative" and map all members of the class
-            // to that representative's original ID. This is much safer than creating
-            // a completely new, dense ID space from 0..N, as it preserves the IDs
-            // of any token that is not equivalent to another.
-            //
-            // To ensure determinism, we choose the member with the minimum original ID.
-            let canonical_internal_id = string_indices
-                .iter()
-                .map(|&idx| original_ids[idx].0)
-                .min()
-                .expect("Equivalence class cannot be empty");
+            let internal_id = internal_id_counter;
+            internal_id_counter += 1;
 
             for string_index in string_indices {
                 let original_llm_id = original_ids[string_index];
-                original_to_internal_map.insert(original_llm_id.0, canonical_internal_id);
+                original_to_internal_map.insert(original_llm_id.0, internal_id);
             }
         }
 
