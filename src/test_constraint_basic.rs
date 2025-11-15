@@ -220,6 +220,8 @@ fn test_constraint_simple_simplified() {
     );
     // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
+    constraint.dump_precomputed3();
+    constraint.dump_precomputed4();
 
     let mut constraint_state = constraint.init();
 
