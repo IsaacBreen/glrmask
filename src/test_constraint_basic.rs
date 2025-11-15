@@ -1,35 +1,47 @@
 // src/test_constraint_basic.rs
+use std::collections::{BTreeSet, HashMap};
+use std::fs;
+use std::sync::Arc;
+use std::time::Instant;
+
+use bimap::BiBTreeMap;
+use indoc::indoc;
+
+use crate::constraint::{
+    GrammarConstraint,
+    GrammarConstraintConfig,
+    IntermediatePrecomputeNode3,
+    IntermediatePrecomputedNodeContents3,
+    PrecomputeNode3Index,
+};
+use crate::datastructures::gss_leveled_adapter::{
+    allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc,
+    Acc,
+};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::finite_automata::{eat_u8, rep1};
 use crate::glr::grammar::{nt, prod, regex_name, t, Terminal};
-use crate::glr::parser::{BelowBottomReductionMode, GLRParserState, ParseState, ProcessTokenAdvancedConfig};
-use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_terminal_map};
-use crate::{choice, choice_fast, groups, seq, seq_fast};
-use std::collections::BTreeSet;
-use crate::interface::{eat_any_fast, eat_string_fast, eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, opt_fast, repeat0_fast, repeat1_fast, CompiledGrammar, GrammarDefinition};
-// Explicitly import HybridBitset
-use std::hash::Hash;
-// Import the analyze module
-
-use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, IntermediatePrecomputeNode3, IntermediatePrecomputedNodeContents3, PrecomputeNode3Index};
+use crate::glr::parser::{
+    BelowBottomReductionMode,
+    GLRParserState,
+    ParseState,
+    ProcessTokenAdvancedConfig,
+};
+use crate::glr::table::generate_glr_parser_with_terminal_map;
+use crate::interface::{
+    eat_any_fast,
+    eat_u8_fast,
+    eat_u8_negation_fast,
+    eat_u8_range_fast,
+    repeat0_fast,
+    repeat1_fast,
+    CompiledGrammar,
+    GrammarDefinition,
+};
 use crate::json_serialization::JSONConvertible;
-// Already a main dependency, but good to be explicit if used directly
-// reqwest will be used if the file isn't cached, ensure it's in dev-dependencies
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use crate::types::TerminalID;
-use bimap::BiBTreeMap;
-use serde_json;
-use std::fs::{self};
-use std::io::Read;
-use std::sync::Arc;
-use rand::prelude::IndexedRandom;
-// Added for tokenization
-use std::time::Instant;
-use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc, Acc};
-use indoc::indoc;
-// Added for panic catching
-use std::collections::HashMap;
-// For the symbol removal helper
+use crate::{choice_fast, groups, seq_fast};
 
 #[test]
 fn test_trivial() {
