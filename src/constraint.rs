@@ -92,6 +92,7 @@ use std::iter;
 use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
+use crate::datastructures::leveled_gss::{LeveledGSS, Merge};
 
 #[derive(Default, Debug)]
 struct DfsStats {
@@ -4949,6 +4950,12 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn get_mask4(&self) -> LLMTokenBV {
+        impl Merge for RangeSetBlaze<usize> {
+            fn merge(&self, other: &Self) -> Self {
+                self & other
+            }
+        }
+
         fn simple_bitset_to_hybrid_bitset(sb: &SimpleBitset) -> HybridBitset {
             HybridBitset::from(sb.rsb.clone())
         }
@@ -4959,10 +4966,9 @@ impl<'a> GrammarConstraintState<'a> {
                 .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
         }
 
-        let mut pending_states: BTreeMap<WAStateID, GLRParserState<'a>> = BTreeMap::new();
+        let mut pending_states: BTreeMap<WAStateID, LeveledGSS<_, _>> = BTreeMap::new();
         let dwa = &self.parent.precomputed4;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
-        let mut start_dwa_ids: HashSet<WAStateID> = HashSet::new();
 
         // 1. Seed initial states
         for (&tokenizer_state_id, glr_state) in &self.state {
@@ -4983,115 +4989,20 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some((target_wa_state_id, weight)) =
                 dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
             {
-                start_dwa_ids.insert(target_wa_state_id);
-                allow_only_llm_tokens_and_prune_arc(
-                    &mut glr_state.active_state.stack,
-                    &simple_bitset_to_hybrid_bitset(weight),
-                    &mut HashMap::new(),
-                );
+                let f = |acc: &Acc| {
+                    Some(acc.llm_tokens_union.inner.as_ref() & &weight.rsb)
+                };
+                let gss = glr_state.active_state.stack.inner.apply_and_prune(f);
 
-                if glr_state.is_ok() {
-                    pending_states
-                        .entry(target_wa_state_id)
-                        .and_modify(|existing| existing.merge_with(glr_state.clone()))
-                        .or_insert(glr_state);
-                }
+                pending_states
+                    .entry(target_wa_state_id)
+                    .and_modify(|existing| *existing = existing.merge(&gss))
+                    .or_insert(gss);
             }
         }
 
         // 2. Main worklist loop
-        while !pending_states.is_empty() {
-            let worklist = std::mem::take(&mut pending_states);
-
-            for (current_wa_state_id, mut current_glr_state) in worklist {
-                let dwa_state = &dwa.states[current_wa_state_id];
-                let pop_len = if start_dwa_ids.contains(&current_wa_state_id) { 0 } else { 1 };
-
-                // Apply state weight
-                if let Some(sw) = &dwa_state.state_weight {
-                    allow_only_llm_tokens_and_prune_arc(
-                        &mut current_glr_state.active_state.stack,
-                        &simple_bitset_to_hybrid_bitset(sw),
-                        &mut HashMap::new(),
-                    );
-                    if !current_glr_state.is_ok() {
-                        continue;
-                    }
-                }
-
-                // Process final weight (pop 0)
-                if let Some(fw) = &dwa_state.final_weight {
-                    let mut final_glr_state = current_glr_state.clone();
-                    allow_only_llm_tokens_and_prune_arc(
-                        &mut final_glr_state.active_state.stack,
-                        &simple_bitset_to_hybrid_bitset(fw),
-                        &mut HashMap::new(),
-                    );
-                    if final_glr_state.is_ok() {
-                        *final_mask_internal.borrow_mut() |=
-                            &final_glr_state.active_state.stack.allowed_llm_tokens();
-                    }
-                }
-
-                // Process transitions
-                if pop_len == 0 {
-                    // Pop 0: Peek at current stack top, do not pop.
-                    for peek in GSSNode::peek_iter(&current_glr_state.active_state.stack) {
-                        let parser_state_id = peek.edge_value().state_id.0;
-                        if let Some((target_wa_state_id, trans_weight)) =
-                            dwa_state.get_transition(parser_state_id as i16)
-                        {
-                            let mut new_glr_state = current_glr_state.clone();
-                            // Apply weight to the GSS isolated for this path, but do not pop.
-                            let isolated_gss = peek.isolated_parent();
-                            new_glr_state.active_state.stack = isolated_gss;
-
-                            allow_only_llm_tokens_and_prune_arc(
-                                &mut new_glr_state.active_state.stack,
-                                &simple_bitset_to_hybrid_bitset(trans_weight),
-                                &mut HashMap::new(),
-                            );
-
-                            if new_glr_state.is_ok() {
-                                pending_states
-                                    .entry(target_wa_state_id)
-                                    .and_modify(|existing| existing.merge_with(new_glr_state.clone()))
-                                    .or_insert(new_glr_state);
-                            }
-                        }
-                    }
-                } else { // pop_len == 1
-                    // Pop 1: Pop the stack, then peek at the new top.
-                    let popped = current_glr_state.active_state.stack.popn(1);
-                    for popper_item in popped.iter() {
-                        for peek in popper_item.peek_iter() {
-                            let parser_state_id = peek.edge_value().state_id.0;
-                            if let Some((target_wa_state_id, trans_weight)) =
-                                dwa_state.get_transition(parser_state_id as i16)
-                            {
-                                let mut new_glr_state = current_glr_state.clone();
-                                new_glr_state.active_state.stack = peek.isolated_parent();
-
-                                allow_only_llm_tokens_and_prune_arc(
-                                    &mut new_glr_state.active_state.stack,
-                                    &simple_bitset_to_hybrid_bitset(trans_weight),
-                                    &mut HashMap::new(),
-                                );
-
-                                if new_glr_state.is_ok() {
-                                    pending_states
-                                        .entry(target_wa_state_id)
-                                        .and_modify(|existing| {
-                                            existing.merge_with(new_glr_state.clone())
-                                        })
-                                        .or_insert(new_glr_state);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // TODO
 
         let final_mask_mapped = self
             .parent
