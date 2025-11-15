@@ -1541,7 +1541,9 @@ fn test_simplify() {
 
     // Since there are no negative codes, the DWA should not be changed.
     let expected = d.clone();
+    println!("Before simplification:\n{}", d);
     d.simplify();
+    println!("After simplification:\n{}", d);
 
     stochastic_equivalence_test(d, expected);
 }

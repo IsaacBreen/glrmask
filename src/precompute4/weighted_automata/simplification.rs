@@ -6,6 +6,7 @@ use super::common::{StateID, Weight};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use super::nwa::NWA;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::cmp::Ordering;
 
 // --- Top-Level API ---
 
@@ -250,7 +251,7 @@ mod shortest_distance {
         if reverse {
             let mut rev_adj: Vec<Vec<(StateID, Weight)>> = vec![vec![]; n];
             for u in 0..n {
-                for (label, v, weight) in states[u].iter_edges() {
+                for (_label, v, weight) in states[u].iter_edges() {
                     if v < n {
                         rev_adj[v].push((u, weight.clone()));
                     }
@@ -291,10 +292,9 @@ mod reweight {
             let state = &mut states[i];
             let inv_potential = !&potential[i];
 
-            // Reweight final weight: ρ'(s) = ρ(s) | !potential(s)
-            if let Some(fw) = &mut state.final_weight {
-                *fw |= &inv_potential;
-            }
+            // Final weights are not reweighted in this scheme to preserve equivalence
+            // under the simple path evaluation logic. The original logic `*fw |= &inv_potential`
+            // was incorrect as it made the automaton more accepting.
 
             // Reweight transitions: w'(s, t) = (w(s, t) & potential(t)) | !potential(s)
             for (label, weight) in &mut state.trans_weights {
@@ -480,7 +480,7 @@ mod cyclic_minimize {
                         partition.classes[state_to_move] = new_class_id;
                     }
 
-                    if let Some(pos) = worklist.iter().position(|&id| id == source_class_id) {
+                    if let Some(_pos) = worklist.iter().position(|&id| id == source_class_id) {
                         worklist.push_back(new_class_id);
                     } else {
                         if split_off.len() <= total_in_class_count / 2 {
