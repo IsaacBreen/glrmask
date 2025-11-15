@@ -4784,7 +4784,11 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn get_mask(&self) -> LLMTokenBV {
-        self.get_mask4()
+        if self.parent.run_precompute4 {
+            self.get_mask4()
+        } else {
+            self.get_mask3()
+        }
     }
 
     pub fn print_gss_stats(&self) {
