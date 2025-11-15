@@ -1748,7 +1748,8 @@ impl GrammarConstraint {
                 .insert(*orig);
         }
 
-        let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
+        // FIX: Use BTreeMap instead of BiBTreeMap to prevent data loss from many-to-one mappings.
+        let mut internal_llm_token_map_for_precompute = BTreeMap::new();
         for (bytes, original_id) in llm_token_map.iter() {
             if let Some(internal_id_val) = original_to_internal_map.get(&original_id.0) {
                 internal_llm_token_map_for_precompute
@@ -2276,7 +2277,7 @@ impl GrammarConstraint {
         tokenizer: &Regex,
         parser: Option<&GLRParser>,
         llm_vocab: Option<Arc<LLMVocab>>,
-        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map: &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
@@ -2536,7 +2537,7 @@ impl GrammarConstraint {
         tokenizer: &Regex,
         parser: Option<&GLRParser>,
         llm_vocab: Option<Arc<LLMVocab>>,
-        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map: &BiBTreeMap<Terminal, usize>,
         stage_vocab: &mut StageVocab,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
@@ -2627,7 +2628,7 @@ impl GrammarConstraint {
         _tokenizer: &Regex,
         _parser: Option<&GLRParser>,
         _llm_vocab: Option<Arc<LLMVocab>>,
-        _internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        _internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         _token_name_map: &BiBTreeMap<Terminal, usize>,
         _internal_max_llm_token: usize,
         _terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
@@ -2879,7 +2880,7 @@ impl GrammarConstraint {
         tokenizer: &Regex,
         parser: Option<&GLRParser>,
         llm_vocab: Option<Arc<LLMVocab>>,
-        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map: &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
@@ -3914,7 +3915,7 @@ impl<'r> Precomputer1<'r> {
         tokenizer: &'r Regex,
         parser: Option<&'r GLRParser>,
         llm_vocab: Option<Arc<LLMVocab>>,
-        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         internal_max_llm_token: usize,
         merge_threshold: usize,
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
