@@ -4910,7 +4910,7 @@ impl<'a> GrammarConstraintState<'a> {
             let mut glr_state = glr_state.clone();
             prune_llm_tokens_by_disallowed_terminals(
                 &mut glr_state.active_state.stack,
-                &self.parent.possible_matches_precompute1,
+                &self.parent.possible_matches,
                 &mut HashMap::new(),
             );
 
@@ -5033,7 +5033,7 @@ impl<'a> GrammarConstraintState<'a> {
             let mut glr_state = glr_state.clone();
             prune_llm_tokens_by_disallowed_terminals(
                 &mut glr_state.active_state.stack,
-                &self.parent.possible_matches,
+                &self.parent.possible_matches_precompute1,
                 &mut HashMap::new(),
             );
 
