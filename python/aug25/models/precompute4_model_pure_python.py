@@ -286,6 +286,7 @@ class Model(GraphProvider):
             weights_map = s['trans_weights']  # label -> weight
 
             merged_trans = {}
+            print(trans_map[0])
             for label_str, target in trans_map.items():
                 label = int(label_str)
                 w_json = weights_map.get(label_str)
