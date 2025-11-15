@@ -1450,9 +1450,8 @@ impl GrammarConstraint {
                         .map(|&idx| {
                             let bytes = &llm_token_strings[idx];
                             format!(
-                                "{:?} (ID {})",
+                                "{:?}",
                                 String::from_utf8_lossy(bytes),
-                                original_ids[idx].0
                             )
                         })
                         .collect();
