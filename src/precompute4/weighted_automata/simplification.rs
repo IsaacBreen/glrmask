@@ -348,7 +348,8 @@ impl Partition {
     }
 
     fn finalize_split(&mut self, queue: &mut VecDeque<usize>) {
-        for &visited_class in &self.visited_classes {
+        let visited_classes = std::mem::take(&mut self.visited_classes);
+        for &visited_class in &visited_classes {
             let yes_size = self.classes[visited_class].yes_size;
             let no_size = self.classes[visited_class].size - yes_size;
 
@@ -383,7 +384,6 @@ impl Partition {
             self.classes[visited_class].yes_head = -1;
             self.classes[visited_class].yes_size = 0;
         }
-        self.visited_classes.clear();
         self.yes_counter += 1;
     }
 
