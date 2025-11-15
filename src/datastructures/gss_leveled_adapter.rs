@@ -274,7 +274,7 @@ impl GSSNode {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty() || self.inner.max_depth() == 0
+        self.inner.is_empty()
     }
     pub fn is_alive(&self) -> bool {
         !self.is_empty()

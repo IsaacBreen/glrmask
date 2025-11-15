@@ -92,6 +92,7 @@ use std::iter;
 use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
+use crate::datastructures::leveled_gss::Merge;
 
 #[derive(Default, Debug)]
 struct DfsStats {
@@ -4887,28 +4888,47 @@ impl<'a> GrammarConstraintState<'a> {
             initial_values_for_map,
             // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
             |glr_s: &GLRParserState,
-             (pop, llm_token_bv_from_edge),
+             (pop_isize, llm_token_bv_from_edge),
              dest_map| {
-                let popped = glr_s.active_state.stack.popn(*pop as usize);
+                let pop = *pop_isize as usize;
                 let mut results = Vec::new();
 
                 for (dest_idx, state_id_bv) in dest_map.iter() {
-                    let mut valid_gss_nodes = Vec::new();
-                    for popper_item in popped.iter() {
-                        for peek in popper_item.peek_iter() {
+                    let mut next_gss_nodes = Vec::new();
+
+                    if pop > 0 {
+                        for peek in glr_s.active_state.stack.peek_iter() {
                             if state_id_bv.contains(peek.edge_value().state_id.0)
                             {
-                                valid_gss_nodes.push(peek.isolated_parent());
+                                let popper = peek.popn(pop);
+                                let popped_gss = Arc::new(GSSNode {
+                                    inner: popper._inner().clone(),
+                                });
+                                if popped_gss.is_ok() {
+                                    next_gss_nodes.push(popped_gss);
+                                }
                             }
+                        }
+                    } else {
+                        // pop == 0
+                        let mut valid_paths = Vec::new();
+                        for peek in glr_s.active_state.stack.peek_iter() {
+                            if state_id_bv.contains(peek.edge_value().state_id.0)
+                            {
+                                valid_paths.push(peek.isolated_parent());
+                            }
+                        }
+                        if !valid_paths.is_empty() {
+                            next_gss_nodes
+                                .push(GSSNode::merge_many_with_depth(0, valid_paths));
                         }
                     }
 
-                    if valid_gss_nodes.is_empty() {
+                    if next_gss_nodes.is_empty() {
                         continue;
                     }
 
-                    let merged_gss =
-                        GSSNode::merge_many_with_depth(1, valid_gss_nodes.clone());
+                    let merged_gss = GSSNode::merge_many_with_depth(pop, next_gss_nodes);
                     let mut new_glr_s = glr_s.clone();
                     new_glr_s.active_state.stack = merged_gss;
 
@@ -4959,13 +4979,14 @@ impl<'a> GrammarConstraintState<'a> {
                 .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
         }
 
-        let mut pending_states: BTreeMap<WAStateID, GLRParserState<'a>> = BTreeMap::new();
+        let mut pending_states: BTreeMap<WAStateID, (GLRParserState<'a>, usize)> =
+            BTreeMap::new();
         let dwa = &self.parent.precomputed4;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
 
         // 1. Seed initial states
         for (&tokenizer_state_id, glr_state) in &self.state {
-            if glr_state.active_state.stack.is_empty() {
+            if !glr_state.is_ok() {
                 continue;
             }
             let mut glr_state = glr_state.clone();
@@ -4991,8 +5012,8 @@ impl<'a> GrammarConstraintState<'a> {
                 if glr_state.is_ok() {
                     pending_states
                         .entry(target_wa_state_id)
-                        .and_modify(|existing| existing.merge_with(glr_state.clone()))
-                        .or_insert(glr_state);
+                        .and_modify(|(existing, _)| existing.merge_with(glr_state.clone()))
+                        .or_insert((glr_state, 0)); // depth 0
                 }
             }
         }
@@ -5001,7 +5022,7 @@ impl<'a> GrammarConstraintState<'a> {
         while !pending_states.is_empty() {
             let worklist = std::mem::take(&mut pending_states);
 
-            for (current_wa_state_id, mut current_glr_state) in worklist {
+            for (current_wa_state_id, (mut current_glr_state, depth)) in worklist {
                 let dwa_state = &dwa.states[current_wa_state_id];
 
                 // Apply state weight
@@ -5018,52 +5039,91 @@ impl<'a> GrammarConstraintState<'a> {
 
                 // Process final weight
                 if let Some(fw) = &dwa_state.final_weight {
-                    let mut final_glr_state = current_glr_state.clone();
-                    allow_only_llm_tokens_and_prune_arc(
-                        &mut final_glr_state.active_state.stack,
-                        &simple_bitset_to_hybrid_bitset(fw),
-                        &mut HashMap::new(),
-                    );
-                    if final_glr_state.is_ok() {
-                        *final_mask_internal.borrow_mut() |=
-                            &final_glr_state.active_state.stack.allowed_llm_tokens();
+                    let empty_path_accs: Vec<_> = current_glr_state
+                        .active_state
+                        .stack
+                        .inner
+                        .to_stacks()
+                        .into_iter()
+                        .filter(|(p, _)| p.is_empty())
+                        .map(|(_, a)| a)
+                        .collect();
+                    if !empty_path_accs.is_empty() {
+                        let mut merged_acc = empty_path_accs[0].clone();
+                        for acc in empty_path_accs.iter().skip(1) {
+                            merged_acc = merged_acc.merge(acc);
+                        }
+                        let mut final_glr_state = current_glr_state.clone();
+                        final_glr_state.active_state.stack = Arc::new(GSSNode::new(merged_acc));
+
+                        allow_only_llm_tokens_and_prune_arc(
+                            &mut final_glr_state.active_state.stack,
+                            &simple_bitset_to_hybrid_bitset(fw),
+                            &mut HashMap::new(),
+                        );
+                        if final_glr_state.is_ok() {
+                            *final_mask_internal.borrow_mut() |=
+                                &final_glr_state.active_state.stack.allowed_llm_tokens();
+                        }
                     }
                 }
 
-                // Process transitions (pop 1)
-                let popped = current_glr_state.active_state.stack.popn(1);
-                if popped.num_predecessors() == 0 {
-                    continue;
-                }
+                // Process transitions
+                let pop_len = if depth == 0 { 0 } else { 1 };
+                let mut gss_nodes_for_target: BTreeMap<WAStateID, (Weight, Vec<Arc<GSSNode>>)> =
+                    BTreeMap::new();
 
                 for (label, target_wa_state_id, trans_weight) in dwa_state.iter_edges() {
-                    let parser_state_id = label as usize;
+                    let required_parser_state_id = label as usize;
+                    let mut valid_next_gss_nodes = Vec::new();
 
-                    let mut valid_gss_nodes = Vec::new();
-                    for popper_item in popped.iter() {
-                        for peek in popper_item.peek_iter() {
-                            if peek.edge_value().state_id.0 == parser_state_id {
-                                valid_gss_nodes.push(peek.isolated_parent());
+                    if pop_len > 0 {
+                        for peek in current_glr_state.active_state.stack.peek_iter() {
+                            if peek.edge_value().state_id.0 == required_parser_state_id {
+                                let popper = peek.popn(pop_len);
+                                let popped_gss =
+                                    Arc::new(GSSNode { inner: popper._inner().clone() });
+                                if popped_gss.is_ok() {
+                                    valid_next_gss_nodes.push(popped_gss);
+                                }
+                            }
+                        }
+                    } else {
+                        // pop_len == 0
+                        for peek in current_glr_state.active_state.stack.peek_iter() {
+                            if peek.edge_value().state_id.0 == required_parser_state_id {
+                                valid_next_gss_nodes.push(peek.isolated_parent());
                             }
                         }
                     }
 
-                    if !valid_gss_nodes.is_empty() {
-                        let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes);
+                    if !valid_next_gss_nodes.is_empty() {
+                        let entry = gss_nodes_for_target
+                            .entry(target_wa_state_id)
+                            .or_insert_with(|| (trans_weight.clone(), Vec::new()));
+                        entry.1.extend(valid_next_gss_nodes);
+                    }
+                }
+
+                for (target_wa_state_id, (trans_weight, gss_nodes)) in gss_nodes_for_target {
+                    if !gss_nodes.is_empty() {
+                        let merged_gss = GSSNode::merge_many_with_depth(pop_len, gss_nodes);
                         let mut new_glr_state = current_glr_state.clone();
                         new_glr_state.active_state.stack = merged_gss;
 
                         allow_only_llm_tokens_and_prune_arc(
                             &mut new_glr_state.active_state.stack,
-                            &simple_bitset_to_hybrid_bitset(trans_weight),
+                            &simple_bitset_to_hybrid_bitset(&trans_weight),
                             &mut HashMap::new(),
                         );
 
                         if new_glr_state.is_ok() {
                             pending_states
                                 .entry(target_wa_state_id)
-                                .and_modify(|existing| existing.merge_with(new_glr_state.clone()))
-                                .or_insert(new_glr_state);
+                                .and_modify(|(existing, _)| {
+                                    existing.merge_with(new_glr_state.clone())
+                                })
+                                .or_insert((new_glr_state, depth + 1));
                         }
                     }
                 }
