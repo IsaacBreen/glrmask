@@ -1993,9 +1993,9 @@ fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::er
     );
     println!("Tokenizer: {}", constraint.tokenizer);
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed0();
     constraint.dump_precomputed1();
     constraint.dump_precomputed3();
+    constraint.dump_precomputed4();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
