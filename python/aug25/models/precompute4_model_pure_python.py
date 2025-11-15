@@ -501,7 +501,10 @@ class Model(GraphProvider):
             queue[depth][target_state_id] = gss
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
-        print(f"GSS: {self.state}")
+        print(f"GSSs")
+        for dwa_id, gss in self.state.items():
+            print(f"  DWA state {dwa_id}:")
+            print(f"    {gss}")
         stats = Stats.get()
         stats.start('get_mask')
         
@@ -538,6 +541,12 @@ class Model(GraphProvider):
                 gss_next = self._apply_weight(gss_init, weight)
                 if not gss_next.is_empty():
                     self._merge_into_queue(queue, gss_next, target_state_id)
+
+        print(f"Initial items")
+        for depth, states in queue.items():
+            for dwa_id, gss in states.items():
+                print(f"  Depth {depth}, DWA state {dwa_id}:")
+                print(f"    {gss}")
 
         # 2. Main worklist loop
         while queue:
