@@ -969,6 +969,15 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         return reduce(_merge_acc, accumulators)
 
+    def max_depth(self) -> int:
+        """Returns the maximum length of any stack in the GSS."""
+        if isinstance(self.inner, UpperBranch):
+            # For UpperBranch, _max_depth is the maximum stack length.
+            return self.inner._max_depth
+        else:
+            # For Interface, the maximum stack length is the max depth of the lower tree.
+            return self.inner.inner._max_depth
+
     def stats(self) -> LeveledGSSStats[T, Acc]:
         """
         Compute a comprehensive set of statistics for this LeveledGSS.
