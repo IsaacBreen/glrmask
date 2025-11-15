@@ -1,6 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
+use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::r#macro::is_debug_level_enabled;
 use std::cell::RefCell;
@@ -70,6 +71,7 @@ use crate::glr::table::StateID;
 use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue};
 use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::precompute4::weighted_automata::{StateID, Weight};
 use crate::precompute4::full_dwa::{precompute4, Precomputed4};
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
@@ -4930,7 +4932,112 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn get_mask4(&self) -> LLMTokenBV {
-        crate::constraint_special_precompute::get_mask4(self)
+        // This symbol is used for default transitions in the DWA.
+        // It's defined in `precompute4::utils`, which is not available here.
+        // Using a hardcoded value that is unlikely to conflict with real parser state IDs.
+        const DEFAULT_TRANSITION_SYMBOL: i16 = -1;
+
+        let dwa = &self.parent.precomputed4;
+        if self.state.is_empty() || dwa.states.is_empty() {
+            return LLMTokenBV::zeros();
+        }
+
+        let mut weights: HashMap<(ArcPtrWrapper<GSSNode>, StateID), Weight> = HashMap::new();
+        let mut worklist: VecDeque<(Arc<GSSNode>, StateID)> = VecDeque::new();
+
+        // Initialization: For each active tokenizer state, find the starting DWA node.
+        let dwa_start_state = &dwa.states[dwa.body.start_state];
+        for (tokenizer_state_id, glr_state) in &self.state {
+            if glr_state.active_state.stack.is_empty() {
+                continue;
+            }
+            let label = tokenizer_state_id.0 as i16;
+            if let Some((target_dwa_id, trans_weight)) = dwa_start_state.get_transition(label) {
+                let mut initial_weight = trans_weight.clone();
+                if let Some(sw) = &dwa_start_state.state_weight {
+                    initial_weight &= sw;
+                }
+
+                if !initial_weight.is_empty() {
+                    let gss_root = glr_state.active_state.stack.clone();
+                    let key = (ArcPtrWrapper(gss_root.clone()), *target_dwa_id);
+
+                    let w = weights.entry(key).or_insert_with(Weight::zeros);
+                    let old_w = w.clone();
+                    *w |= &initial_weight;
+                    if *w != old_w {
+                        worklist.push_back((gss_root, *target_dwa_id));
+                    }
+                }
+            }
+        }
+
+        // Fixed-point iteration: Traverse GSS and DWA simultaneously.
+        while let Some((gss_node, current_dwa_id)) = worklist.pop_front() {
+            let current_weight_at_entry = weights
+                .get(&(ArcPtrWrapper(gss_node.clone()), current_dwa_id))
+                .unwrap()
+                .clone();
+            let current_dwa_state = &dwa.states[current_dwa_id];
+
+            let mut path_weight = current_weight_at_entry;
+            if let Some(sw) = &current_dwa_state.state_weight {
+                path_weight &= sw;
+            }
+            if path_weight.is_empty() {
+                continue;
+            }
+
+            if gss_node.is_bottom() {
+                continue;
+            }
+
+            let parser_state_id = gss_node.state_id().0 as i16;
+            let mut transition_found = false;
+
+            let mut propagate = |next_dwa_id: StateID, trans_weight: &Weight| {
+                let weight_to_propagate = &path_weight & trans_weight;
+                if weight_to_propagate.is_empty() {
+                    return;
+                }
+                for pred_edge in gss_node.predecessors() {
+                    let pred_gss_node = &pred_edge.predecessor;
+                    let key = (ArcPtrWrapper(pred_gss_node.clone()), next_dwa_id);
+                    let w_entry = weights.entry(key).or_insert_with(Weight::zeros);
+                    let old_w = w_entry.clone();
+                    *w_entry |= &weight_to_propagate;
+                    if *w_entry != old_w {
+                        worklist.push_back((pred_gss_node.clone(), next_dwa_id));
+                    }
+                }
+            };
+
+            if let Some((next_dwa_id, trans_weight)) = current_dwa_state.get_transition(parser_state_id) {
+                transition_found = true;
+                propagate(*next_dwa_id, trans_weight);
+            }
+
+            if !transition_found {
+                if let Some((next_dwa_id, trans_weight)) = current_dwa_state.get_transition(DEFAULT_TRANSITION_SYMBOL) {
+                    propagate(*next_dwa_id, trans_weight);
+                }
+            }
+        }
+
+        // Calculate final mask by collecting weights from all final DWA states reached.
+        let mut final_mask = Weight::zeros();
+        for ((_gss_node, dwa_id), weight) in weights {
+            let dwa_state = &dwa.states[dwa_id];
+            let mut path_weight = weight;
+            if let Some(sw) = &dwa_state.state_weight {
+                path_weight &= sw;
+            }
+            if let Some(fw) = &dwa_state.final_weight {
+                final_mask |= &(path_weight & fw);
+            }
+        }
+
+        self.parent.internal_bv_to_original_precompute1(&LLMTokenBV::from(final_mask.rsb))
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
