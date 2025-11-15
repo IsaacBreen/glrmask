@@ -129,7 +129,7 @@ pub fn precompute4(
         |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
             let (current_nwa_body, current_tokens) = current_val;
             let template_dwa: &DWA = match edge_terminal_opt {
-                Some(terminal_id) if terminal_id != parser.ignore_terminal_id => template_dwas
+                Some(terminal_id) if Some(*terminal_id) != parser.ignore_terminal_id => template_dwas
                     .get(&terminal_id)
                     .expect_else(|| format!("No template DWA for terminal {:?}", terminal_id)),
                 _ => &ignore_dwa,
