@@ -397,7 +397,7 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
 
 impl NWA {
     /// Determinize the subgraph reachable from `self.body.start_state` into a `DWA`.
-    pub fn determinize_to_dwa(&self) -> DWA {
+    pub fn determinize_to_dwa2(&self) -> DWA {
         let custom_dwa = if let Some(dwa) = try_build_singleton_loop_union(self) {
             dwa
         } else {
