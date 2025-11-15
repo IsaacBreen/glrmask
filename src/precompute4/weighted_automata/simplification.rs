@@ -704,35 +704,26 @@ impl NWA {
     ///
     /// Returns `true` if the automaton changed structurally.
     pub fn simplify(&mut self) -> bool {
-        println!("prune_unreachable");
         let mut changed = self.prune_unreachable();
-        println!("prune_dead_ends");
         changed |= self.prune_dead_ends();
 
         let n = self.states.len();
         if n <= 1 {
-            println!("done");
             return changed;
         }
 
-        println!("minimize_nwa_partition");
         let partition = minimize_nwa_partition(&self.states);
         if partition.num_classes() >= n {
             // No merges.
-            println!("done");
             return changed;
         }
 
-        println!("rebuild_from_partition");
         self.rebuild_from_partition(partition);
         changed = true;
 
         // Final cleanup.
-        println!("final prune_unreachable");
         changed |= self.prune_unreachable();
-        println!("final prune_dead_ends");
         changed |= self.prune_dead_ends();
-        println!("done");
         changed
     }
 
