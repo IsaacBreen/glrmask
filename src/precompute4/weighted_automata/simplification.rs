@@ -456,13 +456,13 @@ enum ArcLabel {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct NwaTransitionSig {
     label: ArcLabel,
-    weight_id: u32,
+    weight: Weight,
     // Sorted list of destination classes.
     dest_classes: Vec<usize>,
 }
 
 impl NwaTransitionSig {
-    fn sort_key(&self) -> (u8, i16, u32, u64) {
+    fn sort_key(&self) -> (u8, i16, u64, u64) {
         let label_tag = match self.label {
             ArcLabel::Eps => 0,
             ArcLabel::Label(_) => 1,
@@ -471,90 +471,56 @@ impl NwaTransitionSig {
             ArcLabel::Eps => 0,
             ArcLabel::Label(v) => v,
         };
+        let w_hash = hash_value(&self.weight);
         let dest_hash = hash_value(&self.dest_classes);
-        (label_tag, label_val, self.weight_id, dest_hash)
-    }
-}
-
-/// Static grouping of outgoing transitions by (label, weight_id) for each state.
-#[derive(Clone, Debug)]
-struct NwaEdgeGroup {
-    label: ArcLabel,
-    weight_id: u32,
-    dests: Vec<NWAStateID>,
-}
-
-/// Interns `Weight` values into compact integer IDs so we can
-/// compare and hash them cheaply.
-#[derive(Clone, Debug)]
-struct WeightInterner {
-    // Map from hash(weight) to a bucket of (exact_weight, id) pairs.
-    buckets: HashMap<u64, Vec<(Weight, u32)>>,
-    next_id: u32,
-}
-
-impl WeightInterner {
-    fn new() -> Self {
-        Self {
-            buckets: HashMap::new(),
-            next_id: 0,
-        }
-    }
-
-    fn intern(&mut self, w: &Weight) -> u32 {
-        let h = hash_value(w);
-        use std::collections::hash_map::Entry;
-        match self.buckets.entry(h) {
-            Entry::Vacant(e) => {
-                let id = self.next_id;
-                self.next_id += 1;
-                e.insert(vec![(w.clone(), id)]);
-                id
-            }
-            Entry::Occupied(mut e) => {
-                // Scan this hash bucket for an exact weight match.
-                for (existing_w, id) in e.get().iter() {
-                    if existing_w == w {
-                        return *id;
-                    }
-                }
-                let id = self.next_id;
-                self.next_id += 1;
-                e.get_mut().push((w.clone(), id));
-                id
-            }
-        }
+        (label_tag, label_val, w_hash, dest_hash)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct NwaStateSignature {
-    final_weight_id: Option<u32>,
+    final_weight: Option<Weight>,
     outgoing: Vec<NwaTransitionSig>,
 }
 
 impl NwaStateSignature {
-    fn from_state(
-        state_id: NWAStateID,
-        final_weight_ids: &[Option<u32>],
-        groups_per_state: &[Vec<NwaEdgeGroup>],
-        classes: &[usize],
-    ) -> Self {
-        let groups = &groups_per_state[state_id];
-        let mut outgoing = Vec::with_capacity(groups.len());
+    fn from_state(state_id: NWAStateID, states: &NWAStates, classes: &[usize]) -> Self {
+        let st = &states[state_id];
 
-        for g in groups {
-            // Translate destination state IDs into destination classes under the
-            // current partition, then sort and deduplicate.
-            let mut dest_classes: Vec<usize> =
-                g.dests.iter().map(|&dest| classes[dest]).collect();
+        // Map (ArcLabel, weight) -> set of destination classes.
+        let mut temp: HashMap<(ArcLabel, Weight), BTreeSet<usize>> = HashMap::new();
 
-            dest_classes.sort_unstable();
-            dest_classes.dedup();
+        // Epsilon transitions.
+        for &(dest, ref w) in &st.epsilons {
+            if w.is_empty() {
+                continue;
+            }
+            let key = (ArcLabel::Eps, w.clone());
+            temp.entry(key)
+                .or_insert_with(BTreeSet::new)
+                .insert(classes[dest]);
+        }
 
+        // Labeled transitions.
+        for (&lbl, targets) in &st.transitions {
+            let label = ArcLabel::Label(lbl);
+            for &(dest, ref w) in targets {
+                if w.is_empty() {
+                    continue;
+                }
+                let key = (label, w.clone());
+                temp.entry(key)
+                    .or_insert_with(BTreeSet::new)
+                    .insert(classes[dest]);
+            }
+        }
+
+        let mut outgoing = Vec::with_capacity(temp.len());
+        for ((label, weight), dest_set) in temp {
+            let dest_classes: Vec<usize> = dest_set.into_iter().collect();
             outgoing.push(NwaTransitionSig {
-                label: g.label,
-                weight_id: g.weight_id,
+                label,
+                weight,
                 dest_classes,
             });
         }
@@ -562,7 +528,7 @@ impl NwaStateSignature {
         outgoing.sort_by_key(|t| t.sort_key());
 
         NwaStateSignature {
-            final_weight_id: final_weight_ids[state_id],
+            final_weight: st.final_weight.clone(),
             outgoing,
         }
     }
@@ -578,82 +544,6 @@ fn minimize_nwa_partition(states: &NWAStates) -> Partition {
         };
     }
 
-    // Precompute a compact representation of all weights and outgoing
-    // transitions. This work is done once, and reused in every refinement
-    // iteration.
-    let mut interner = WeightInterner::new();
-
-    // Map each state's final_weight (if any) to a compact ID.
-    let mut final_weight_ids: Vec<Option<u32>> = Vec::with_capacity(n);
-    for s in 0..n {
-        let id_opt = states[s]
-            .final_weight
-            .as_ref()
-            .map(|w| interner.intern(w));
-        final_weight_ids.push(id_opt);
-    }
-
-    // For each state, group outgoing transitions by (label, weight_id).
-    let mut groups_per_state: Vec<Vec<NwaEdgeGroup>> = Vec::with_capacity(n);
-    for s in 0..n {
-        let st = &states[s];
-        let mut groups: Vec<NwaEdgeGroup> = Vec::new();
-        let mut group_index: HashMap<(ArcLabel, u32), usize> = HashMap::new();
-
-        // Epsilon transitions.
-        for &(dest, ref w) in &st.epsilons {
-            if w.is_empty() {
-                continue;
-            }
-            let wid = interner.intern(w);
-            let key = (ArcLabel::Eps, wid);
-
-            let idx = match group_index.get(&key) {
-                Some(&idx) => idx,
-                None => {
-                    let idx = groups.len();
-                    groups.push(NwaEdgeGroup {
-                        label: ArcLabel::Eps,
-                        weight_id: wid,
-                        dests: Vec::new(),
-                    });
-                    group_index.insert(key, idx);
-                    idx
-                }
-            };
-            groups[idx].dests.push(dest);
-        }
-
-        // Labeled transitions.
-        for (&lbl, targets) in &st.transitions {
-            let label = ArcLabel::Label(lbl);
-            for &(dest, ref w) in targets {
-                if w.is_empty() {
-                    continue;
-                }
-                let wid = interner.intern(w);
-                let key = (label, wid);
-
-                let idx = match group_index.get(&key) {
-                    Some(&idx) => idx,
-                    None => {
-                        let idx = groups.len();
-                        groups.push(NwaEdgeGroup {
-                            label,
-                            weight_id: wid,
-                            dests: Vec::new(),
-                        });
-                        group_index.insert(key, idx);
-                        idx
-                    }
-                };
-                groups[idx].dests.push(dest);
-            }
-        }
-
-        groups_per_state.push(groups);
-    }
-
     let mut partition = Partition::new(n);
 
     loop {
@@ -662,12 +552,7 @@ fn minimize_nwa_partition(states: &NWAStates) -> Partition {
         let mut next_class = 0;
 
         for s in 0..n {
-            let sig = NwaStateSignature::from_state(
-                s,
-                &final_weight_ids,
-                &groups_per_state,
-                &partition.classes,
-            );
+            let sig = NwaStateSignature::from_state(s, states, &partition.classes);
             let entry = sig_to_class.entry(sig).or_insert_with(|| {
                 let id = next_class;
                 next_class += 1;
