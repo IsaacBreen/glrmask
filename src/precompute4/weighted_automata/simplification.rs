@@ -61,7 +61,7 @@ impl DWA {
         let (encoded_graph, encode_table) = encode(&self.states);
 
         // 2. CORE MINIMIZATION: Use Hopcroft's algorithm for all cases.
-        let partition = cyclic_minimize::minimize(&encoded_graph);
+        let partition = cyclic_minimize::minimize(&encoded_graph, &self.states);
 
         // The encoded graph includes a super-final state. If no states were merged,
         // the number of classes will equal the number of original states + 1.
@@ -262,7 +262,6 @@ struct Partition {
 
 struct PartitionIterator<'a> {
     partition: &'a Partition,
-    class_id: usize,
     last_element_id: Option<i32>,
 }
 
@@ -270,8 +269,9 @@ impl<'a> PartitionIterator<'a> {
     fn new(partition: &'a Partition, class_id: usize) -> Self {
         PartitionIterator {
             partition,
-            class_id,
-            last_element_id: None,
+            last_element_id: Some(partition.classes[class_id].no_head)
+                .filter(|&h| h >= 0)
+                .map(|h| partition.elements[h as usize].prev_element),
         }
     }
 }
@@ -281,10 +281,13 @@ impl<'a> Iterator for PartitionIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let new_element_id = match self.last_element_id {
-            None => self.partition.classes[self.class_id].no_head,
+            None => return None,
+            Some(e) if e < 0 => self.partition.classes[self.partition.elements[0].class_id].no_head,
             Some(e) => self.partition.elements[e as usize].next_element,
         };
+
         if new_element_id < 0 {
+            self.last_element_id = None;
             None
         } else {
             self.last_element_id = Some(new_element_id);
@@ -368,21 +371,14 @@ impl Partition {
                 self.classes[visited_class].no_head = self.classes[visited_class].yes_head;
             } else {
                 let new_class_id = self.add_class();
-                let (smaller_class, larger_class) = if no_size < yes_size {
-                    (new_class_id, visited_class)
-                } else {
-                    (visited_class, new_class_id)
-                };
-                if !queue.contains(&larger_class) {
-                    queue.push_back(smaller_class);
-                }
-
                 if no_size < yes_size {
+                    queue.push_back(new_class_id);
                     self.classes[new_class_id].no_head = self.classes[visited_class].no_head;
                     self.classes[new_class_id].size = no_size;
                     self.classes[visited_class].no_head = self.classes[visited_class].yes_head;
                     self.classes[visited_class].size = yes_size;
                 } else {
+                    queue.push_back(visited_class);
                     self.classes[new_class_id].no_head = self.classes[visited_class].yes_head;
                     self.classes[new_class_id].size = yes_size;
                     self.classes[visited_class].size = no_size;
@@ -409,8 +405,17 @@ impl Partition {
     fn num_classes(&self) -> usize {
         self.classes.len()
     }
-    fn iter(&self, class_id: usize) -> PartitionIterator {
-        PartitionIterator::new(self, class_id)
+    fn iter(&self, class_id: usize) -> impl Iterator<Item = usize> + '_ {
+        let mut curr = self.classes[class_id].no_head;
+        std::iter::from_fn(move || {
+            if curr < 0 {
+                None
+            } else {
+                let id = curr as usize;
+                curr = self.elements[id].next_element;
+                Some(id)
+            }
+        })
     }
 }
 
@@ -418,26 +423,33 @@ impl Partition {
 mod cyclic_minimize {
     use super::*;
 
-    pub fn minimize(graph: &EncodedGraph) -> Partition {
+    pub fn minimize(graph: &EncodedGraph, states: &DWAStates) -> Partition {
         let n = graph.transitions.len();
+        let original_n = states.len();
         let mut partition = Partition::new(n);
         let mut worklist = VecDeque::new();
 
-        // Initial partition: final vs non-final
-        let final_class = partition.add_class();
-        let non_final_class = partition.add_class();
-        for i in 0..n {
-            if graph.is_final[i] {
-                partition.add(i, final_class);
-            } else {
-                partition.add(i, non_final_class);
-            }
+        // Initial partition: group by (is_final, state_weight)
+        let mut groups: HashMap<(bool, Option<Weight>), usize> = HashMap::new();
+        for i in 0..original_n {
+            let key = (graph.is_final[i], states[i].state_weight.clone());
+            let class_id = *groups.entry(key).or_insert_with(|| partition.add_class());
+            partition.add(i, class_id);
         }
+        // Handle super-final state (ID = original_n)
+        let super_final_key = (true, None);
+        let super_final_class = *groups.entry(super_final_key).or_insert_with(|| partition.add_class());
+        partition.add(original_n, super_final_class);
 
-        if partition.get_class_size(final_class) < partition.get_class_size(non_final_class) {
-            worklist.push_back(final_class);
-        } else {
-            worklist.push_back(non_final_class);
+        // Populate worklist with all but the largest initial class
+        if partition.num_classes() > 1 {
+            let mut class_sizes: Vec<(usize, usize)> = (0..partition.num_classes())
+                .map(|i| (i, partition.get_class_size(i)))
+                .collect();
+            class_sizes.sort_by_key(|&(_, size)| size);
+            for (class_id, _) in class_sizes.iter().take(class_sizes.len() - 1) {
+                worklist.push_back(*class_id);
+            }
         }
 
         let mut rev_adj: Vec<BTreeMap<i16, Vec<StateID>>> = vec![BTreeMap::new(); n];
@@ -448,16 +460,21 @@ mod cyclic_minimize {
         }
 
         while let Some(class_id) = worklist.pop_front() {
-            let mut splitters: BTreeMap<i16, Vec<StateID>> = BTreeMap::new();
+            let mut predecessors_by_label: BTreeMap<i16, Vec<StateID>> = BTreeMap::new();
             for state_id in partition.iter(class_id) {
-                for (label, sources) in &rev_adj[state_id] {
-                    splitters.entry(*label).or_default().extend(sources);
+                if state_id < rev_adj.len() {
+                    for (label, sources) in &rev_adj[state_id] {
+                        predecessors_by_label
+                            .entry(*label)
+                            .or_default()
+                            .extend(sources);
+                    }
                 }
             }
 
-            for (_, sources) in splitters {
-                for source in sources {
-                    partition.split_on(source);
+            for (_, predecessors) in predecessors_by_label {
+                for p in predecessors {
+                    partition.split_on(p);
                 }
                 partition.finalize_split(&mut worklist);
             }
