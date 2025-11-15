@@ -293,15 +293,15 @@ pub fn precompute4(
         combined_nwa.states.len()
     );
 
-    let final_dwa = optimize_and_determinize(parser, combined_nwa);
+    let final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
     crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
     final_dwa
 }
 
-fn optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
+fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
     crate::debug!(
         4,
-        "Starting optimization and determinization of combined NWA..."
+        "Starting resolve negatives and optimization and determinization of combined NWA..."
     );
     combined_nwa.simplify_rustfst();
     crate::debug!(
