@@ -849,6 +849,7 @@ pub struct GrammarConstraintConfig {
     pub trie1: Trie1Config,
     pub trie2: Trie2Config,
     pub trie3: Trie3Config,
+    pub skip_precompute3: bool,
     pub intermediate_trie3_templates: IntermediateTrie3Config,
     pub run_precompute4: bool,
     pub intermediate_trie3_main: IntermediateTrie3Config,
@@ -866,6 +867,7 @@ impl Default for GrammarConstraintConfig {
             trie1: Trie1Config::default(),
             trie2: Trie2Config::off(),
             trie3: Trie3Config::default(),
+            skip_precompute3: true,
             intermediate_trie3_templates: IntermediateTrie3Config::default(),
             run_precompute4: true,
             intermediate_trie3_main: IntermediateTrie3Config::default(),
@@ -885,6 +887,7 @@ impl GrammarConstraintConfig {
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
             trie3: Trie3Config::off(),
+            skip_precompute3: false,
             intermediate_trie3_templates: IntermediateTrie3Config::off(),
             run_precompute4: false,
             intermediate_trie3_main: IntermediateTrie3Config::off(),
@@ -2011,31 +2014,37 @@ impl GrammarConstraint {
         let (mut precomputed3, trie3_god, precomputed4) = if config.run_precompute4 {
             let precomputed4_dwa =
                 precompute4(&parser, &precomputed1, &trie1_god);
-            let max_parser_state_id = parser
-                .table
-                .keys()
-                .map(|s| s.0)
-                .max()
-                .unwrap_or(0);
 
-            let (mut precomputed3, trie3_god) =
-                crate::precompute4::conversion::dwa_to_precompute3(
-                    &precomputed4_dwa,
+            let (mut precomputed3, trie3_god) = if !config.skip_precompute3 {
+                let max_parser_state_id = parser
+                    .table
+                    .keys()
+                    .map(|s| s.0)
+                    .max()
+                    .unwrap_or(0);
+
+                let (mut precomputed3, trie3_god) =
+                    crate::precompute4::conversion::dwa_to_precompute3(
+                        &precomputed4_dwa,
+                        internal_max_llm_token,
+                        max_parser_state_id,
+                    );
+
+                let max_state_id =
+                    parser.table.keys().map(|s| s.0).max().unwrap_or(0);
+                optimize_trie3_size(
+                    &mut precomputed3,
+                    &trie3_god,
+                    &config.trie3,
+                    max_state_id,
                     internal_max_llm_token,
-                    max_parser_state_id,
+                    &mut precompute3_vocab,
+                    &parser,
                 );
-
-            let max_state_id =
-                parser.table.keys().map(|s| s.0).max().unwrap_or(0);
-            optimize_trie3_size(
-                &mut precomputed3,
-                &trie3_god,
-                &config.trie3,
-                max_state_id,
-                internal_max_llm_token,
-                &mut precompute3_vocab,
-                &parser,
-            );
+                (precomputed3, trie3_god)
+            } else {
+                (BTreeMap::new(), Trie3GodWrapper::new())
+            };
 
             (precomputed3, trie3_god, precomputed4_dwa)
         } else {
