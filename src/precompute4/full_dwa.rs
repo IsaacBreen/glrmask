@@ -128,15 +128,11 @@ pub fn precompute4(
         // step function
         |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
             let (current_nwa_body, current_tokens) = current_val;
-            let template_dwa: &DWA = if edge_terminal_opt.is_some()
-                && *edge_terminal_opt != parser.ignore_terminal_id
-            {
-                let terminal_id = edge_terminal_opt.unwrap();
-                template_dwas
+            let template_dwa: &DWA = match edge_terminal_opt {
+                Some(terminal_id) if terminal_id != parser.ignore_terminal_id => template_dwas
                     .get(&terminal_id)
-                    .expect_else(|| format!("No template DWA for terminal {:?}", terminal_id))
-            } else {
-                &ignore_dwa
+                    .expect_else(|| format!("No template DWA for terminal {:?}", terminal_id)),
+                _ => &ignore_dwa,
             };
 
             let mut results: Vec<(
@@ -149,48 +145,12 @@ pub fn precompute4(
                     continue;
                 }
 
-                let mut states = states_arena.borrow_mut();
-
-                // Convert template DWA to NWA and copy it into the arena
-                let mut template_dwa = template_dwa.clone();
-                let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                template_dwa =
-                    DWA::concatenate(&template_dwa, &build_epsilon_dwa(eps_weight));
-                let template_nwa = NWA::from_dwa(&template_dwa);
-                crate::debug!(
-                    6,
-                    "Template NWA for terminal {:?} with epsilon gate weight {:?}:\n{}",
-                    edge_terminal_opt,
+                let left_body = instantiate_template_nwa(
+                    &states_arena,
+                    template_dwa,
+                    &edge_terminal_opt,
                     llm_token_bv,
-                    template_nwa
                 );
-                crate::debug!(
-                    5,
-                    "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...",
-                    edge_terminal_opt,
-                    llm_token_bv
-                );
-                let (template_start_in_arena, _) = states
-                    .copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
-                crate::debug!(
-                    5,
-                    "Template NWA copied into arena. Current arena size: {} states.",
-                    states.0.len()
-                );
-                let left_body = NWABody {
-                    start_state: template_start_in_arena,
-                };
-
-                // Concatenate: left then current (right) via epsilon with weight = llm_token_bv
-                crate::debug!(
-                    5,
-                    "Starting NWA::concatenate_components: left_start={} right_start={}...",
-                    left_body.start_state,
-                    current_nwa_body.start_state
-                );
-                // let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                // let composed_body = NWA::concatenate_components(&mut states, &left_body, current_nwa_body, &eps_weight);
-                // crate::debug!(5, "NWA::concatenate_components finished. New start state: {}.", composed_body.start_state);
 
                 results.push((
                     *dest_idx,
@@ -228,59 +188,8 @@ pub fn precompute4(
                     continue;
                 }
 
-                let mut queue: VecDeque<NWA> = VecDeque::with_capacity(left_bodies.len());
-                {
-                    let arena = states_arena.borrow();
-                    for left_body in left_bodies {
-                        let mut states = NWAStates::default();
-                        let start =
-                            states.copy_subgraph_from_and_return_body(&arena, left_body).start_state;
-                        queue.push_back(NWA {
-                            states,
-                            body: NWABody { start_state: start },
-                        });
-                    }
-                }
-
-                if queue.len() == 1 {
-                    queue.front_mut().unwrap().simplify_rustfst_with_config(
-                        SimplifyRustfstConfig::default()
-                            .with_rm_epsilon(true)
-                            .with_determinize(true),
-                    );
-                }
-
-                while queue.len() > 1 {
-                    let nwa1 = queue.pop_front().unwrap();
-                    let nwa2 = queue.pop_front().unwrap();
-                    let mut states = nwa1.states;
-                    let (start2, _) =
-                        states.copy_subgraph_from(&nwa2.states, nwa2.body.start_state);
-                    let union_body = NWA::union_components(
-                        &mut states,
-                        &nwa1.body,
-                        &NWABody { start_state: start2 },
-                    );
-                    let mut res = NWA {
-                        states,
-                        body: union_body,
-                    };
-                    res.simplify_rustfst_with_config(
-                        SimplifyRustfstConfig::default()
-                            .with_rm_epsilon(true)
-                            .with_determinize(true),
-                    );
-                    queue.push_back(res);
-                }
-
-                let left_bodies_nwa = queue.pop_front().unwrap();
-                let NWA {
-                    states: states2,
-                    body: left_bodies_union2,
-                } = left_bodies_nwa;
+                let left_bodies_union = union_left_bodies(&states_arena, left_bodies);
                 let mut states = states_arena.borrow_mut();
-                let left_bodies_union =
-                    states.copy_subgraph_from_and_return_body(&states2, left_bodies_union2);
                 let composed_body = NWA::concatenate_components(
                     &mut states,
                     &left_bodies_union,
@@ -331,12 +240,19 @@ pub fn precompute4(
             .unwrap();
     }
 
-    let mut combined_nwa = NWA {
+    let combined_nwa = NWA {
         states: combined_nwa_states,
         body: NWABody {
             start_state: combined_start_state,
         },
     };
+
+    let final_dwa = optimize_and_determinize(parser, combined_nwa);
+    crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
+    final_dwa
+}
+
+fn optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
     combined_nwa.simplify_rustfst();
     crate::debug!(
         5,
@@ -353,12 +269,6 @@ pub fn precompute4(
         "Stats for combined NWA before negative resolution:\n{}",
         combined_nwa.stats()
     );
-
-    // prune_continuations_from_final_states(&mut combined_nwa);
-    // combined_nwa.simplify();
-    // prune_continuations_from_final_states(&mut combined_nwa);
-    // combined_nwa.simplify();
-    // combined_nwa = NWA::from_dwa(&combined_nwa.determinize_to_dwa());
 
     let now = Instant::now();
     crate::debug!(4, "Starting negative code resolution...");
@@ -381,9 +291,7 @@ pub fn precompute4(
     let now = Instant::now();
     crate::debug!(4, "Pruning continuations from final states...");
     prune_continuations_from_final_states(&mut combined_nwa);
-    combined_nwa.simplify_rustfst_with_config(
-        SimplifyRustfstConfig::default().with_rm_epsilon(true),
-    );
+    simplify_remove_epsilon(&mut combined_nwa);
     crate::debug!(
         4,
         "Pruning and simplifying took: {:?}. NWA now has {} states.",
@@ -399,9 +307,7 @@ pub fn precompute4(
     let now = Instant::now();
     crate::debug!(4, "Simplifying default transitions...");
     simplify_default_transitions(&mut combined_nwa);
-    combined_nwa.simplify_rustfst_with_config(
-        SimplifyRustfstConfig::default().with_rm_epsilon(true),
-    );
+    simplify_remove_epsilon(&mut combined_nwa);
     crate::debug!(
         4,
         "Default transition simplification took: {:?}. NWA now has {} states.",
@@ -414,25 +320,14 @@ pub fn precompute4(
         combined_nwa.stats()
     );
 
-    // let now = Instant::now();
-    // crate::debug!(4, "Starting label propagation and pruning...");
-    // // New optimization pass
-    // crate::precompute4::nwa_optimizations::propagate_and_prune_labels(parser, &mut combined_nwa);
-    // combined_nwa.simplify_rustfst();
-    // crate::debug!(4, "Label propagation and pruning took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
-    // crate::debug!(4, "Stats for combined NWA after label propagation:\n{}", combined_nwa.stats());
-
     crate::debug!(
         4,
         "Starting simplification before final determinization..."
     );
-    combined_nwa.simplify_rustfst_with_config(
-        SimplifyRustfstConfig::default().with_rm_epsilon(true),
-    );
+    let now = Instant::now();
+    simplify_remove_epsilon(&mut combined_nwa);
     combined_nwa.simplify();
-    combined_nwa.simplify_rustfst_with_config(
-        SimplifyRustfstConfig::default().with_rm_epsilon(true),
-    );
+    simplify_remove_epsilon(&mut combined_nwa);
     crate::debug!(
         4,
         "Simplification before final determinization took: {:?}. NWA now has {} states.",
@@ -466,8 +361,8 @@ pub fn precompute4(
             .expect("Unable to write parser to file");
         eprintln!("Parser dump complete.");
     }
+
     let now = Instant::now();
-    // Determinize the single combined NWA
     crate::debug!(4, "Determinizing final combined NWA...");
     combined_nwa = NWA::from_dwa(&combined_nwa.determinize_to_dwa());
     crate::debug!(
@@ -476,7 +371,6 @@ pub fn precompute4(
         combined_nwa.stats()
     );
     let mut final_dwa = combined_nwa.determinize_to_dwa_with_rustfst();
-    // final_dwa.simplify();
     crate::debug!(
         4,
         "Final determinize & simplify took: {:?}. Final DWA has {} states.",
@@ -485,6 +379,101 @@ pub fn precompute4(
     );
     crate::debug!(4, "Stats for final DWA:\n{}", final_dwa.stats());
 
-    crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
     final_dwa
+}
+
+fn instantiate_template_nwa<T: std::fmt::Debug>(
+    states_arena: &RefCell<NWAStates>,
+    template_dwa: &DWA,
+    edge_terminal_opt: &Option<T>,
+    llm_token_bv: &LLMTokenBV,
+) -> NWABody {
+    let mut template_dwa = template_dwa.clone();
+    let eps_weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
+    template_dwa = DWA::concatenate(&template_dwa, &build_epsilon_dwa(eps_weight));
+    let template_nwa = NWA::from_dwa(&template_dwa);
+    crate::debug!(
+        6,
+        "Template NWA for terminal {:?} with epsilon gate weight {:?}:\n{}",
+        edge_terminal_opt,
+        llm_token_bv,
+        template_nwa
+    );
+    crate::debug!(
+        5,
+        "Applying template NWA for terminal {:?} with epsilon gate weight {:?}...",
+        edge_terminal_opt,
+        llm_token_bv
+    );
+    let mut states = states_arena.borrow_mut();
+    let (template_start_in_arena, _) =
+        states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
+    crate::debug!(
+        5,
+        "Template NWA copied into arena. Current arena size: {} states.",
+        states.0.len()
+    );
+    NWABody {
+        start_state: template_start_in_arena,
+    }
+}
+
+fn union_left_bodies(
+    states_arena: &RefCell<NWAStates>,
+    left_bodies: Vec<NWABody>,
+) -> NWABody {
+    let mut queue: VecDeque<NWA> = VecDeque::with_capacity(left_bodies.len());
+    {
+        let arena = states_arena.borrow();
+        for left_body in left_bodies {
+            let mut states = NWAStates::default();
+            let start =
+                states.copy_subgraph_from_and_return_body(&arena, left_body).start_state;
+            queue.push_back(NWA {
+                states,
+                body: NWABody { start_state: start },
+            });
+        }
+    }
+
+    if queue.len() == 1 {
+        simplify_and_determinize_nwa(queue.front_mut().unwrap());
+    }
+
+    while queue.len() > 1 {
+        let nwa1 = queue.pop_front().unwrap();
+        let nwa2 = queue.pop_front().unwrap();
+        let mut states = nwa1.states;
+        let (start2, _) = states.copy_subgraph_from(&nwa2.states, nwa2.body.start_state);
+        let union_body = NWA::union_components(
+            &mut states,
+            &nwa1.body,
+            &NWABody { start_state: start2 },
+        );
+        let mut res = NWA {
+            states,
+            body: union_body,
+        };
+        simplify_and_determinize_nwa(&mut res);
+        queue.push_back(res);
+    }
+
+    let NWA {
+        states: states2,
+        body: left_bodies_union2,
+    } = queue.pop_front().unwrap();
+    let mut states = states_arena.borrow_mut();
+    states.copy_subgraph_from_and_return_body(&states2, left_bodies_union2)
+}
+
+fn simplify_and_determinize_nwa(nwa: &mut NWA) {
+    nwa.simplify_rustfst_with_config(
+        SimplifyRustfstConfig::default()
+            .with_rm_epsilon(true)
+            .with_determinize(true),
+    );
+}
+
+fn simplify_remove_epsilon(nwa: &mut NWA) {
+    nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true));
 }
