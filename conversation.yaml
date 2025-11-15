@@ -10739,7 +10739,7 @@ local_system:
       use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue};
       use crate::interface::{CompiledGrammar, GrammarDefinition};
       use crate::json_serialization::{JSONConvertible, JSONNode};
-      use crate::precompute4::weighted_automata::{StateID as WAStateID, Weight};
+      use crate::precompute4::weighted_automata::{SimpleBitset, StateID as WAStateID, Weight};
       use crate::precompute4::full_dwa::{precompute4, Precomputed4};
       use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
       use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
@@ -10761,6 +10761,7 @@ local_system:
       use std::iter::FromIterator;
       use std::ops::{BitAnd, Sub};
       use rustc_hash::FxHashMap;
+      use crate::datastructures::leveled_gss::{LeveledGSS, Merge};
 
       #[derive(Default, Debug)]
       struct DfsStats {
@@ -11668,6 +11669,7 @@ local_system:
           pub trie2_god: Trie2GodWrapper,
           pub trie3_god: Trie3GodWrapper,
           pub trie3_traversal_data: Option<TrieTraversalData>,
+          pub run_precompute4: bool,
           pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
           // Stage-local vocabularies for internal<->original mappings
           pub precompute0_vocab: StageVocab,
@@ -11775,6 +11777,10 @@ local_system:
               obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
               obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
               obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
+              obj.insert(
+                  "run_precompute4".to_string(),
+                  self.run_precompute4.to_json(),
+              );
               obj.insert(
                   "post_commit_allow_check_mode".to_string(),
                   self.post_commit_allow_check_mode.to_json(),
@@ -11886,6 +11892,11 @@ local_system:
                       let trie3_traversal_data =
                           Trie::compute_traversal_data(&trie3_god, &trie3_roots);
 
+                      let run_precompute4 = obj
+                          .remove("run_precompute4")
+                          .map(bool::from_json)
+                          .transpose()?
+                          .unwrap_or(false);
                       let post_commit_allow_check_mode =
                           match obj.remove("post_commit_allow_check_mode") {
                               Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
@@ -11948,6 +11959,7 @@ local_system:
                           trie2_god,
                           trie3_god,
                           trie3_traversal_data,
+                          run_precompute4,
                           post_commit_allow_check_mode,
                           state_map_by_llm,
                           terminal_map_by_llm,
@@ -12544,6 +12556,7 @@ local_system:
                       precomputed2: BTreeMap::new(),
                       precomputed3: BTreeMap::new(),
                       precomputed4: Precomputed4::new(),
+                      run_precompute4: false,
                       llm_vocab,
                       token_name_map,
                       possible_matches: computed_possible_matches,
@@ -12613,6 +12626,7 @@ local_system:
                       precomputed2: BTreeMap::new(),
                       precomputed3: BTreeMap::new(),
                       precomputed4: Precomputed4::new(),
+                      run_precompute4: false,
                       llm_vocab,
                       token_name_map,
                       possible_matches: computed_possible_matches,
@@ -12801,6 +12815,7 @@ local_system:
                   trie2_god,
                   trie3_god,
                   trie3_traversal_data,
+                  run_precompute4: config.run_precompute4,
                   post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
                   state_map_by_llm,
                   terminal_map_by_llm,
@@ -15380,7 +15395,11 @@ local_system:
           }
 
           pub fn get_mask(&self) -> LLMTokenBV {
-              self.get_mask3()
+              if self.parent.run_precompute4 {
+                  self.get_mask4()
+              } else {
+                  self.get_mask3()
+              }
           }
 
           pub fn print_gss_stats(&self) {
@@ -15600,7 +15619,67 @@ local_system:
           }
 
           pub fn get_mask4(&self) -> LLMTokenBV {
-              todo!()
+              impl Merge for RangeSetBlaze<usize> {
+                  fn merge(&self, other: &Self) -> Self {
+                      self & other
+                  }
+              }
+
+              fn simple_bitset_to_hybrid_bitset(sb: &SimpleBitset) -> HybridBitset {
+                  HybridBitset::from(sb.rsb.clone())
+              }
+              let final_mask_internal = RefCell::new(HybridBitset::zeros());
+              if self.state.is_empty() {
+                  return self
+                      .parent
+                      .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+              }
+
+              let mut queue: BTreeMap<usize, BTreeMap<WAStateID, LeveledGSS<_, _>>> = BTreeMap::new();
+              let dwa = &self.parent.precomputed4;
+              let dwa_start_state = &dwa.states[dwa.body.start_state];
+
+              // 1. Seed initial states
+              for (&tokenizer_state_id, glr_state) in &self.state {
+                  if glr_state.active_state.stack.is_empty() {
+                      continue;
+                  }
+                  let mut glr_state = glr_state.clone();
+                  prune_llm_tokens_by_disallowed_terminals(
+                      &mut glr_state.active_state.stack,
+                      &self.parent.possible_matches,
+                      &mut HashMap::new(),
+                  );
+
+                  if !glr_state.is_ok() {
+                      continue;
+                  }
+
+                  if let Some((target_wa_state_id, weight)) =
+                      dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
+                  {
+                      let f = |acc: &Acc| {
+                          Some(acc.llm_tokens_union.inner.as_ref() & &weight.rsb)
+                      };
+                      let gss = glr_state.active_state.stack.inner.apply_and_prune(f);
+
+                      queue
+                          .entry(gss.max_depth() as usize)
+                          .or_default()
+                          .entry(target_wa_state_id)
+                          .and_modify(|existing| *existing = existing.merge(&gss))
+                          .or_insert(gss);
+                  }
+              }
+
+              // 2. Main worklist loop
+              // TODO
+
+              let final_mask_mapped = self
+                  .parent
+                  .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+
+              final_mask_mapped
           }
 
           pub fn commit(&mut self, llm_token_id: LLMTokenID) {
@@ -26620,7 +26699,7 @@ local_system:
       use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue};
       use crate::interface::{CompiledGrammar, GrammarDefinition};
       use crate::json_serialization::{JSONConvertible, JSONNode};
-      use crate::precompute4::weighted_automata::{StateID as WAStateID, Weight};
+      use crate::precompute4::weighted_automata::{SimpleBitset, StateID as WAStateID, Weight};
       use crate::precompute4::full_dwa::{precompute4, Precomputed4};
       use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
       use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
@@ -26642,6 +26721,7 @@ local_system:
       use std::iter::FromIterator;
       use std::ops::{BitAnd, Sub};
       use rustc_hash::FxHashMap;
+      use crate::datastructures::leveled_gss::{LeveledGSS, Merge};
 
       #[derive(Default, Debug)]
       struct DfsStats {
@@ -31499,6 +31579,12 @@ local_system:
           }
 
           pub fn get_mask4(&self) -> LLMTokenBV {
+              impl Merge for RangeSetBlaze<usize> {
+                  fn merge(&self, other: &Self) -> Self {
+                      self | other
+                  }
+              }
+
               let final_mask_internal = RefCell::new(HybridBitset::zeros());
               if self.state.is_empty() {
                   return self
@@ -31506,7 +31592,7 @@ local_system:
                       .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
               }
 
-              let mut pending_states: BTreeMap<WAStateID, GLRParserState<'a>> = BTreeMap::new();
+              let mut queue: BTreeMap<usize, BTreeMap<WAStateID, LeveledGSS<_, _>>> = BTreeMap::new();
               let dwa = &self.parent.precomputed4;
               let dwa_start_state = &dwa.states[dwa.body.start_state];
 
@@ -31529,88 +31615,88 @@ local_system:
                   if let Some((target_wa_state_id, weight)) =
                       dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
                   {
-                      allow_only_llm_tokens_and_prune_arc(
-                          &mut glr_state.active_state.stack,
-                          weight,
-                          &mut HashMap::new(),
-                      );
+                      let f = |acc: &Acc| {
+                          let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
+                          if new_rsb.is_empty() {
+                              None
+                          } else {
+                              Some(new_rsb)
+                          }
+                      };
+                      let gss = glr_state.active_state.stack.inner.apply_and_prune(f);
 
-                      if glr_state.is_ok() {
-                          pending_states
+                      if !gss.is_empty() {
+                          queue
+                              .entry(gss.max_depth() as usize)
+                              .or_default()
                               .entry(target_wa_state_id)
-                              .and_modify(|existing| existing.merge_with(glr_state.clone()))
-                              .or_insert(glr_state);
+                              .and_modify(|existing| *existing = existing.merge(&gss))
+                              .or_insert(gss);
                       }
                   }
               }
 
               // 2. Main worklist loop
-              while !pending_states.is_empty() {
-                  let worklist = std::mem::take(&mut pending_states);
-
-                  for (current_wa_state_id, mut current_glr_state) in worklist {
+              while let Some((_depth, states_at_depth)) = queue.pop_last() {
+                  for (current_wa_state_id, mut gss) in states_at_depth {
                       let dwa_state = &dwa.states[current_wa_state_id];
 
                       // Apply state weight
-                      if let Some(sw) = &dwa_state.state_weight {
-                          allow_only_llm_tokens_and_prune_arc(
-                              &mut current_glr_state.active_state.stack,
-                              sw,
-                              &mut HashMap::new(),
-                          );
-                          if !current_glr_state.is_ok() {
+                      if let Some(state_weight) = &dwa_state.state_weight {
+                          let f = |rsb: &RangeSetBlaze<usize>| {
+                              let new_rsb = rsb & &state_weight.rsb;
+                              if new_rsb.is_empty() {
+                                  None
+                              } else {
+                                  Some(new_rsb)
+                              }
+                          };
+                          gss = gss.apply_and_prune(f);
+                          if gss.is_empty() {
                               continue;
                           }
                       }
 
-                      // Process final weight
-                      if let Some(fw) = &dwa_state.final_weight {
-                          let mut final_glr_state = current_glr_state.clone();
-                          allow_only_llm_tokens_and_prune_arc(
-                              &mut final_glr_state.active_state.stack,
-                              fw,
-                              &mut HashMap::new(),
-                          );
-                          if final_glr_state.is_ok() {
-                              *final_mask_internal.borrow_mut() |=
-                                  &final_glr_state.active_state.stack.allowed_llm_tokens();
-                          }
-                      }
-
-                      // Process transitions (pop 1)
-                      let popped = current_glr_state.active_state.stack.popn(1);
-                      if popped.num_predecessors() == 0 {
-                          continue;
-                      }
-
-                      for (label, target_wa_state_id, trans_weight) in dwa_state.iter_edges() {
-                          let parser_state_id = label as usize;
-
-                          let mut valid_gss_nodes = Vec::new();
-                          for popper_item in popped.iter() {
-                              for peek in popper_item.peek_iter() {
-                                  if peek.edge_value().state_id.0 == parser_state_id {
-                                      valid_gss_nodes.push(peek.isolated_parent());
-                                  }
+                      // Check for final state
+                      if let Some(final_weight) = &dwa_state.final_weight {
+                          if let Some(reduced_acc) = gss.reduce_acc() {
+                              let final_tokens = &reduced_acc & &final_weight.rsb;
+                              if !final_tokens.is_empty() {
+                                  *final_mask_internal.borrow_mut() |= HybridBitset::from(final_tokens);
                               }
                           }
+                      }
 
-                          if !valid_gss_nodes.is_empty() {
-                              let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes);
-                              let mut new_glr_state = current_glr_state.clone();
-                              new_glr_state.active_state.stack = merged_gss;
+                      // Process transitions
+                      for peeked_edge in gss.peek() {
+                          let parser_state_id = peeked_edge.state_id.0 as i16;
+                          if let Some((target_wa_state_id, trans_weight)) =
+                              dwa_state.get_transition(parser_state_id)
+                          {
+                              let isolated_gss = gss.isolate(Some(peeked_edge));
+                              let popped_gss = isolated_gss.pop();
 
-                              allow_only_llm_tokens_and_prune_arc(
-                                  &mut new_glr_state.active_state.stack,
-                                  trans_weight,
-                                  &mut HashMap::new(),
-                              );
+                              if popped_gss.is_empty() {
+                                  continue;
+                              }
 
-                              if new_glr_state.is_ok() {
-                                  pending_states
+                              let f = |rsb: &RangeSetBlaze<usize>| {
+                                  let new_rsb = rsb & &trans_weight.rsb;
+                                  if new_rsb.is_empty() {
+                                      None
+                                  } else {
+                                      Some(new_rsb)
+                                  }
+                              };
+                              let final_gss = popped_gss.apply_and_prune(f);
+
+                              if !final_gss.is_empty() {
+                                  queue
+                                      .entry(final_gss.max_depth() as usize)
+                                      .or_default()
                                       .entry(target_wa_state_id)
-                                      .and_modify(|existing| existing.merge_with(new_glr_state.clone()))
-                                      .or_insert(new_glr_state);
+                                      .and_modify(|existing| *existing = existing.merge(&final_gss))
+                                      .or_insert(final_gss);
                               }
                           }
                       }
@@ -42731,7 +42817,7 @@ messages:
       use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue};
       use crate::interface::{CompiledGrammar, GrammarDefinition};
       use crate::json_serialization::{JSONConvertible, JSONNode};
-      use crate::precompute4::weighted_automata::{StateID as WAStateID, Weight};
+      use crate::precompute4::weighted_automata::{SimpleBitset, StateID as WAStateID, Weight};
       use crate::precompute4::full_dwa::{precompute4, Precomputed4};
       use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
       use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
@@ -42753,6 +42839,7 @@ messages:
       use std::iter::FromIterator;
       use std::ops::{BitAnd, Sub};
       use rustc_hash::FxHashMap;
+      use crate::datastructures::leveled_gss::{LeveledGSS, Merge};
 
       #[derive(Default, Debug)]
       struct DfsStats {
@@ -43660,6 +43747,7 @@ messages:
           pub trie2_god: Trie2GodWrapper,
           pub trie3_god: Trie3GodWrapper,
           pub trie3_traversal_data: Option<TrieTraversalData>,
+          pub run_precompute4: bool,
           pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
           // Stage-local vocabularies for internal<->original mappings
           pub precompute0_vocab: StageVocab,
@@ -43767,6 +43855,10 @@ messages:
               obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
               obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
               obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
+              obj.insert(
+                  "run_precompute4".to_string(),
+                  self.run_precompute4.to_json(),
+              );
               obj.insert(
                   "post_commit_allow_check_mode".to_string(),
                   self.post_commit_allow_check_mode.to_json(),
@@ -43878,6 +43970,11 @@ messages:
                       let trie3_traversal_data =
                           Trie::compute_traversal_data(&trie3_god, &trie3_roots);
 
+                      let run_precompute4 = obj
+                          .remove("run_precompute4")
+                          .map(bool::from_json)
+                          .transpose()?
+                          .unwrap_or(false);
                       let post_commit_allow_check_mode =
                           match obj.remove("post_commit_allow_check_mode") {
                               Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
@@ -43940,6 +44037,7 @@ messages:
                           trie2_god,
                           trie3_god,
                           trie3_traversal_data,
+                          run_precompute4,
                           post_commit_allow_check_mode,
                           state_map_by_llm,
                           terminal_map_by_llm,
@@ -44536,6 +44634,7 @@ messages:
                       precomputed2: BTreeMap::new(),
                       precomputed3: BTreeMap::new(),
                       precomputed4: Precomputed4::new(),
+                      run_precompute4: false,
                       llm_vocab,
                       token_name_map,
                       possible_matches: computed_possible_matches,
@@ -44605,6 +44704,7 @@ messages:
                       precomputed2: BTreeMap::new(),
                       precomputed3: BTreeMap::new(),
                       precomputed4: Precomputed4::new(),
+                      run_precompute4: false,
                       llm_vocab,
                       token_name_map,
                       possible_matches: computed_possible_matches,
@@ -44793,6 +44893,7 @@ messages:
                   trie2_god,
                   trie3_god,
                   trie3_traversal_data,
+                  run_precompute4: config.run_precompute4,
                   post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
                   state_map_by_llm,
                   terminal_map_by_llm,
@@ -47372,7 +47473,11 @@ messages:
           }
 
           pub fn get_mask(&self) -> LLMTokenBV {
-              self.get_mask3()
+              if self.parent.run_precompute4 {
+                  self.get_mask4()
+              } else {
+                  self.get_mask3()
+              }
           }
 
           pub fn print_gss_stats(&self) {
@@ -47592,7 +47697,67 @@ messages:
           }
 
           pub fn get_mask4(&self) -> LLMTokenBV {
-              todo!()
+              impl Merge for RangeSetBlaze<usize> {
+                  fn merge(&self, other: &Self) -> Self {
+                      self & other
+                  }
+              }
+
+              fn simple_bitset_to_hybrid_bitset(sb: &SimpleBitset) -> HybridBitset {
+                  HybridBitset::from(sb.rsb.clone())
+              }
+              let final_mask_internal = RefCell::new(HybridBitset::zeros());
+              if self.state.is_empty() {
+                  return self
+                      .parent
+                      .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+              }
+
+              let mut queue: BTreeMap<usize, BTreeMap<WAStateID, LeveledGSS<_, _>>> = BTreeMap::new();
+              let dwa = &self.parent.precomputed4;
+              let dwa_start_state = &dwa.states[dwa.body.start_state];
+
+              // 1. Seed initial states
+              for (&tokenizer_state_id, glr_state) in &self.state {
+                  if glr_state.active_state.stack.is_empty() {
+                      continue;
+                  }
+                  let mut glr_state = glr_state.clone();
+                  prune_llm_tokens_by_disallowed_terminals(
+                      &mut glr_state.active_state.stack,
+                      &self.parent.possible_matches,
+                      &mut HashMap::new(),
+                  );
+
+                  if !glr_state.is_ok() {
+                      continue;
+                  }
+
+                  if let Some((target_wa_state_id, weight)) =
+                      dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
+                  {
+                      let f = |acc: &Acc| {
+                          Some(acc.llm_tokens_union.inner.as_ref() & &weight.rsb)
+                      };
+                      let gss = glr_state.active_state.stack.inner.apply_and_prune(f);
+
+                      queue
+                          .entry(gss.max_depth() as usize)
+                          .or_default()
+                          .entry(target_wa_state_id)
+                          .and_modify(|existing| *existing = existing.merge(&gss))
+                          .or_insert(gss);
+                  }
+              }
+
+              // 2. Main worklist loop
+              // TODO
+
+              let final_mask_mapped = self
+                  .parent
+                  .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+
+              final_mask_mapped
           }
 
           pub fn commit(&mut self, llm_token_id: LLMTokenID) {
@@ -47902,9 +48067,18 @@ messages:
       When traversing in get_mask3, we traverse the precompute3 trie.
       For get_mask4, you might think we'd analogously traverse the DWA. But no. We'll actually traverse the GSS itself, traversing in order of max depth so we have ample merge opportunity.
 
-      ...
-
-      Implement get_mask4 in full.
+      The queue can be a map from max depth to DWA state ID to Leveled GSS node.
+      Let's consider a single traversal step. We have a (merged) GSS and a single DWA state ID.
+      - First, consider whether this DWA state is final.
+          - If it is, take its final weight and intersect it with the GSS's active LLM tokens. Add the result to the final mask.
+          - Subtract the final weight from the GSS's active LLM tokens.
+      - Now, consider transitions.
+          - Call peek() on the GSS to get the next set of parser state IDs. Iterate through them.
+              - Apply the relevant transition from the DWA state. The transition has a weight.
+              - If such a transition exists, isolate the GSS for the peeked parser state ID. Then call pop(). Then apply the transition weight by intersecting with the GSS's active LLM tokens.
+              - Add the resulting GSS to the queue under its max depth and the new DWA state ID. If a GSS entry exists already, merge into it.
+    metadata:
+  - user: Don't touch the already-implemented part.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -47924,474 +48098,284 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement `get_mask4` and related changes, followed by the git diffs.
+      Of course. Here are the step-by-step instructions to implement `get_mask4`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      #### 1. File: `src/constraint.rs`
+      #### File: `src/constraint.rs`
 
-      This file requires several changes to introduce and use the new `get_mask4` function.
+      1.  **Navigate to the `get_mask4` function.** This function is located within the `impl GrammarConstraintState<'_>` block.
 
-      1.  **Add Imports**: At the top of the file, add an import for `WAStateID` and `Weight` from the weighted automata module.
-
-          ```rust
-          use crate::precompute4::weighted_automata::{StateID as WAStateID, Weight};
-          ```
-
-      2.  **Update `GrammarConstraint` Struct**: Add a new public field `run_precompute4: bool` to the `GrammarConstraint` struct. This will be used to decide which `get_mask` implementation to use.
+      2.  **Correct the `Merge` implementation:**
+          Inside `get_mask4`, find the local implementation of the `Merge` trait for `RangeSetBlaze<usize>`. The current implementation incorrectly uses intersection (`&`). Change it to use union (`|`) to correctly combine token sets from different paths.
 
           ```rust
-          // in pub struct GrammarConstraint
-          pub trie3_traversal_data: Option<TrieTraversalData>,
-          pub run_precompute4: bool, // Add this line
-          pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
-          // ...
-          ```
+          // src/constraint.rs
 
-      3.  **Update `GrammarConstraint::to_json`**: Serialize the new `run_precompute4` field.
-
-          ```rust
-          // in impl JSONConvertible for GrammarConstraint
-          // inside fn to_json
-          obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
-          obj.insert(
-              "run_precompute4".to_string(),
-              self.run_precompute4.to_json(),
-          ); // Add these lines
-          obj.insert(
-              "post_commit_allow_check_mode".to_string(),
-              self.post_commit_allow_check_mode.to_json(),
-          );
-          ```
-
-      4.  **Update `GrammarConstraint::from_json`**: Deserialize the new `run_precompute4` field.
-
-          ```rust
-          // in impl JSONConvertible for GrammarConstraint
-          // inside fn from_json
-          let trie3_traversal_data =
-              Trie::compute_traversal_data(&trie3_god, &trie3_roots);
-
-          let run_precompute4 = obj
-              .remove("run_precompute4")
-              .map(bool::from_json)
-              .transpose()?
-              .unwrap_or(false); // Add these lines
-
-          let post_commit_allow_check_mode =
-              match obj.remove("post_commit_allow_check_mode") {
-          // ...
-          // then in the struct initialization:
-          let mut gc = GrammarConstraint {
-              // ...
-              trie3_god,
-              trie3_traversal_data,
-              run_precompute4, // Add this line
-              post_commit_allow_check_mode,
-              // ...
-          };
-          ```
-
-      5.  **Update `GrammarConstraint::build_with_config_impl`**:
-          *   When constructing the `GrammarConstraint` instance at the end of the function, set the `run_precompute4` field from the configuration.
-          *   Also, handle the case where `skip_precomputation` is true.
-
-          ```rust
-          // in build_with_config_impl, for skip_precomputation case:
-          return Self {
-              // ...
-              precomputed4: Precomputed4::new(),
-              run_precompute4: false, // Add this
-              llm_vocab,
-              // ...
-          };
-
-          // in build_with_config_impl, for precompute0_only case:
-          return Self {
-              // ...
-              precomputed4: Precomputed4::new(),
-              run_precompute4: false, // Add this
-              llm_vocab,
-              // ...
-          };
-
-          // in build_with_config_impl, at the end of the function:
-          let mut gc = Self {
-              // ...
-              trie3_god,
-              trie3_traversal_data,
-              run_precompute4: config.run_precompute4, // Add this
-              post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
-              // ...
-          };
-          ```
-
-      6.  **Update `GrammarConstraintState::get_mask`**: Modify this function to call `get_mask4` when `run_precompute4` is true.
-
-          ```rust
-          // in impl<'a> GrammarConstraintState<'a>
-          pub fn get_mask(&self) -> LLMTokenBV {
-              if self.parent.run_precompute4 {
-                  self.get_mask4()
-              } else {
-                  self.get_mask3()
+          // ... inside get_mask4 ...
+          impl Merge for RangeSetBlaze<usize> {
+              fn merge(&self, other: &Self) -> Self {
+                  self | other // Changed from & to |
               }
+          }
+          // ...
+          ```
+
+      3.  **Remove the unused helper function:**
+          Delete the `simple_bitset_to_hybrid_bitset` function, as it is no longer needed.
+
+      4.  **Refine the initial GSS transformation:**
+          In the seeding loop, when applying the initial weight, ensure that you only create a `Some` value if the resulting token set is not empty.
+
+          ```rust
+          // src/constraint.rs
+
+          // ... inside the seeding loop of get_mask4 ...
+          let f = |acc: &Acc| {
+              let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
+              if new_rsb.is_empty() {
+                  None
+              } else {
+                  Some(new_rsb)
+              }
+          };
+          let gss = glr_state.active_state.stack.inner.apply_and_prune(f);
+
+          if !gss.is_empty() {
+              // ... add to queue ...
           }
           ```
 
-      7.  **Implement `GrammarConstraintState::get_mask4`**: Replace the `todo!()` in `get_mask4` with the full implementation. This function will traverse the DWA from `precomputed4` using a worklist approach to calculate the allowed token mask.
+      5.  **Implement the main worklist loop:**
+          Replace the `// TODO` comment with the core logic for traversing the DWA and GSS states. This involves:
+          *   Looping while the `queue` is not empty, processing states with the highest `max_depth` first.
+          *   Applying DWA state weights.
+          *   Checking for final DWA states and updating the final token mask.
+          *   Processing transitions by peeking at the GSS, finding the corresponding DWA transition, popping the GSS, applying the transition weight, and adding the result back to the queue.
+
+          The full implementation of the loop will look like this:
 
           ```rust
-          // in impl<'a> GrammarConstraintState<'a>
-          pub fn get_mask4(&self) -> LLMTokenBV {
-              let final_mask_internal = RefCell::new(HybridBitset::zeros());
-              if self.state.is_empty() {
-                  return self
-                      .parent
-                      .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
-              }
+          // src/constraint.rs
 
-              let mut pending_states: BTreeMap<WAStateID, GLRParserState<'a>> = BTreeMap::new();
-              let dwa = &self.parent.precomputed4;
-              let dwa_start_state = &dwa.states[dwa.body.start_state];
+          // ... after the seeding loop in get_mask4 ...
+          // 2. Main worklist loop
+          while let Some((_depth, states_at_depth)) = queue.pop_last() {
+              for (current_wa_state_id, mut gss) in states_at_depth {
+                  let dwa_state = &dwa.states[current_wa_state_id];
 
-              // 1. Seed initial states
-              for (&tokenizer_state_id, glr_state) in &self.state {
-                  if glr_state.active_state.stack.is_empty() {
-                      continue;
-                  }
-                  let mut glr_state = glr_state.clone();
-                  prune_llm_tokens_by_disallowed_terminals(
-                      &mut glr_state.active_state.stack,
-                      &self.parent.possible_matches,
-                      &mut HashMap::new(),
-                  );
-
-                  if !glr_state.is_ok() {
-                      continue;
-                  }
-
-                  if let Some((target_wa_state_id, weight)) =
-                      dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
-                  {
-                      allow_only_llm_tokens_and_prune_arc(
-                          &mut glr_state.active_state.stack,
-                          weight,
-                          &mut HashMap::new(),
-                      );
-
-                      if glr_state.is_ok() {
-                          pending_states
-                              .entry(target_wa_state_id)
-                              .and_modify(|existing| existing.merge_with(glr_state.clone()))
-                              .or_insert(glr_state);
-                      }
-                  }
-              }
-
-              // 2. Main worklist loop
-              while !pending_states.is_empty() {
-                  let worklist = std::mem::take(&mut pending_states);
-
-                  for (current_wa_state_id, mut current_glr_state) in worklist {
-                      let dwa_state = &dwa.states[current_wa_state_id];
-
-                      // Apply state weight
-                      if let Some(sw) = &dwa_state.state_weight {
-                          allow_only_llm_tokens_and_prune_arc(
-                              &mut current_glr_state.active_state.stack,
-                              sw,
-                              &mut HashMap::new(),
-                          );
-                          if !current_glr_state.is_ok() {
-                              continue;
+                  // Apply state weight
+                  if let Some(state_weight) = &dwa_state.state_weight {
+                      let f = |rsb: &RangeSetBlaze<usize>| {
+                          let new_rsb = rsb & &state_weight.rsb;
+                          if new_rsb.is_empty() {
+                              None
+                          } else {
+                              Some(new_rsb)
                           }
-                      }
-
-                      // Process final weight
-                      if let Some(fw) = &dwa_state.final_weight {
-                          let mut final_glr_state = current_glr_state.clone();
-                          allow_only_llm_tokens_and_prune_arc(
-                              &mut final_glr_state.active_state.stack,
-                              fw,
-                              &mut HashMap::new(),
-                          );
-                          if final_glr_state.is_ok() {
-                              *final_mask_internal.borrow_mut() |=
-                                  &final_glr_state.active_state.stack.allowed_llm_tokens();
-                          }
-                      }
-
-                      // Process transitions (pop 1)
-                      let popped = current_glr_state.active_state.stack.popn(1);
-                      if popped.num_predecessors() == 0 {
+                      };
+                      gss = gss.apply_and_prune(f);
+                      if gss.is_empty() {
                           continue;
                       }
+                  }
 
-                      for (label, target_wa_state_id, trans_weight) in dwa_state.iter_edges() {
-                          let parser_state_id = label as usize;
+                  // Check for final state
+                  if let Some(final_weight) = &dwa_state.final_weight {
+                      if let Some(reduced_acc) = gss.reduce_acc() {
+                          let final_tokens = &reduced_acc & &final_weight.rsb;
+                          if !final_tokens.is_empty() {
+                              *final_mask_internal.borrow_mut() |= HybridBitset::from(final_tokens);
+                          }
+                      }
+                  }
 
-                          let mut valid_gss_nodes = Vec::new();
-                          for popper_item in popped.iter() {
-                              for peek in popper_item.peek_iter() {
-                                  if peek.edge_value().state_id.0 == parser_state_id {
-                                      valid_gss_nodes.push(peek.isolated_parent());
-                                  }
-                              }
+                  // Process transitions
+                  for peeked_edge in gss.peek() {
+                      let parser_state_id = peeked_edge.state_id.0 as i16;
+                      if let Some((target_wa_state_id, trans_weight)) =
+                          dwa_state.get_transition(parser_state_id)
+                      {
+                          let isolated_gss = gss.isolate(Some(peeked_edge));
+                          let popped_gss = isolated_gss.pop();
+
+                          if popped_gss.is_empty() {
+                              continue;
                           }
 
-                          if !valid_gss_nodes.is_empty() {
-                              let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes);
-                              let mut new_glr_state = current_glr_state.clone();
-                              new_glr_state.active_state.stack = merged_gss;
-
-                              allow_only_llm_tokens_and_prune_arc(
-                                  &mut new_glr_state.active_state.stack,
-                                  trans_weight,
-                                  &mut HashMap::new(),
-                              );
-
-                              if new_glr_state.is_ok() {
-                                  pending_states
-                                      .entry(target_wa_state_id)
-                                      .and_modify(|existing| existing.merge_with(new_glr_state.clone()))
-                                      .or_insert(new_glr_state);
+                          let f = |rsb: &RangeSetBlaze<usize>| {
+                              let new_rsb = rsb & &trans_weight.rsb;
+                              if new_rsb.is_empty() {
+                                  None
+                              } else {
+                                  Some(new_rsb)
                               }
+                          };
+                          let final_gss = popped_gss.apply_and_prune(f);
+
+                          if !final_gss.is_empty() {
+                              queue
+                                  .entry(final_gss.max_depth() as usize)
+                                  .or_default()
+                                  .entry(target_wa_state_id)
+                                  .and_modify(|existing| *existing = existing.merge(&final_gss))
+                                  .or_insert(final_gss);
                           }
                       }
                   }
               }
-
-              let final_mask_mapped = self
-                  .parent
-                  .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
-
-              final_mask_mapped
           }
+          // ...
           ```
 
-      ### Git Diffs
+      ### Git Diff
 
-      Here are the git diffs corresponding to the changes described above.
+      Here is the git diff that applies the changes described above.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -27,6 +27,7 @@
-       use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue};
-       use crate::interface::{CompiledGrammar, GrammarDefinition};
-       use crate::json_serialization::{JSONConvertible, JSONNode};
-      +use crate::precompute4::weighted_automata::{StateID as WAStateID, Weight};
-       use crate::precompute4::full_dwa::{precompute4, Precomputed4};
-       use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
-       use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
-      @@ -610,6 +611,7 @@
-           pub trie2_god: Trie2GodWrapper,
-           pub trie3_god: Trie3GodWrapper,
-           pub trie3_traversal_data: Option<TrieTraversalData>,
-      +    pub run_precompute4: bool,
-           pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
-           // Stage-local vocabularies for internal<->original mappings
-           pub precompute0_vocab: StageVocab,
-      @@ -688,6 +690,10 @@
-               obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
-               obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
-               obj.insert(
-      +            "run_precompute4".to_string(),
-      +            self.run_precompute4.to_json(),
-      +        );
-      +        obj.insert(
-                   "post_commit_allow_check_mode".to_string(),
-                   self.post_commit_allow_check_mode.to_json(),
-               );
-      @@ -765,6 +771,11 @@
-                       let trie3_traversal_data =
-                           Trie::compute_traversal_data(&trie3_god, &trie3_roots);
-       
-      +                let run_precompute4 = obj
-      +                    .remove("run_precompute4")
-      +                    .map(bool::from_json)
-      +                    .transpose()?
-      +                    .unwrap_or(false);
-                       let post_commit_allow_check_mode =
-                           match obj.remove("post_commit_allow_check_mode") {
-                               Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
-      @@ -821,6 +832,7 @@
-                           trie2_god,
-                           trie3_god,
-                           trie3_traversal_data,
-      +                    run_precompute4,
-                           post_commit_allow_check_mode,
-                           state_map_by_llm,
-                           terminal_map_by_llm,
-      @@ -1101,6 +1113,7 @@
-                       precomputed2: BTreeMap::new(),
-                       precomputed3: BTreeMap::new(),
-                       precomputed4: Precomputed4::new(),
-      +                run_precompute4: false,
-                       llm_vocab,
-                       token_name_map,
-                       possible_matches: computed_possible_matches,
-      @@ -1128,6 +1141,7 @@
-                       precomputed2: BTreeMap::new(),
-                       precomputed3: BTreeMap::new(),
-                       precomputed4: Precomputed4::new(),
-      +                run_precompute4: false,
-                       llm_vocab,
-                       token_name_map,
-                       possible_matches: computed_possible_matches,
-      @@ -1264,6 +1278,7 @@
-                   trie2_god,
-                   trie3_god,
-                   trie3_traversal_data,
-      +            run_precompute4: config.run_precompute4,
-                   post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
-                   state_map_by_llm,
-                   terminal_map_by_llm,
-      @@ -2001,7 +2016,11 @@
-           }
-       
-           pub fn get_mask(&self) -> LLMTokenBV {
-      -        self.get_mask3()
-      +        if self.parent.run_precompute4 {
-      +            self.get_mask4()
-      +        } else {
-      +            self.get_mask3()
-      +        }
-           }
-       
-           pub fn print_gss_stats(&self) {
-      @@ -2158,7 +2177,111 @@
-           }
+      @@ -1510,18 +1510,13 @@
        
            pub fn get_mask4(&self) -> LLMTokenBV {
-      -        todo!()
-      +        let final_mask_internal = RefCell::new(HybridBitset::zeros());
-      +        if self.state.is_empty() {
-      +            return self
-      +                .parent
-      +                .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
-      +        }
-      +
-      +        let mut pending_states: BTreeMap<WAStateID, GLRParserState<'a>> = BTreeMap::new();
-      +        let dwa = &self.parent.precomputed4;
-      +        let dwa_start_state = &dwa.states[dwa.body.start_state];
-      +
-      +        // 1. Seed initial states
-      +        for (&tokenizer_state_id, glr_state) in &self.state {
-      +            if glr_state.active_state.stack.is_empty() {
-      +                continue;
-      +            }
-      +            let mut glr_state = glr_state.clone();
-      +            prune_llm_tokens_by_disallowed_terminals(
-      +                &mut glr_state.active_state.stack,
-      +                &self.parent.possible_matches,
-      +                &mut HashMap::new(),
-      +            );
-      +
-      +            if !glr_state.is_ok() {
-      +                continue;
-      +            }
-      +
-      +            if let Some((target_wa_state_id, weight)) =
-      +                dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
-      +            {
-      +                allow_only_llm_tokens_and_prune_arc(
-      +                    &mut glr_state.active_state.stack,
-      +                    weight,
-      +                    &mut HashMap::new(),
-      +                );
-      +
-      +                if glr_state.is_ok() {
-      +                    pending_states
+               impl Merge for RangeSetBlaze<usize> {
+                   fn merge(&self, other: &Self) -> Self {
+      -                self & other
+      +                self | other
+                   }
+               }
+       
+      -        fn simple_bitset_to_hybrid_bitset(sb: &SimpleBitset) -> HybridBitset {
+      -            HybridBitset::from(sb.rsb.clone())
+      -        }
+               let final_mask_internal = RefCell::new(HybridBitset::zeros());
+               if self.state.is_empty() {
+                   return self
+                       .parent
+                       .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+               }
+       
+               let mut queue: BTreeMap<usize, BTreeMap<WAStateID, LeveledGSS<_, _>>> = BTreeMap::new();
+               let dwa = &self.parent.precomputed4;
+               let dwa_start_state = &dwa.states[dwa.body.start_state];
+       
+               // 1. Seed initial states
+               for (&tokenizer_state_id, glr_state) in &self.state {
+                   if glr_state.active_state.stack.is_empty() {
+                       continue;
+                   }
+                   let mut glr_state = glr_state.clone();
+                   prune_llm_tokens_by_disallowed_terminals(
+                       &mut glr_state.active_state.stack,
+                       &self.parent.possible_matches,
+                       &mut HashMap::new(),
+                   );
+       
+                   if !glr_state.is_ok() {
+                       continue;
+                   }
+       
+                   if let Some((target_wa_state_id, weight)) =
+                       dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
+                   {
+                       let f = |acc: &Acc| {
+      -                    Some(acc.llm_tokens_union.inner.as_ref() & &weight.rsb)
+      +                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
+      +                    if new_rsb.is_empty() {
+      +                        None
+      +                    } else {
+      +                        Some(new_rsb)
+      +                    }
+                       };
+                       let gss = glr_state.active_state.stack.inner.apply_and_prune(f);
+       
+      -                queue
+      -                    .entry(gss.max_depth() as usize)
+      -                    .or_default()
+      -                    .entry(target_wa_state_id)
+      -                    .and_modify(|existing| *existing = existing.merge(&gss))
+      -                    .or_insert(gss);
+      +                if !gss.is_empty() {
+      +                    queue
+      +                        .entry(gss.max_depth() as usize)
+      +                        .or_default()
       +                        .entry(target_wa_state_id)
-      +                        .and_modify(|existing| existing.merge_with(glr_state.clone()))
-      +                        .or_insert(glr_state);
+      +                        .and_modify(|existing| *existing = existing.merge(&gss))
+      +                        .or_insert(gss);
       +                }
-      +            }
-      +        }
-      +
-      +        // 2. Main worklist loop
-      +        while !pending_states.is_empty() {
-      +            let worklist = std::mem::take(&mut pending_states);
-      +
-      +            for (current_wa_state_id, mut current_glr_state) in worklist {
+                   }
+               }
+       
+               // 2. Main worklist loop
+      -        // TODO
+      +        while let Some((_depth, states_at_depth)) = queue.pop_last() {
+      +            for (current_wa_state_id, mut gss) in states_at_depth {
       +                let dwa_state = &dwa.states[current_wa_state_id];
       +
       +                // Apply state weight
-      +                if let Some(sw) = &dwa_state.state_weight {
-      +                    allow_only_llm_tokens_and_prune_arc(
-      +                        &mut current_glr_state.active_state.stack,
-      +                        sw,
-      +                        &mut HashMap::new(),
-      +                    );
-      +                    if !current_glr_state.is_ok() {
+      +                if let Some(state_weight) = &dwa_state.state_weight {
+      +                    let f = |rsb: &RangeSetBlaze<usize>| {
+      +                        let new_rsb = rsb & &state_weight.rsb;
+      +                        if new_rsb.is_empty() {
+      +                            None
+      +                        } else {
+      +                            Some(new_rsb)
+      +                        }
+      +                    };
+      +                    gss = gss.apply_and_prune(f);
+      +                    if gss.is_empty() {
       +                        continue;
       +                    }
       +                }
       +
-      +                // Process final weight
-      +                if let Some(fw) = &dwa_state.final_weight {
-      +                    let mut final_glr_state = current_glr_state.clone();
-      +                    allow_only_llm_tokens_and_prune_arc(
-      +                        &mut final_glr_state.active_state.stack,
-      +                        fw,
-      +                        &mut HashMap::new(),
-      +                    );
-      +                    if final_glr_state.is_ok() {
-      +                        *final_mask_internal.borrow_mut() |=
-      +                            &final_glr_state.active_state.stack.allowed_llm_tokens();
-      +                    }
-      +                }
-      +
-      +                // Process transitions (pop 1)
-      +                let popped = current_glr_state.active_state.stack.popn(1);
-      +                if popped.num_predecessors() == 0 {
-      +                    continue;
-      +                }
-      +
-      +                for (label, target_wa_state_id, trans_weight) in dwa_state.iter_edges() {
-      +                    let parser_state_id = label as usize;
-      +
-      +                    let mut valid_gss_nodes = Vec::new();
-      +                    for popper_item in popped.iter() {
-      +                        for peek in popper_item.peek_iter() {
-      +                            if peek.edge_value().state_id.0 == parser_state_id {
-      +                                valid_gss_nodes.push(peek.isolated_parent());
-      +                            }
+      +                // Check for final state
+      +                if let Some(final_weight) = &dwa_state.final_weight {
+      +                    if let Some(reduced_acc) = gss.reduce_acc() {
+      +                        let final_tokens = &reduced_acc & &final_weight.rsb;
+      +                        if !final_tokens.is_empty() {
+      +                            *final_mask_internal.borrow_mut() |= HybridBitset::from(final_tokens);
       +                        }
       +                    }
+      +                }
       +
-      +                    if !valid_gss_nodes.is_empty() {
-      +                        let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes);
-      +                        let mut new_glr_state = current_glr_state.clone();
-      +                        new_glr_state.active_state.stack = merged_gss;
+      +                // Process transitions
+      +                for peeked_edge in gss.peek() {
+      +                    let parser_state_id = peeked_edge.state_id.0 as i16;
+      +                    if let Some((target_wa_state_id, trans_weight)) =
+      +                        dwa_state.get_transition(parser_state_id)
+      +                    {
+      +                        let isolated_gss = gss.isolate(Some(peeked_edge));
+      +                        let popped_gss = isolated_gss.pop();
       +
-      +                        allow_only_llm_tokens_and_prune_arc(
-      +                            &mut new_glr_state.active_state.stack,
-      +                            trans_weight,
-      +                            &mut HashMap::new(),
-      +                        );
+      +                        if popped_gss.is_empty() {
+      +                            continue;
+      +                        }
       +
-      +                        if new_glr_state.is_ok() {
-      +                            pending_states
+      +                        let f = |rsb: &RangeSetBlaze<usize>| {
+      +                            let new_rsb = rsb & &trans_weight.rsb;
+      +                            if new_rsb.is_empty() {
+      +                                None
+      +                            } else {
+      +                                Some(new_rsb)
+      +                            }
+      +                        };
+      +                        let final_gss = popped_gss.apply_and_prune(f);
+      +
+      +                        if !final_gss.is_empty() {
+      +                            queue
+      +                                .entry(final_gss.max_depth() as usize)
+      +                                .or_default()
       +                                .entry(target_wa_state_id)
-      +                                .and_modify(|existing| existing.merge_with(new_glr_state.clone()))
-      +                                .or_insert(new_glr_state);
+      +                                .and_modify(|existing| *existing = existing.merge(&final_gss))
+      +                                .or_insert(final_gss);
       +                        }
       +                    }
       +                }
       +            }
       +        }
-      +
-      +        let final_mask_mapped = self
-      +            .parent
-      +            .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
-      +
-      +        final_mask_mapped
-           }
        
-           pub fn commit(&mut self, llm_token_id: LLMTokenID) {
+               let final_mask_mapped = self
+                   .parent
 
       ```
     metadata:
@@ -48404,7 +48388,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Add precompute4 support for mask
-      calculation via get_mask4"'
+  - user: 'Changes committed with message: "Implement get_mask4 logic using DWA traversal
+      and correct RangeSetBlaze merge for GSS accumulation"'
     metadata:
 ...

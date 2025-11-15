@@ -4952,13 +4952,10 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask4(&self) -> LLMTokenBV {
         impl Merge for RangeSetBlaze<usize> {
             fn merge(&self, other: &Self) -> Self {
-                self & other
+                self | other
             }
         }
 
-        fn simple_bitset_to_hybrid_bitset(sb: &SimpleBitset) -> HybridBitset {
-            HybridBitset::from(sb.rsb.clone())
-        }
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
         if self.state.is_empty() {
             return self
@@ -4966,7 +4963,7 @@ impl<'a> GrammarConstraintState<'a> {
                 .internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
         }
 
-        let mut pending_states: BTreeMap<WAStateID, LeveledGSS<_, _>> = BTreeMap::new();
+        let mut queue: BTreeMap<usize, BTreeMap<WAStateID, LeveledGSS<_, _>>> = BTreeMap::new();
         let dwa = &self.parent.precomputed4;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
 
@@ -4990,19 +4987,92 @@ impl<'a> GrammarConstraintState<'a> {
                 dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
             {
                 let f = |acc: &Acc| {
-                    Some(acc.llm_tokens_union.inner.as_ref() & &weight.rsb)
+                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
+                    if new_rsb.is_empty() {
+                        None
+                    } else {
+                        Some(new_rsb)
+                    }
                 };
                 let gss = glr_state.active_state.stack.inner.apply_and_prune(f);
 
-                pending_states
-                    .entry(target_wa_state_id)
-                    .and_modify(|existing| *existing = existing.merge(&gss))
-                    .or_insert(gss);
+                if !gss.is_empty() {
+                    queue
+                        .entry(gss.max_depth() as usize)
+                        .or_default()
+                        .entry(target_wa_state_id)
+                        .and_modify(|existing| *existing = existing.merge(&gss))
+                        .or_insert(gss);
+                }
             }
         }
 
         // 2. Main worklist loop
-        // TODO
+        while let Some((_depth, states_at_depth)) = queue.pop_last() {
+            for (current_wa_state_id, mut gss) in states_at_depth {
+                let dwa_state = &dwa.states[current_wa_state_id];
+
+                // Apply state weight
+                if let Some(state_weight) = &dwa_state.state_weight {
+                    let f = |rsb: &RangeSetBlaze<usize>| {
+                        let new_rsb = rsb & &state_weight.rsb;
+                        if new_rsb.is_empty() {
+                            None
+                        } else {
+                            Some(new_rsb)
+                        }
+                    };
+                    gss = gss.apply_and_prune(f);
+                    if gss.is_empty() {
+                        continue;
+                    }
+                }
+
+                // Check for final state
+                if let Some(final_weight) = &dwa_state.final_weight {
+                    if let Some(reduced_acc) = gss.reduce_acc() {
+                        let final_tokens = &reduced_acc & &final_weight.rsb;
+                        if !final_tokens.is_empty() {
+                            *final_mask_internal.borrow_mut() |= HybridBitset::from(final_tokens);
+                        }
+                    }
+                }
+
+                // Process transitions
+                for peeked_edge in gss.peek() {
+                    let parser_state_id = peeked_edge.state_id.0 as i16;
+                    if let Some((target_wa_state_id, trans_weight)) =
+                        dwa_state.get_transition(parser_state_id)
+                    {
+                        let isolated_gss = gss.isolate(Some(peeked_edge));
+                        let popped_gss = isolated_gss.pop();
+
+                        if popped_gss.is_empty() {
+                            continue;
+                        }
+
+                        let f = |rsb: &RangeSetBlaze<usize>| {
+                            let new_rsb = rsb & &trans_weight.rsb;
+                            if new_rsb.is_empty() {
+                                None
+                            } else {
+                                Some(new_rsb)
+                            }
+                        };
+                        let final_gss = popped_gss.apply_and_prune(f);
+
+                        if !final_gss.is_empty() {
+                            queue
+                                .entry(final_gss.max_depth() as usize)
+                                .or_default()
+                                .entry(target_wa_state_id)
+                                .and_modify(|existing| *existing = existing.merge(&final_gss))
+                                .or_insert(final_gss);
+                        }
+                    }
+                }
+            }
+        }
 
         let final_mask_mapped = self
             .parent
