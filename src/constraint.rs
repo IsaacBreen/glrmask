@@ -994,6 +994,7 @@ pub struct GrammarConstraint {
     pub llm_vocab: Arc<LLMVocab>,
     pub(crate) token_name_map: BiBTreeMap<Terminal, usize>,
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    pub possible_matches_precompute1: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     pub state_map_by_llm:
         DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
     pub terminal_map_by_llm:
@@ -1073,6 +1074,10 @@ impl GrammarConstraint {
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.possible_matches, other.possible_matches);
         assert_eq!(
+            self.possible_matches_precompute1,
+            other.possible_matches_precompute1
+        );
+        assert_eq!(
             self.post_commit_allow_check_mode,
             other.post_commit_allow_check_mode
         );
@@ -1106,6 +1111,10 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert(
             "possible_matches".to_string(),
             self.possible_matches.to_json(),
+        );
+        obj.insert(
+            "possible_matches_precompute1".to_string(),
+            self.possible_matches_precompute1.to_json(),
         );
         obj.insert("trie0_god".to_string(), self.trie0_god.to_json());
         obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
@@ -1205,6 +1214,14 @@ impl JSONConvertible for GrammarConstraint {
                             n,
                         )
                     })?;
+                let possible_matches_precompute1 = match obj.remove("possible_matches_precompute1") {
+                    Some(n) => {
+                        BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(
+                            n,
+                        )?
+                    }
+                    None => possible_matches.clone(), // Backwards compatibility
+                };
                 let trie0_god = obj
                     .remove("trie0_god")
                     .ok_or_else(|| "Missing field trie0_god".to_string())
@@ -1288,6 +1305,7 @@ impl JSONConvertible for GrammarConstraint {
                     }),
                     token_name_map,
                     possible_matches,
+                    possible_matches_precompute1,
                     trie0_god,
                     trie1_god,
                     trie2_god,
@@ -1893,7 +1911,8 @@ impl GrammarConstraint {
                 run_precompute4: false,
                 llm_vocab,
                 token_name_map,
-                possible_matches: computed_possible_matches,
+                possible_matches: computed_possible_matches.clone(),
+                possible_matches_precompute1: computed_possible_matches,
                 trie0_god: Trie0GodWrapper::new(),
                 trie1_god: Trie1GodWrapper::new(),
                 trie2_god: Trie2GodWrapper::new(),
@@ -1963,7 +1982,8 @@ impl GrammarConstraint {
                 run_precompute4: false,
                 llm_vocab,
                 token_name_map,
-                possible_matches: computed_possible_matches,
+                possible_matches: computed_possible_matches.clone(),
+                possible_matches_precompute1: computed_possible_matches,
                 trie0_god,
                 trie1_god: Trie1GodWrapper::new(),
                 trie2_god: Trie2GodWrapper::new(),
@@ -1992,6 +2012,38 @@ impl GrammarConstraint {
             config,
             original_to_dummy_map.clone(),
         );
+
+        // Create possible_matches_precompute1 by remapping from precompute0 vocab to precompute1 vocab.
+        let possible_matches_precompute1 = if precompute0_vocab.original_to_internal
+            != precompute_vocab.original_to_internal
+        {
+            let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
+            for (original_id, old_internal_id) in &precompute0_vocab.original_to_internal {
+                if let Some(new_internal_id) =
+                    precompute_vocab.original_to_internal.get(original_id)
+                {
+                    old_to_new_map.insert(*old_internal_id, *new_internal_id);
+                }
+            }
+
+            let mut new_possible_matches = BTreeMap::new();
+            for (sid, terminal_map) in &computed_possible_matches {
+                let mut new_terminal_map = BTreeMap::new();
+                for (tid, llm_token_bv) in terminal_map {
+                    let mut new_bv = LLMTokenBV::zeros();
+                    for old_id in llm_token_bv.iter() {
+                        if let Some(new_id) = old_to_new_map.get(&old_id) {
+                            new_bv.insert(*new_id);
+                        }
+                    }
+                    new_terminal_map.insert(*tid, new_bv);
+                }
+                new_possible_matches.insert(*sid, new_terminal_map);
+            }
+            new_possible_matches
+        } else {
+            computed_possible_matches.clone()
+        };
 
         precompute2_vocab = precompute_vocab.clone();
         precompute3_vocab = precompute_vocab.clone();
@@ -2150,6 +2202,7 @@ impl GrammarConstraint {
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches,
+            possible_matches_precompute1,
             trie0_god,
             trie1_god,
             trie2_god,
@@ -4857,7 +4910,7 @@ impl<'a> GrammarConstraintState<'a> {
             let mut glr_state = glr_state.clone();
             prune_llm_tokens_by_disallowed_terminals(
                 &mut glr_state.active_state.stack,
-                &self.parent.possible_matches,
+                &self.parent.possible_matches_precompute1,
                 &mut HashMap::new(),
             );
 
