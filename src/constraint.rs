@@ -1444,14 +1444,19 @@ impl GrammarConstraint {
             if num_original_tokens < 1000 {
                 println!("All equivalence classes:");
                 for (signature, string_indices) in &equivalence_classes {
-                    let member_ids: Vec<usize> = string_indices
+                    // Print the group as the original tokens (the contents, not the IDs)
+                    let members: Vec<String> = string_indices
                         .iter()
-                        .map(|&idx| original_ids[idx].0)
+                        .map(|&idx| {
+                            let bytes = &llm_token_strings[idx];
+                            format!(
+                                "{} (ID {})",
+                                String::from_utf8_lossy(bytes),
+                                original_ids[idx].0
+                            )
+                        })
                         .collect();
-                    println!(
-                        "  - Class (signature: {:?}): {:?}",
-                        signature, member_ids
-                    );
+                    println!("- Class {:?}: {}", signature, members.join(", "));
                 }
             }
 
