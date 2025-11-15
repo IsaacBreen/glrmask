@@ -282,11 +282,11 @@ class Model(GraphProvider):
         states_data = dwa_json['states']
         dwa_states = []
         for s in states_data:
-            trans_map = s['transitions']  # label -> target
-            weights_map = s['trans_weights']  # label -> weight
+            trans_map = dict(s['transitions'])  # label -> target
+            weights_map = dict(s['trans_weights'])  # label -> weight
 
             merged_trans = {}
-            for label_str, target in trans_map:
+            for label_str, target in trans_map.items():
                 label = int(label_str)
                 w_json = weights_map.get(label_str)
                 weight = _parse_weight(w_json) if w_json is not None else all_internal_llm_tokens_bitset
@@ -297,7 +297,7 @@ class Model(GraphProvider):
 
             dwa_states.append(DWAState(merged_trans, st_weight, fin_weight))
 
-        start_state = dwa_json['body']['start_state']
+        start_state = dwa_json['start_state']
         dwa = DWA(dwa_states, start_state)
 
         # Tokenizer
