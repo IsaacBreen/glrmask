@@ -370,6 +370,18 @@ fn optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
         "Stats after final NWA determinization:\n{}",
         combined_nwa.stats()
     );
+    combined_nwa.simplify_rustfst();
+    crate::debug!(
+        4,
+        "Final NWA simplification took: {:?}. NWA now has {} states.",
+        now.elapsed(),
+        combined_nwa.states.len()
+    );
+    crate::debug!(
+        4,
+        "Stats for final NWA before DWA determinization:\n{}",
+        combined_nwa.stats()
+    );
     let mut final_dwa = combined_nwa.determinize_to_dwa_with_rustfst();
     crate::debug!(
         4,
