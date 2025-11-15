@@ -221,7 +221,7 @@ class DWA:
     start_state: int
 
 
-DEFAULT_TRANSITION_SYMBOL = -32768
+DEFAULT_TRANSITION_SYMBOL = 32767
 
 
 @dataclass
