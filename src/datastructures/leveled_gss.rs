@@ -78,22 +78,23 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use super::*;
     use std::sync::Arc;
 
     // A simple accumulator that just collects integers.
     #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
-    struct IntAcc(im::HashSet<i32>);
+    struct IntAcc(BTreeSet<i32>);
 
     impl Merge for IntAcc {
         fn merge(&self, other: &Self) -> Self {
-            IntAcc(self.0.clone().union(other.0.clone()))
+            IntAcc(&self.0 | &other.0)
         }
     }
 
     impl IntAcc {
         fn new(vals: &[i32]) -> Self {
-            let mut set = im::HashSet::new();
+            let mut set = BTreeSet::new();
             for &v in vals {
                 set.insert(v);
             }
@@ -876,7 +877,7 @@ fn truncate_upper<T, A>(
 ) -> Option<Arc<Upper<T, A>>>
 where
     T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     let ptr = Arc::as_ptr(node) as usize;
     if let Some(cached) = memo_upper.get(&ptr) {
@@ -887,9 +888,9 @@ where
         let sub_gss = LeveledGSS {
             inner: node.clone(),
         };
-        let res = if let Some(acc) = sub_gss.reduce_acc() {
+        let res = if let Some(acc) = sub_gss.accs_by_depth().get(&0) {
             let terminal_lower = new_lower(IHashMap::new(), true);
-            Some(new_interface(terminal_lower, acc))
+            Some(new_interface(terminal_lower, acc.clone()))
         } else {
             None
         };
@@ -2752,7 +2753,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Some(reduced)
     }
 
-    pub fn truncate(&self, max_len: isize) -> Self {
+    pub fn truncate(&self, max_len: isize) -> Self
+    where
+        A: Ord,
+    {
         if max_len < 0 {
             return Self::empty();
         }
@@ -2771,7 +2775,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         new_inner.map_or_else(Self::empty, |inner| Self { inner })
     }
 
-    pub fn split_at_depth(&self, depth: isize) -> (Self, Self) {
+    pub fn split_at_depth(&self, depth: isize) -> (Self, Self)
+    where
+        A: Ord,
+    {
         if depth < 0 {
             return (self.clone(), Self::empty());
         }
