@@ -295,10 +295,10 @@ mod tests {
         assert_eq!(grammar_def.productions.len(), 4); // start' -> start, start -> ..., new_nt -> ..., new_nt ->
         assert!(grammar_def
             .regex_name_to_group_id
-            .contains_left("\"a\""));
+            .contains_left("a"));
         assert!(grammar_def
             .regex_name_to_group_id
-            .contains_left("\"b\""));
+            .contains_left("b"));
     }
 }
 
