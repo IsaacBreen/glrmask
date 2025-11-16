@@ -285,6 +285,10 @@ fn test_resolve_negatives_from_large_nwa_log() {
     nwa.add_transition(states[68], 165, states[20], Weight::all());
     nwa.add_transition(states[68], 166, states[20], Weight::all());
 
+    nwa.simplify();
+    nwa = NWA::from_dwa(&nwa.determinize_to_dwa());
+    nwa.simplify();
+    println!("{}", nwa);
     resolve_negative_codes_in_nwa(&mut nwa);
     let mut d = nwa.determinize_to_dwa();
     d.simplify();
