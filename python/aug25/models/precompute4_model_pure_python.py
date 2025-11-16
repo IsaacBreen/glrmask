@@ -470,14 +470,23 @@ class Model(GraphProvider):
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
         return GSS.merge_many(shifted)
 
-    def _apply_weight(self, gss: GSS, weight: LLMTokenSet) -> GSS:
+    def _mutate_weight(self, gss: GSS, f: Callable[[LLMTokenSet], LLMTokenSet]) -> GSS:
         @_acc_memoize(use_value_cache=False)
         def apply_fn(acc: PyAcc) -> Optional[PyAcc]:
-            new_mask = acc.llm_mask.intersection(weight)
+            new_mask = f(acc.llm_mask)
             if new_mask.is_empty():
                 return None
             return PyAcc(acc.terminals_union, new_mask)
         return gss.apply_and_prune(apply_fn)
+
+    def _apply_weight(self, gss: GSS, weight: LLMTokenSet) -> GSS:
+        return self._mutate_weight(gss, lambda bv: bv.intersection(weight))
+
+    def _subtract_weight(self, gss: GSS, weight: LLMTokenSet) -> GSS:
+        return self._mutate_weight(gss, lambda bv: bv.difference(weight))
+
+    def _is_dead(self, gss: GSS) -> bool:
+        return gss.reduce_acc().llm_mask.is_empty()
 
     def _merge_into_queue(self, queue: Dict[int, Dict[int, GSS]], gss: GSS, target_state_id: int):
         depth = gss.max_depth()
@@ -539,6 +548,16 @@ class Model(GraphProvider):
                         final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
                         if not final_tokens.is_empty():
                             final_mask |= final_tokens
+
+                gss = self._subtract_weight(gss, final_mask)
+
+                if dwa_state.state_weight is not None:
+                    gss = self._apply_weight(gss, dwa_state.state_weight)
+                    if gss.is_empty():
+                        continue
+
+                if self._is_dead(gss):
+                    continue
                             
                 # Process transitions
                 peeked = gss.peek()
@@ -556,7 +575,7 @@ class Model(GraphProvider):
                         popped = isolated.pop()
                         if not popped.is_empty():
                             final_gss = self._apply_weight(popped, weight)
-                            if not final_gss.is_empty():
+                            if not self._is_dead(final_gss):
                                 self._merge_into_queue(queue, final_gss, target_id)
                                 
                     # 2. Default transition
@@ -567,7 +586,7 @@ class Model(GraphProvider):
                         popped = isolated.pop()
                         if not popped.is_empty():
                             final_gss = self._apply_weight(popped, weight)
-                            if not final_gss.is_empty():
+                            if not self._is_dead(final_gss):
                                 self._merge_into_queue(queue, final_gss, target_id)
 
         stats.start('get_mask.teardown.final_conversion')
