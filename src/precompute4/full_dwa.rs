@@ -369,11 +369,11 @@ fn union_left_bodies(states_arena: &RefCell<NWAStates>, left_bodies: Vec<NWABody
 }
 
 fn simplify_and_determinize_nwa(nwa: &mut NWA) {
-    crate::debug!(4, "Simplifying and determinizing NWA with {} states...", nwa.states.len());
+    crate::debug!(5, "Simplifying and determinizing NWA with {} states...", nwa.states.len());
     nwa.simplify();
-    crate::debug!(4, "NWA simplified to {} states.", nwa.states.len());
+    crate::debug!(5, "NWA simplified to {} states.", nwa.states.len());
     let dwa = nwa.determinize_to_dwa_with_rustfst();
-    crate::debug!(4, "NWA determinized to DWA with {} states.", dwa.states.len());
+    crate::debug!(5, "NWA determinized to DWA with {} states.", dwa.states.len());
     *nwa = NWA::from_dwa(&dwa);
 }
 
