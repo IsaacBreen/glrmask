@@ -762,6 +762,19 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     }
 
     let nullability = compute_nonterminal_nullability(productions);
+    let nullable_nonterminals: BTreeSet<_> = nullability
+        .iter()
+        .filter_map(|(nt, status)| {
+            if *status == Nullability::Nullable || *status == Nullability::Null {
+                Some(nt.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let start_symbol = &productions[0].lhs;
+    let start_symbol_is_nullable = nullable_nonterminals.contains(start_symbol);
+
     let mut seen = BTreeSet::<Production>::new();
     let mut out = Vec::<Production>::new();
 
@@ -813,7 +826,16 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         .collect();
 
     out.into_iter()
-        .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
+        .filter(|p| {
+            if !p.rhs.is_empty() {
+                true
+            } else {
+                // Epsilon production. Keep if its LHS is in start_rhs_nts,
+                // or if it's an epsilon production for a nullable start symbol.
+                start_rhs_nts.contains(&p.lhs)
+                    || (p.lhs == *start_symbol && start_symbol_is_nullable)
+            }
+        })
         .collect()
 }
 
