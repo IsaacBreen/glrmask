@@ -24,14 +24,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-fn i16_to_label(label: i16) -> u32 {
-    (label as i32 - i16::MIN as i32) as u32 + 1
-}
-
-fn label_to_i16(label: u32) -> i16 {
-    ((label - 1) as i32 + i16::MIN as i32) as i16
-}
-
 static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
@@ -176,8 +168,8 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                     fst.add_tr(
                         fst_state_id,
                         Tr::new(
-                            i16_to_label(*label),
-                            i16_to_label(*label),
+                            (*label as u32) + 1,
+                            (*label as u32) + 1,
                             BitsetWeight::new(weight.clone()),
                             state_map[target],
                         ),
@@ -235,7 +227,7 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                 }
                 let res = dwa.add_transition(
                     dwa_state_id,
-                    label_to_i16(tr.ilabel),
+                    ((tr.ilabel - 1) as u16) as i16,
                     state_map[&tr.nextstate],
                     tr.weight.value().clone(),
                 );
@@ -290,7 +282,7 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
                 if tr.ilabel == EPS_LABEL {
                     nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
                 } else {
-                    let label = label_to_i16(tr.ilabel);
+                    let label = ((tr.ilabel - 1) as u16) as i16;
                     nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
                 }
             }
@@ -305,30 +297,25 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     fst.compute_and_update_properties_all().unwrap();
     assert!(fst.properties().contains(FstProperties::ACCEPTOR), "FST should be an acceptor before determinization");
 
+    crate::debug!(4, "NFA states before rm_epsilon: {}", fst.num_states());
     rm_epsilon(&mut fst).unwrap();
+    crate::debug!(4, "NFA states after rm_epsilon: {}", fst.num_states());
+
+    crate::debug!(4, "NFA states before minimization: {}", fst.num_states());
+    let min_config = MinimizeConfig::default().with_allow_nondet(true);
+    minimize_with_config(&mut fst, min_config).unwrap();
+    crate::debug!(4, "NFA states after minimization: {}", fst.num_states());
 
     let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
-    let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
+    crate::debug!(4, "NFA states before determinization: {}", fst.num_states());
+    let mut det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
+    crate::debug!(4, "DFA states after determinization: {}", det_fst.num_states());
+
+    let min_config = MinimizeConfig::default();
+    crate::debug!(4, "DFA states before minimization: {}", det_fst.num_states());
+    minimize_with_config(&mut det_fst, min_config).unwrap();
+    crate::debug!(4, "DFA states after minimization: {}", det_fst.num_states());
+    crate::debug!(5, "Determinized FST:\n{}", det_fst);
 
     vector_fst_to_dwa(&det_fst)
-}
-
-impl DWA {
-    pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
-        nwa_to_vector_fst(&NWA::from_dwa(self))
-    }
-
-    pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> DWA {
-        vector_fst_to_dwa(fst)
-    }
-}
-
-impl NWA {
-    pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
-        nwa_to_vector_fst(self)
-    }
-
-    pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> NWA {
-        vector_fst_to_nwa(fst)
-    }
 }
