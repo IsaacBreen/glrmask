@@ -54,6 +54,7 @@ pub fn precompute4(
         Err(e) => panic!("Failed to build template DWAs: {:?}", e),
     };
     // Print the template DWA for terminal ''`''
+    println!("parser: {}", parser);
     println!("Template DWA for terminal ''`'':\n{}", template_dwas.get(&parser.terminal_map.get_by_left(&crate::glr::grammar::Terminal::Literal(b"`".to_vec())).unwrap()).expect_else(|| "No template DWA for terminal ''`''".to_string()));
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
