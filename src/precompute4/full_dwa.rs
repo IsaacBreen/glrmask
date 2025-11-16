@@ -55,12 +55,12 @@ pub fn precompute4(
         Err(e) => panic!("Failed to build template DWAs: {:?}", e),
     };
     // Print the template DWA for terminal ''`''
-    // println!("parser: {}", parser);
-    // let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476];
-    // let mut template_dwa = template_dwas.get(&parser.terminal_map.get_by_left(&crate::glr::grammar::Terminal::Literal(b"`".to_vec())).unwrap()).expect_else(|| "No template DWA for terminal ''`''".to_string()).clone();
-    // template_dwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| allowed.contains(&label) || allowed.contains(&-label) || label == 0));
-    // template_dwa.simplify();
-    // println!("Template DWA for terminal ''`'':\n{}", template_dwa);
+    println!("parser: {}", parser);
+    let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 358, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476, DEFAULT_TRANSITION_SYMBOL];
+    let mut template_dwa = template_dwas.get(&parser.terminal_map.get_by_left(&crate::glr::grammar::Terminal::Literal(b"`".to_vec())).unwrap()).expect_else(|| "No template DWA for terminal ''`''".to_string()).clone();
+    template_dwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| allowed.contains(&label) || allowed.contains(&-label) || label == 0));
+    template_dwa.simplify();
+    println!("Template DWA for terminal ''`'':\n{}", template_dwa);
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
     if is_debug_level_enabled(5) {
