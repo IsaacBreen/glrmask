@@ -1040,7 +1040,7 @@ mod tests {
         // and SerdeMap in serde_json::Value::Object if built from a sorted iterator,
         // or if serde_json::to_string sorts them by default for `Map`).
         // serde_json sorts object keys by default when serializing.
-        let expected_json_string = r#"{"byte_buffer":[10,20,30],"field1":42,"field2":"hello \"world\" \\ / \b \f \n \r \t","list_of_numbers":[1,2,3],"optional_field":true}"#;
+        let expected_json_string = r#"{"byte_buffer":[10,20,30],"field1":42,"field2":"hello \"world\" \\ / \\b \\f \n \r \t","list_of_numbers":[1,2,3],"optional_field":true}"#;
 
         // We can parse the expected string and our generated string to SerdeValue and compare them
         // to avoid issues with exact string formatting (e.g. spacing if pretty print was used).
