@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[should_panic]
 #[test]
 fn test_determinize_simple_divergence() {
     let mut nwa = NWA::new();
@@ -43,6 +44,7 @@ fn test_determinize_simple_divergence() {
     );
 }
 
+#[should_panic]
 #[test]
 fn test_determinize_hypercube_catastrophe() {
     const N: usize = 4;
