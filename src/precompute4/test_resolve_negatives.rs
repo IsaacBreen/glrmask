@@ -34,54 +34,55 @@ fn test_resolve_negatives_simple_cancellation() {
 
 #[test]
 fn test_resolve_negatives_from_nwa_log_2() {
-    let mut nwa = NWA::new();
-    for _ in 0..=16 {
-        nwa.add_state();
+    let mut d = DWA::new();
+    let mut states = vec![d.body.start_state];
+    for _ in 0..16 {
+        states.push(d.add_state());
     }
-    nwa.body.start_state = 0;
 
     // State 0: 0 -> 1 (weight: ALL)
-    nwa.states.add_transition(0, 0, 1, Weight::all());
+    d.add_transition(states[0], 0, states[1], Weight::all()).unwrap();
     // State 1: 422 -> 2 (weight: ALL)
-    nwa.states.add_transition(1, 422, 2, Weight::all());
+    d.add_transition(states[1], 422, states[2], Weight::all()).unwrap();
     // State 2: neg(422) -> 3 (weight: ALL)
-    nwa.states.add_transition(2, i16::MIN + 422, 3, Weight::all());
+    d.add_transition(states[2], i16::MIN + 422, states[3], Weight::all()).unwrap();
     // State 3: neg(458) -> 4 (weight: [1])
-    nwa.states.add_transition(3, i16::MIN + 458, 4, Weight::from_item(1));
+    d.add_transition(states[3], i16::MIN + 458, states[4], Weight::from_item(1)).unwrap();
     // State 4: 458 -> 5 (weight: ALL)
-    nwa.states.add_transition(4, 458, 5, Weight::all());
+    d.add_transition(states[4], 458, states[5], Weight::all()).unwrap();
     // State 5: neg(458) -> 6 (weight: ALL)
-    nwa.states.add_transition(5, i16::MIN + 458, 6, Weight::all());
+    d.add_transition(states[5], i16::MIN + 458, states[6], Weight::all()).unwrap();
     // State 6: neg(459) -> 7 (weight: [1])
-    nwa.states.add_transition(6, i16::MIN + 459, 7, Weight::from_item(1));
+    d.add_transition(states[6], i16::MIN + 459, states[7], Weight::from_item(1)).unwrap();
     // State 7: 459 -> 8 (weight: ALL)
-    nwa.states.add_transition(7, 459, 8, Weight::all());
+    d.add_transition(states[7], 459, states[8], Weight::all()).unwrap();
     // State 8: 32767 -> 9 (weight: ALL)
-    nwa.states.add_transition(8, DEFAULT_TRANSITION_SYMBOL, 9, Weight::all());
+    d.add_transition(states[8], DEFAULT_TRANSITION_SYMBOL, states[9], Weight::all()).unwrap();
     // State 9: 422 -> 10 (weight: ALL)
-    nwa.states.add_transition(9, 422, 10, Weight::all());
+    d.add_transition(states[9], 422, states[10], Weight::all()).unwrap();
     // State 10: neg(422) -> 11 (weight: ALL)
-    nwa.states.add_transition(10, i16::MIN + 422, 11, Weight::all());
+    d.add_transition(states[10], i16::MIN + 422, states[11], Weight::all()).unwrap();
     // State 11: neg(436) -> 12 (weight: ALL)
-    nwa.states.add_transition(11, i16::MIN + 436, 12, Weight::all());
+    d.add_transition(states[11], i16::MIN + 436, states[12], Weight::all()).unwrap();
     // State 12: neg(458) -> 13 (weight: [1])
-    nwa.states.add_transition(12, i16::MIN + 458, 13, Weight::from_item(1));
+    d.add_transition(states[12], i16::MIN + 458, states[13], Weight::from_item(1)).unwrap();
     // State 13: 458 -> 14 (weight: ALL)
-    nwa.states.add_transition(13, 458, 14, Weight::all());
+    d.add_transition(states[13], 458, states[14], Weight::all()).unwrap();
     // State 14: neg(458) -> 15 (weight: ALL)
-    nwa.states.add_transition(14, i16::MIN + 458, 15, Weight::all());
+    d.add_transition(states[14], i16::MIN + 458, states[15], Weight::all()).unwrap();
     // State 15: neg(459) -> 16 (weight: [1])
-    nwa.states.add_transition(15, i16::MIN + 459, 16, Weight::from_item(1));
+    d.add_transition(states[15], i16::MIN + 459, states[16], Weight::from_item(1)).unwrap();
     // State 16: final_weight: ALL
-    nwa.states.0[16].final_weight = Some(Weight::all());
+    d.set_final_weight(states[16], Weight::all()).unwrap();
 
-    let mut d = nwa.determinize_to_dwa();
     resolve_negative_codes_in_dwa(&mut d);
 
     let mut expected = DWA::new();
-    let s_final = expected.add_state();
-    expected.add_transition(expected.body.start_state, 0, s_final, Weight::all()).unwrap();
-    expected.set_final_weight(s_final, Weight::from_item(1)).unwrap();
+    let s1 = expected.add_state();
+    let s2 = expected.add_state();
+    expected.add_transition(expected.body.start_state, 0, s1, Weight::all()).unwrap();
+    expected.add_transition(s1, 422, s2, Weight::all()).unwrap();
+    expected.set_final_weight(s2, Weight::from_item(1)).unwrap();
 
     stochastic_equivalence_test(d, expected);
 }
