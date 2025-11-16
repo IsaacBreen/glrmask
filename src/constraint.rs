@@ -17,7 +17,6 @@ use range_set_blaze::RangeSetBlaze;
 use crate::{
     constraint_extra::PrecomputeStats,
     constraint_precompute1_utils::{self, Trie1Config},
-    constraint_special_precompute::SpecialPrecomputation,
     datastructures::{
         gss_leveled_adapter::{
             disallow_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc,
@@ -42,6 +41,7 @@ use crate::{
     interface::{CompiledGrammar, GrammarDefinition},
     json_serialization::{JSONConvertible, JSONNode},
     precompute4::full_dwa::{precompute4, Precomputed4},
+    precompute4::weighted_automata::common::StateID as WAStateID,
     profiler::{self, PROGRESS_BAR_ENABLED},
     r#macro::is_debug_level_enabled,
     tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
@@ -49,13 +49,14 @@ use crate::{
 };
 use profiler_macro::{time_it, timeit};
 use std::collections::BTreeMap as StdMap;
-
+use std::ops::BitOrAssign;
 // ---------------------------------------------------------------------------
 // Basic aliases
 // ---------------------------------------------------------------------------
 
 pub type LLMTokenBV = HybridBitset;
 pub type TerminalBV = HybridBitset;
+pub type StateIDBV = HybridBitset;
 /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
 pub type TerminalInfo = HybridL2Bitset;
 
@@ -581,7 +582,6 @@ pub struct GrammarConstraint {
     pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
 
     pub vocab: StageVocab,
-    pub special_precomputation: SpecialPrecomputation,
 
     /// Maps original terminal IDs to dummy terminal IDs (if any).
     pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
@@ -618,7 +618,6 @@ impl GrammarConstraint {
         assert_eq!(self.state_map_by_llm, other.state_map_by_llm);
         assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
         assert_eq!(self.vocab, other.vocab);
-        assert_eq!(self.special_precomputation, other.special_precomputation);
         assert_eq!(self.original_to_dummy_map, other.original_to_dummy_map);
         // precomputed4 still has no PartialEq; skip.
     }
@@ -781,10 +780,8 @@ impl JSONConvertible for GrammarConstraint {
                     run_precompute4,
                     post_commit_allow_check_mode,
                     vocab,
-                    special_precomputation: SpecialPrecomputation::default(),
                     original_to_dummy_map,
                 };
-                gc.special_precomputation = gc.precompute_special();
                 Ok(gc)
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -1259,10 +1256,8 @@ impl GrammarConstraint {
             run_precompute4: config.run_precompute4,
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             vocab,
-            special_precomputation: SpecialPrecomputation::default(),
             original_to_dummy_map,
         };
-        gc.special_precomputation = gc.precompute_special();
         gc
     }
 
@@ -1590,14 +1585,6 @@ impl GrammarConstraint {
     // -----------------------------------------------------------------------
     // Special precomputation
     // -----------------------------------------------------------------------
-
-    pub fn precompute_special(&self) -> SpecialPrecomputation {
-        crate::constraint_special_precompute::precompute_special(self)
-    }
-
-    pub fn dump_precomputed_special(&self) {
-        crate::constraint_special_precompute::dump_precomputed_special(self);
-    }
 
     pub fn dump_precomputed4(&self) {
         println!("\n--- Precomputed4 DWA ---");
@@ -1958,7 +1945,6 @@ impl<'r> Precomputer1<'r> {
             roots,
             possible_matches: RefCell::new(BTreeMap::new()),
             all_llm_tokens: RangeSetBlaze::from_iter(0..=internal_max_llm_token),
-            merge_threshold: 0, // unused; kept only for backwards-compat layout
             pb,
             stats: PrecomputeStats::default(),
             leaf_node,

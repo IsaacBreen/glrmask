@@ -18,8 +18,8 @@ use bimap::BiBTreeMap;
 use profiler_macro::time_it;
 
 // Adapter aliases for precompute-trie types (referencing constraint.rs)
-pub type StoredPrecomputeNodeIndex = crate::constraint::IntermediatePrecomputeNode3Index;
-pub type StoredTrieGodWrapper = crate::constraint::IntermediateTrie3GodWrapper;
+pub type StoredPrecomputeNodeIndex = ();
+pub type StoredTrieGodWrapper = ();
 
 // --- Acc type compatible with LeveledGSS A ---
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -722,7 +722,7 @@ impl GSSNode {
 pub(crate) fn deep_add_precompute_trie_edges(
     _root_arc: &mut Arc<GSSNode>,
     _god: &StoredTrieGodWrapper,
-    _edge_key: &crate::constraint::IntermediateTrie3EdgeKey,
+    _edge_key: &(),
     _destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
     _memo: &mut PruneAndTransformRecursiveMemo,
 ) {

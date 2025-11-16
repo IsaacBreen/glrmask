@@ -1,5 +1,4 @@
 use super::items::{Item, LRMode, LR_MODE};
-use crate::constraint::StateIDBV;
 use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
 use crate::glr::analyze::{
     create_unique_name_generator, inline_null_productions, inline_unit_productions,
@@ -19,7 +18,7 @@ use std::collections::BTreeMap as StdMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;
 use std::sync::Arc;
-
+use crate::constraint::StateIDBV;
 use crate::glr::parser::{ActionFn, ExpectElse, GLRParser};
 use crate::profiler::{print_summary, print_summary_flat};
 

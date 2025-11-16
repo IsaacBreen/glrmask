@@ -1,7 +1,4 @@
-use crate::constraint::{
-    IntermediatePrecomputeNode3, IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey,
-    IntermediateTrie3GodWrapper, LLMTokenBV, LLMVocab, PrecomputeNode3Index, StateIDBV, Trie3God,
-};
+use crate::constraint::{LLMTokenBV, LLMVocab, StateIDBV, Trie1GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{
     deep_add_precompute_trie_edges, find_longest_path, gather_gss_stats, map_trie3_node_ids,
     print_gss_forest, Acc, GSSNode, GSSPeek, GSSPopper, GSSPopperItem, GSSPrintConfig, GSSStats,
@@ -30,10 +27,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
-
-type PrecomputeNode3 = IntermediatePrecomputeNode3;
-type Trie3GodWrapper = IntermediateTrie3GodWrapper;
-type PrecomputedNodeContents = IntermediatePrecomputedNodeContents3;
 
 // A single combined action for a given (state,row) and token:
 // - Normal(...) is a concrete per-token action from the row's action map
@@ -131,7 +124,7 @@ pub struct ParseState {
     pub stack: Arc<GSSNode>,
     pub accepted_state: Option<Arc<GSSNode>>,
     pub prev_accepted_state: Arc<GSSNode>,
-    pub trie2_god: Option<Trie3GodWrapper>,
+    pub trie2_god: Option<Trie1GodWrapper>,
 }
 
 impl ParseState {
@@ -153,12 +146,12 @@ impl ParseState {
         }
     }
 
-    pub(crate) fn with_god(mut self, trie2_god: Trie3GodWrapper) -> Self {
+    pub(crate) fn with_god(mut self, trie2_god: Trie1GodWrapper) -> Self {
         self.trie2_god = Some(trie2_god);
         self
     }
 
-    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<Trie3GodWrapper>) -> Self {
+    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<Trie1GodWrapper>) -> Self {
         self.trie2_god = maybe_god;
         self
     }
@@ -166,12 +159,12 @@ impl ParseState {
     #[time_it]
     pub fn merge(&mut self, mut other: ParseState) {
         timeit!("ParseState::merge::merge main stacks", {
-            Arc::make_mut(&mut self.stack).merge_with_depth(super::MAX_MERGE_DEPTH, &other.stack);
+            Arc::make_mut(&mut self.stack).merge_with_depth(MAX_MERGE_DEPTH, &other.stack);
         });
         timeit!("ParseState::merge::merge accepted states", {
             if let Some(other_accepted) = other.accepted_state {
                 if let Some(self_accepted) = self.accepted_state.as_mut() {
-                    Arc::make_mut(self_accepted).merge_with_depth(super::MAX_MERGE_DEPTH, &other_accepted);
+                    Arc::make_mut(self_accepted).merge_with_depth(MAX_MERGE_DEPTH, &other_accepted);
                 } else {
                     self.accepted_state = Some(other_accepted);
                 }
@@ -179,7 +172,7 @@ impl ParseState {
         });
         timeit!("ParseState::merge::merge prev accepted states", {
             Arc::make_mut(&mut self.prev_accepted_state)
-                .merge_with_depth(super::MAX_MERGE_DEPTH, &other.prev_accepted_state);
+                .merge_with_depth(MAX_MERGE_DEPTH, &other.prev_accepted_state);
             if self.trie2_god.is_some() && other.trie2_god.is_some() {
                 assert_eq!(self.trie2_god.as_ref().unwrap(), other.trie2_god.as_ref().unwrap());
             } else if other.trie2_god.is_some() {
@@ -752,7 +745,7 @@ impl GLRParser {
         };
 
         for (&from_sid, row) in &self.table {
-            for &to_sid in row.shifts_and_reduces_full.values().filter_map(|action| match action {
+            for to_sid in row.shifts_and_reduces_full.values().filter_map(|action| match action {
                 Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(*sid),
                 Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
                 _ => None,
@@ -865,7 +858,7 @@ impl WorkMapKey {
 type WorkMap = BTreeMap<WorkMapKey, (ParseState, Option<usize>)>;
 
 impl<'a> GLRParserState<'a> {
-    pub fn with_god(mut self, trie2_god: Trie3GodWrapper) -> GLRParserState<'a> {
+    pub fn with_god(mut self, trie2_god: Trie1GodWrapper) -> GLRParserState<'a> {
         self.active_state.trie2_god = Some(trie2_god);
         self
     }
@@ -1699,8 +1692,7 @@ impl<'a> GLRParserState<'a> {
             self.parser
                 .terminal_map
                 .get_by_right(&token)
-                .expect_else(|| format!("Token {} not found in terminal map", token.0))
-                .0,
+                .expect_else(|| format!("Token {} not found in terminal map", token.0)),
             token.0,
             stats_breakdown
         );

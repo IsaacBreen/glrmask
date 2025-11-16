@@ -2,7 +2,7 @@ use clap::Parser;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig, Precompute0Cache};
+use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig};
 use sep1::interface::{CompiledGrammar, GrammarDefinition};
 use sep1::json_serialization::JSONConvertible;
 use sep1::tokenizer::{LLMTokenID, LLMTokenMap};
@@ -74,50 +74,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Construct the GrammarConstraint.
     println!("\nConstructing GrammarConstraint...");
-    let mut loaded_pc0: Option<Precompute0Cache> = None;
-    if let Some(path) = args.load_precompute0.as_ref() {
-        println!("Attempting to load precompute0 cache from: {:?}", path);
-        match File::open(path) {
-            Ok(f) => {
-                let mut dec = GzDecoder::new(f);
-                match Precompute0Cache::from_reader(&mut dec) {
-                    Ok(cache) => {
-                        println!("Loaded precompute0 cache successfully.");
-                        loaded_pc0 = Some(cache);
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: Failed to parse precompute0 cache: {}. Will recompute.", e);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Warning: Could not open precompute0 cache file: {}. Will recompute.", e);
-            }
-        }
-    }
-
     let mut config = GrammarConstraintConfig::default();
-    if args.precompute0_only {
-        config.precompute0_only = true;
-    }
 
     let grammar_constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
         max_original_llm_token_id,
         &config,
-        loaded_pc0,
     );
 
     println!("GrammarConstraint constructed successfully.");
-    grammar_constraint.parser.print_stored_cache_stats();
-
     if let Some(path) = args.save_precompute0.as_ref() {
         println!("Saving precompute0 cache to: {:?}", path);
         let output_file = File::create(path)?;
         let writer = BufWriter::new(output_file);
         let mut encoder = GzEncoder::new(writer, Compression::default());
-        grammar_constraint.export_precompute0_cache().to_writer(&mut encoder)?;
         encoder.finish()?;
     }
 
