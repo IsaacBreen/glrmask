@@ -1211,12 +1211,10 @@ impl<'a> GLRParserState<'a> {
                 shifted_states_todo,
                 accepted_states_todo,
                 |state_id| {
-                    let row = &parser.table[&state_id];
-                    if let Some(a) = row.shifts_and_reduces_full.get(&token_id) {
-                        vec![Action::Normal(a)]
-                    } else {
-                        vec![Action::Default(&row.default_reduce)]
-                    }
+                    parser.table.get(&state_id).expect_else(|| format!("State ID {} not found in parse table during Phase 2", state_id.0)).shifts_and_reduces_full
+                        .get(&token_id)
+                        .map(|a| vec![Action::Normal(a)])
+                        .unwrap_or_default()
                 },
                 config,
                 &mut None,
