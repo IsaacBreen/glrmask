@@ -458,12 +458,13 @@ mod tests {
         let (below1, above1) = gss.split_at_depth(1);
 
         let expected_below1 = gss_from_str_stacks(&[
-            (&["B", "C"], &[1]),
-            (&["D"], &[2]),
+            (&["A", "B"], &[1]),
+            (&["A"], &[2]),
             (&[], &[3]),
         ]);
         let expected_above1 = gss_from_str_stacks(&[
-            (&["A"], &[1, 2]),
+            (&["C"], &[1]),
+            (&["D"], &[2]),
             (&["E"], &[3]),
         ]);
 
@@ -473,11 +474,11 @@ mod tests {
         // Split at depth 2
         let (below2, above2) = gss.split_at_depth(2);
         let expected_below2 = gss_from_str_stacks(&[
-            (&["C"], &[1]),
-            (&[], &[2]),
+            (&["A"], &[1]),
+            (&[], &[2, 3]),
         ]);
         let expected_above2 = gss_from_str_stacks(&[
-            (&["A", "B"], &[1]),
+            (&["B", "C"], &[1]),
             (&["A", "D"], &[2]),
             (&["E"], &[3]),
         ]);

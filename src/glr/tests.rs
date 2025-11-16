@@ -83,13 +83,14 @@ fn test_repetition_no_eof_2() {
     let mut state4 = parser_with_b.init_glr_parser(None);
     state4.parse(&tokens4);
     // After parsing 'b', there should be no valid active states.
+    state4._log_gss("State 4 after parsing 'b'", TerminalID(0), false, false);
     assert!(!state4.is_ok(), "Parse should fail after invalid token 'b'");
 
     // Test case 5: "ab"
     let tokens5 = vec![a_token_b, b_token];
     let mut state5 = parser_with_b.init_glr_parser(None);
     state5.parse(&tokens5);
-    state5.log_gss("State 5 after parsing 'ab'", TerminalID(0), false, false);
+    state5._log_gss("State 5 after parsing 'ab'", TerminalID(0), false, false);
     assert!(!state5.is_ok(), "Parse should fail for 'ab'");
 }
 
