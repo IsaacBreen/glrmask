@@ -228,18 +228,26 @@ pub fn precompute4(
 }
 
 fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
+    let now = Instant::now();
     crate::debug!(4, "Starting resolve negatives and optimization and determinization of combined NWA...");
     combined_nwa.simplify_rustfst();
-    crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
-    crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
-    crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
+    crate::debug!(4, "Initial simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
 
-    let now = Instant::now();
-    crate::debug!(4, "Starting negative code resolution...");
+    crate::debug!(4, "Determinizing combined NWA before negative code resolution...");
     combined_nwa.determinize_inplace();
+    crate::debug!(
+        4,
+        "Pre-resolution determinization took: {:?}. NWA now has {} states.",
+        now.elapsed(),
+        combined_nwa.states.len()
+    );
+    crate::debug!(4, "Starting negative code resolution...");
     apply_cancellations(&mut combined_nwa);
+    crate::debug!(4, "Applied cancellations.");
     apply_finality_fixpoint(&mut combined_nwa);
+    crate::debug!(4, "Applied finality fixpoint.");
     remove_negative_transitions(&mut combined_nwa);
+    crate::debug!(4, "Removed negative transitions.");
     combined_nwa.simplify_rustfst();
     crate::debug!(
         4,
