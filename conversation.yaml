@@ -14061,6 +14061,9 @@ local_system:
               changed |= self.prune_unreachable();
               crate::debug!(5, "[NWA::simplify] After prune_unreachable (1): {}", self.stats());
 
+              changed |= self.push_final_weights_along_epsilons();
+              crate::debug!(5, "[NWA::simplify] After pushing final weights along epsilons: {}", self.stats());
+
               changed |= self.prune_dead_ends();
               crate::debug!(5, "[NWA::simplify] After prune_dead_ends (1): {}", self.stats());
 
@@ -14086,6 +14089,74 @@ local_system:
                   changed,
                   self.stats()
               );
+              changed
+          }
+
+          fn push_final_weights_along_epsilons(&mut self) -> bool {
+              let n = self.states.len();
+              if n == 0 {
+                  return false;
+              }
+
+              // Build reverse epsilon adjacency: for each target v, collect (u, w_uv) with u --w_uv--> v.
+              let mut rev_eps: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
+              for (u, st) in self.states.0.iter().enumerate() {
+                  for &(v, ref w) in &st.epsilons {
+                      if v < n && !w.is_empty() {
+                          rev_eps[v].push((u, w.clone()));
+                      }
+                  }
+              }
+
+              // Initialise final_weights with the existing final weights.
+              let mut final_weights: Vec<Weight> = Vec::with_capacity(n);
+              let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+              for i in 0..n {
+                  let w = self.states.0[i]
+                      .final_weight
+                      .clone()
+                      .unwrap_or_else(Weight::zeros);
+                  if !w.is_empty() {
+                      queue.push_back(i);
+                  }
+                  final_weights.push(w);
+              }
+
+              let mut changed = false;
+
+              // Worklist fixpoint for F(q) = f0(q) ∨ ⋁_{q --w--> r} (w ∧ F(r)).
+              while let Some(v) = queue.pop_front() {
+                  let w_v = &final_weights[v];
+                  if w_v.is_empty() {
+                      continue;
+                  }
+
+                  for &(u, ref w_uv) in &rev_eps[v] {
+                      let candidate = w_v & w_uv;
+                      if candidate.is_empty() {
+                          continue;
+                      }
+                      let new_w = &final_weights[u] | &candidate;
+                      if new_w != final_weights[u] {
+                          final_weights[u] = new_w;
+                          queue.push_back(u);
+                      }
+                  }
+              }
+
+              for i in 0..n {
+                  let new_w = &final_weights[i];
+                  let new_final = if new_w.is_empty() {
+                      None
+                  } else {
+                      Some(new_w.clone())
+                  };
+                  if self.states.0[i].final_weight != new_final {
+                      self.states.0[i].final_weight = new_final;
+                      changed = true;
+                  }
+              }
+
               changed
           }
 
@@ -14368,7 +14439,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gpt-5
   code_completion_model:
     - gf
   commit_message_model:
@@ -21704,9 +21775,10 @@ messages:
       ```
     metadata:
       filename: src/precompute4/weighted_automata/simplification.rs
-  - user: Right now, weight pushing is only implemented in simplification.rs in the
-      already determinized DWA. Implement it for NWA too. I've attached the original
-      rustfst code. We want simplificaiton to be just as effective as rustfst's minimization.
+  - user: |-
+      Right now, weight pushing is only implemented in simplification.rs in the already determinized DWA. Implement it for NWA too. I've attached the original rustfst code. We want simplificaiton to be just as effective as rustfst's minimization.
+      Don't do it just by determinizing and then passing through to the DWA weight pushing algorithm. That's cheating. Weight pushing should work for a NWA in-place without determinization.
+      Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your output.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -21726,190 +21798,420 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement weight pushing for Nondeterministic Weighted Automata (NWA) using `rustfst`, followed by the corresponding git diff.
+      Here’s how to implement NWA weight pushing in-place, together with a mathematical justification, and then the exact patch.
 
-      ### Step-by-step Instructions
+      ---
 
-      I will modify `src/precompute4/weighted_automata/simplification.rs` to add simplification capabilities for `NWA`, mirroring the structure used for `DWA` which leverages `rustfst` for a robust minimization implementation that includes weight pushing.
+      ## 1. Concept and invariants
 
-      #### File: `src/precompute4/weighted_automata/simplification.rs`
+      ### 1.1. Semantics model (hypothesis)
 
-      1.  **Add necessary imports**: At the top of the file, add a `use` statement for `rustfst`'s minimization functionality.
+      From the code you provided, we can safely treat `Weight = SimpleBitset` as:
 
-          ```rust
-          use rustfst::algorithms::{minimize_with_config, MinimizeConfig};
-          ```
+      - Elements are subsets of some fixed universe \(U\) of “atoms” (bit positions).
+      - Operations:
+        - `&` is set intersection (\(\wedge\)).
+        - `|` is set union (\(\vee\)).
+        - `Weight::zeros()` is the empty set \(\varnothing\).
+        - `Weight::all()` is the universal set \(U\).
+        - `is_empty()` checks emptiness.
 
-      2.  **Implement `NWA::simplify` and `NWA::simplify_with_rustfst`**: In the `impl NWA` block, I'll add two new public methods.
-          *   `simplify_with_rustfst`: This method will convert the `NWA` to a `rustfst` `VectorFst`, apply `rustfst`'s minimization algorithm (which includes weight pushing), and then convert the result back into an `NWA`. We'll configure the minimizer to allow non-deterministic FSTs.
-          *   `simplify`: This will be the main entry point for simplification. It will run both the native `simplify_internal` method and the new `simplify_with_rustfst` method, printing debug information about their performance and results, similar to how `DWA::simplify` is implemented. For now, it will use the result from `simplify_internal`.
+      For an NWA
 
-          Here is the code to add to the `impl NWA` block:
+      - States: `Q`
+      - Start state: `q_0` (`self.body.start_state`)
+      - Epsilon transitions: \(u \xrightarrow{w_\varepsilon} v\) with weight \(w_\varepsilon\)
+      - Labeled transitions: \(u \xrightarrow{a, w_a} v\) with label \(a` (i16) and weight \(w_a\)
+      - Final weights: `final_weight(q)` ∈ `Option<Weight>`; treat `None` as `zeros()`.
 
-          ```rust
-          pub fn simplify(&mut self) {
-              crate::debug!(4, "[NWA::simplify] Num states before simplification: {}", self.states.len());
-              let instant = std::time::Instant::now();
-              let mut internal = self.clone();
-              internal.simplify_internal();
+      For a path \(\pi\) from \(q_0\) to state \(q\),
+
+      - Let the sequence of transition weights on \(\pi\) be \(w_1,\dots,w_k\).
+      - Let the final weight at \(q\) be \(f(q)\) (or `Weight::zeros()` if not final).
+
+      Define **path weight**:
+
+      \[
+      \rho(\pi) = \left( \bigwedge_{i=1}^k w_i \right) \wedge f(q).
+      \]
+
+      For a word \(x\) (sequence of i16 labels, epsilons omitted), the NWA’s semantics is:
+
+      \[
+      W(x) \;=\; \bigvee_{\pi : \text{label}(\pi) = x}\; \rho(\pi).
+      \]
+
+      This is exactly what your determinization code computes (using closure over epsilons, `&` for path concatenation, and `|` for combining different paths).
+
+      ### 1.2. What we want to do
+
+      We want an in-place **weight pushing** that:
+
+      - Works directly on the NWA, without determinization.
+      - Uses only `&`, `|`, `zeros`, and `is_empty` (no division).
+      - Preserves semantics: for every word \(x\), the new automaton has the same \(W(x)\).
+      - Helps minimization by “normalising” weights in a way similar in spirit to RustFST’s push: here, we’ll normalise final weights with respect to epsilon structure.
+
+      Key idea: epsilon transitions do not contribute to the label sequence, so we are free to “push” final weights backwards along epsilon transitions, without changing the labels of words. This is analogous to treating final weights as epsilon transitions to a global sink and folding them backwards.
+
+      ---
+
+      ## 2. Mathematical formulation of the NWA weight push
+
+      ### 2.1. System of equations for final weights
+
+      Let:
+
+      - \(f_0(q)\) be the original final weight at state \(q\), or \(\varnothing\) if `None`.
+      - For each epsilon transition \(q \xrightarrow{w} r\), we consider \(w\) the epsilon weight.
+
+      We define new final weights \(F(q)\) as the **least fixed point** of:
+
+      \[
+      F(q) = f_0(q) \;\vee\; \bigvee_{q\xrightarrow{w}r\ \text{(epsilon)}} \left( w \wedge F(r) \right).
+      \tag{*}
+      \]
+
+      This equation says:
+
+      > The new final weight at \(q\) is its own original final weight, plus (union with) every way of going via any epsilon edge to another state \(r\), then being final there with weight \(F(r)\), multiplied (intersected) by the epsilon’s weight.
+
+      Because:
+
+      - Both \(\wedge\) (intersection) and \(\vee\) (union) are monotone in the subset order,
+      - And the domain is the finite lattice \((2^U)^Q\) (final weights per state),
+
+      this system has a unique least fixpoint, which can be computed by a standard monotone fixpoint / worklist algorithm.
+
+      Intuitively, \(F(q)\) is:
+
+      > the union of the weights of all epsilon-only paths from \(q\) to final states, including paths of length zero (i.e., \(q\) itself if final).
+
+      ### 2.2. Algorithm we implement
+
+      We compute \(F\) by **backward propagation** along epsilons:
+
+      1. Build reverse epsilon adjacency:
+         - For each epsilon transition `u --w--> v`, we add `(u, w)` into `rev_eps[v]`.
+         - This allows us to propagate “final-weight influence” backwards from `v` to `u`.
+
+      2. Initialise `final_weights[i] = f0[i]` for each state `i`. Seed a queue with all `i` where `final_weights[i]` is non-empty.
+
+      3. While queue is non-empty:
+         - Pop a state `v`.
+         - For each `(u, w_uv)` in `rev_eps[v]`:
+           - Candidate contribution from `v` back to `u` is `candidate = final_weights[v] & w_uv`.
+           - If `candidate` is non-empty and `final_weights[u]` does not already contain it, update:
+             \[
+             \text{final\_weights}[u] \gets \text{final\_weights}[u] \;\vee\; \text{candidate},
+             \]
+             and push `u` back onto the queue.
+
+      4. After convergence, set:
+         - `self.states[i].final_weight = None` if `final_weights[i].is_empty()`
+         - otherwise `Some(final_weights[i].clone())`.
+
+      This is exactly computing the least fixpoint of (*). Each bit in each state’s final weight only flips once from 0 to 1, so termination is guaranteed.
+
+      ### 2.3. Semantics preservation (proof sketch)
+
+      Let \(A\) be the original NWA and \(A'\) be the NWA after replacing \(f_0(q)\) with \(F(q)\).
+
+      We need to show:
+
+      \[
+      \forall x \in \Sigma^*,\quad W_A(x) = W_{A'}(x).
+      \]
+
+      Take any path \(\pi\) in \(A'\) from \(q_0\) to final state \(q\), labelled \(x\). The path’s transitions (and weights on transitions) are **unchanged** between \(A\) and \(A'\); the only difference is the final weight at \(q\). So:
+
+      \[
+      \rho_{A'}(\pi) = \left( \bigwedge_{i=1}^k w_i \right) \wedge F(q).
+      \]
+
+      And by definition of \(F(q)\):
+
+      \[
+      F(q) = \bigvee_{\tau: q \xrightarrow{\varepsilon^*} r\ \text{and}\ r\ \text{final in } A}
+      \left( w(\tau) \wedge f_0(r) \right),
+      \]
+
+      where \(\tau\) runs over all epsilon-only paths from \(q\) to some state \(r\), \(w(\tau)\) is the intersection of weights on \(\tau\), and \(f_0(r)\) is the original final weight of \(r\).
+
+      Because intersection distributes over union:
+
+      \[
+      \left( \bigwedge_{i=1}^k w_i \right) \wedge F(q)
+      = \bigvee_{\tau} \left( \bigwedge_{i=1}^k w_i \wedge w(\tau) \wedge f_0(r) \right).
+      \]
+
+      Each term on the right-hand side corresponds precisely to the **extended path** \(\pi\tau\) in the original automaton \(A\): we first take all transitions of \(\pi\), then follow the epsilon-only path \(\tau\) to \(r\), and then apply final weight \(f_0(r)\). Since epsilons do not change the label, \(\lambda(\pi\tau) = \lambda(\pi) = x\).
+
+      Thus, every path contribution in \(A'\) is a union over contributions of some set of paths in \(A\) with the **same label**.
+
+      Conversely, any path in \(A\) can be uniquely split as:
+
+      - A prefix \(\pi\) from the start state that contains all non-epsilon transitions, and
+      - A suffix \(\tau\) of epsilon-only transitions to the final state.
+
+      Our new \(F\) construction ensures that the contribution of such a path appears in some `F(q)` for a state reachable via the same prefix; by exactly the same algebra, all of those contributions appear in \(W_{A'}(x)\).
+
+      Since weights are bitsets and union is idempotent, double counting is harmless.
+
+      Therefore, for every word \(x\), \(W_{A'}(x) = W_A(x)\). Semantics is preserved.
+
+      ---
+
+      ## 3. Concrete code changes (step-by-step)
+
+      We only need to modify **one file**:
+
+      - `src/precompute4/weighted_automata/simplification.rs`
+
+      ### 3.1. Add the weight-pushing step into `NWA::simplify_internal`
+
+      In the `impl NWA` block, locate the method:
+
+      ```rust
+          pub fn simplify_internal(&mut self) -> bool {
+              crate::debug!(5, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+              let mut changed = false;
+              changed |= self.prune_unreachable();
+              crate::debug!(5, "[NWA::simplify] After prune_unreachable (1): {}", self.stats());
+
+              changed |= self.prune_dead_ends();
+              crate::debug!(5, "[NWA::simplify] After prune_dead_ends (1): {}", self.stats());
+
+              let n = self.states.len();
+              if n > 1 {
+                  let partition = minimize_nwa_partition(&self.states);
+                  if partition.num_classes() < n {
+                      crate::debug!(5, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
+                      self.rebuild_from_partition(partition);
+                      changed = true;
+                      crate::debug!(5, "[NWA::simplify] After minimizing: {}", self.stats());
+                  }
+              }
+
+              changed |= self.prune_unreachable();
+              crate::debug!(5, "[NWA::simplify] After prune_unreachable (2): {}", self.stats());
+
+              changed |= self.prune_dead_ends();
+              crate::debug!(5, "[NWA::simplify] After prune_dead_ends (2): {}", self.stats());
               crate::debug!(
-                  4,
-                  "[NWA::simplify] Simplification took {:.3} seconds. Num states: {}",
-                  instant.elapsed().as_secs_f64(),
-                  internal.states.len()
+                  5,
+                  "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}",
+                  changed,
+                  self.stats()
               );
-              let mut rustfst = self.clone();
-              rustfst.simplify_with_rustfst();
-              crate::debug!(
-                  4,
-                  "[NWA::simplify] RustFST minimization took {:.3} seconds. Num states: {}",
-                  instant.elapsed().as_secs_f64(),
-                  rustfst.states.len()
-              );
-              *self = internal;
+              changed
           }
-
-          pub fn simplify_with_rustfst(&mut self) -> bool {
-              let min_config = MinimizeConfig::default().with_allow_nondet(true);
-              let mut fst = self.to_rustfst();
-              minimize_with_config(&mut fst, min_config).unwrap();
-              *self = NWA::from_rustfst(&fst);
-              true
-          }
-          ```
-
-      These changes will equip your `NWA` with a powerful simplification mechanism that leverages the advanced algorithms from `rustfst`, including weight pushing.
-
-      ### Git Diffs
-
-      Here is the git diff for the changes described above.
-
-      ```diff
-      --- a/src/precompute4/weighted_automata/simplification.rs
-      +++ b/src/precompute4/weighted_automata/simplification.rs
-      @@ -4,6 +4,7 @@
-       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-       use std::hash::{Hash, Hasher};
-       use std::collections::hash_map::DefaultHasher;
-      +use rustfst::algorithms::{minimize_with_config, MinimizeConfig};
-       
-       #[derive(Clone, Debug)]
-       struct Partition {
-      @@ -411,6 +412,35 @@
-       }
-       
-       impl NWA {
-      +    pub fn simplify(&mut self) {
-      +        crate::debug!(4, "[NWA::simplify] Num states before simplification: {}", self.states.len());
-      +        let instant = std::time::Instant::now();
-      +        let mut internal = self.clone();
-      +        internal.simplify_internal();
-      +        crate::debug!(
-      +            4,
-      +            "[NWA::simplify] Simplification took {:.3} seconds. Num states: {}",
-      +            instant.elapsed().as_secs_f64(),
-      +            internal.states.len()
-      +        );
-      +        let mut rustfst = self.clone();
-      +        rustfst.simplify_with_rustfst();
-      +        crate::debug!(
-      +            4,
-      +            "[NWA::simplify] RustFST minimization took {:.3} seconds. Num states: {}",
-      +            instant.elapsed().as_secs_f64(),
-      +            rustfst.states.len()
-      +        );
-      +        *self = internal;
-      +    }
-      +
-      +    pub fn simplify_with_rustfst(&mut self) -> bool {
-      +        let min_config = MinimizeConfig::default().with_allow_nondet(true);
-      +        let mut fst = self.to_rustfst();
-      +        minimize_with_config(&mut fst, min_config).unwrap();
-      +        *self = NWA::from_rustfst(&fst);
-      +        true
-      +    }
-      +
-           pub fn simplify_internal(&mut self) -> bool {
-               crate::debug!(5, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
-               let mut changed = false;
-
       ```
-    metadata:
-  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
-      applied now.
-    metadata:
-  - assistant: |-
+
+      Right after the first `prune_dead_ends` and its debug line, insert a call to the new weight-pushing method and a debug line:
+
+      ```rust
+              changed |= self.push_final_weights_along_epsilons();
+              crate::debug!(5, "[NWA::simplify] After pushing final weights along epsilons: {}", self.stats());
+      ```
+
+      So that the beginning of `simplify_internal` becomes:
+
+      ```rust
+          pub fn simplify_internal(&mut self) -> bool {
+              crate::debug!(5, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+              let mut changed = false;
+              changed |= self.prune_unreachable();
+              crate::debug!(5, "[NWA::simplify] After prune_unreachable (1): {}", self.stats());
+
+              changed |= self.prune_dead_ends();
+              crate::debug!(5, "[NWA::simplify] After prune_dead_ends (1): {}", self.stats());
+
+              changed |= self.push_final_weights_along_epsilons();
+              crate::debug!(5, "[NWA::simplify] After pushing final weights along epsilons: {}", self.stats());
+
+              let n = self.states.len();
+              ...
+      ```
+
+      ### 3.2. Implement `NWA::push_final_weights_along_epsilons`
+
+      Still inside the same `impl NWA` block (e.g., just after `simplify_internal` and before `rebuild_from_partition`), add the new private method:
+
+      ```rust
+          fn push_final_weights_along_epsilons(&mut self) -> bool {
+              let n = self.states.len();
+              if n == 0 {
+                  return false;
+              }
+
+              // Build reverse epsilon adjacency: for each target v, collect (u, w_uv) with u --w_uv--> v.
+              let mut rev_eps: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
+              for (u, st) in self.states.0.iter().enumerate() {
+                  for &(v, ref w) in &st.epsilons {
+                      if v < n && !w.is_empty() {
+                          rev_eps[v].push((u, w.clone()));
+                      }
+                  }
+              }
+
+              // Initialise final_weights with the existing final weights.
+              let mut final_weights: Vec<Weight> = Vec::with_capacity(n);
+              let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+              for i in 0..n {
+                  let w = self.states.0[i]
+                      .final_weight
+                      .clone()
+                      .unwrap_or_else(Weight::zeros);
+                  if !w.is_empty() {
+                      queue.push_back(i);
+                  }
+                  final_weights.push(w);
+              }
+
+              let mut changed = false;
+
+              // Worklist fixpoint for F(q) = f0(q) ∨ ⋁_{q --w--> r} (w ∧ F(r)).
+              while let Some(v) = queue.pop_front() {
+                  let w_v = &final_weights[v];
+                  if w_v.is_empty() {
+                      continue;
+                  }
+
+                  for &(u, ref w_uv) in &rev_eps[v] {
+                      let candidate = w_v & w_uv;
+                      if candidate.is_empty() {
+                          continue;
+                      }
+                      let new_w = &final_weights[u] | &candidate;
+                      if new_w != final_weights[u] {
+                          final_weights[u] = new_w;
+                          queue.push_back(u);
+                      }
+                  }
+              }
+
+              // Install the new final weights back into the NWA.
+              for i in 0..n {
+                  let new_w = &final_weights[i];
+                  let new_final = if new_w.is_empty() {
+                      None
+                  } else {
+                      Some(new_w.clone())
+                  };
+                  if self.states.0[i].final_weight != new_final {
+                      self.states.0[i].final_weight = new_final;
+                      changed = true;
+                  }
+              }
+
+              changed
+          }
+      ```
+
+      Notes:
+
+      - We use `self.states.0` directly (the underlying `Vec<NWAState>`), consistent with other parts of `simplification.rs`.
+      - We never **remove** final weights, except when they are provably empty; we only add bits that correspond to real epsilon paths to final states.
+      - We propagate only non-empty weights.
+
+      This is a pure NWA-level transformation; no determinization is used.
+
+      ---
+
+      ## 4. Git diff patch
+
+      Below is the unified diff for `simplification.rs` that implements the changes above.
+
       ```diff
+      diff --git a/src/precompute4/weighted_automata/simplification.rs b/src/precompute4/weighted_automata/simplification.rs
       --- a/src/precompute4/weighted_automata/simplification.rs
       +++ b/src/precompute4/weighted_automata/simplification.rs
-      @@ -4,6 +4,7 @@
-       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-       use std::hash::{Hash, Hasher};
-       use std::collections::hash_map::DefaultHasher;
-      +use rustfst::algorithms::{minimize_with_config, MinimizeConfig};
+      @@ -648,6 +648,9 @@
+               changed |= self.prune_unreachable();
+               crate::debug!(5, "[NWA::simplify] After prune_unreachable (1): {}", self.stats());
        
-       #[derive(Clone, Debug)]
-       struct Partition {
-      @@ -421,29 +421,29 @@
-       impl NWA {
-      -    pub fn simplify(&mut self) {
-      -        crate::debug!(4, "[NWA::simplify] Num states before simplification: {}", self.states.len());
-      -        let instant = std::time::Instant::now();
-      -        let mut internal = self.clone();
-      -        internal.simplify_internal();
-      -        crate::debug!(
-      -            4,
-      -            "[NWA::simplify] Simplification took {:.3} seconds. Num states: {}",
-      -            instant.elapsed().as_secs_f64(),
-      -            internal.states.len()
-      -        );
-      -        let mut rustfst = self.clone();
-      -        rustfst.simplify_with_rustfst();
-      -        crate::debug!(
-      -            4,
-      -            "[NWA::simplify] RustFST minimization took {:.3} seconds. Num states: {}",
-      -            instant.elapsed().as_secs_f64(),
-      -            rustfst.states.len()
-      -        );
-      -        *self = internal;
-      -    }
-      -
-      -    pub fn simplify_with_rustfst(&mut self) -> bool {
-      -        let min_config = MinimizeConfig::default().with_allow_nondet(true);
-      -        let mut fst = self.to_rustfst();
-      -        minimize_with_config(&mut fst, min_config).unwrap();
-      -        *self = NWA::from_rustfst(&fst);
-      -        true
-      -    }
-      +    pub fn simplify(&mut self) {
-      +        crate::debug!(4, "[NWA::simplify] Num states before simplification: {}", self.states.len());
-      +        let instant = std::time::Instant::now();
-      +        let mut internal = self.clone();
-      +        internal.simplify_internal();
-      +        crate::debug!(
-      +            4,
-      +            "[NWA::simplify] Simplification took {:.3} seconds. Num states: {}",
-      +            instant.elapsed().as_secs_f64(),
-      +            internal.states.len()
-      +        );
-      +        let mut rustfst = self.clone();
-      +        rustfst.simplify_with_rustfst();
-      +        crate::debug!(
-      +            4,
-      +            "[NWA::simplify] RustFST minimization took {:.3} seconds. Num states: {}",
-      +            instant.elapsed().as_secs_f64(),
-      +            rustfst.states.len()
-      +        );
-      +        *self = internal;
+      +        changed |= self.push_final_weights_along_epsilons();
+      +        crate::debug!(5, "[NWA::simplify] After pushing final weights along epsilons: {}", self.stats());
+      +
+               changed |= self.prune_dead_ends();
+               crate::debug!(5, "[NWA::simplify] After prune_dead_ends (1): {}", self.stats());
+       
+      @@ -672,6 +675,60 @@
+                   self.stats()
+               );
+               changed
       +    }
       +
-      +    pub fn simplify_with_rustfst(&mut self) -> bool {
-      +        let min_config = MinimizeConfig::default().with_allow_nondet(true);
-      +        let mut fst = self.to_rustfst();
-      +        minimize_with_config(&mut fst, min_config).unwrap();
-      +        *self = NWA::from_rustfst(&fst);
-      +        true
-      +    }
+      +    fn push_final_weights_along_epsilons(&mut self) -> bool {
+      +        let n = self.states.len();
+      +        if n == 0 {
+      +            return false;
+      +        }
+      +
+      +        // Build reverse epsilon adjacency: for each target v, collect (u, w_uv) with u --w_uv--> v.
+      +        let mut rev_eps: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); n];
+      +        for (u, st) in self.states.0.iter().enumerate() {
+      +            for &(v, ref w) in &st.epsilons {
+      +                if v < n && !w.is_empty() {
+      +                    rev_eps[v].push((u, w.clone()));
+      +                }
+      +            }
+      +        }
+      +
+      +        // Initialise final_weights with the existing final weights.
+      +        let mut final_weights: Vec<Weight> = Vec::with_capacity(n);
+      +        let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+      +        for i in 0..n {
+      +            let w = self.states.0[i]
+      +                .final_weight
+      +                .clone()
+      +                .unwrap_or_else(Weight::zeros);
+      +            if !w.is_empty() {
+      +                queue.push_back(i);
+      +            }
+      +            final_weights.push(w);
+      +        }
+      +
+      +        let mut changed = false;
+      +
+      +        // Worklist fixpoint for F(q) = f0(q) ∨ ⋁_{q --w--> r} (w ∧ F(r)).
+      +        while let Some(v) = queue.pop_front() {
+      +            let w_v = &final_weights[v];
+      +            if w_v.is_empty() {
+      +                continue;
+      +            }
+      +
+      +            for &(u, ref w_uv) in &rev_eps[v] {
+      +                let candidate = w_v & w_uv;
+      +                if candidate.is_empty() {
+      +                    continue;
+      +                }
+      +                let new_w = &final_weights[u] | &candidate;
+      +                if new_w != final_weights[u] {
+      +                    final_weights[u] = new_w;
+      +                    queue.push_back(u);
+      +                }
+      +            }
+      +        }
+      +
+      +        for i in 0..n {
+      +            let new_w = &final_weights[i];
+      +            let new_final = if new_w.is_empty() {
+      +                None
+      +            } else {
+      +                Some(new_w.clone())
+      +            };
+      +            if self.states.0[i].final_weight != new_final {
+      +                self.states.0[i].final_weight = new_final;
+      +                changed = true;
+      +            }
+      +        }
+      +
+      +        changed
+           }
+       
+           fn rebuild_from_partition(&mut self, partition: Partition) {
       ```
     metadata:
   - user: |
@@ -21921,7 +22223,7 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
     metadata:
-  - user: 'Changes committed with message: "Implement NWA::simplify and NWA::simplify_with_rustfst
-      using rustfst minimization"'
+  - user: 'Changes committed with message: "perf(nwa): Add weight pushing along epsilon
+      transitions to NWA simplification"'
     metadata:
 ...
