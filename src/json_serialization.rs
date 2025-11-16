@@ -125,10 +125,10 @@ impl JSONNode {
             SerdeValue::Null => Ok(JSONNode::Null),
             SerdeValue::Bool(b) => Ok(JSONNode::Bool(b)),
             SerdeValue::Number(n) => {
-                if let Some(u) = n.as_u64() {
-                    Ok(JSONNode::UInt(u as u128))
-                } else if let Some(i) = n.as_i64() {
+                if let Some(i) = n.as_i64() {
                     Ok(JSONNode::Int(i as i128))
+                } else if let Some(u) = n.as_u64() {
+                    Ok(JSONNode::UInt(u as u128))
                 } else if let Some(f) = n.as_f64() {
                     Ok(JSONNode::Float(f))
                 } else {
