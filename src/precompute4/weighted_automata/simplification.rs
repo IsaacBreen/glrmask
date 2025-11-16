@@ -110,20 +110,20 @@ impl DWA {
     }
 
     fn simplify_internal(&mut self) -> bool {
-        crate::debug!(5, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         let mut changed = false;
         changed |= self.prune_unreachable();
-        crate::debug!(5, "[DWA::simplify] After prune_unreachable (1): {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After prune_unreachable (1): {}", self.stats());
         changed |= self.prune_dead_ends();
-        crate::debug!(5, "[DWA::simplify] After prune_dead_ends (1): {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After prune_dead_ends (1): {}", self.stats());
         changed |= self.push_weights_into_transitions_and_finals();
-        crate::debug!(5, "[DWA::simplify] After pushing weights: {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After pushing weights: {}", self.stats());
         changed |= self.minimize_states();
-        crate::debug!(5, "[DWA::simplify] After minimizing: {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After minimizing: {}", self.stats());
         changed |= self.prune_unreachable();
-        crate::debug!(5, "[DWA::simplify] After prune_unreachable (2): {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After prune_unreachable (2): {}", self.stats());
         changed |= self.prune_dead_ends();
-        crate::debug!(5, "[DWA::simplify] After prune_dead_ends (2): {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After prune_dead_ends (2): {}", self.stats());
         crate::debug!(
             5,
             "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}",
@@ -564,30 +564,30 @@ struct NwaStateBuilder {
 
 impl NWA {
     pub fn simplify(&mut self) -> bool {
-        crate::debug!(5, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         let mut changed = false;
         changed |= self.prune_unreachable();
-        crate::debug!(5, "[NWA::simplify] After prune_unreachable (1): {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] After prune_unreachable (1): {}", self.stats());
 
         changed |= self.prune_dead_ends();
-        crate::debug!(5, "[NWA::simplify] After prune_dead_ends (1): {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] After prune_dead_ends (1): {}", self.stats());
 
         let n = self.states.len();
         if n > 1 {
             let partition = minimize_nwa_partition(&self.states);
             if partition.num_classes() < n {
-                crate::debug!(5, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
+                crate::debug!(4, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
                 self.rebuild_from_partition(partition);
                 changed = true;
-                crate::debug!(5, "[NWA::simplify] After minimizing: {}", self.stats());
+                crate::debug!(4, "[NWA::simplify] After minimizing: {}", self.stats());
             }
         }
 
         changed |= self.prune_unreachable();
-        crate::debug!(5, "[NWA::simplify] After prune_unreachable (2): {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] After prune_unreachable (2): {}", self.stats());
 
         changed |= self.prune_dead_ends();
-        crate::debug!(5, "[NWA::simplify] After prune_dead_ends (2): {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] After prune_dead_ends (2): {}", self.stats());
         crate::debug!(
             5,
             "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}",
