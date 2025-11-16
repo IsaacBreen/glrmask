@@ -214,8 +214,16 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
 
     gss_pe_popped = gss_pe_merged.pop()
     # pop should discard the empty stack and pop the non-empty one.
-    # Expected: `([10], 2)` becomes `([], 2)`. `([], 1)` is discarded.
+    # Expected (ReferenceGSS): `([10], 2)` becomes `([], 2)`. `([], 1)` is discarded.
+    # Expected (LeveledGSS): `([10], 2)` becomes `([], 2)`. `([], 1)` becomes `([], 1)`. They merge to `([], 3)`.
     yield from _yield_state(gss_pe_popped)
+
+    # --- NEW TEST: Pop from GSS containing ONLY an empty stack ---
+    gss_only_empty = gss_class.from_stacks([([], MergeableInt(5))])
+    yield from _yield_state(gss_only_empty) # State: [([], 5)]
+
+    gss_popped_from_only_empty = gss_only_empty.pop()
+    yield from _yield_state(gss_popped_from_only_empty)
 
     # --- Test 14: String values and popn(0) ---
     gss_s1 = gss_class.from_stacks([(['x', 'y'], MergeableInt(1))])
