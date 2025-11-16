@@ -118,9 +118,7 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
 
     let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
     let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
-
-    // new_eps_from[from][to] = weight of the cancellation epsilon from `from` to `to`.
-    let mut new_eps_from: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); n];
+    let mut new_epsilons: HashMap<(NWAStateID, NWAStateID), Weight> = HashMap::new();
 
     // Seed from negative transitions.
     for a in 0..n {
@@ -145,24 +143,6 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
     }
 
     while let Some((s, a, c, w_as)) = worklist.pop_front() {
-        // First, propagate this query through any already-known cancellation epsilons
-        // originating from the current location `s`.
-        if !new_eps_from[s].is_empty() {
-            for (&target, eps_w) in &new_eps_from[s] {
-                let prop_w = &w_as & eps_w;
-                if prop_w.is_empty() {
-                    continue;
-                }
-                let query_key: QueryKey = (a, c);
-                let query_weight = queries[target].entry(query_key).or_default();
-                let old_qw = query_weight.clone();
-                *query_weight |= &prop_w;
-                if *query_weight != old_qw {
-                    worklist.push_back((target, a, c, query_weight.clone()));
-                }
-            }
-        }
-
         let mut check_cancellations = |target: NWAStateID,
                                        w_st: &Weight,
                                        worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code, Weight)>| {
@@ -171,15 +151,12 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
                 return;
             }
 
-            // Epsilon summarizing a cancellation from `a` (the negative's source) to `target`.
-            let eps_from_a = &mut new_eps_from[a];
-            let eps_weight = eps_from_a.entry(target).or_default();
+            let eps_key = (a, target);
+            let eps_weight = new_epsilons.entry(eps_key).or_default();
             let old_eps_w = eps_weight.clone();
             *eps_weight |= &new_eps_w;
 
             if *eps_weight != old_eps_w {
-                // When this epsilon grows, any existing queries that are currently at `a`
-                // can also traverse it.
                 let queries_at_a = queries[a].clone();
                 for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
                     let prop_w = w_a_prime_a & &*eps_weight;
@@ -228,13 +205,7 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
         }
     }
 
-    let mut result = Vec::new();
-    for (from, targets) in new_eps_from.into_iter().enumerate() {
-        for (to, w) in targets {
-            result.push((from, to, w));
-        }
-    }
-    result
+    new_epsilons.into_iter().map(|((from, to), w)| (from, to, w)).collect()
 }
 
 fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
