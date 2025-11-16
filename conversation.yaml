@@ -1,660 +1,1363 @@
 local_system:
   attached_files:
-    - src/precompute4/weighted_automata/determinization_rustfst.rs
+    - python/aug25/models/precompute4_model_pure_python.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/precompute4/weighted_automata/determinization_rustfst.rs: |-
-      // src/precompute4/weighted_automata/determinization_rustfst.rs
+    python/aug25/models/precompute4_model_pure_python.py: |
+      from __future__ import annotations
 
-      #![allow(dead_code)]
-      #![allow(clippy::needless_borrow)]
+      import collections
+      import heapq
+      from dataclasses import dataclass, field
+      from typing import Dict, List, Tuple, Optional, Union, Set, Generator, Any
+      import json
+      import types
 
-      use super::common::{StateID, Weight};
-      use super::dwa::DWA;
-      use super::nwa::NWA;
-      use crate::precompute4::weighted_automata::NWAStateID;
-      use anyhow::Result;
-      use nom::IResult;
-      use once_cell::sync::Lazy;
-      use range_set_blaze::RangeSetBlaze;
-      use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
-      use rustfst::algorithms::rm_epsilon::rm_epsilon;
-      use rustfst::fst_properties::FstProperties;
-      use rustfst::prelude::*;
-      use rustfst::semirings::{
-          DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring, WeightQuantize,
-      };
-      use rustfst::NomCustomError;
-      use std::borrow::Borrow;
-      use std::collections::{HashMap, HashSet};
-      use std::io::Write;
-      use std::sync::{Arc, Mutex};
+      import _sep1 as ffi
+      from tqdm import tqdm
 
-      static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> =
-          Lazy::new(|| Mutex::new(HashSet::new()));
+      from ..stats import Stats
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from ..common_interface import GraphProvider
+      from ..range_set import FFIRangeSet as RangeSet
+      from ..range_set import SetRangeSet as RangeSetOut
+      from ..range_set import SetRangeSet as RangeSetStates
 
-      fn intern_weight(weight: Weight) -> Arc<Weight> {
-          let mut interner = WEIGHT_INTERNER.lock().unwrap();
-          if let Some(w) = interner.get(&weight) {
-              return w.clone();
-          }
-          let arc_weight = Arc::new(weight);
-          interner.insert(arc_weight.clone());
-          arc_weight
-      }
+      # Type Aliases
+      NodeID = int
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
+      TerminalIdSet = RangeSet
 
-      /// Semiring over bitset weights: plus = union, times = intersection.
-      #[derive(Clone, Debug, PartialOrd, Default, Eq, Hash)]
-      pub struct BitsetWeight(pub Arc<Weight>);
+      # --- Monkey-patch RangeSet to collect stats on union/intersection ---
+      _original_rangeset_union = RangeSet.union
+      _original_rangeset_intersection = RangeSet.intersection
+      _original_rangeset_isdisjoint = RangeSet.isdisjoint
+      _original_rangeset_len = RangeSet.__len__
 
-      impl PartialEq for BitsetWeight {
-          fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0 }
-      }
+      def _patched_union(self, other: "RangeSet") -> "RangeSet":
+          stats = Stats.get()
+          stats.inc('bitset.union.calls')
+          stats.start('bitset.union.time')
+          result = _original_rangeset_union(self, other)
+          stats.stop('bitset.union.time')
+          return result
 
-      impl Semiring for BitsetWeight {
-          type Type = Weight;
-          type ReverseWeight = BitsetWeight;
+      def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
+          stats = Stats.get()
+          stats.inc('bitset.intersection.calls')
+          stats.start('bitset.intersection.time')
+          result = _original_rangeset_intersection(self, other)
+          stats.stop('bitset.intersection.time')
+          return result
 
-          fn zero() -> Self { BitsetWeight(intern_weight(Weight::zeros())) }
-          fn one() -> Self { BitsetWeight(intern_weight(Weight::all())) }
-          fn new(value: Self::Type) -> Self { BitsetWeight(intern_weight(value)) }
+      def _patched_isdisjoint(self, other: "RangeSet") -> bool:
+          stats = Stats.get()
+          stats.inc('bitset.isdisjoint.calls')
+          stats.start('bitset.isdisjoint.time')
+          result = _original_rangeset_isdisjoint(self, other)
+          stats.stop('bitset.isdisjoint.time')
+          return result
 
-          fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-              let new_weight = &*self.0 | &*rhs.borrow().0;
-              self.0 = intern_weight(new_weight);
-              Ok(())
-          }
+      def _patched_len(self) -> int:
+          stats = Stats.get()
+          stats.inc('bitset.len.calls')
+          stats.start('bitset.len.time')
+          result = _original_rangeset_len(self)
+          stats.stop('bitset.len.time')
+          return result
 
-          fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-              let new_weight = &*self.0 & &*rhs.borrow().0;
-              self.0 = intern_weight(new_weight);
-              Ok(())
-          }
+      # --- Monkey-patch RangeSetStates ---
+      _original_rangesetstates_isdisjoint = RangeSetStates.isdisjoint
 
-          fn approx_equal<P: Borrow<Self>>(&self, rhs: P, _delta: f32) -> bool { *self.0 == *rhs.borrow().0 }
-          fn value(&self) -> &Self::Type { &self.0 }
-          fn take_value(self) -> Self::Type { Arc::try_unwrap(self.0).unwrap_or_else(|arc| (*arc).clone()) }
-          fn set_value(&mut self, value: Self::Type) { self.0 = intern_weight(value); }
-          fn reverse(&self) -> Result<Self::ReverseWeight> { Ok(self.clone()) }
+      def _patched_states_isdisjoint(self, other: "RangeSetStates") -> bool:
+          stats = Stats.get()
+          stats.inc('bitset.states.isdisjoint.calls')
+          stats.start('bitset.states.isdisjoint.time')
+          result = _original_rangesetstates_isdisjoint(self, other)
+          stats.stop('bitset.states.isdisjoint.time')
+          return result
 
-          fn properties() -> SemiringProperties {
-              SemiringProperties::LEFT_SEMIRING
-                  | SemiringProperties::RIGHT_SEMIRING
-                  | SemiringProperties::COMMUTATIVE
-                  | SemiringProperties::IDEMPOTENT
-                  | SemiringProperties::PATH
-          }
-      }
+      # Apply the patches
+      RangeSet.union = _patched_union
+      RangeSet.intersection = _patched_intersection
+      RangeSet.isdisjoint = _patched_isdisjoint
+      RangeSet.__len__ = _patched_len
+      RangeSetStates.isdisjoint = _patched_states_isdisjoint
+      # --- End of monkey-patch ---
 
-      impl ReverseBack<BitsetWeight> for BitsetWeight {
-          fn reverse_back(&self) -> Result<BitsetWeight> { Ok(self.clone()) }
-      }
+      def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
+          def decorator(fn):
+              id_memo = {}
+              val_memo = {}
+              def wrapper(acc):
+                  acc_id = id(acc)
+                  if acc_id in id_memo:
+                      if stats_prefix:
+                          Stats.get().inc(f'{stats_prefix}.memo_hits')
+                      return id_memo[acc_id]
 
-      impl WeaklyDivisibleSemiring for BitsetWeight {
-          fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
-              let new_weight = &*self.0 | &!&*rhs.0;
-              self.0 = intern_weight(new_weight);
-              Ok(())
-          }
-      }
+                  if use_value_cache:
+                      cached = val_memo.get(acc)
+                      if cached is not None:
+                          id_memo[acc_id] = cached
+                          if stats_prefix:
+                              Stats.get().inc(f'{stats_prefix}.memo_hits')
+                          return cached
 
-      impl WeightQuantize for BitsetWeight {
-          fn quantize_assign(&mut self, _delta: f32) -> Result<()> { Ok(()) }
-      }
+                  result = fn(acc)
+                  id_memo[acc_id] = result
+                  if use_value_cache and result is not None:
+                      val_memo[acc] = result
+                  return result
+              wrapper._acc_memo_size = lambda: len(id_memo)
+              return wrapper
+          return decorator
 
-      impl SerializableSemiring for BitsetWeight {
-          fn weight_type() -> String { "bitset".to_string() }
 
-          fn parse_binary(i: &[u8]) -> IResult<&[u8], Self, NomCustomError<&[u8]>> {
-              use nom::number::complete::le_u64;
+      @dataclass(frozen=True)
+      class DFAState:
+          transitions: Dict[int, int]
+          finalizers: Set[int]
+          possible_future_group_ids: Set[int]
 
-              let (mut i, num_ranges) = le_u64(i)?;
-              let mut ranges = Vec::with_capacity(num_ranges as usize);
-              for _ in 0..num_ranges {
-                  let (next_i, start) = le_u64(i)?;
-                  let (next_i, end) = le_u64(next_i)?;
-                  ranges.push(start as usize..=end as usize);
-                  i = next_i;
-              }
-              let rsb = RangeSetBlaze::from_iter(ranges);
-              Ok((i, BitsetWeight(intern_weight(Weight::from_rsb(rsb)))))
-          }
 
-          fn write_binary<F: Write>(&self, file: &mut F) -> Result<()> {
-              let ranges: Vec<_> = self.0.rsb.ranges().collect();
-              file.write_all(&(ranges.len() as u64).to_le_bytes())?;
-              for range in ranges {
-                  file.write_all(&(*range.start() as u64).to_le_bytes())?;
-                  file.write_all(&(*range.end() as u64).to_le_bytes())?;
-              }
-              Ok(())
-          }
+      @dataclass(frozen=True)
+      class PyTokenizer:
+          states: List[DFAState]
+          start_state: int
+          non_greedy_finalizers: Set[int]
 
-          fn parse_text(i: &str) -> IResult<&str, Self> {
-              use nom::combinator::map_res;
-              map_res(nom::combinator::rest, |s: &str| -> Result<BitsetWeight, _> {
-                  serde_json::from_str::<Weight>(s)
-                      .map(|w| BitsetWeight(intern_weight(w)))
-                      .map_err(|e| e.to_string())
-              })(i)
-          }
-      }
+          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+              current_state = state_id
+              matches = {}
 
-      impl std::fmt::Display for BitsetWeight {
-          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-              write!(f, "{}", serde_json::to_string(self.0.as_ref()).unwrap_or_else(|_| "err".to_string()))
-          }
-      }
+              for group_id in self.states[current_state].finalizers:
+                  if group_id in self.non_greedy_finalizers:
+                      matches.setdefault(group_id, 0)
+                  else:
+                      matches[group_id] = 0
 
-      pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
-          let mut fst = VectorFst::<BitsetWeight>::new();
-          let mut state_map = HashMap::<NWAStateID, StateId>::new();
+              for i, byte in enumerate(text):
+                  state_data = self.states[current_state]
+                  next_state = state_data.transitions.get(byte)
+                  if next_state is None:
+                      return None, [(gid, width) for gid, width in matches.items() if width > 0]
+                  current_state = next_state
+                  for group_id in self.states[current_state].finalizers:
+                      if group_id in self.non_greedy_finalizers:
+                          matches.setdefault(group_id, i + 1)
+                      else:
+                          matches[group_id] = i + 1
 
-          for i in 0..nwa.states.len() {
-              let s = fst.add_state();
-              state_map.insert(i, s);
-          }
+              return current_state, [(gid, width) for gid, width in matches.items() if width > 0]
 
-          if !nwa.states.0.is_empty() {
-              fst.set_start(state_map[&nwa.body.start_state]).unwrap();
-          }
+          def initial_state_id(self) -> int:
+              return self.start_state
 
-          for (i, nwa_state) in nwa.states.0.iter().enumerate() {
-              let fst_state_id = state_map[&i];
 
-              if let Some(w) = &nwa_state.final_weight {
-                  if !w.is_empty() {
-                      fst.set_final(fst_state_id, BitsetWeight::new(w.clone())).unwrap();
-                  }
-              }
+      @dataclass(frozen=True)
+      class Reduce:
+          nonterminal_id: int
+          len: int
+          production_ids: Tuple[int, ...]
 
-              for (label, targets) in &nwa_state.transitions {
-                  for (target, weight) in targets {
-                      if !weight.is_empty() {
-                          fst.add_tr(
-                              fst_state_id,
-                              Tr::new(
-                                  (*label as u32) + 1,
-                                  (*label as u32) + 1,
-                                  BitsetWeight::new(weight.clone()),
-                                  state_map[target],
-                              ),
-                          )
-                          .unwrap();
-                      }
-                  }
-              }
 
-              for (target, weight) in &nwa_state.epsilons {
-                  if !weight.is_empty() {
-                      fst.add_tr(fst_state_id, Tr::new(EPS_LABEL, EPS_LABEL, BitsetWeight::new(weight.clone()), state_map[target]))
-                          .unwrap();
-                  }
-              }
-          }
+      @dataclass(frozen=True)
+      class Split:
+          shift: Optional[int]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]]
 
-          crate::debug!(5, "NWA to FST conversion done:\n{}", fst);
-          fst
-      }
 
-      pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
-          let fst_start = match fst.start() {
-              Some(s) => s,
-              None => return DWA::new(),
-          };
+      Action = Union[int, Reduce, Split]
 
-          let mut dwa = DWA::new();
-          dwa.states.0.clear();
-          let mut state_map = HashMap::<StateId, StateID>::new();
 
-          for i in 0..fst.num_states() {
-              let s = dwa.add_state();
-              state_map.insert(i as StateId, s);
-          }
-          dwa.body.start_state = state_map[&fst_start];
+      @dataclass
+      class Row:
+          actions: Dict[int, Action] = field(default_factory=dict)
+          gotos: Dict[int, int] = field(default_factory=dict)
 
-          for i in 0..fst.num_states() {
-              let fst_state_id = i as StateId;
-              if !state_map.contains_key(&fst_state_id) {
-                  continue;
-              }
-              let dwa_state_id = state_map[&fst_state_id];
 
-              if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
-                  if !w.0.is_empty() {
-                      dwa.set_final_weight(dwa_state_id, w.value().clone()).unwrap();
-                  }
-              }
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
 
-              for tr in fst.get_trs(fst_state_id).unwrap().trs() {
-                  if !tr.weight.0.is_empty() {
-                      if !state_map.contains_key(&tr.nextstate) {
-                          continue;
-                      }
-                      let res = dwa.add_transition(
-                          dwa_state_id,
-                          ((tr.ilabel - 1) as u16) as i16,
-                          state_map[&tr.nextstate],
-                          tr.weight.value().clone(),
-                      );
-                      if let Err(e) = res {
-                          panic!(
-                              "Error converting VectorFst to DWA: transition already exists. This indicates non-determinism. Error: {:?}",
-                              e
-                          );
-                      }
-                  }
-              }
-          }
 
-          dwa
-      }
+      @dataclass(frozen=True, eq=False)
+      class PyAcc:
+          terminals_union: Dict[int, TerminalIdSet]
+          llm_mask: LLMTokenSet
 
-      pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
-          if fst.num_states() == 0 {
-              return NWA::new();
-          }
+          def __eq__(self, other):
+              if not isinstance(other, PyAcc):
+                  return NotImplemented
+              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
 
-          let mut nwa = NWA::new();
-          nwa.states.0.clear();
-          let mut state_map = HashMap::<StateId, NWAStateID>::new();
+          def __hash__(self):
+              return hash((len(self.terminals_union), self.llm_mask))
 
-          for i in 0..fst.num_states() {
-              let s = nwa.states.add_state();
-              state_map.insert(i as StateId, s);
-          }
+          def merge(self, other: "PyAcc") -> "PyAcc":
+              new_terminals_union = self.terminals_union.copy()
+              for k, v in other.terminals_union.items():
+                  if k in new_terminals_union:
+                      new_terminals_union[k] = new_terminals_union[k].union(v)
+                  else:
+                      new_terminals_union[k] = v
+              return PyAcc(
+                  terminals_union=new_terminals_union,
+                  llm_mask=self.llm_mask.union(other.llm_mask),
+              )
 
-          if let Some(fst_start) = fst.start() {
-              nwa.body.start_state = state_map[&fst_start];
-          } else {
-              nwa.body.start_state = 0;
-          }
+          def is_empty(self):
+              return self.llm_mask.is_empty()
 
-          for i in 0..fst.num_states() {
-              let fst_state_id = i as StateId;
-              let nwa_state_id = state_map[&fst_state_id];
 
-              if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
-                  if !w.0.is_empty() {
-                      nwa.states[nwa_state_id].final_weight = Some(w.value().clone());
-                  }
-              }
+      @dataclass
+      class DWAState:
+          # Maps label (int) -> (target_state_id, weight)
+          transitions: Dict[int, Tuple[int, LLMTokenSet]]
+          state_weight: Optional[LLMTokenSet]
+          final_weight: Optional[LLMTokenSet]
 
-              for tr in fst.get_trs(fst_state_id).unwrap().trs() {
-                  if !tr.weight.0.is_empty() {
-                      let target_nwa_id = state_map[&tr.nextstate];
-                      let weight = tr.weight.value().clone();
 
-                      if tr.ilabel == EPS_LABEL {
-                          nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
-                      } else {
-                          let label = ((tr.ilabel - 1) as u16) as i16;
-                          nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
-                      }
-                  }
-              }
-          }
+      @dataclass
+      class DWA:
+          states: List[DWAState]
+          start_state: int
 
-          nwa
-      }
 
-      pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
-          let mut fst = nwa_to_vector_fst(nwa);
-          fst.compute_and_update_properties_all().unwrap();
-          assert!(fst.properties().contains(FstProperties::ACCEPTOR), "FST should be an acceptor before determinization");
+      DEFAULT_TRANSITION_SYMBOL = 32767
 
-          let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
-          let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
 
-          vector_fst_to_dwa(&det_fst)
-      }
+      @dataclass
+      class Model(GraphProvider):
+          stats = Stats.get()
+          stats.add_group('get_mask')
+          stats.add_group('commit')
 
-      impl DWA {
-          pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
-              nwa_to_vector_fst(&NWA::from_dwa(self))
-          }
+          dwa: DWA
+          parser_table: ParserTable
+          tokenizer: PyTokenizer
+          tokenizer_initial_state: int
+          possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
+          id_to_token: Dict[int, bytes]
+          internal_to_original_map: Dict[int, RangeSetOut]
+          all_internal_llm_tokens_bitset: LLMTokenSet
+          ignore_terminal_id: Optional[int]
+          original_to_dummy_map: Dict[int, int]
+          state: Dict[int, GSS]
+          suppress_stats_report: bool = False
+          last_get_mask_cost: int = 0
+          last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
 
-          pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> DWA {
-              vector_fst_to_dwa(fst)
-          }
-      }
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              Stats.get().reset()
+              data = json.loads(s)
+              dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
 
-      impl NWA {
-          pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
-              nwa_to_vector_fst(self)
-          }
+              vocab = data['vocab']
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
 
-          pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> NWA {
-              vector_fst_to_nwa(fst)
-          }
-      }
+              def _parse_weight(w_json: Any) -> LLMTokenSet:
+                  if w_json is None:
+                      return all_internal_llm_tokens_bitset
+                  # Handle SimpleBitset serialization (assuming it might be wrapped or direct RangeSetBlaze)
+                  # If it's a dict with "rsb", use that. If it's a list, assume ranges or integers.
+                  # For now, assuming it matches what RangeSet.from_json_string expects or is a list of ranges.
+                  # If it's from Rust's RangeSetBlaze serde, it might be a list of integers.
+                  # But here we assume it's compatible with our RangeSet loading or we adapt.
+                  # Given we don't have the exact JSON format of SimpleBitset here, we try standard approaches.
+                  try:
+                      if isinstance(w_json, dict) and 'inner' in w_json:
+                          # HybridBitset style
+                          return RangeSet.from_ranges(bs_from_json(dumps(w_json)).to_ranges())
+                      if isinstance(w_json, dict) and 'rsb' in w_json:
+                          # SimpleBitset style?
+                          return RangeSet.from_ranges(bs_from_json(dumps(w_json['rsb'])).to_ranges())
+                      # Fallback: try parsing as HybridBitset directly
+                      return RangeSet.from_ranges(bs_from_json(dumps(w_json)).to_ranges())
+                  except Exception:
+                      # If it's a list of integers (RangeSetBlaze default serde), we might need to handle it.
+                      # But let's assume the provided JSON uses the compatible format.
+                      return all_internal_llm_tokens_bitset
+
+              # Load DWA
+              dwa_json = data['precomputed4']
+              states_data = dwa_json['states']
+              dwa_states = []
+              for s in states_data:
+                  trans_map = dict(s['transitions'])  # label -> target
+                  weights_map = dict(s['trans_weights'])  # label -> weight
+
+                  merged_trans = {}
+                  for label_str, target in trans_map.items():
+                      label = int(label_str)
+                      w_json = weights_map.get(label_str)
+                      weight = _parse_weight(w_json) if w_json is not None else all_internal_llm_tokens_bitset
+                      merged_trans[label] = (target, weight)
+
+                  st_weight = _parse_weight(s.get('state_weight')) if s.get('state_weight') is not None else None
+                  fin_weight = _parse_weight(s.get('final_weight')) if s.get('final_weight') is not None else None
+
+                  dwa_states.append(DWAState(merged_trans, st_weight, fin_weight))
+
+              # Re-compute/narrow all state weights using a sophisticated propagation method.
+              # Build a reverse graph of the DWA for weight propagation.
+              rev_adj = [[] for _ in dwa_states]
+              for u, state in enumerate(dwa_states):
+                  for _label, (v, weight) in state.transitions.items():
+                      rev_adj[v].append((u, weight))
+
+              # Initialize weights with final weights, as these are the starting points for propagation.
+              computed_weights = [(s.final_weight if s.final_weight is not None else RangeSet.empty()) for s in dwa_states]
+              worklist = collections.deque([i for i, w in enumerate(computed_weights) if not w.is_empty()])
+              in_worklist = set(worklist)
+
+              # Propagate weights backwards through the graph until a fixed point is reached.
+              with tqdm(total=len(dwa_states), desc="Propagating DWA weights", leave=False) as pbar:
+                  processed_for_pbar = set()
+
+                  def update_pbar(state_id):
+                      if state_id not in processed_for_pbar:
+                          processed_for_pbar.add(state_id)
+                          pbar.update(1)
+
+                  for i in worklist:
+                      update_pbar(i)
+
+                  while worklist:
+                      v = worklist.popleft()
+                      in_worklist.remove(v)
+
+                      weight_from_v = computed_weights[v]
+                      if weight_from_v.is_empty():
+                          continue
+
+                      for u, edge_weight in rev_adj[v]:
+                          # The weight to propagate is the union of the edge's weight and the reachable weight from the target state.
+                          propagated = edge_weight.union(weight_from_v)
+                          old_weight = computed_weights[u]
+
+                          if not propagated.issubset(old_weight):
+                              computed_weights[u] = old_weight.union(propagated)
+                              if u not in in_worklist:
+                                  worklist.append(u)
+                                  in_worklist.add(u)
+                                  update_pbar(u)
+                  
+                  # Ensure the progress bar completes.
+                  if pbar.n < len(dwa_states):
+                      pbar.update(len(dwa_states) - pbar.n)
+
+              # Assign the computed, more precise weights.
+              # If a weight already exists, we narrow it.
+              for i, state in enumerate(dwa_states):
+                  if state.state_weight is None:
+                      state.state_weight = computed_weights[i]
+                  else:
+                      state.state_weight = state.state_weight.intersection(computed_weights[i])
+
+              start_state = dwa_json['start_state']
+              dwa = DWA(dwa_states, start_state)
+
+              # Tokenizer
+              dfa_data = data['tokenizer']['dfa']
+              dfa_states = [DFAState(
+                  transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()},
+                  finalizers=set(s['finalizers']),
+                  possible_future_group_ids=set(s['possible_future_group_ids'])
+              ) for s in dfa_data['states']]
+              tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
+
+              # Parser Table
+              parser_data = data['parser']
+              py_table: Dict[int, Row] = {}
+              for state_id_str, row_data in parser_data['stage_7_table']:
+                  state_id, py_row = int(state_id_str), Row()
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                      term_id, variant = int(term_id_str), action_data['variant']
+                      if variant == 'Shift':
+                          py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce':
+                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
+                      elif variant == 'Split':
+                          reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
+                          py_row.actions[term_id] = Split(action_data['shift'], reduces)
+                  py_row.gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
+                  py_table[state_id] = py_row
+              parser_table = ParserTable(parser_data['start_state_id'], py_table)
+
+              # Misc data
+              pmc_json = data['possible_matches']
+              possible_matches_cache = {}
+              for tsid_json, term_map_json in pmc_json:
+                  tsid = int(tsid_json)
+                  term_map = {}
+                  for term_id_json, bv_json in term_map_json:
+                      term_id = int(term_id_json)
+                      bv = RangeSet.from_ranges(bs_from_json(dumps(bv_json)).to_ranges())
+                      term_map[term_id] = bv
+                  possible_matches_cache[tsid] = term_map
+
+              original_to_dummy_map_json = data.get('original_to_dummy_map', [])
+              original_to_dummy_map = {int(k): int(v) for k, v in original_to_dummy_map_json}
+
+              # Initial state
+              initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+
+              model = Model(
+                  dwa=dwa,
+                  parser_table=parser_table,
+                  tokenizer=tokenizer,
+                  tokenizer_initial_state=tokenizer.initial_state_id(),
+                  possible_matches_cache=possible_matches_cache,
+                  id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
+                  internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
+                  all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
+                  ignore_terminal_id=parser_data.get('ignore_terminal_id'),
+                  original_to_dummy_map=original_to_dummy_map,
+                  state={tokenizer.initial_state_id(): initial_gss},
+              )
+
+              return model
+
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              term_rs = RangeSet.from_indices([terminal_id])
+              @_acc_memoize(use_value_cache=False)
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current.contains(terminal_id):
+                      return acc
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current.union(term_rs)
+                  return PyAcc(new_map, acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def commit(self, token_id: int):
+              token_bytes = self.id_to_token[token_id]
+              terminals_map, state_map = {}, {}
+              for tsid in self.state:
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
+                  if end_state is not None:
+                      state_map[tsid] = end_state
+                  terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
+
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  for tsid, matched in terminals_map.items():
+                      if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched):
+                          return None
+                  new_bvs = collections.defaultdict(RangeSet.empty)
+                  for old, new in state_map.items():
+                      if old in acc.terminals_union:
+                          new_bvs[new] |= acc.terminals_union[old]
+                  return PyAcc(dict(new_bvs), acc.llm_mask)
+
+              cache = {}
+              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in self.state.items()}
+              current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
+
+              new_states = collections.defaultdict(list)
+              work = {(0, tsid): gss for tsid, gss in current.items()}
+              q = collections.deque(work.keys())
+
+              while q:
+                  offset, tsid = q.popleft()
+                  gss = work.pop((offset, tsid))
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
+
+                  for term_id, width in matches:
+                      proc_gss = gss
+                      dummy_id = self.original_to_dummy_map.get(term_id)
+                      if dummy_id is not None:
+                          proc_gss = self._process_token(proc_gss, dummy_id)
+                      proc_gss = self._process_token(proc_gss, term_id)
+
+                      if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
+                          proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
+                      if not proc_gss.is_empty():
+                          new_offset, next_tsid = offset + width, self.tokenizer.initial_state_id()
+                          if new_offset == len(token_bytes):
+                              new_states[next_tsid].append(proc_gss)
+                          else:
+                              key = (new_offset, next_tsid)
+                              if key in work:
+                                  work[key] = work[key].merge(proc_gss)
+                              else:
+                                  work[key] = proc_gss
+                                  q.append(key)
+                  if end_state is not None:
+                      new_states[end_state].append(gss)
+
+              merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
+              self.state = {sid: g for sid, g in merged.items() if not g.is_empty()}
+
+          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+              if self.ignore_terminal_id == terminal_id:
+                  return gss
+
+              heads_by_state = collections.defaultdict(list)
+              for state_id in gss.peek():
+                  heads_by_state[state_id].append(gss.isolate(state_id))
+
+              shifted = []
+              while heads_by_state:
+                  state_id, gss_list = heads_by_state.popitem()
+                  state_gss = GSS.merge_many(gss_list)
+                  row = self.parser_table.table.get(state_id)
+                  if not row:
+                      continue
+                  action = row.actions.get(terminal_id)
+                  if action is None:
+                      continue
+
+                  if isinstance(action, int):
+                      shifted.append(state_gss.push(action))
+                  elif isinstance(action, Reduce):
+                      popped = state_gss.popn(action.len)
+                      for from_id in popped.peek():
+                          goto_id = self.parser_table.table[from_id].gotos[action.nonterminal_id]
+                          heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+                  elif isinstance(action, Split):
+                      if action.shift is not None:
+                          shifted.append(state_gss.push(action.shift))
+                      for length, nts in action.reduces.items():
+                          popped = state_gss.popn(length)
+                          for nt_id in nts:
+                              for from_id in popped.peek():
+                                  goto_id = self.parser_table.table[from_id].gotos[nt_id]
+                                  heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+              return GSS.merge_many(shifted)
+
+          def _mutate_weight(self, gss: GSS, f: Callable[[LLMTokenSet], LLMTokenSet]) -> GSS:
+              @_acc_memoize(use_value_cache=False)
+              def apply_fn(acc: PyAcc) -> Optional[PyAcc]:
+                  new_mask = f(acc.llm_mask)
+                  if new_mask.is_empty():
+                      return None
+                  return PyAcc(acc.terminals_union, new_mask)
+              return gss.apply_and_prune(apply_fn)
+
+          def _apply_weight(self, gss: GSS, weight: LLMTokenSet) -> GSS:
+              return self._mutate_weight(gss, lambda bv: bv.intersection(weight))
+
+          def _subtract_weight(self, gss: GSS, weight: LLMTokenSet) -> GSS:
+              return self._mutate_weight(gss, lambda bv: bv.difference(weight))
+
+          def _is_dead(self, gss: GSS) -> bool:
+              return gss.reduce_acc().llm_mask.is_empty()
+
+          def _merge_into_queue(self, queue: Dict[int, Dict[int, GSS]], gss: GSS, target_state_id: int):
+              depth = gss.max_depth()
+              if target_state_id in queue[depth]:
+                  queue[depth][target_state_id] = queue[depth][target_state_id].merge(gss)
+              else:
+                  queue[depth][target_state_id] = gss
+
+          def get_mask(self) -> Union[RangeSetOut, Dict]:
+              stats = Stats.get()
+              stats.start('get_mask')
+              
+              all_ones = self.all_internal_llm_tokens_bitset
+              final_mask = RangeSet.empty()
+              
+              # Queue: depth -> {dwa_state_id: GSS}
+              queue: Dict[int, Dict[int, GSS]] = collections.defaultdict(dict)
+              
+              # 1. Seed initial states
+              start_node = self.dwa.states[self.dwa.start_state]
+
+              @_acc_memoize(use_value_cache=False)
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  disallowed = RangeSet.empty()
+                  for tsid, terms in acc.terminals_union.items():
+                      if tsid in self.possible_matches_cache:
+                          term_map = self.possible_matches_cache[tsid]
+                          for term_id in terms.iter_indices():
+                              if term_id in term_map:
+                                  disallowed |= term_map[term_id]
+                  return PyAcc({}, all_ones.difference(disallowed))
+
+              init_cache = {}
+              for sid, gss in self.state.items():
+                  gss_init = gss.apply(initialize_acc, init_cache)
+                  if gss_init.is_empty():
+                      continue
+                      
+                  # Transition on tokenizer state id
+                  target = start_node.transitions.get(sid)
+                  if target is not None:
+                      target_state_id, weight = target
+                      gss_next = self._apply_weight(gss_init, weight)
+                      if not gss_next.is_empty():
+                          self._merge_into_queue(queue, gss_next, target_state_id)
+
+              # 2. Main worklist loop
+              while queue:
+                  max_depth = max(queue.keys())
+                  states_at_depth = queue.pop(max_depth)
+                  
+                  for dwa_id, gss in states_at_depth.items():
+                      dwa_state = self.dwa.states[dwa_id]
+
+                      # Check for final state
+                      if dwa_state.final_weight is not None:
+                          acc = gss.reduce_acc()
+                          if acc:
+                              final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
+                              if not final_tokens.is_empty():
+                                  final_mask |= final_tokens
+
+                      gss = self._subtract_weight(gss, final_mask)
+
+                      if dwa_state.state_weight is not None:
+                          gss = self._apply_weight(gss, dwa_state.state_weight)
+                          if gss.is_empty():
+                              continue
+
+                      if self._is_dead(gss):
+                          continue
+                                  
+                      # Process transitions
+                      peeked = gss.peek()
+                      if not peeked:
+                          continue
+                          
+                      for edge in peeked:
+                          parser_state_id = edge
+                          
+                          # 1. Specific transition
+                          t = dwa_state.transitions.get(parser_state_id)
+                          if t:
+                              target_id, weight = t
+                              isolated = gss.isolate(edge)
+                              popped = isolated.pop()
+                              if not popped.is_empty():
+                                  final_gss = self._apply_weight(popped, weight)
+                                  if not self._is_dead(final_gss):
+                                      self._merge_into_queue(queue, final_gss, target_id)
+                                      
+                          # 2. Default transition
+                          t_def = dwa_state.transitions.get(DEFAULT_TRANSITION_SYMBOL)
+                          if t_def:
+                              target_id, weight = t_def
+                              isolated = gss.isolate(edge)
+                              popped = isolated.pop()
+                              if not popped.is_empty():
+                                  final_gss = self._apply_weight(popped, weight)
+                                  if not self._is_dead(final_gss):
+                                      self._merge_into_queue(queue, final_gss, target_id)
+
+              stats.start('get_mask.teardown.final_conversion')
+              original_indices = RangeSetOut.empty()
+              for i in final_mask.iter_indices():
+                  if i in self.internal_to_original_map:
+                      original_indices |= self.internal_to_original_map[i]
+              stats.stop('get_mask.teardown.final_conversion')
+              stats.stop('get_mask')
+
+              if not self.suppress_stats_report:
+                  Stats.get().report(sort_by='alpha')
+
+              return original_indices
+
+          def finalize(self):
+              print("\n--- Final Stats Report from Model ---")
+              Stats.get().report(sort_by='alpha')
   prev_file_contents:
-    src/precompute4/weighted_automata/determinization_rustfst.rs: |-
-      // src/precompute4/weighted_automata/determinization_rustfst.rs
+    python/aug25/models/precompute4_model_pure_python.py: |
+      from __future__ import annotations
 
-      #![allow(dead_code)]
-      #![allow(clippy::needless_borrow)]
+      import collections
+      import heapq
+      from dataclasses import dataclass, field
+      from typing import Dict, List, Tuple, Optional, Union, Set, Generator, Any
+      import json
+      import types
 
-      use super::common::{StateID, Weight};
-      use super::dwa::DWA;
-      use super::nwa::NWA;
-      use crate::precompute4::weighted_automata::NWAStateID;
-      use anyhow::Result;
-      use nom::IResult;
-      use once_cell::sync::Lazy;
-      use range_set_blaze::RangeSetBlaze;
-      use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
-      use rustfst::algorithms::rm_epsilon::rm_epsilon;
-      use rustfst::fst_properties::FstProperties;
-      use rustfst::prelude::*;
-      use rustfst::semirings::{
-          DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring, WeightQuantize,
-      };
-      use rustfst::NomCustomError;
-      use std::borrow::Borrow;
-      use std::collections::{HashMap, HashSet};
-      use std::io::Write;
-      use std::sync::{Arc, Mutex};
+      import _sep1 as ffi
+      from tqdm import tqdm
 
-      static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> =
-          Lazy::new(|| Mutex::new(HashSet::new()));
+      from ..stats import Stats
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from ..common_interface import GraphProvider
+      from ..range_set import FFIRangeSet as RangeSet
+      from ..range_set import SetRangeSet as RangeSetOut
+      from ..range_set import SetRangeSet as RangeSetStates
 
-      fn intern_weight(weight: Weight) -> Arc<Weight> {
-          let mut interner = WEIGHT_INTERNER.lock().unwrap();
-          if let Some(w) = interner.get(&weight) {
-              return w.clone();
-          }
-          let arc_weight = Arc::new(weight);
-          interner.insert(arc_weight.clone());
-          arc_weight
-      }
+      # Type Aliases
+      NodeID = int
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
+      TerminalIdSet = RangeSet
 
-      /// Semiring over bitset weights: plus = union, times = intersection.
-      #[derive(Clone, Debug, PartialOrd, Default, Eq, Hash)]
-      pub struct BitsetWeight(pub Arc<Weight>);
+      # --- Monkey-patch RangeSet to collect stats on union/intersection ---
+      _original_rangeset_union = RangeSet.union
+      _original_rangeset_intersection = RangeSet.intersection
+      _original_rangeset_isdisjoint = RangeSet.isdisjoint
+      _original_rangeset_len = RangeSet.__len__
 
-      impl PartialEq for BitsetWeight {
-          fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0 }
-      }
+      def _patched_union(self, other: "RangeSet") -> "RangeSet":
+          stats = Stats.get()
+          stats.inc('bitset.union.calls')
+          stats.start('bitset.union.time')
+          result = _original_rangeset_union(self, other)
+          stats.stop('bitset.union.time')
+          return result
 
-      impl Semiring for BitsetWeight {
-          type Type = Weight;
-          type ReverseWeight = BitsetWeight;
+      def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
+          stats = Stats.get()
+          stats.inc('bitset.intersection.calls')
+          stats.start('bitset.intersection.time')
+          result = _original_rangeset_intersection(self, other)
+          stats.stop('bitset.intersection.time')
+          return result
 
-          fn zero() -> Self { BitsetWeight(intern_weight(Weight::zeros())) }
-          fn one() -> Self { BitsetWeight(intern_weight(Weight::all())) }
-          fn new(value: Self::Type) -> Self { BitsetWeight(intern_weight(value)) }
+      def _patched_isdisjoint(self, other: "RangeSet") -> bool:
+          stats = Stats.get()
+          stats.inc('bitset.isdisjoint.calls')
+          stats.start('bitset.isdisjoint.time')
+          result = _original_rangeset_isdisjoint(self, other)
+          stats.stop('bitset.isdisjoint.time')
+          return result
 
-          fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-              let new_weight = &*self.0 | &*rhs.borrow().0;
-              self.0 = intern_weight(new_weight);
-              Ok(())
-          }
+      def _patched_len(self) -> int:
+          stats = Stats.get()
+          stats.inc('bitset.len.calls')
+          stats.start('bitset.len.time')
+          result = _original_rangeset_len(self)
+          stats.stop('bitset.len.time')
+          return result
 
-          fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-              let new_weight = &*self.0 & &*rhs.borrow().0;
-              self.0 = intern_weight(new_weight);
-              Ok(())
-          }
+      # --- Monkey-patch RangeSetStates ---
+      _original_rangesetstates_isdisjoint = RangeSetStates.isdisjoint
 
-          fn approx_equal<P: Borrow<Self>>(&self, rhs: P, _delta: f32) -> bool { *self.0 == *rhs.borrow().0 }
-          fn value(&self) -> &Self::Type { &self.0 }
-          fn take_value(self) -> Self::Type { Arc::try_unwrap(self.0).unwrap_or_else(|arc| (*arc).clone()) }
-          fn set_value(&mut self, value: Self::Type) { self.0 = intern_weight(value); }
-          fn reverse(&self) -> Result<Self::ReverseWeight> { Ok(self.clone()) }
+      def _patched_states_isdisjoint(self, other: "RangeSetStates") -> bool:
+          stats = Stats.get()
+          stats.inc('bitset.states.isdisjoint.calls')
+          stats.start('bitset.states.isdisjoint.time')
+          result = _original_rangesetstates_isdisjoint(self, other)
+          stats.stop('bitset.states.isdisjoint.time')
+          return result
 
-          fn properties() -> SemiringProperties {
-              SemiringProperties::LEFT_SEMIRING
-                  | SemiringProperties::RIGHT_SEMIRING
-                  | SemiringProperties::COMMUTATIVE
-                  | SemiringProperties::IDEMPOTENT
-                  | SemiringProperties::PATH
-          }
-      }
+      # Apply the patches
+      RangeSet.union = _patched_union
+      RangeSet.intersection = _patched_intersection
+      RangeSet.isdisjoint = _patched_isdisjoint
+      RangeSet.__len__ = _patched_len
+      RangeSetStates.isdisjoint = _patched_states_isdisjoint
+      # --- End of monkey-patch ---
 
-      impl ReverseBack<BitsetWeight> for BitsetWeight {
-          fn reverse_back(&self) -> Result<BitsetWeight> { Ok(self.clone()) }
-      }
+      def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
+          def decorator(fn):
+              id_memo = {}
+              val_memo = {}
+              def wrapper(acc):
+                  acc_id = id(acc)
+                  if acc_id in id_memo:
+                      if stats_prefix:
+                          Stats.get().inc(f'{stats_prefix}.memo_hits')
+                      return id_memo[acc_id]
 
-      impl WeaklyDivisibleSemiring for BitsetWeight {
-          fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
-              let new_weight = &*self.0 | &!&*rhs.0;
-              self.0 = intern_weight(new_weight);
-              Ok(())
-          }
-      }
+                  if use_value_cache:
+                      cached = val_memo.get(acc)
+                      if cached is not None:
+                          id_memo[acc_id] = cached
+                          if stats_prefix:
+                              Stats.get().inc(f'{stats_prefix}.memo_hits')
+                          return cached
 
-      impl WeightQuantize for BitsetWeight {
-          fn quantize_assign(&mut self, _delta: f32) -> Result<()> { Ok(()) }
-      }
+                  result = fn(acc)
+                  id_memo[acc_id] = result
+                  if use_value_cache and result is not None:
+                      val_memo[acc] = result
+                  return result
+              wrapper._acc_memo_size = lambda: len(id_memo)
+              return wrapper
+          return decorator
 
-      impl SerializableSemiring for BitsetWeight {
-          fn weight_type() -> String { "bitset".to_string() }
 
-          fn parse_binary(i: &[u8]) -> IResult<&[u8], Self, NomCustomError<&[u8]>> {
-              use nom::number::complete::le_u64;
+      @dataclass(frozen=True)
+      class DFAState:
+          transitions: Dict[int, int]
+          finalizers: Set[int]
+          possible_future_group_ids: Set[int]
 
-              let (mut i, num_ranges) = le_u64(i)?;
-              let mut ranges = Vec::with_capacity(num_ranges as usize);
-              for _ in 0..num_ranges {
-                  let (next_i, start) = le_u64(i)?;
-                  let (next_i, end) = le_u64(next_i)?;
-                  ranges.push(start as usize..=end as usize);
-                  i = next_i;
-              }
-              let rsb = RangeSetBlaze::from_iter(ranges);
-              Ok((i, BitsetWeight(intern_weight(Weight::from_rsb(rsb)))))
-          }
 
-          fn write_binary<F: Write>(&self, file: &mut F) -> Result<()> {
-              let ranges: Vec<_> = self.0.rsb.ranges().collect();
-              file.write_all(&(ranges.len() as u64).to_le_bytes())?;
-              for range in ranges {
-                  file.write_all(&(*range.start() as u64).to_le_bytes())?;
-                  file.write_all(&(*range.end() as u64).to_le_bytes())?;
-              }
-              Ok(())
-          }
+      @dataclass(frozen=True)
+      class PyTokenizer:
+          states: List[DFAState]
+          start_state: int
+          non_greedy_finalizers: Set[int]
 
-          fn parse_text(i: &str) -> IResult<&str, Self> {
-              use nom::combinator::map_res;
-              map_res(nom::combinator::rest, |s: &str| -> Result<BitsetWeight, _> {
-                  serde_json::from_str::<Weight>(s)
-                      .map(|w| BitsetWeight(intern_weight(w)))
-                      .map_err(|e| e.to_string())
-              })(i)
-          }
-      }
+          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+              current_state = state_id
+              matches = {}
 
-      impl std::fmt::Display for BitsetWeight {
-          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-              write!(f, "{}", serde_json::to_string(self.0.as_ref()).unwrap_or_else(|_| "err".to_string()))
-          }
-      }
+              for group_id in self.states[current_state].finalizers:
+                  if group_id in self.non_greedy_finalizers:
+                      matches.setdefault(group_id, 0)
+                  else:
+                      matches[group_id] = 0
 
-      pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
-          let mut fst = VectorFst::<BitsetWeight>::new();
-          let mut state_map = HashMap::<NWAStateID, StateId>::new();
+              for i, byte in enumerate(text):
+                  state_data = self.states[current_state]
+                  next_state = state_data.transitions.get(byte)
+                  if next_state is None:
+                      return None, [(gid, width) for gid, width in matches.items() if width > 0]
+                  current_state = next_state
+                  for group_id in self.states[current_state].finalizers:
+                      if group_id in self.non_greedy_finalizers:
+                          matches.setdefault(group_id, i + 1)
+                      else:
+                          matches[group_id] = i + 1
 
-          for i in 0..nwa.states.len() {
-              let s = fst.add_state();
-              state_map.insert(i, s);
-          }
+              return current_state, [(gid, width) for gid, width in matches.items() if width > 0]
 
-          if !nwa.states.0.is_empty() {
-              fst.set_start(state_map[&nwa.body.start_state]).unwrap();
-          }
+          def initial_state_id(self) -> int:
+              return self.start_state
 
-          for (i, nwa_state) in nwa.states.0.iter().enumerate() {
-              let fst_state_id = state_map[&i];
 
-              if let Some(w) = &nwa_state.final_weight {
-                  if !w.is_empty() {
-                      fst.set_final(fst_state_id, BitsetWeight::new(w.clone())).unwrap();
-                  }
-              }
+      @dataclass(frozen=True)
+      class Reduce:
+          nonterminal_id: int
+          len: int
+          production_ids: Tuple[int, ...]
 
-              for (label, targets) in &nwa_state.transitions {
-                  for (target, weight) in targets {
-                      if !weight.is_empty() {
-                          fst.add_tr(
-                              fst_state_id,
-                              Tr::new(
-                                  ((*label as i32 - i16::MIN as i32) as u32) + 1,
-                                  ((*label as i32 - i16::MIN as i32) as u32) + 1,
-                                  BitsetWeight::new(weight.clone()),
-                                  state_map[target],
-                              ),
-                          )
-                          .unwrap();
-                      }
-                  }
-              }
 
-              for (target, weight) in &nwa_state.epsilons {
-                  if !weight.is_empty() {
-                      fst.add_tr(fst_state_id, Tr::new(EPS_LABEL, EPS_LABEL, BitsetWeight::new(weight.clone()), state_map[target]))
-                          .unwrap();
-                  }
-              }
-          }
+      @dataclass(frozen=True)
+      class Split:
+          shift: Optional[int]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]]
 
-          crate::debug!(5, "NWA to FST conversion done:\n{}", fst);
-          fst
-      }
 
-      pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
-          let fst_start = match fst.start() {
-              Some(s) => s,
-              None => return DWA::new(),
-          };
+      Action = Union[int, Reduce, Split]
 
-          let mut dwa = DWA::new();
-          dwa.states.0.clear();
-          let mut state_map = HashMap::<StateId, StateID>::new();
 
-          for i in 0..fst.num_states() {
-              let s = dwa.add_state();
-              state_map.insert(i as StateId, s);
-          }
-          dwa.body.start_state = state_map[&fst_start];
+      @dataclass
+      class Row:
+          actions: Dict[int, Action] = field(default_factory=dict)
+          gotos: Dict[int, int] = field(default_factory=dict)
 
-          for i in 0..fst.num_states() {
-              let fst_state_id = i as StateId;
-              if !state_map.contains_key(&fst_state_id) {
-                  continue;
-              }
-              let dwa_state_id = state_map[&fst_state_id];
 
-              if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
-                  if !w.0.is_empty() {
-                      dwa.set_final_weight(dwa_state_id, w.value().clone()).unwrap();
-                  }
-              }
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
 
-              for tr in fst.get_trs(fst_state_id).unwrap().trs() {
-                  if !tr.weight.0.is_empty() {
-                      if !state_map.contains_key(&tr.nextstate) {
-                          continue;
-                      }
-                      let res = dwa.add_transition(
-                          dwa_state_id,
-                          ((tr.ilabel - 1) as i32 + i16::MIN as i32) as i16,
-                          state_map[&tr.nextstate],
-                          tr.weight.value().clone(),
-                      );
-                      if let Err(e) = res {
-                          panic!(
-                              "Error converting VectorFst to DWA: transition already exists. This indicates non-determinism. Error: {:?}",
-                              e
-                          );
-                      }
-                  }
-              }
-          }
 
-          dwa
-      }
+      @dataclass(frozen=True, eq=False)
+      class PyAcc:
+          terminals_union: Dict[int, TerminalIdSet]
+          llm_mask: LLMTokenSet
 
-      pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
-          if fst.num_states() == 0 {
-              return NWA::new();
-          }
+          def __eq__(self, other):
+              if not isinstance(other, PyAcc):
+                  return NotImplemented
+              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
 
-          let mut nwa = NWA::new();
-          nwa.states.0.clear();
-          let mut state_map = HashMap::<StateId, NWAStateID>::new();
+          def __hash__(self):
+              return hash((len(self.terminals_union), self.llm_mask))
 
-          for i in 0..fst.num_states() {
-              let s = nwa.states.add_state();
-              state_map.insert(i as StateId, s);
-          }
+          def merge(self, other: "PyAcc") -> "PyAcc":
+              new_terminals_union = self.terminals_union.copy()
+              for k, v in other.terminals_union.items():
+                  if k in new_terminals_union:
+                      new_terminals_union[k] = new_terminals_union[k].union(v)
+                  else:
+                      new_terminals_union[k] = v
+              return PyAcc(
+                  terminals_union=new_terminals_union,
+                  llm_mask=self.llm_mask.union(other.llm_mask),
+              )
 
-          if let Some(fst_start) = fst.start() {
-              nwa.body.start_state = state_map[&fst_start];
-          } else {
-              nwa.body.start_state = 0;
-          }
+          def is_empty(self):
+              return self.llm_mask.is_empty()
 
-          for i in 0..fst.num_states() {
-              let fst_state_id = i as StateId;
-              let nwa_state_id = state_map[&fst_state_id];
 
-              if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
-                  if !w.0.is_empty() {
-                      nwa.states[nwa_state_id].final_weight = Some(w.value().clone());
-                  }
-              }
+      @dataclass
+      class DWAState:
+          # Maps label (int) -> (target_state_id, weight)
+          transitions: Dict[int, Tuple[int, LLMTokenSet]]
+          state_weight: Optional[LLMTokenSet]
+          final_weight: Optional[LLMTokenSet]
 
-              for tr in fst.get_trs(fst_state_id).unwrap().trs() {
-                  if !tr.weight.0.is_empty() {
-                      let target_nwa_id = state_map[&tr.nextstate];
-                      let weight = tr.weight.value().clone();
 
-                      if tr.ilabel == EPS_LABEL {
-                          nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
-                      } else {
-                          let label = ((tr.ilabel - 1) as i32 + i16::MIN as i32) as i16;
-                          nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
-                      }
-                  }
-              }
-          }
+      @dataclass
+      class DWA:
+          states: List[DWAState]
+          start_state: int
 
-          nwa
-      }
 
-      pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
-          let mut fst = nwa_to_vector_fst(nwa);
-          fst.compute_and_update_properties_all().unwrap();
-          assert!(fst.properties().contains(FstProperties::ACCEPTOR), "FST should be an acceptor before determinization");
+      DEFAULT_TRANSITION_SYMBOL = 32767
 
-          let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
-          let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
 
-          vector_fst_to_dwa(&det_fst)
-      }
+      @dataclass
+      class Model(GraphProvider):
+          stats = Stats.get()
+          stats.add_group('get_mask')
+          stats.add_group('commit')
 
-      impl DWA {
-          pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
-              nwa_to_vector_fst(&NWA::from_dwa(self))
-          }
+          dwa: DWA
+          dwa_shortest_paths: List[int]
+          parser_table: ParserTable
+          tokenizer: PyTokenizer
+          tokenizer_initial_state: int
+          possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
+          id_to_token: Dict[int, bytes]
+          internal_to_original_map: Dict[int, RangeSetOut]
+          all_internal_llm_tokens_bitset: LLMTokenSet
+          ignore_terminal_id: Optional[int]
+          original_to_dummy_map: Dict[int, int]
+          state: Dict[int, GSS]
+          suppress_stats_report: bool = False
+          last_get_mask_cost: int = 0
+          last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
 
-          pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> DWA {
-              vector_fst_to_dwa(fst)
-          }
-      }
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              Stats.get().reset()
+              data = json.loads(s)
+              dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
 
-      impl NWA {
-          pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
-              nwa_to_vector_fst(self)
-          }
+              vocab = data['vocab']
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
 
-          pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> NWA {
-              vector_fst_to_nwa(fst)
-          }
-      }
+              def _parse_weight(w_json: Any) -> LLMTokenSet:
+                  if w_json is None:
+                      return all_internal_llm_tokens_bitset
+                  # Handle SimpleBitset serialization (assuming it might be wrapped or direct RangeSetBlaze)
+                  # If it's a dict with "rsb", use that. If it's a list, assume ranges or integers.
+                  # For now, assuming it matches what RangeSet.from_json_string expects or is a list of ranges.
+                  # If it's from Rust's RangeSetBlaze serde, it might be a list of integers.
+                  # But here we assume it's compatible with our RangeSet loading or we adapt.
+                  # Given we don't have the exact JSON format of SimpleBitset here, we try standard approaches.
+                  try:
+                      if isinstance(w_json, dict) and 'inner' in w_json:
+                          # HybridBitset style
+                          return RangeSet.from_ranges(bs_from_json(dumps(w_json)).to_ranges())
+                      if isinstance(w_json, dict) and 'rsb' in w_json:
+                          # SimpleBitset style?
+                          return RangeSet.from_ranges(bs_from_json(dumps(w_json['rsb'])).to_ranges())
+                      # Fallback: try parsing as HybridBitset directly
+                      return RangeSet.from_ranges(bs_from_json(dumps(w_json)).to_ranges())
+                  except Exception:
+                      # If it's a list of integers (RangeSetBlaze default serde), we might need to handle it.
+                      # But let's assume the provided JSON uses the compatible format.
+                      return all_internal_llm_tokens_bitset
+
+              # Load DWA
+              dwa_json = data['precomputed4']
+              states_data = dwa_json['states']
+              dwa_states = []
+              for s in states_data:
+                  trans_map = dict(s['transitions'])  # label -> target
+                  weights_map = dict(s['trans_weights'])  # label -> weight
+
+                  merged_trans = {}
+                  for label_str, target in trans_map.items():
+                      label = int(label_str)
+                      w_json = weights_map.get(label_str)
+                      weight = _parse_weight(w_json) if w_json is not None else all_internal_llm_tokens_bitset
+                      merged_trans[label] = (target, weight)
+
+                  st_weight = _parse_weight(s.get('state_weight')) if s.get('state_weight') is not None else None
+                  fin_weight = _parse_weight(s.get('final_weight')) if s.get('final_weight') is not None else None
+
+                  dwa_states.append(DWAState(merged_trans, st_weight, fin_weight))
+
+              # Re-compute/narrow all state weights using a sophisticated propagation method.
+              # Build a reverse graph of the DWA for weight propagation.
+              rev_adj = [[] for _ in dwa_states]
+              for u, state in enumerate(dwa_states):
+                  for _label, (v, weight) in state.transitions.items():
+                      rev_adj[v].append((u, weight))
+
+              # Initialize weights with final weights, as these are the starting points for propagation.
+              computed_weights = [(s.final_weight if s.final_weight is not None else RangeSet.empty()) for s in dwa_states]
+              worklist = collections.deque([i for i, w in enumerate(computed_weights) if not w.is_empty()])
+              in_worklist = set(worklist)
+
+              # Propagate weights backwards through the graph until a fixed point is reached.
+              with tqdm(total=len(dwa_states), desc="Propagating DWA weights", leave=False) as pbar:
+                  processed_for_pbar = set()
+
+                  def update_pbar(state_id):
+                      if state_id not in processed_for_pbar:
+                          processed_for_pbar.add(state_id)
+                          pbar.update(1)
+
+                  for i in worklist:
+                      update_pbar(i)
+
+                  while worklist:
+                      v = worklist.popleft()
+                      in_worklist.remove(v)
+
+                      weight_from_v = computed_weights[v]
+                      if weight_from_v.is_empty():
+                          continue
+
+                      for u, edge_weight in rev_adj[v]:
+                          # The weight to propagate is the union of the edge's weight and the reachable weight from the target state.
+                          propagated = edge_weight.union(weight_from_v)
+                          old_weight = computed_weights[u]
+
+                          if not propagated.issubset(old_weight):
+                              computed_weights[u] = old_weight.union(propagated)
+                              if u not in in_worklist:
+                                  worklist.append(u)
+                                  in_worklist.add(u)
+                                  update_pbar(u)
+                  
+                  # Ensure the progress bar completes.
+                  if pbar.n < len(dwa_states):
+                      pbar.update(len(dwa_states) - pbar.n)
+
+              # Assign the computed, more precise weights.
+              # If a weight already exists, we narrow it.
+              for i, state in enumerate(dwa_states):
+                  if state.state_weight is None:
+                      state.state_weight = computed_weights[i]
+                  else:
+                      state.state_weight = state.state_weight.intersection(computed_weights[i])
+
+              # Compute shortest paths to a final state.
+              num_dwa_states = len(dwa_states)
+              dwa_shortest_paths = [num_dwa_states] * num_dwa_states
+              q = collections.deque()
+
+              for i, state in enumerate(dwa_states):
+                  if state.final_weight is not None:
+                      dwa_shortest_paths[i] = 0
+                      q.append(i)
+
+              while q:
+                  v = q.popleft()
+                  for u, _ in rev_adj[v]:
+                      if dwa_shortest_paths[u] == num_dwa_states:
+                          dwa_shortest_paths[u] = dwa_shortest_paths[v] + 1
+                          q.append(u)
+
+              start_state = dwa_json['start_state']
+              dwa = DWA(dwa_states, start_state)
+
+              # Tokenizer
+              dfa_data = data['tokenizer']['dfa']
+              dfa_states = [DFAState(
+                  transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()},
+                  finalizers=set(s['finalizers']),
+                  possible_future_group_ids=set(s['possible_future_group_ids'])
+              ) for s in dfa_data['states']]
+              tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
+
+              # Parser Table
+              parser_data = data['parser']
+              py_table: Dict[int, Row] = {}
+              for state_id_str, row_data in parser_data['stage_7_table']:
+                  state_id, py_row = int(state_id_str), Row()
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                      term_id, variant = int(term_id_str), action_data['variant']
+                      if variant == 'Shift':
+                          py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce':
+                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
+                      elif variant == 'Split':
+                          reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
+                          py_row.actions[term_id] = Split(action_data['shift'], reduces)
+                  py_row.gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
+                  py_table[state_id] = py_row
+              parser_table = ParserTable(parser_data['start_state_id'], py_table)
+
+              # Misc data
+              pmc_json = data['possible_matches']
+              possible_matches_cache = {}
+              for tsid_json, term_map_json in pmc_json:
+                  tsid = int(tsid_json)
+                  term_map = {}
+                  for term_id_json, bv_json in term_map_json:
+                      term_id = int(term_id_json)
+                      bv = RangeSet.from_ranges(bs_from_json(dumps(bv_json)).to_ranges())
+                      term_map[term_id] = bv
+                  possible_matches_cache[tsid] = term_map
+
+              original_to_dummy_map_json = data.get('original_to_dummy_map', [])
+              original_to_dummy_map = {int(k): int(v) for k, v in original_to_dummy_map_json}
+
+              # Initial state
+              initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+
+              model = Model(
+                  dwa=dwa,
+                  dwa_shortest_paths=dwa_shortest_paths,
+                  parser_table=parser_table,
+                  tokenizer=tokenizer,
+                  tokenizer_initial_state=tokenizer.initial_state_id(),
+                  possible_matches_cache=possible_matches_cache,
+                  id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
+                  internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
+                  all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
+                  ignore_terminal_id=parser_data.get('ignore_terminal_id'),
+                  original_to_dummy_map=original_to_dummy_map,
+                  state={tokenizer.initial_state_id(): initial_gss},
+              )
+
+              return model
+
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              term_rs = RangeSet.from_indices([terminal_id])
+              @_acc_memoize(use_value_cache=False)
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current.contains(terminal_id):
+                      return acc
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current.union(term_rs)
+                  return PyAcc(new_map, acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def commit(self, token_id: int):
+              token_bytes = self.id_to_token[token_id]
+              terminals_map, state_map = {}, {}
+              for tsid in self.state:
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
+                  if end_state is not None:
+                      state_map[tsid] = end_state
+                  terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
+
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  for tsid, matched in terminals_map.items():
+                      if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched):
+                          return None
+                  new_bvs = collections.defaultdict(RangeSet.empty)
+                  for old, new in state_map.items():
+                      if old in acc.terminals_union:
+                          new_bvs[new] |= acc.terminals_union[old]
+                  return PyAcc(dict(new_bvs), acc.llm_mask)
+
+              cache = {}
+              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in self.state.items()}
+              current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
+
+              new_states = collections.defaultdict(list)
+              work = {(0, tsid): gss for tsid, gss in current.items()}
+              q = collections.deque(work.keys())
+
+              while q:
+                  offset, tsid = q.popleft()
+                  gss = work.pop((offset, tsid))
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
+
+                  for term_id, width in matches:
+                      proc_gss = gss
+                      dummy_id = self.original_to_dummy_map.get(term_id)
+                      if dummy_id is not None:
+                          proc_gss = self._process_token(proc_gss, dummy_id)
+                      proc_gss = self._process_token(proc_gss, term_id)
+
+                      if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
+                          proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
+                      if not proc_gss.is_empty():
+                          new_offset, next_tsid = offset + width, self.tokenizer.initial_state_id()
+                          if new_offset == len(token_bytes):
+                              new_states[next_tsid].append(proc_gss)
+                          else:
+                              key = (new_offset, next_tsid)
+                              if key in work:
+                                  work[key] = work[key].merge(proc_gss)
+                              else:
+                                  work[key] = proc_gss
+                                  q.append(key)
+                  if end_state is not None:
+                      new_states[end_state].append(gss)
+
+              merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
+              self.state = {sid: g for sid, g in merged.items() if not g.is_empty()}
+
+          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+              if self.ignore_terminal_id == terminal_id:
+                  return gss
+
+              heads_by_state = collections.defaultdict(list)
+              for state_id in gss.peek():
+                  heads_by_state[state_id].append(gss.isolate(state_id))
+
+              shifted = []
+              while heads_by_state:
+                  state_id, gss_list = heads_by_state.popitem()
+                  state_gss = GSS.merge_many(gss_list)
+                  row = self.parser_table.table.get(state_id)
+                  if not row:
+                      continue
+                  action = row.actions.get(terminal_id)
+                  if action is None:
+                      continue
+
+                  if isinstance(action, int):
+                      shifted.append(state_gss.push(action))
+                  elif isinstance(action, Reduce):
+                      popped = state_gss.popn(action.len)
+                      for from_id in popped.peek():
+                          goto_id = self.parser_table.table[from_id].gotos[action.nonterminal_id]
+                          heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+                  elif isinstance(action, Split):
+                      if action.shift is not None:
+                          shifted.append(state_gss.push(action.shift))
+                      for length, nts in action.reduces.items():
+                          popped = state_gss.popn(length)
+                          for nt_id in nts:
+                              for from_id in popped.peek():
+                                  goto_id = self.parser_table.table[from_id].gotos[nt_id]
+                                  heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+              return GSS.merge_many(shifted)
+
+          def _mutate_weight(self, gss: GSS, f: Callable[[LLMTokenSet], LLMTokenSet]) -> GSS:
+              @_acc_memoize(use_value_cache=False)
+              def apply_fn(acc: PyAcc) -> Optional[PyAcc]:
+                  new_mask = f(acc.llm_mask)
+                  if new_mask.is_empty():
+                      return None
+                  return PyAcc(acc.terminals_union, new_mask)
+              return gss.apply_and_prune(apply_fn)
+
+          def _apply_weight(self, gss: GSS, weight: LLMTokenSet) -> GSS:
+              return self._mutate_weight(gss, lambda bv: bv.intersection(weight))
+
+          def _subtract_weight(self, gss: GSS, weight: LLMTokenSet) -> GSS:
+              return self._mutate_weight(gss, lambda bv: bv.difference(weight))
+
+          def _is_dead(self, gss: GSS) -> bool:
+              return gss.reduce_acc().llm_mask.is_empty()
+
+          def _merge_into_queue(self, queue: Dict[int, Dict[int, Dict[int, GSS]]], gss: GSS, target_state_id: int):
+              depth = gss.max_depth()
+              dist = self.dwa_shortest_paths[target_state_id]
+              if target_state_id in queue[dist][depth]:
+                  queue[dist][depth][target_state_id] = queue[dist][depth][target_state_id].merge(gss)
+              else:
+                  queue[dist][depth][target_state_id] = gss
+
+          def get_mask(self) -> Union[RangeSetOut, Dict]:
+              stats = Stats.get()
+              stats.start('get_mask')
+              
+              all_ones = self.all_internal_llm_tokens_bitset
+              final_mask = RangeSet.empty()
+
+              # Queue: dist -> depth -> {dwa_state_id: GSS}
+              queue: Dict[int, Dict[int, Dict[int, GSS]]] = collections.defaultdict(lambda: collections.defaultdict(dict))
+
+              # 1. Seed initial states
+              start_node = self.dwa.states[self.dwa.start_state]
+
+              @_acc_memoize(use_value_cache=False)
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  disallowed = RangeSet.empty()
+                  for tsid, terms in acc.terminals_union.items():
+                      if tsid in self.possible_matches_cache:
+                          term_map = self.possible_matches_cache[tsid]
+                          for term_id in terms.iter_indices():
+                              if term_id in term_map:
+                                  disallowed |= term_map[term_id]
+                  return PyAcc({}, all_ones.difference(disallowed))
+
+              init_cache = {}
+              for sid, gss in self.state.items():
+                  gss_init = gss.apply(initialize_acc, init_cache)
+                  if gss_init.is_empty():
+                      continue
+                      
+                  # Transition on tokenizer state id
+                  target = start_node.transitions.get(sid)
+                  if target is not None:
+                      target_state_id, weight = target
+                      gss_next = self._apply_weight(gss_init, weight)
+                      if not gss_next.is_empty():
+                          self._merge_into_queue(queue, gss_next, target_state_id)
+
+              # 2. Main worklist loop
+              while queue:
+                  min_dist = min(queue.keys())
+                  by_depth = queue.pop(min_dist)
+
+                  while by_depth:
+                      max_depth = max(by_depth.keys())
+                      states_at_depth = by_depth.pop(max_depth)
+
+                      for dwa_id in sorted(states_at_depth.keys()):
+                          gss = states_at_depth[dwa_id]
+                          dwa_state = self.dwa.states[dwa_id]
+
+                          # Check for final state
+                          if dwa_state.final_weight is not None:
+                              acc = gss.reduce_acc()
+                              if acc:
+                                  final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
+                                  if not final_tokens.is_empty():
+                                      final_mask |= final_tokens
+
+                          gss = self._subtract_weight(gss, final_mask)
+
+                          if dwa_state.state_weight is not None:
+                              gss = self._apply_weight(gss, dwa_state.state_weight)
+                              if gss.is_empty():
+                                  continue
+
+                          if self._is_dead(gss):
+                              continue
+                                      
+                          # Process transitions
+                          peeked = gss.peek()
+                          if not peeked:
+                              continue
+                              
+                          for edge in peeked:
+                              parser_state_id = edge
+                              
+                              # 1. Specific transition
+                              t = dwa_state.transitions.get(parser_state_id)
+                              if t:
+                                  target_id, weight = t
+                                  isolated = gss.isolate(edge)
+                                  popped = isolated.pop()
+                                  if not popped.is_empty():
+                                      final_gss = self._apply_weight(popped, weight)
+                                      if not self._is_dead(final_gss):
+                                          self._merge_into_queue(queue, final_gss, target_id)
+                                          
+                              # 2. Default transition
+                              t_def = dwa_state.transitions.get(DEFAULT_TRANSITION_SYMBOL)
+                              if t_def:
+                                  target_id, weight = t_def
+                                  isolated = gss.isolate(edge)
+                                  popped = isolated.pop()
+                                  if not popped.is_empty():
+                                      final_gss = self._apply_weight(popped, weight)
+                                      if not self._is_dead(final_gss):
+                                          self._merge_into_queue(queue, final_gss, target_id)
+
+              stats.start('get_mask.teardown.final_conversion')
+              original_indices = RangeSetOut.empty()
+              for i in final_mask.iter_indices():
+                  if i in self.internal_to_original_map:
+                      original_indices |= self.internal_to_original_map[i]
+              stats.stop('get_mask.teardown.final_conversion')
+              stats.stop('get_mask')
+
+              if not self.suppress_stats_report:
+                  Stats.get().report(sort_by='alpha')
+
+              return original_indices
+
+          def finalize(self):
+              print("\n--- Final Stats Report from Model ---")
+              Stats.get().report(sort_by='alpha')
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -698,339 +1401,678 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
-      ```rust "src/precompute4/weighted_automata/determinization_rustfst.rs"
-      // src/precompute4/weighted_automata/determinization_rustfst.rs
+      ```python "python/aug25/models/precompute4_model_pure_python.py"
+      from __future__ import annotations
 
-      #![allow(dead_code)]
-      #![allow(clippy::needless_borrow)]
+      import collections
+      import heapq
+      from dataclasses import dataclass, field
+      from typing import Dict, List, Tuple, Optional, Union, Set, Generator, Any
+      import json
+      import types
 
-      use super::common::{StateID, Weight};
-      use super::dwa::DWA;
-      use super::nwa::NWA;
-      use crate::precompute4::weighted_automata::NWAStateID;
-      use anyhow::Result;
-      use nom::IResult;
-      use once_cell::sync::Lazy;
-      use range_set_blaze::RangeSetBlaze;
-      use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
-      use rustfst::algorithms::rm_epsilon::rm_epsilon;
-      use rustfst::fst_properties::FstProperties;
-      use rustfst::prelude::*;
-      use rustfst::semirings::{
-          DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring, WeightQuantize,
-      };
-      use rustfst::NomCustomError;
-      use std::borrow::Borrow;
-      use std::collections::{HashMap, HashSet};
-      use std::io::Write;
-      use std::sync::{Arc, Mutex};
+      import _sep1 as ffi
+      from tqdm import tqdm
 
-      static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> =
-          Lazy::new(|| Mutex::new(HashSet::new()));
+      from ..stats import Stats
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from ..common_interface import GraphProvider
+      from ..range_set import FFIRangeSet as RangeSet
+      from ..range_set import SetRangeSet as RangeSetOut
+      from ..range_set import SetRangeSet as RangeSetStates
 
-      fn intern_weight(weight: Weight) -> Arc<Weight> {
-          let mut interner = WEIGHT_INTERNER.lock().unwrap();
-          if let Some(w) = interner.get(&weight) {
-              return w.clone();
-          }
-          let arc_weight = Arc::new(weight);
-          interner.insert(arc_weight.clone());
-          arc_weight
-      }
+      # Type Aliases
+      NodeID = int
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
+      TerminalIdSet = RangeSet
 
-      /// Semiring over bitset weights: plus = union, times = intersection.
-      #[derive(Clone, Debug, PartialOrd, Default, Eq, Hash)]
-      pub struct BitsetWeight(pub Arc<Weight>);
+      # --- Monkey-patch RangeSet to collect stats on union/intersection ---
+      _original_rangeset_union = RangeSet.union
+      _original_rangeset_intersection = RangeSet.intersection
+      _original_rangeset_isdisjoint = RangeSet.isdisjoint
+      _original_rangeset_len = RangeSet.__len__
 
-      impl PartialEq for BitsetWeight {
-          fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0 }
-      }
+      def _patched_union(self, other: "RangeSet") -> "RangeSet":
+          stats = Stats.get()
+          stats.inc('bitset.union.calls')
+          stats.start('bitset.union.time')
+          result = _original_rangeset_union(self, other)
+          stats.stop('bitset.union.time')
+          return result
 
-      impl Semiring for BitsetWeight {
-          type Type = Weight;
-          type ReverseWeight = BitsetWeight;
+      def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
+          stats = Stats.get()
+          stats.inc('bitset.intersection.calls')
+          stats.start('bitset.intersection.time')
+          result = _original_rangeset_intersection(self, other)
+          stats.stop('bitset.intersection.time')
+          return result
 
-          fn zero() -> Self { BitsetWeight(intern_weight(Weight::zeros())) }
-          fn one() -> Self { BitsetWeight(intern_weight(Weight::all())) }
-          fn new(value: Self::Type) -> Self { BitsetWeight(intern_weight(value)) }
+      def _patched_isdisjoint(self, other: "RangeSet") -> bool:
+          stats = Stats.get()
+          stats.inc('bitset.isdisjoint.calls')
+          stats.start('bitset.isdisjoint.time')
+          result = _original_rangeset_isdisjoint(self, other)
+          stats.stop('bitset.isdisjoint.time')
+          return result
 
-          fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-              let new_weight = &*self.0 | &*rhs.borrow().0;
-              self.0 = intern_weight(new_weight);
-              Ok(())
-          }
+      def _patched_len(self) -> int:
+          stats = Stats.get()
+          stats.inc('bitset.len.calls')
+          stats.start('bitset.len.time')
+          result = _original_rangeset_len(self)
+          stats.stop('bitset.len.time')
+          return result
 
-          fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-              let new_weight = &*self.0 & &*rhs.borrow().0;
-              self.0 = intern_weight(new_weight);
-              Ok(())
-          }
+      # --- Monkey-patch RangeSetStates ---
+      _original_rangesetstates_isdisjoint = RangeSetStates.isdisjoint
 
-          fn approx_equal<P: Borrow<Self>>(&self, rhs: P, _delta: f32) -> bool { *self.0 == *rhs.borrow().0 }
-          fn value(&self) -> &Self::Type { &self.0 }
-          fn take_value(self) -> Self::Type { Arc::try_unwrap(self.0).unwrap_or_else(|arc| (*arc).clone()) }
-          fn set_value(&mut self, value: Self::Type) { self.0 = intern_weight(value); }
-          fn reverse(&self) -> Result<Self::ReverseWeight> { Ok(self.clone()) }
+      def _patched_states_isdisjoint(self, other: "RangeSetStates") -> bool:
+          stats = Stats.get()
+          stats.inc('bitset.states.isdisjoint.calls')
+          stats.start('bitset.states.isdisjoint.time')
+          result = _original_rangesetstates_isdisjoint(self, other)
+          stats.stop('bitset.states.isdisjoint.time')
+          return result
 
-          fn properties() -> SemiringProperties {
-              SemiringProperties::LEFT_SEMIRING
-                  | SemiringProperties::RIGHT_SEMIRING
-                  | SemiringProperties::COMMUTATIVE
-                  | SemiringProperties::IDEMPOTENT
-                  | SemiringProperties::PATH
-          }
-      }
+      # Apply the patches
+      RangeSet.union = _patched_union
+      RangeSet.intersection = _patched_intersection
+      RangeSet.isdisjoint = _patched_isdisjoint
+      RangeSet.__len__ = _patched_len
+      RangeSetStates.isdisjoint = _patched_states_isdisjoint
+      # --- End of monkey-patch ---
 
-      impl ReverseBack<BitsetWeight> for BitsetWeight {
-          fn reverse_back(&self) -> Result<BitsetWeight> { Ok(self.clone()) }
-      }
+      def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
+          def decorator(fn):
+              id_memo = {}
+              val_memo = {}
+              def wrapper(acc):
+                  acc_id = id(acc)
+                  if acc_id in id_memo:
+                      if stats_prefix:
+                          Stats.get().inc(f'{stats_prefix}.memo_hits')
+                      return id_memo[acc_id]
 
-      impl WeaklyDivisibleSemiring for BitsetWeight {
-          fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
-              let new_weight = &*self.0 | &!&*rhs.0;
-              self.0 = intern_weight(new_weight);
-              Ok(())
-          }
-      }
+                  if use_value_cache:
+                      cached = val_memo.get(acc)
+                      if cached is not None:
+                          id_memo[acc_id] = cached
+                          if stats_prefix:
+                              Stats.get().inc(f'{stats_prefix}.memo_hits')
+                          return cached
 
-      impl WeightQuantize for BitsetWeight {
-          fn quantize_assign(&mut self, _delta: f32) -> Result<()> { Ok(()) }
-      }
+                  result = fn(acc)
+                  id_memo[acc_id] = result
+                  if use_value_cache and result is not None:
+                      val_memo[acc] = result
+                  return result
+              wrapper._acc_memo_size = lambda: len(id_memo)
+              return wrapper
+          return decorator
 
-      impl SerializableSemiring for BitsetWeight {
-          fn weight_type() -> String { "bitset".to_string() }
 
-          fn parse_binary(i: &[u8]) -> IResult<&[u8], Self, NomCustomError<&[u8]>> {
-              use nom::number::complete::le_u64;
+      @dataclass(frozen=True)
+      class DFAState:
+          transitions: Dict[int, int]
+          finalizers: Set[int]
+          possible_future_group_ids: Set[int]
 
-              let (mut i, num_ranges) = le_u64(i)?;
-              let mut ranges = Vec::with_capacity(num_ranges as usize);
-              for _ in 0..num_ranges {
-                  let (next_i, start) = le_u64(i)?;
-                  let (next_i, end) = le_u64(next_i)?;
-                  ranges.push(start as usize..=end as usize);
-                  i = next_i;
-              }
-              let rsb = RangeSetBlaze::from_iter(ranges);
-              Ok((i, BitsetWeight(intern_weight(Weight::from_rsb(rsb)))))
-          }
 
-          fn write_binary<F: Write>(&self, file: &mut F) -> Result<()> {
-              let ranges: Vec<_> = self.0.rsb.ranges().collect();
-              file.write_all(&(ranges.len() as u64).to_le_bytes())?;
-              for range in ranges {
-                  file.write_all(&(*range.start() as u64).to_le_bytes())?;
-                  file.write_all(&(*range.end() as u64).to_le_bytes())?;
-              }
-              Ok(())
-          }
+      @dataclass(frozen=True)
+      class PyTokenizer:
+          states: List[DFAState]
+          start_state: int
+          non_greedy_finalizers: Set[int]
 
-          fn parse_text(i: &str) -> IResult<&str, Self> {
-              use nom::combinator::map_res;
-              map_res(nom::combinator::rest, |s: &str| -> Result<BitsetWeight, _> {
-                  serde_json::from_str::<Weight>(s)
-                      .map(|w| BitsetWeight(intern_weight(w)))
-                      .map_err(|e| e.to_string())
-              })(i)
-          }
-      }
+          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+              current_state = state_id
+              matches = {}
 
-      impl std::fmt::Display for BitsetWeight {
-          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-              write!(f, "{}", serde_json::to_string(self.0.as_ref()).unwrap_or_else(|_| "err".to_string()))
-          }
-      }
+              for group_id in self.states[current_state].finalizers:
+                  if group_id in self.non_greedy_finalizers:
+                      matches.setdefault(group_id, 0)
+                  else:
+                      matches[group_id] = 0
 
-      pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
-          let mut fst = VectorFst::<BitsetWeight>::new();
-          let mut state_map = HashMap::<NWAStateID, StateId>::new();
+              for i, byte in enumerate(text):
+                  state_data = self.states[current_state]
+                  next_state = state_data.transitions.get(byte)
+                  if next_state is None:
+                      return None, [(gid, width) for gid, width in matches.items() if width > 0]
+                  current_state = next_state
+                  for group_id in self.states[current_state].finalizers:
+                      if group_id in self.non_greedy_finalizers:
+                          matches.setdefault(group_id, i + 1)
+                      else:
+                          matches[group_id] = i + 1
 
-          for i in 0..nwa.states.len() {
-              let s = fst.add_state();
-              state_map.insert(i, s);
-          }
+              return current_state, [(gid, width) for gid, width in matches.items() if width > 0]
 
-          if !nwa.states.0.is_empty() {
-              fst.set_start(state_map[&nwa.body.start_state]).unwrap();
-          }
+          def initial_state_id(self) -> int:
+              return self.start_state
 
-          for (i, nwa_state) in nwa.states.0.iter().enumerate() {
-              let fst_state_id = state_map[&i];
 
-              if let Some(w) = &nwa_state.final_weight {
-                  if !w.is_empty() {
-                      fst.set_final(fst_state_id, BitsetWeight::new(w.clone())).unwrap();
-                  }
-              }
+      @dataclass(frozen=True)
+      class Reduce:
+          nonterminal_id: int
+          len: int
+          production_ids: Tuple[int, ...]
 
-              for (label, targets) in &nwa_state.transitions {
-                  for (target, weight) in targets {
-                      if !weight.is_empty() {
-                          fst.add_tr(
-                              fst_state_id,
-                              Tr::new(
-                                  (*label as u32) + 1,
-                                  (*label as u32) + 1,
-                                  BitsetWeight::new(weight.clone()),
-                                  state_map[target],
-                              ),
-                          )
-                          .unwrap();
-                      }
-                  }
-              }
 
-              for (target, weight) in &nwa_state.epsilons {
-                  if !weight.is_empty() {
-                      fst.add_tr(fst_state_id, Tr::new(EPS_LABEL, EPS_LABEL, BitsetWeight::new(weight.clone()), state_map[target]))
-                          .unwrap();
-                  }
-              }
-          }
+      @dataclass(frozen=True)
+      class Split:
+          shift: Optional[int]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]]
 
-          crate::debug!(5, "NWA to FST conversion done:\n{}", fst);
-          fst
-      }
 
-      pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
-          let fst_start = match fst.start() {
-              Some(s) => s,
-              None => return DWA::new(),
-          };
+      Action = Union[int, Reduce, Split]
 
-          let mut dwa = DWA::new();
-          dwa.states.0.clear();
-          let mut state_map = HashMap::<StateId, StateID>::new();
 
-          for i in 0..fst.num_states() {
-              let s = dwa.add_state();
-              state_map.insert(i as StateId, s);
-          }
-          dwa.body.start_state = state_map[&fst_start];
+      @dataclass
+      class Row:
+          actions: Dict[int, Action] = field(default_factory=dict)
+          gotos: Dict[int, int] = field(default_factory=dict)
 
-          for i in 0..fst.num_states() {
-              let fst_state_id = i as StateId;
-              if !state_map.contains_key(&fst_state_id) {
-                  continue;
-              }
-              let dwa_state_id = state_map[&fst_state_id];
 
-              if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
-                  if !w.0.is_empty() {
-                      dwa.set_final_weight(dwa_state_id, w.value().clone()).unwrap();
-                  }
-              }
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
 
-              for tr in fst.get_trs(fst_state_id).unwrap().trs() {
-                  if !tr.weight.0.is_empty() {
-                      if !state_map.contains_key(&tr.nextstate) {
-                          continue;
-                      }
-                      let res = dwa.add_transition(
-                          dwa_state_id,
-                          ((tr.ilabel - 1) as u16) as i16,
-                          state_map[&tr.nextstate],
-                          tr.weight.value().clone(),
-                      );
-                      if let Err(e) = res {
-                          panic!(
-                              "Error converting VectorFst to DWA: transition already exists. This indicates non-determinism. Error: {:?}",
-                              e
-                          );
-                      }
-                  }
-              }
-          }
 
-          dwa
-      }
+      @dataclass(frozen=True, eq=False)
+      class PyAcc:
+          terminals_union: Dict[int, TerminalIdSet]
+          llm_mask: LLMTokenSet
 
-      pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
-          if fst.num_states() == 0 {
-              return NWA::new();
-          }
+          def __eq__(self, other):
+              if not isinstance(other, PyAcc):
+                  return NotImplemented
+              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
 
-          let mut nwa = NWA::new();
-          nwa.states.0.clear();
-          let mut state_map = HashMap::<StateId, NWAStateID>::new();
+          def __hash__(self):
+              return hash((len(self.terminals_union), self.llm_mask))
 
-          for i in 0..fst.num_states() {
-              let s = nwa.states.add_state();
-              state_map.insert(i as StateId, s);
-          }
+          def merge(self, other: "PyAcc") -> "PyAcc":
+              new_terminals_union = self.terminals_union.copy()
+              for k, v in other.terminals_union.items():
+                  if k in new_terminals_union:
+                      new_terminals_union[k] = new_terminals_union[k].union(v)
+                  else:
+                      new_terminals_union[k] = v
+              return PyAcc(
+                  terminals_union=new_terminals_union,
+                  llm_mask=self.llm_mask.union(other.llm_mask),
+              )
 
-          if let Some(fst_start) = fst.start() {
-              nwa.body.start_state = state_map[&fst_start];
-          } else {
-              nwa.body.start_state = 0;
-          }
+          def is_empty(self):
+              return self.llm_mask.is_empty()
 
-          for i in 0..fst.num_states() {
-              let fst_state_id = i as StateId;
-              let nwa_state_id = state_map[&fst_state_id];
 
-              if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
-                  if !w.0.is_empty() {
-                      nwa.states[nwa_state_id].final_weight = Some(w.value().clone());
-                  }
-              }
+      @dataclass
+      class DWAState:
+          # Maps label (int) -> (target_state_id, weight)
+          transitions: Dict[int, Tuple[int, LLMTokenSet]]
+          state_weight: Optional[LLMTokenSet]
+          final_weight: Optional[LLMTokenSet]
 
-              for tr in fst.get_trs(fst_state_id).unwrap().trs() {
-                  if !tr.weight.0.is_empty() {
-                      let target_nwa_id = state_map[&tr.nextstate];
-                      let weight = tr.weight.value().clone();
 
-                      if tr.ilabel == EPS_LABEL {
-                          nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
-                      } else {
-                          let label = ((tr.ilabel - 1) as u16) as i16;
-                          nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
-                      }
-                  }
-              }
-          }
+      @dataclass
+      class DWA:
+          states: List[DWAState]
+          start_state: int
 
-          nwa
-      }
 
-      pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
-          let mut fst = nwa_to_vector_fst(nwa);
-          fst.compute_and_update_properties_all().unwrap();
-          assert!(fst.properties().contains(FstProperties::ACCEPTOR), "FST should be an acceptor before determinization");
+      DEFAULT_TRANSITION_SYMBOL = 32767
 
-          let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
-          let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
 
-          vector_fst_to_dwa(&det_fst)
-      }
+      @dataclass
+      class Model(GraphProvider):
+          stats = Stats.get()
+          stats.add_group('get_mask')
+          stats.add_group('commit')
 
-      impl DWA {
-          pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
-              nwa_to_vector_fst(&NWA::from_dwa(self))
-          }
+          dwa: DWA
+          parser_table: ParserTable
+          tokenizer: PyTokenizer
+          tokenizer_initial_state: int
+          possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
+          id_to_token: Dict[int, bytes]
+          internal_to_original_map: Dict[int, RangeSetOut]
+          all_internal_llm_tokens_bitset: LLMTokenSet
+          ignore_terminal_id: Optional[int]
+          original_to_dummy_map: Dict[int, int]
+          state: Dict[int, GSS]
+          suppress_stats_report: bool = False
+          last_get_mask_cost: int = 0
+          last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
 
-          pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> DWA {
-              vector_fst_to_dwa(fst)
-          }
-      }
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              Stats.get().reset()
+              data = json.loads(s)
+              dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
 
-      impl NWA {
-          pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
-              nwa_to_vector_fst(self)
-          }
+              vocab = data['vocab']
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
 
-          pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> NWA {
-              vector_fst_to_nwa(fst)
-          }
-      }
+              def _parse_weight(w_json: Any) -> LLMTokenSet:
+                  if w_json is None:
+                      return all_internal_llm_tokens_bitset
+                  # Handle SimpleBitset serialization (assuming it might be wrapped or direct RangeSetBlaze)
+                  # If it's a dict with "rsb", use that. If it's a list, assume ranges or integers.
+                  # For now, assuming it matches what RangeSet.from_json_string expects or is a list of ranges.
+                  # If it's from Rust's RangeSetBlaze serde, it might be a list of integers.
+                  # But here we assume it's compatible with our RangeSet loading or we adapt.
+                  # Given we don't have the exact JSON format of SimpleBitset here, we try standard approaches.
+                  try:
+                      if isinstance(w_json, dict) and 'inner' in w_json:
+                          # HybridBitset style
+                          return RangeSet.from_ranges(bs_from_json(dumps(w_json)).to_ranges())
+                      if isinstance(w_json, dict) and 'rsb' in w_json:
+                          # SimpleBitset style?
+                          return RangeSet.from_ranges(bs_from_json(dumps(w_json['rsb'])).to_ranges())
+                      # Fallback: try parsing as HybridBitset directly
+                      return RangeSet.from_ranges(bs_from_json(dumps(w_json)).to_ranges())
+                  except Exception:
+                      # If it's a list of integers (RangeSetBlaze default serde), we might need to handle it.
+                      # But let's assume the provided JSON uses the compatible format.
+                      return all_internal_llm_tokens_bitset
+
+              # Load DWA
+              dwa_json = data['precomputed4']
+              states_data = dwa_json['states']
+              dwa_states = []
+              for s in states_data:
+                  trans_map = dict(s['transitions'])  # label -> target
+                  weights_map = dict(s['trans_weights'])  # label -> weight
+
+                  merged_trans = {}
+                  for label_str, target in trans_map.items():
+                      label = int(label_str)
+                      w_json = weights_map.get(label_str)
+                      weight = _parse_weight(w_json) if w_json is not None else all_internal_llm_tokens_bitset
+                      merged_trans[label] = (target, weight)
+
+                  st_weight = _parse_weight(s.get('state_weight')) if s.get('state_weight') is not None else None
+                  fin_weight = _parse_weight(s.get('final_weight')) if s.get('final_weight') is not None else None
+
+                  dwa_states.append(DWAState(merged_trans, st_weight, fin_weight))
+
+              # Re-compute/narrow all state weights using a sophisticated propagation method.
+              # Build a reverse graph of the DWA for weight propagation.
+              rev_adj = [[] for _ in dwa_states]
+              for u, state in enumerate(dwa_states):
+                  for _label, (v, weight) in state.transitions.items():
+                      rev_adj[v].append((u, weight))
+
+              # Initialize weights with final weights, as these are the starting points for propagation.
+              computed_weights = [(s.final_weight if s.final_weight is not None else RangeSet.empty()) for s in dwa_states]
+              worklist = collections.deque([i for i, w in enumerate(computed_weights) if not w.is_empty()])
+              in_worklist = set(worklist)
+
+              # Propagate weights backwards through the graph until a fixed point is reached.
+              with tqdm(total=len(dwa_states), desc="Propagating DWA weights", leave=False) as pbar:
+                  processed_for_pbar = set()
+
+                  def update_pbar(state_id):
+                      if state_id not in processed_for_pbar:
+                          processed_for_pbar.add(state_id)
+                          pbar.update(1)
+
+                  for i in worklist:
+                      update_pbar(i)
+
+                  while worklist:
+                      v = worklist.popleft()
+                      in_worklist.remove(v)
+
+                      weight_from_v = computed_weights[v]
+                      if weight_from_v.is_empty():
+                          continue
+
+                      for u, edge_weight in rev_adj[v]:
+                          # The weight to propagate is the union of the edge's weight and the reachable weight from the target state.
+                          propagated = edge_weight.union(weight_from_v)
+                          old_weight = computed_weights[u]
+
+                          if not propagated.issubset(old_weight):
+                              computed_weights[u] = old_weight.union(propagated)
+                              if u not in in_worklist:
+                                  worklist.append(u)
+                                  in_worklist.add(u)
+                                  update_pbar(u)
+                  
+                  # Ensure the progress bar completes.
+                  if pbar.n < len(dwa_states):
+                      pbar.update(len(dwa_states) - pbar.n)
+
+              # Assign the computed, more precise weights.
+              # If a weight already exists, we narrow it.
+              for i, state in enumerate(dwa_states):
+                  if state.state_weight is None:
+                      state.state_weight = computed_weights[i]
+                  else:
+                      state.state_weight = state.state_weight.intersection(computed_weights[i])
+
+              start_state = dwa_json['start_state']
+              dwa = DWA(dwa_states, start_state)
+
+              # Tokenizer
+              dfa_data = data['tokenizer']['dfa']
+              dfa_states = [DFAState(
+                  transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()},
+                  finalizers=set(s['finalizers']),
+                  possible_future_group_ids=set(s['possible_future_group_ids'])
+              ) for s in dfa_data['states']]
+              tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
+
+              # Parser Table
+              parser_data = data['parser']
+              py_table: Dict[int, Row] = {}
+              for state_id_str, row_data in parser_data['stage_7_table']:
+                  state_id, py_row = int(state_id_str), Row()
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                      term_id, variant = int(term_id_str), action_data['variant']
+                      if variant == 'Shift':
+                          py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce':
+                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
+                      elif variant == 'Split':
+                          reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
+                          py_row.actions[term_id] = Split(action_data['shift'], reduces)
+                  py_row.gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
+                  py_table[state_id] = py_row
+              parser_table = ParserTable(parser_data['start_state_id'], py_table)
+
+              # Misc data
+              pmc_json = data['possible_matches']
+              possible_matches_cache = {}
+              for tsid_json, term_map_json in pmc_json:
+                  tsid = int(tsid_json)
+                  term_map = {}
+                  for term_id_json, bv_json in term_map_json:
+                      term_id = int(term_id_json)
+                      bv = RangeSet.from_ranges(bs_from_json(dumps(bv_json)).to_ranges())
+                      term_map[term_id] = bv
+                  possible_matches_cache[tsid] = term_map
+
+              original_to_dummy_map_json = data.get('original_to_dummy_map', [])
+              original_to_dummy_map = {int(k): int(v) for k, v in original_to_dummy_map_json}
+
+              # Initial state
+              initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+
+              model = Model(
+                  dwa=dwa,
+                  parser_table=parser_table,
+                  tokenizer=tokenizer,
+                  tokenizer_initial_state=tokenizer.initial_state_id(),
+                  possible_matches_cache=possible_matches_cache,
+                  id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
+                  internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
+                  all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
+                  ignore_terminal_id=parser_data.get('ignore_terminal_id'),
+                  original_to_dummy_map=original_to_dummy_map,
+                  state={tokenizer.initial_state_id(): initial_gss},
+              )
+
+              return model
+
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              term_rs = RangeSet.from_indices([terminal_id])
+              @_acc_memoize(use_value_cache=False)
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current.contains(terminal_id):
+                      return acc
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current.union(term_rs)
+                  return PyAcc(new_map, acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def commit(self, token_id: int):
+              token_bytes = self.id_to_token[token_id]
+              terminals_map, state_map = {}, {}
+              for tsid in self.state:
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
+                  if end_state is not None:
+                      state_map[tsid] = end_state
+                  terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
+
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  for tsid, matched in terminals_map.items():
+                      if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched):
+                          return None
+                  new_bvs = collections.defaultdict(RangeSet.empty)
+                  for old, new in state_map.items():
+                      if old in acc.terminals_union:
+                          new_bvs[new] |= acc.terminals_union[old]
+                  return PyAcc(dict(new_bvs), acc.llm_mask)
+
+              cache = {}
+              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in self.state.items()}
+              current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
+
+              new_states = collections.defaultdict(list)
+              work = {(0, tsid): gss for tsid, gss in current.items()}
+              q = collections.deque(work.keys())
+
+              while q:
+                  offset, tsid = q.popleft()
+                  gss = work.pop((offset, tsid))
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
+
+                  for term_id, width in matches:
+                      proc_gss = gss
+                      dummy_id = self.original_to_dummy_map.get(term_id)
+                      if dummy_id is not None:
+                          proc_gss = self._process_token(proc_gss, dummy_id)
+                      proc_gss = self._process_token(proc_gss, term_id)
+
+                      if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
+                          proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
+                      if not proc_gss.is_empty():
+                          new_offset, next_tsid = offset + width, self.tokenizer.initial_state_id()
+                          if new_offset == len(token_bytes):
+                              new_states[next_tsid].append(proc_gss)
+                          else:
+                              key = (new_offset, next_tsid)
+                              if key in work:
+                                  work[key] = work[key].merge(proc_gss)
+                              else:
+                                  work[key] = proc_gss
+                                  q.append(key)
+                  if end_state is not None:
+                      new_states[end_state].append(gss)
+
+              merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
+              self.state = {sid: g for sid, g in merged.items() if not g.is_empty()}
+
+          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+              if self.ignore_terminal_id == terminal_id:
+                  return gss
+
+              heads_by_state = collections.defaultdict(list)
+              for state_id in gss.peek():
+                  heads_by_state[state_id].append(gss.isolate(state_id))
+
+              shifted = []
+              while heads_by_state:
+                  state_id, gss_list = heads_by_state.popitem()
+                  state_gss = GSS.merge_many(gss_list)
+                  row = self.parser_table.table.get(state_id)
+                  if not row:
+                      continue
+                  action = row.actions.get(terminal_id)
+                  if action is None:
+                      continue
+
+                  if isinstance(action, int):
+                      shifted.append(state_gss.push(action))
+                  elif isinstance(action, Reduce):
+                      popped = state_gss.popn(action.len)
+                      for from_id in popped.peek():
+                          goto_id = self.parser_table.table[from_id].gotos[action.nonterminal_id]
+                          heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+                  elif isinstance(action, Split):
+                      if action.shift is not None:
+                          shifted.append(state_gss.push(action.shift))
+                      for length, nts in action.reduces.items():
+                          popped = state_gss.popn(length)
+                          for nt_id in nts:
+                              for from_id in popped.peek():
+                                  goto_id = self.parser_table.table[from_id].gotos[nt_id]
+                                  heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+              return GSS.merge_many(shifted)
+
+          def _mutate_weight(self, gss: GSS, f: Callable[[LLMTokenSet], LLMTokenSet]) -> GSS:
+              @_acc_memoize(use_value_cache=False)
+              def apply_fn(acc: PyAcc) -> Optional[PyAcc]:
+                  new_mask = f(acc.llm_mask)
+                  if new_mask.is_empty():
+                      return None
+                  return PyAcc(acc.terminals_union, new_mask)
+              return gss.apply_and_prune(apply_fn)
+
+          def _apply_weight(self, gss: GSS, weight: LLMTokenSet) -> GSS:
+              return self._mutate_weight(gss, lambda bv: bv.intersection(weight))
+
+          def _subtract_weight(self, gss: GSS, weight: LLMTokenSet) -> GSS:
+              return self._mutate_weight(gss, lambda bv: bv.difference(weight))
+
+          def _is_dead(self, gss: GSS) -> bool:
+              return gss.reduce_acc().llm_mask.is_empty()
+
+          def _merge_into_queue(self, queue: Dict[int, Dict[int, GSS]], gss: GSS, target_state_id: int):
+              depth = gss.max_depth()
+              if target_state_id in queue[depth]:
+                  queue[depth][target_state_id] = queue[depth][target_state_id].merge(gss)
+              else:
+                  queue[depth][target_state_id] = gss
+
+          def get_mask(self) -> Union[RangeSetOut, Dict]:
+              stats = Stats.get()
+              stats.start('get_mask')
+              
+              all_ones = self.all_internal_llm_tokens_bitset
+              final_mask = RangeSet.empty()
+              
+              # Queue: depth -> {dwa_state_id: GSS}
+              queue: Dict[int, Dict[int, GSS]] = collections.defaultdict(dict)
+              
+              # 1. Seed initial states
+              start_node = self.dwa.states[self.dwa.start_state]
+
+              @_acc_memoize(use_value_cache=False)
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  disallowed = RangeSet.empty()
+                  for tsid, terms in acc.terminals_union.items():
+                      if tsid in self.possible_matches_cache:
+                          term_map = self.possible_matches_cache[tsid]
+                          for term_id in terms.iter_indices():
+                              if term_id in term_map:
+                                  disallowed |= term_map[term_id]
+                  return PyAcc({}, all_ones.difference(disallowed))
+
+              init_cache = {}
+              for sid, gss in self.state.items():
+                  gss_init = gss.apply(initialize_acc, init_cache)
+                  if gss_init.is_empty():
+                      continue
+                      
+                  # Transition on tokenizer state id
+                  target = start_node.transitions.get(sid)
+                  if target is not None:
+                      target_state_id, weight = target
+                      gss_next = self._apply_weight(gss_init, weight)
+                      if not gss_next.is_empty():
+                          self._merge_into_queue(queue, gss_next, target_state_id)
+
+              # 2. Main worklist loop
+              while queue:
+                  max_depth = max(queue.keys())
+                  states_at_depth = queue.pop(max_depth)
+                  
+                  for dwa_id, gss in states_at_depth.items():
+                      dwa_state = self.dwa.states[dwa_id]
+
+                      # Check for final state
+                      if dwa_state.final_weight is not None:
+                          acc = gss.reduce_acc()
+                          if acc:
+                              final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
+                              if not final_tokens.is_empty():
+                                  final_mask |= final_tokens
+
+                      gss = self._subtract_weight(gss, final_mask)
+
+                      if dwa_state.state_weight is not None:
+                          gss = self._apply_weight(gss, dwa_state.state_weight)
+                          if gss.is_empty():
+                              continue
+
+                      if self._is_dead(gss):
+                          continue
+                                  
+                      # Process transitions
+                      peeked = gss.peek()
+                      if not peeked:
+                          continue
+                          
+                      for edge in peeked:
+                          parser_state_id = edge
+                          
+                          # 1. Specific transition
+                          t = dwa_state.transitions.get(parser_state_id)
+                          if t:
+                              target_id, weight = t
+                              isolated = gss.isolate(edge)
+                              popped = isolated.pop()
+                              if not popped.is_empty():
+                                  final_gss = self._apply_weight(popped, weight)
+                                  if not self._is_dead(final_gss):
+                                      self._merge_into_queue(queue, final_gss, target_id)
+                                      
+                          # 2. Default transition
+                          t_def = dwa_state.transitions.get(DEFAULT_TRANSITION_SYMBOL)
+                          if t_def:
+                              target_id, weight = t_def
+                              isolated = gss.isolate(edge)
+                              popped = isolated.pop()
+                              if not popped.is_empty():
+                                  final_gss = self._apply_weight(popped, weight)
+                                  if not self._is_dead(final_gss):
+                                      self._merge_into_queue(queue, final_gss, target_id)
+
+              stats.start('get_mask.teardown.final_conversion')
+              original_indices = RangeSetOut.empty()
+              for i in final_mask.iter_indices():
+                  if i in self.internal_to_original_map:
+                      original_indices |= self.internal_to_original_map[i]
+              stats.stop('get_mask.teardown.final_conversion')
+              stats.stop('get_mask')
+
+              if not self.suppress_stats_report:
+                  Stats.get().report(sort_by='alpha')
+
+              return original_indices
+
+          def finalize(self):
+              print("\n--- Final Stats Report from Model ---")
+              Stats.get().report(sort_by='alpha')
+
       ```
     metadata:
-      filename: src/precompute4/weighted_automata/determinization_rustfst.rs
-  - user: The existing labels are i16. In the existing NWA/DWA, the labels can be
-      0. 0 isn't eps. In the rustfst fst, 0 is eps, and labels have type u32. Right
-      now we convert like `(*label as u32) + 1`. This is wrong. We need to do something
-      like add i16::MIN and then also add 1 and then convert to u32. Do this. And
-      fix conversion in the other direction.
+      filename: python/aug25/models/precompute4_model_pure_python.py
+  - user: Right now the queue items are processed first in order of max depth of GSS,
+      then by DWA state. Change it so it's processed first in oreder of DWA state
+      shortest distance to finish state, then by max depth, then by DWA state. You'll
+      need to compute shortest distance to finish state for each state.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1050,83 +2092,228 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to apply the required changes, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to modify the queue processing order, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/precompute4/weighted_automata/determinization_rustfst.rs`**.
+      Here are the edits for `python/aug25/models/precompute4_model_pure_python.py`:
 
-      2.  In the `nwa_to_vector_fst` function, modify the transition creation to correctly map the `i16` label to a `u32` label for `rustfst`. You need to shift the `i16` range to be non-negative and greater than 0.
+      1.  **Add `dwa_shortest_paths` field to `Model` dataclass:**
+          In the `Model` dataclass definition (around line 301), add a new field `dwa_shortest_paths: List[int]` right after the `dwa` field.
 
-          Around line 200, change this:
-          ```rust
-                                  (*label as u32) + 1,
-                                  (*label as u32) + 1,
-          ```
-          to this:
-          ```rust
-                                  ((*label as i32 - i16::MIN as i32) as u32) + 1,
-                                  ((*label as i32 - i16::MIN as i32) as u32) + 1,
-          ```
+      2.  **Compute shortest paths in `from_json_string`:**
+          In the `Model.from_json_string` static method, after the weight propagation logic (around line 431), insert a new code block. This block will perform a backward Breadth-First Search (BFS) from all final DWA states to compute the shortest distance to a final state for every DWA state.
 
-      3.  In the `vector_fst_to_dwa` function, update the reverse conversion from a `rustfst` `u32` label back to a `DWA` `i16` label.
+      3.  **Update `Model` instantiation:**
+          Still in `from_json_string`, modify the call to the `Model` constructor (around line 530) to include the `dwa_shortest_paths` you just computed.
 
-          Around line 253, change this line:
-          ```rust
-                          ((tr.ilabel - 1) as u16) as i16,
-          ```
-          to this:
-          ```rust
-                          ((tr.ilabel - 1) as i32 + i16::MIN as i32) as i16,
-          ```
+      4.  **Update `_merge_into_queue` method:**
+          Replace the entire `_merge_into_queue` method (around line 704) with a new implementation. The new version will use the pre-computed shortest path distance as the primary key for a new, three-level nested dictionary structure that serves as the processing queue.
 
-      4.  Similarly, in the `vector_fst_to_nwa` function, update the reverse label conversion for creating transitions.
-
-          Around line 309, change this line:
-          ```rust
-                          let label = ((tr.ilabel - 1) as u16) as i16;
-          ```
-          to this:
-          ```rust
-                          let label = ((tr.ilabel - 1) as i32 + i16::MIN as i32) as i16;
-          ```
+      5.  **Modify `get_mask` method for new queue structure:**
+          *   In the `get_mask` method (around line 718), change the definition of the `queue` variable to `collections.defaultdict(lambda: collections.defaultdict(dict))` to support the new nested structure. Also, update the comment to reflect the new key order: `dist -> depth -> {dwa_state_id: GSS}`.
+          *   Replace the main processing loop (starting around line 745) with a new set of nested loops. This new logic will process items from the queue in the desired order:
+              1.  Shortest distance to a final state (ascending).
+              2.  Maximum GSS depth (descending).
+              3.  DWA state ID (ascending, for determinism).
 
       ### Git Diff
 
-      Here is the git diff with the changes:
+      Here is the git diff with the specified changes.
 
       ```diff
-      --- a/src/precompute4/weighted_automata/determinization_rustfst.rs
-      +++ b/src/precompute4/weighted_automata/determinization_rustfst.rs
-      @@ -197,8 +197,8 @@
-                           fst.add_tr(
-                               fst_state_id,
-                               Tr::new(
-      -                            (*label as u32) + 1,
-      -                            (*label as u32) + 1,
-      +                            ((*label as i32 - i16::MIN as i32) as u32) + 1,
-      +                            ((*label as i32 - i16::MIN as i32) as u32) + 1,
-                                   BitsetWeight::new(weight.clone()),
-                                   state_map[target],
-                               ),
-      @@ -251,7 +251,7 @@
-                       }
-                       let res = dwa.add_transition(
-                           dwa_state_id,
-      -                    ((tr.ilabel - 1) as u16) as i16,
-      +                    ((tr.ilabel - 1) as i32 + i16::MIN as i32) as i16,
-                           state_map[&tr.nextstate],
-                           tr.weight.value().clone(),
-                       );
-      @@ -307,7 +307,7 @@
-                       if tr.ilabel == EPS_LABEL {
-                           nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
-                       } else {
-      -                    let label = ((tr.ilabel - 1) as u16) as i16;
-      +                    let label = ((tr.ilabel - 1) as i32 + i16::MIN as i32) as i16;
-                           nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
-                       }
-                   }
+      --- a/python/aug25/models/precompute4_model_pure_python.py
+      +++ b/python/aug25/models/precompute4_model_pure_python.py
+      @@ -304,6 +304,7 @@
+           stats.add_group('commit')
+       
+           dwa: DWA
+      +    dwa_shortest_paths: List[int]
+           parser_table: ParserTable
+           tokenizer: PyTokenizer
+           tokenizer_initial_state: int
+      @@ -431,6 +432,24 @@
+                   else:
+                       state.state_weight = state.state_weight.intersection(computed_weights[i])
+       
+      +        # Compute shortest paths to a final state.
+      +        num_dwa_states = len(dwa_states)
+      +        dwa_shortest_paths = [num_dwa_states] * num_dwa_states
+      +        q = collections.deque()
+      +
+      +        for i, state in enumerate(dwa_states):
+      +            if state.final_weight is not None:
+      +                dwa_shortest_paths[i] = 0
+      +                q.append(i)
+      +
+      +        while q:
+      +            v = q.popleft()
+      +            for u, _ in rev_adj[v]:
+      +                if dwa_shortest_paths[u] == num_dwa_states:
+      +                    dwa_shortest_paths[u] = dwa_shortest_paths[v] + 1
+      +                    q.append(u)
+      +
+               start_state = dwa_json['start_state']
+               dwa = DWA(dwa_states, start_state)
+       
+      @@ -470,6 +489,7 @@
+       
+               model = Model(
+                   dwa=dwa,
+      +            dwa_shortest_paths=dwa_shortest_paths,
+                   parser_table=parser_table,
+                   tokenizer=tokenizer,
+                   tokenizer_initial_state=tokenizer.initial_state_id(),
+      @@ -601,25 +621,27 @@
+           def _is_dead(self, gss: GSS) -> bool:
+               return gss.reduce_acc().llm_mask.is_empty()
+       
+      -    def _merge_into_queue(self, queue: Dict[int, Dict[int, GSS]], gss: GSS, target_state_id: int):
+      +    def _merge_into_queue(self, queue: Dict[int, Dict[int, Dict[int, GSS]]], gss: GSS, target_state_id: int):
+               depth = gss.max_depth()
+      -        if target_state_id in queue[depth]:
+      -            queue[depth][target_state_id] = queue[depth][target_state_id].merge(gss)
+      +        dist = self.dwa_shortest_paths[target_state_id]
+      +        if target_state_id in queue[dist][depth]:
+      +            queue[dist][depth][target_state_id] = queue[dist][depth][target_state_id].merge(gss)
+               else:
+      -            queue[depth][target_state_id] = gss
+      +            queue[dist][depth][target_state_id] = gss
+       
+           def get_mask(self) -> Union[RangeSetOut, Dict]:
+               stats = Stats.get()
+               stats.start('get_mask')
+               
+               all_ones = self.all_internal_llm_tokens_bitset
+               final_mask = RangeSet.empty()
+      -        
+      -        # Queue: depth -> {dwa_state_id: GSS}
+      -        queue: Dict[int, Dict[int, GSS]] = collections.defaultdict(dict)
+      -        
+      +
+      +        # Queue: dist -> depth -> {dwa_state_id: GSS}
+      +        queue: Dict[int, Dict[int, Dict[int, GSS]]] = collections.defaultdict(lambda: collections.defaultdict(dict))
+      +
+               # 1. Seed initial states
+               start_node = self.dwa.states[self.dwa.start_state]
+       
+      @@ -648,58 +670,64 @@
+       
+               # 2. Main worklist loop
+               while queue:
+      -            max_depth = max(queue.keys())
+      -            states_at_depth = queue.pop(max_depth)
+      -            
+      -            for dwa_id, gss in states_at_depth.items():
+      -                dwa_state = self.dwa.states[dwa_id]
+      -
+      -                # Check for final state
+      -                if dwa_state.final_weight is not None:
+      -                    acc = gss.reduce_acc()
+      -                    if acc:
+      -                        final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
+      -                        if not final_tokens.is_empty():
+      -                            final_mask |= final_tokens
+      -
+      -                gss = self._subtract_weight(gss, final_mask)
+      -
+      -                if dwa_state.state_weight is not None:
+      -                    gss = self._apply_weight(gss, dwa_state.state_weight)
+      -                    if gss.is_empty():
+      +            min_dist = min(queue.keys())
+      +            by_depth = queue.pop(min_dist)
+      +
+      +            while by_depth:
+      +                max_depth = max(by_depth.keys())
+      +                states_at_depth = by_depth.pop(max_depth)
+      +
+      +                for dwa_id in sorted(states_at_depth.keys()):
+      +                    gss = states_at_depth[dwa_id]
+      +                    dwa_state = self.dwa.states[dwa_id]
+      +
+      +                    # Check for final state
+      +                    if dwa_state.final_weight is not None:
+      +                        acc = gss.reduce_acc()
+      +                        if acc:
+      +                            final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
+      +                            if not final_tokens.is_empty():
+      +                                final_mask |= final_tokens
+      +
+      +                    gss = self._subtract_weight(gss, final_mask)
+      +
+      +                    if dwa_state.state_weight is not None:
+      +                        gss = self._apply_weight(gss, dwa_state.state_weight)
+      +                        if gss.is_empty():
+      +                            continue
+      +
+      +                    if self._is_dead(gss):
+                               continue
+      -
+      -                if self._is_dead(gss):
+      -                    continue
+      -                            
+      -                # Process transitions
+      -                peeked = gss.peek()
+      -                if not peeked:
+      -                    continue
+      -                    
+      -                for edge in peeked:
+      -                    parser_state_id = edge
+      -                    
+      -                    # 1. Specific transition
+      -                    t = dwa_state.transitions.get(parser_state_id)
+      -                    if t:
+      -                        target_id, weight = t
+      -                        isolated = gss.isolate(edge)
+      -                        popped = isolated.pop()
+      -                        if not popped.is_empty():
+      -                            final_gss = self._apply_weight(popped, weight)
+      -                            if not self._is_dead(final_gss):
+      -                                self._merge_into_queue(queue, final_gss, target_id)
+      -                                
+      -                    # 2. Default transition
+      -                    t_def = dwa_state.transitions.get(DEFAULT_TRANSITION_SYMBOL)
+      -                    if t_def:
+      -                        target_id, weight = t_def
+      -                        isolated = gss.isolate(edge)
+      -                        popped = isolated.pop()
+      -                        if not popped.is_empty():
+      -                            final_gss = self._apply_weight(popped, weight)
+      -                            if not self._is_dead(final_gss):
+      -                                self._merge_into_queue(queue, final_gss, target_id)
+      +                                
+      +                    # Process transitions
+      +                    peeked = gss.peek()
+      +                    if not peeked:
+      +                        continue
+      +                        
+      +                    for edge in peeked:
+      +                        parser_state_id = edge
+      +                        
+      +                        # 1. Specific transition
+      +                        t = dwa_state.transitions.get(parser_state_id)
+      +                        if t:
+      +                            target_id, weight = t
+      +                            isolated = gss.isolate(edge)
+      +                            popped = isolated.pop()
+      +                            if not popped.is_empty():
+      +                                final_gss = self._apply_weight(popped, weight)
+      +                                if not self._is_dead(final_gss):
+      +                                    self._merge_into_queue(queue, final_gss, target_id)
+      +                                    
+      +                        # 2. Default transition
+      +                        t_def = dwa_state.transitions.get(DEFAULT_TRANSITION_SYMBOL)
+      +                        if t_def:
+      +                            target_id, weight = t_def
+      +                            isolated = gss.isolate(edge)
+      +                            popped = isolated.pop()
+      +                            if not popped.is_empty():
+      +                                final_gss = self._apply_weight(popped, weight)
+      +                                if not self._is_dead(final_gss):
+      +                                    self._merge_into_queue(queue, final_gss, target_id)
+       
+               stats.start('get_mask.teardown.final_conversion')
+               original_indices = RangeSetOut.empty()
 
       ```
     metadata:
@@ -1135,12 +2322,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/weighted_automata/determinization_rustfst.rs
-      Applying patch to 'src/precompute4/weighted_automata/determinization_rustfst.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/weighted_automata/determinization_rustfst.rs.
+      Identified target file: python/aug25/models/precompute4_model_pure_python.py
+      Applying patch to 'python/aug25/models/precompute4_model_pure_python.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute4_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Fix label mapping between DWA/NWA (i16)
-      and rustfst (u32) to correctly handle label 0 by shifting labels to avoid collision
-      with EPS_LABEL (0)."'
+  - user: 'Changes committed with message: "Reorder GSS worklist processing in get_mask
+      by DWA shortest path to final state, then depth"'
     metadata:
 ...
