@@ -42,9 +42,6 @@ fn test_resolve_negatives_from_large_nwa_log() {
 
     // State 0:
     d.add_transition(states[0], 0, states[1], Weight::all()).unwrap();
-    d.add_transition(states[0], 161, states[2], Weight::all()).unwrap();
-    d.add_transition(states[0], 165, states[2], Weight::all()).unwrap();
-    d.add_transition(states[0], 166, states[2], Weight::all()).unwrap();
     // State 1:
     for code in [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 400, 429, 476] {
         d.add_transition(states[1], code, states[3], Weight::all()).unwrap();
@@ -186,6 +183,8 @@ fn test_resolve_negatives_from_large_nwa_log() {
     // State 50:
     d.set_final_weight(states[50], Weight::from_item(1)).unwrap();
 
+    d.simplify();
+    println!("{}", d);
     resolve_negative_codes_in_dwa(&mut d);
 
     let mut expected = DWA::new();
