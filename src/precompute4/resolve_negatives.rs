@@ -27,21 +27,26 @@ fn progress_step(pb: &Option<ProgressBar>, step: u64, msg: &str) {
     }
 }
 
-fn resolve_negative_codes_in_nwa_internal(nwa: &mut NWA) {
+pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
+    let pb = make_progress_bar(
+        3,
+        "{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] \
+         [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
+    );
+
+    progress_step(&pb, 1, "Compute cancellations");
     apply_cancellations(nwa);
+
+    progress_step(&pb, 2, "Propagate finality");
     apply_finality_fixpoint(nwa);
+
+    progress_step(&pb, 3, "Apply changes & remove negatives");
     remove_negative_transitions(nwa);
     crate::debug!(4, "Applied changes to NWA.");
-}
 
-pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-    // Define negative resolution on arbitrary NWAs via determinization and the
-    // already-tested DWA pipeline. This guarantees that resolving negatives on
-    // an NWA and then determinizing is equivalent to determinizing first and
-    // resolving negatives on the resulting DWA.
-    let mut dwa = nwa.determinize_to_dwa();
-    resolve_negative_codes_in_dwa(&mut dwa);
-    *nwa = NWA::from_dwa(&dwa);
+    if let Some(p) = &pb {
+        p.finish_with_message("Done");
+    }
 }
 
 pub fn apply_cancellations(nwa: &mut NWA) {
@@ -90,7 +95,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
 
     progress_step(&pb, 2, "Resolve negatives in NWA");
-    resolve_negative_codes_in_nwa_internal(&mut nwa);
+    resolve_negative_codes_in_nwa(&mut nwa);
     crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
     crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
 
