@@ -342,7 +342,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     );
     crate::debug!(4, "Stats for final NWA before DWA determinization:\n{}", combined_nwa.stats());
     let mut final_dwa = combined_nwa.determinize_to_dwa_with_rustfst();
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
+    println!("Combined {} DWA after filtering transitions:\n{}", TEMP, final_dwa); TEMP += 1;
     crate::debug!(
         4,
         "Final determinize & simplify took: {:?}. Final DWA has {} states.",
