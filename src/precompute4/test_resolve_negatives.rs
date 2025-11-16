@@ -40,7 +40,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     for _ in 0..69 {
         states.push(nwa.add_state());
     }
-    nwa.start_state = states[68];
+    nwa.body.start_state = states[68];
 
     // State 0:
     nwa.states[states[0]].final_weight = Some(Weight::all());
@@ -106,7 +106,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     // State 18:
     nwa.add_epsilon(states[18], states[3], Weight::all());
     // State 19:
-    nwa.add_epsilon(states[19], states[2], Weight::from_ranges(&[(0, 5)]).unwrap());
+    nwa.add_epsilon(states[19], states[2], Weight::from_ranges(&[(0, 5)]));
     // State 20:
     nwa.add_epsilon(states[20], states[19], Weight::all());
     // State 21:
@@ -225,7 +225,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     nwa.add_epsilon(states[52], states[53], Weight::all());
     nwa.add_epsilon(states[52], states[54], Weight::all());
     // State 53:
-    nwa.add_epsilon(states[53], states[51], Weight::from_ranges(&[(2, 2), (4, 5)]).unwrap());
+    nwa.add_epsilon(states[53], states[51], Weight::from_ranges(&[(2, 2), (4, 5)]));
     // State 54:
     nwa.add_transition(states[54], 0, states[55], Weight::all());
     nwa.add_transition(states[54], 69, states[55], Weight::all());
@@ -291,7 +291,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
 
     let mut expected = DWA::new();
     let s_final = expected.add_state();
-    expected.set_final_weight(s_final, Weight::from_ranges(&[(0, 5)]).unwrap()).unwrap();
+    expected.set_final_weight(s_final, Weight::from_ranges(&[(0, 5)])).unwrap();
     expected.add_transition(expected.body.start_state, 161, s_final, Weight::all()).unwrap();
     expected.add_transition(expected.body.start_state, 165, s_final, Weight::all()).unwrap();
     expected.add_transition(expected.body.start_state, 166, s_final, Weight::all()).unwrap();

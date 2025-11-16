@@ -82,6 +82,11 @@ impl SimpleBitset {
 
     pub fn from_item(item: usize) -> Self { SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter([item])) }
 
+    pub fn from_ranges(ranges: &[(usize, usize)]) -> Self {
+        let rsb = RangeSetBlaze::from_iter(ranges.iter().map(|&(s, e)| s..=e));
+        SimpleBitset::from_rsb_inner(rsb)
+    }
+
     pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self { SimpleBitset::from_rsb_inner(rsb) }
 
     pub fn len(&self) -> usize { self.rsb.len().try_into().unwrap_or(usize::MAX) }
