@@ -161,7 +161,8 @@ pub fn precompute4(
             for (right_body, terminal_map) in nwa_bodies_map {
                 let mut left_bodies = Vec::new();
                 for (terminal_id_opt, weight) in terminal_map {
-                    if weight.is_empty() {
+                    let accum_weight = weight & Weight::from_rsb(tokens.inner.as_ref().clone());
+                    if accum_weight.is_empty() {
                         continue;
                     }
                     let template_dwa: &DWA = match terminal_id_opt {
@@ -170,7 +171,7 @@ pub fn precompute4(
                         }
                         _ => &ignore_dwa,
                     };
-                    let left_body = instantiate_template_nwa_with_weight(&states_arena, template_dwa, weight);
+                    let left_body = instantiate_template_nwa_with_weight(&states_arena, template_dwa, accum_weight);
                     left_bodies.push(left_body);
                 }
                 if left_bodies.is_empty() {
