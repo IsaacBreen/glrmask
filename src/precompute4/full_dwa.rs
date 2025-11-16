@@ -35,6 +35,7 @@ impl NWA {
 
 // Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
 pub use crate::precompute4::template_nwa::FullDWABuildError;
+use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 
 pub type Precomputed4 = DWA;
 
@@ -234,7 +235,7 @@ pub fn precompute4(
 }
 
 fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
-    // let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476];
+    // let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476, DEFAULT_TRANSITION_SYMBOL];
     // combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| allowed.contains(&label) || allowed.contains(&-label) || label == 0));
     crate::debug!(4, "Starting resolve negatives and optimization and determinization of combined NWA...");
     combined_nwa.simplify_rustfst();
@@ -248,7 +249,6 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     apply_cancellations(&mut combined_nwa);
     apply_finality_fixpoint(&mut combined_nwa);
     remove_negative_transitions(&mut combined_nwa);
-    println!("Combined NWA after filtering transitions:\n{}", combined_nwa);
     combined_nwa.simplify_rustfst();
     crate::debug!(
         4,
