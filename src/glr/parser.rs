@@ -4,7 +4,6 @@ use crate::datastructures::gss_leveled_adapter::{
     print_gss_forest, Acc, GSSNode, GSSPeek, GSSPopper, GSSPopperItem, GSSPrintConfig, GSSStats,
     PruneAndTransformRecursiveMemo, StoredPrecomputeNodeIndex, StoredTrieGodWrapper, is_simple_gss,
 };
-use crate::datastructures::ArcPtrWrapper;
 use crate::datastructures::trie::{EdgeInserter, God, GodWrapper, Trie2Index, TrieStats};
 use crate::glr::automaton::compute_closure;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
