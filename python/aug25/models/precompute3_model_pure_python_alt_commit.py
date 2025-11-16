@@ -38,7 +38,7 @@ class Precompute0Node:
 class Model(_Model):
     """
     A model that subclasses the base Model to provide an alternative `commit` implementation.
-    This version uses the precomputed0 trie, which is specialized for single-token commits
+    This version uses the precomputed trie, which is specialized for single-token commits
     and avoids using the tokenizer at commit time, similar to the Rust `commit(token_id)` logic.
     """
     # New fields specific to this model
@@ -61,7 +61,7 @@ class Model(_Model):
         bs_from_json = ffi.Bitset.from_json_string
 
         # --- Load precompute0 trie ---
-        roots_map0_raw = data["precomputed0"]
+        roots_map0_raw = data["precomputed"]
         arena0_json = data["trie0_god"]
         arena0_values = arena0_json.get("values", [])
         arena0_dict = {int(k): v for k, v in arena0_values}
@@ -139,7 +139,7 @@ class Model(_Model):
 
     def commit(self, token_id: int):
         """
-        Overrides the base `commit` method. This version uses the precomputed0 trie
+        Overrides the base `commit` method. This version uses the precomputed trie
         to update the GLR state without invoking the tokenizer.
         """
         # print("\n--- commit_precompute0 START ---")

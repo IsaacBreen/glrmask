@@ -251,7 +251,7 @@ class Model(GraphProvider):
         data = json.loads(s)
         dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
 
-        vocab = data['precompute_vocab']
+        vocab = data['vocab']
         all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
 
         def _parse_weight(w_json: Any) -> LLMTokenSet:
@@ -328,7 +328,7 @@ class Model(GraphProvider):
         parser_table = ParserTable(parser_data['start_state_id'], py_table)
 
         # Misc data
-        pmc_json = data['possible_matches_precompute1']
+        pmc_json = data['possible_matches']
         possible_matches_cache = {}
         for tsid_json, term_map_json in pmc_json:
             tsid = int(tsid_json)
