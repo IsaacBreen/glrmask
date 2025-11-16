@@ -48,11 +48,30 @@ struct DwaStateSignature {
 impl DwaStateSignature {
     fn from_state(state_id: StateID, states: &DWAStates, classes: &[usize]) -> Self {
         let st = &states[state_id];
-        let mut outgoing = Vec::with_capacity(st.transitions.len());
+
+        // Aggregate transitions by (label, dest_class), summing (unioning) their weights.
+        // This is semantically justified since in the bitset semiring we have:
+        //   (w1 & x) | (w2 & x) = (w1 | w2) & x
+        // so multiple parallel transitions to the same equivalence class under the same
+        // label are equivalent to a single transition whose weight is the union.
+        let mut agg: BTreeMap<(i16, usize), Weight> = BTreeMap::new();
         for (&label, &dest) in &st.transitions {
-            let weight = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+            let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+            if w.is_empty() {
+                continue;
+            }
             let dest_class = classes[dest];
-            outgoing.push(DwaTransitionSig { label, dest_class, weight });
+            let key = (label, dest_class);
+            agg.entry(key)
+                .and_modify(|acc| *acc |= &w)
+                .or_insert(w);
+        }
+
+        let mut outgoing = Vec::with_capacity(agg.len());
+        for ((label, dest_class), weight) in agg {
+            if !weight.is_empty() {
+                outgoing.push(DwaTransitionSig { label, dest_class, weight });
+            }
         }
         outgoing.sort_by(|a, b| {
             a.label
@@ -477,7 +496,7 @@ impl DWA {
 
 // ---------------- NWA minimization ----------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum ArcLabel {
     Eps,
     Label(i16),
@@ -486,12 +505,12 @@ enum ArcLabel {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct NwaTransitionSig {
     label: ArcLabel,
+    dest_class: usize,
     weight: Weight,
-    dest_classes: Vec<usize>,
 }
 
 impl NwaTransitionSig {
-    fn sort_key(&self) -> (u8, i16, u64, u64) {
+    fn sort_key(&self) -> (u8, i16, usize, u64) {
         let label_tag = match self.label {
             ArcLabel::Eps => 0,
             ArcLabel::Label(_) => 1,
@@ -501,8 +520,7 @@ impl NwaTransitionSig {
             ArcLabel::Label(v) => v,
         };
         let w_hash = hash_value(&self.weight);
-        let dest_hash = hash_value(&self.dest_classes);
-        (label_tag, label_val, w_hash, dest_hash)
+        (label_tag, label_val, self.dest_class, w_hash)
     }
 }
 
@@ -515,32 +533,50 @@ struct NwaStateSignature {
 impl NwaStateSignature {
     fn from_state(state_id: NWAStateID, states: &NWAStates, classes: &[usize]) -> Self {
         let st = &states[state_id];
-        let mut temp: HashMap<(ArcLabel, Weight), BTreeSet<usize>> = HashMap::new();
+        // Aggregate transitions by (label, dest_class), summing (unioning) their weights.
+        // This matches the semantic equation:
+        //   L_s(a v) = ⋁_C ( W_s(a, C) & L_C(v) )
+        // where W_s(a, C) is the union of weights of all transitions s -a,w-> t with t in class C.
+        // Using aggregated weights per (label, dest_class) gives a right-invariant equivalence
+        // that is exactly language-preserving for the bitset-weight semantics.
+        let mut temp: BTreeMap<(ArcLabel, usize), Weight> = BTreeMap::new();
 
+        // Epsilon transitions
         for &(dest, ref w) in &st.epsilons {
             if w.is_empty() {
                 continue;
             }
-            let key = (ArcLabel::Eps, w.clone());
-            temp.entry(key).or_insert_with(BTreeSet::new).insert(classes[dest]);
+            let key = (ArcLabel::Eps, classes[dest]);
+            temp.entry(key)
+                .and_modify(|acc| *acc |= w)
+                .or_insert(w.clone());
         }
 
+        // Labeled transitions
         for (&lbl, targets) in &st.transitions {
             let label = ArcLabel::Label(lbl);
             for &(dest, ref w) in targets {
                 if w.is_empty() {
                     continue;
                 }
-                let key = (label, w.clone());
-                temp.entry(key).or_insert_with(BTreeSet::new).insert(classes[dest]);
+                let key = (label, classes[dest]);
+                temp.entry(key)
+                    .and_modify(|acc| *acc |= w)
+                    .or_insert(w.clone());
             }
         }
 
         let mut outgoing = Vec::with_capacity(temp.len());
-        for ((label, weight), dest_set) in temp {
-            let dest_classes: Vec<usize> = dest_set.into_iter().collect();
-            outgoing.push(NwaTransitionSig { label, weight, dest_classes });
+        for ((label, dest_class), weight) in temp {
+            if !weight.is_empty() {
+                outgoing.push(NwaTransitionSig {
+                    label,
+                    dest_class,
+                    weight,
+                });
+            }
         }
+
         outgoing.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
 
         NwaStateSignature {
@@ -629,6 +665,9 @@ impl NWA {
         changed |= self.push_final_weights_along_epsilons();
         crate::debug!(5, "[NWA::simplify] After pushing final weights along epsilons: {}", self.stats());
 
+        changed |= self.compress_transitions();
+        crate::debug!(5, "[NWA::simplify] After compress_transitions: {}", self.stats());
+
         changed |= self.prune_dead_ends();
         crate::debug!(5, "[NWA::simplify] After prune_dead_ends (1): {}", self.stats());
 
@@ -654,6 +693,75 @@ impl NWA {
             changed,
             self.stats()
         );
+        changed
+    }
+
+    /// Canonicalize NWA transitions by merging parallel transitions:
+    ///  - For each state and epsilon edge, merge multiple (to, w) by unioning weights per `to`.
+    ///  - For each state, label, and destination, merge multiple (label, to, w) by unioning weights.
+    /// Transitions with empty weight are removed.
+    ///
+    /// This is sound because the weight semiring is (bitset, |, &, ∅, U), so:
+    ///   (w1 & x) | (w2 & x) = (w1 | w2) & x
+    /// for all bitsets w1, w2, x. Thus, multiple parallel transitions are semantically
+    /// equivalent to a single transition with the union of their weights.
+    fn compress_transitions(&mut self) -> bool {
+        let mut changed = false;
+
+        for st in &mut self.states.0 {
+            // Compress epsilons: (to, w) -> union of weights per `to`.
+            if !st.epsilons.is_empty() {
+                let mut eps_map: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+                for &(to, ref w) in &st.epsilons {
+                    if w.is_empty() {
+                        continue;
+                    }
+                    eps_map
+                        .entry(to)
+                        .and_modify(|acc| *acc |= w)
+                        .or_insert(w.clone());
+                }
+                if eps_map.len() != st.epsilons.len() {
+                    changed = true;
+                }
+                st.epsilons = eps_map
+                    .into_iter()
+                    .filter(|(_, w)| !w.is_empty())
+                    .collect();
+            }
+
+            // Compress labeled transitions: per (label, to) aggregate weights by union.
+            if !st.transitions.is_empty() {
+                let mut new_transitions: BTreeMap<i16, Vec<(NWAStateID, Weight)>> = BTreeMap::new();
+                for (&lbl, targets) in &st.transitions {
+                    let mut per_dest: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+                    for &(to, ref w) in targets {
+                        if w.is_empty() {
+                            continue;
+                        }
+                        per_dest
+                            .entry(to)
+                            .and_modify(|acc| *acc |= w)
+                            .or_insert(w.clone());
+                    }
+                    if per_dest.len() != targets.len() {
+                        changed = true;
+                    }
+                    let merged: Vec<(NWAStateID, Weight)> = per_dest
+                        .into_iter()
+                        .filter(|(_, w)| !w.is_empty())
+                        .collect();
+                    if !merged.is_empty() {
+                        new_transitions.insert(lbl, merged);
+                    }
+                }
+                if new_transitions.len() != st.transitions.len() {
+                    changed = true;
+                }
+                st.transitions = new_transitions;
+            }
+        }
+
         changed
     }
 
