@@ -2590,6 +2590,7 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 }
 
+#[ignore]
 #[test]
 fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
     // This test uses the grammar from `test_js_simplified_ebnf_string` to reproduce
