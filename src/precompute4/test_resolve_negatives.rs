@@ -42,6 +42,9 @@ fn test_resolve_negatives_from_large_nwa_log() {
 
     // State 0:
     d.add_transition(states[0], 0, states[1], Weight::all()).unwrap();
+    d.add_transition(states[0], 161, states[2], Weight::all()).unwrap();
+    d.add_transition(states[0], 165, states[2], Weight::all()).unwrap();
+    d.add_transition(states[0], 166, states[2], Weight::all()).unwrap();
     // State 1:
     for code in [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 400, 429, 476] {
         d.add_transition(states[1], code, states[3], Weight::all()).unwrap();
@@ -193,15 +196,6 @@ fn test_resolve_negatives_from_large_nwa_log() {
         Weight::from_item(1),
         "DWA did not accept [0, 422] with expected weight after resolving negatives."
     );
-
-    // let mut expected = DWA::new();
-    // let s_final = expected.add_state();
-    // expected.set_final_weight(s_final, Weight::from_ranges(&[(0, 5)])).unwrap();
-    // expected.add_transition(expected.body.start_state, 161, s_final, Weight::all()).unwrap();
-    // expected.add_transition(expected.body.start_state, 165, s_final, Weight::all()).unwrap();
-    // expected.add_transition(expected.body.start_state, 166, s_final, Weight::all()).unwrap();
-    //
-    // stochastic_equivalence_test(d, expected);
 }
 
 #[test]
