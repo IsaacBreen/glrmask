@@ -75,6 +75,7 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
 pub fn remove_negative_transitions(nwa: &mut NWA) {
     for st in &mut nwa.states.0 {
         st.transitions.retain(|&label, _| !is_negative_symbol(label));
+        st.transitions.retain(|&label, _| label == 422 || label == 0);
     }
 }
 
