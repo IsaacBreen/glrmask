@@ -8,6 +8,7 @@ use chrono::Local;
 use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::parser::{ExpectElse, GLRParser};
+use crate::glr::table::StateID;
 use crate::json_serialization::JSONConvertible;
 use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
@@ -35,7 +36,7 @@ impl NWA {
 
 // Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
 pub use crate::precompute4::template_nwa::FullDWABuildError;
-use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
+use crate::precompute4::utils::{encode_symbol_i16, DEFAULT_TRANSITION_SYMBOL};
 
 pub type Precomputed4 = DWA;
 
@@ -56,9 +57,9 @@ pub fn precompute4(
     };
     // Print the template DWA for terminal ''`''
     println!("parser: {}", parser);
-    let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476, DEFAULT_TRANSITION_SYMBOL];
+    let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476, DEFAULT_TRANSITION_SYMBOL as usize];
     let mut template_dwa = template_dwas.get(&parser.terminal_map.get_by_left(&crate::glr::grammar::Terminal::Literal(b"`".to_vec())).unwrap()).expect_else(|| "No template DWA for terminal ''`''".to_string()).clone();
-    template_dwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| allowed.contains(&label) || allowed.contains(&-label) || label == 0));
+    template_dwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| allowed.contains(&crate::precompute4::utils::decode_symbol_i16(label).unwrap().1 .0)));
     template_dwa.simplify();
     println!("Template DWA for terminal ''`'':\n{}", template_dwa);
     assert!(template_dwa.states.0.len() > 10);
