@@ -686,7 +686,6 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
     memo: &mut PruneAndTransformRecursiveMemo,
-    _stored_trie_god: &StoredTrieGodWrapper,
 ) {
     // Stored trie nodes are no longer tracked; reuse the normal LLM-token pruning logic.
     allow_only_llm_tokens_and_prune_arc(root_arc, allowed_tokens, memo);

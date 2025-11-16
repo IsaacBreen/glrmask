@@ -1607,11 +1607,20 @@ impl GrammarConstraint {
         )
     }
 
+
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         self.original_bv_to_internal_with_map(
             original_bv,
             &self.vocab.original_to_internal,
         )
+    }
+
+    pub fn internal_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
+        self.vocab
+            .internal_to_original
+            .get(&internal_id.0)
+            .and_then(|bv| bv.iter().next())
+            .map(|v| LLMTokenID(v))
     }
 
     #[inline]

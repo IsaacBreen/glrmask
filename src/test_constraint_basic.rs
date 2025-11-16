@@ -7,13 +7,7 @@ use std::time::Instant;
 use bimap::BiBTreeMap;
 use indoc::indoc;
 
-use crate::constraint::{
-    GrammarConstraint,
-    GrammarConstraintConfig,
-    IntermediatePrecomputeNode3,
-    IntermediatePrecomputedNodeContents3,
-    PrecomputeNode3Index,
-};
+use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, LLMTokenBV};
 use crate::datastructures::gss_leveled_adapter::{
     allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc,
     Acc,
@@ -65,14 +59,10 @@ fn test_trivial() {
         llm_token_map,
         1, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
-        None,
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed0();
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed3();
-    constraint.dump_precomputed_special();
     constraint.dump_precomputed4();
 
     println!("Initializing constraint state...");
@@ -124,12 +114,9 @@ fn test_constraint_simple() {
         llm_token_map.clone(),
         2, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
-        None,
     );
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed3();
-    constraint.dump_precomputed_special();
 
     let mut constraint_state = constraint.init();
 
@@ -216,11 +203,9 @@ fn test_constraint_simple_simplified() {
         llm_token_map.clone(),
         1, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
-        None,
     );
     // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed3();
     constraint.dump_precomputed4();
 
     let mut constraint_state = constraint.init();
@@ -294,11 +279,9 @@ fn test_constraint_expression() {
         llm_token_map.clone(),
         6, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
-        None,
     );
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed3();
     constraint.dump_precomputed4();
     // constraint.dump_precomputed_special();
 
@@ -373,11 +356,9 @@ fn test_constraint_expression_simplified_06_11_25() {
         llm_token_map.clone(),
         1, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
-        None,
     );
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
     constraint.dump_precomputed4();
 
     // Initial state and step
@@ -513,13 +494,9 @@ fn test_aborted_tokenizer_restart_equivalence() {
         llm_token_map.clone(),
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
-        None,
     );
     println!("parser: {}", constraint.parser);
     println!("Vocab: {:?}", constraint.llm_vocab);
-    println!("Precompute0 vocab: {:?}", constraint.precompute0_vocab);
-    constraint.dump_precomputed0();
-    constraint.dump_precomputed3();
 
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state1 = constraint.init();
@@ -580,7 +557,6 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
         llm_token_map.clone(),
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
-        None,
     );
     constraint.dump_precomputed1();
 
@@ -660,9 +636,7 @@ fn test_a_plus_commit_equivalence() {
         llm_token_map.clone(),
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
-        None,
     );
-    constraint.dump_precomputed0();
 
     // Scenario 1: Commit "a" three times
     let mut state1 = constraint.init();
@@ -718,15 +692,11 @@ fn test_ignore_token() {
         llm_token_map,
         3, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
-        None,
     );
     println!("Parser: {}", constraint.parser);
     // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed0();
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
-    constraint.dump_precomputed_special();
     constraint.dump_precomputed4();
 
     // --- Runtime check ---
@@ -766,7 +736,6 @@ fn test_hideous_ambiguity() {
         llm_token_map.clone(),
         0,
         &GrammarConstraintConfig::default(),
-        None,
     );
 
     // 7. Initialize the Constraint State
@@ -812,7 +781,6 @@ fn test_simple_def_match_non_zero_llm_id() {
         llm_token_map.clone(), // Original LLMTokenID map
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
-        None,
     );
 
     // constraint.dump_precomputed1(); // Optional: for debugging precomputation
@@ -966,8 +934,8 @@ fn test_precompute_x_eq() {
     let equals_tid = *grammar_token_map.get_by_left(&regex_name("EQUALS")).unwrap();
 
     // Get the LLM token IDs
-    let x_llm_id = constraint.internal_to_original_precompute1(*llm_token_map.get_by_left(b"x".as_ref()).unwrap()).unwrap();
-    let space_equals_llm_id = constraint.internal_to_original_precompute1(*llm_token_map.get_by_left(b" =".as_ref()).unwrap()).unwrap();
+    let x_llm_id = constraint.internal_bv_to_original(&LLMTokenBV::from_item(llm_token_map.get_by_left(b"x".as_ref()).unwrap().0));
+    let space_equals_llm_id = constraint.internal_bv_to_original(&LLMTokenBV::from_item(llm_token_map.get_by_left(b" =".as_ref()).unwrap().0));
 
     // 1. Verify the edge for 'X'
     let x_dests = root_node.get(&Some(x_tid)).expect("No edge for terminal 'X'");
@@ -1117,7 +1085,6 @@ fn test_constraint_expression_no_parens() {
     );
     println!("parser: {}", constraint.parser);
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -1204,7 +1171,7 @@ fn test_constraint_expression_no_times_parens() {
 
     // Tokenizer regex for grammar tokens '+' 'i'
     let expr = groups![
-        eat_u8(b'+'), 
+        eat_u8(b'+'),
         eat_u8(b'i'),
     ];
     let tokenizer = expr.build();
@@ -1365,7 +1332,6 @@ fn test_constraint_expression_unbalanced_parens2() {
     );
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed3();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -1472,13 +1438,11 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
         llm_token_map,
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
-        None,
     );
     // println!("Tokenizer: {}", constraint.tokenizer);
     // println!("Parser: {}", constraint.parser);
     // constraint.dump_precomputed0();
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
 
     // 4. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -1539,10 +1503,8 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
         llm_token_map,
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
-        None,
     );
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
     constraint.dump_precomputed4();
 
     // 5. Initialize state and get the initial mask
@@ -1586,11 +1548,9 @@ fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::err
         llm_token_map,
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
-        None,
     );
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
     constraint.dump_precomputed4();
 
     // 5. Initialize state and get the initial mask
@@ -1644,11 +1604,9 @@ fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::er
         llm_token_map,
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
-        None,
     );
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
     constraint.dump_precomputed4();
 
     // 5. Initialize state and get the initial mask
@@ -1703,11 +1661,7 @@ fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>
     let tid = 1; // Terminal ID for 'if'
     let terminal = TerminalID(tid);
 
-    let trie3_god = crate::constraint::IntermediateTrie3GodWrapper::new(); // Dummy 'god' object
-    let acc = Acc::new_fresh();
-    let gss_stack = parser.get_combined_gss_with_acc(acc);
-
-    let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
+    let mut glr_state = parser.init_glr_parser_with_acc();
 
     const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromAll;
     glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
@@ -1770,12 +1724,7 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
     use crate::datastructures::gss_leveled_adapter::Acc;
     use crate::glr::parser::{BelowBottomReductionMode, ProcessTokenAdvancedConfig};
 
-
-    let trie3_god = crate::constraint::IntermediateTrie3GodWrapper::new(); // Dummy 'god' object
-    let acc = Acc::new_fresh();
-    let gss_stack = parser.get_combined_gss_with_acc(acc);
-
-    let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
+    let mut glr_state = parser.init_glr_parser_with_acc();
 
     const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromAll;
     // for tid in parser.terminal_map.right_values() {
@@ -1879,12 +1828,7 @@ fn test_gss_structural_sharing_factor3() -> Result<(), Box<dyn std::error::Error
     use crate::datastructures::gss_leveled_adapter::Acc;
     use crate::glr::parser::{BelowBottomReductionMode, ProcessTokenAdvancedConfig};
 
-
-    let trie3_god = crate::constraint::IntermediateTrie3GodWrapper::new(); // Dummy 'god' object
-    let acc = Acc::new_fresh();
-    let gss_stack = parser.get_combined_gss_with_acc(acc);
-
-    let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
+    let mut glr_state = parser.init_glr_parser_with_acc();
 
     const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromAll;
     for tid in parser.terminal_map.right_values() {
@@ -1941,13 +1885,10 @@ fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
         llm_token_map,
         max_original_llm_token_id,
         &GrammarConstraintConfig::off(),
-        None,
     );
     println!("Tokenizer: {}", constraint.tokenizer);
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed0();
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -1989,12 +1930,10 @@ fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::er
         llm_token_map,
         max_original_llm_token_id,
         &GrammarConstraintConfig::off(),
-        None,
     );
     println!("Tokenizer: {}", constraint.tokenizer);
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
     constraint.dump_precomputed4();
 
     // 5. Initialize state and get the initial mask
@@ -2090,17 +2029,14 @@ fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     }
 
     let mut config = crate::constraint::GrammarConstraintConfig::default();
-    config.skip_precomputation = true;
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
         max_id,
         &config,
-        None,
     );
     println!("GrammarConstraint constructed successfully.");
-    constraint.dump_precomputed3();
 
     let mut constraint_state = constraint.init();
 
@@ -2224,7 +2160,6 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
         llm_token_map.clone(),
         max_id,
         &GrammarConstraintConfig::default(),
-        None,
     );
     println!("GrammarConstraint constructed successfully.");
     println!("{}", constraint.parser);
@@ -2411,10 +2346,8 @@ fn test_constraint_indirect_recursion_simplified() {
         llm_token_map.clone(),
         2, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
-        None,
     );
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -2454,12 +2387,10 @@ fn test_constraint_repetition_a() {
         llm_token_map.clone(),
         0, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
-        None,
     );
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed3();
     constraint.dump_precomputed4();
 
     // Initial state and step
@@ -2500,7 +2431,6 @@ fn test_constraint_expression_split_token() {
         llm_token_map.clone(),
         1, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
-        None,
     );
     // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
@@ -2543,7 +2473,6 @@ fn test_constraint_expression_trivial_indirect() {
         llm_token_map.clone(),
         3,
         &GrammarConstraintConfig::default(),
-        None,
     );
     // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
@@ -2591,12 +2520,10 @@ fn test_constraint_expression_trivial_direct() {
         llm_token_map.clone(),
         3,
         &GrammarConstraintConfig::default(),
-        None,
     );
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed3();
     constraint.dump_precomputed4();
 
     // Initial state and step
@@ -2644,12 +2571,10 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
         llm_token_map.clone(),
         3,
         &GrammarConstraintConfig::default(),
-        None,
     );
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed3();
     constraint.dump_precomputed4();
 
     // Initial state and step
@@ -2688,12 +2613,7 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     println!("Parser has {} states", parser.table.len());
 
     // 2. Replicate the GSS setup from `precompute3`
-    let trie3_god = crate::constraint::IntermediateTrie3GodWrapper::new();
-    let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::root())));
-    let mut acc = Acc::new_fresh();
-    acc.stored_trie_nodes.insert(trie3_root);
-    let gss_stack = parser.get_combined_gss_with_acc(acc);
-    let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
+    let mut glr_state = parser.init_glr_parser_with_acc();
 
     for i in 0..50 {
         let mut next_glr_state: Option<GLRParserState> = None;
@@ -2701,7 +2621,7 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
             let mut glr_state_copy = glr_state.clone();
             glr_state_copy.process_token_advanced(*terminal_id, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll, current_token: None, ..Default::default() });
             let edge_bv = HybridBitset::from_iter(vec![i, terminal_id.0]);
-            allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_state_copy.active_state.stack, &edge_bv, &mut HashMap::new(), glr_state_copy.active_state.trie2_god.as_ref().unwrap());
+            allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_state_copy.active_state.stack, &edge_bv, &mut HashMap::new());
             if glr_state_copy.is_ok() {
                 if let Some(existing) = &mut next_glr_state {
                     existing.merge_with(glr_state_copy);
