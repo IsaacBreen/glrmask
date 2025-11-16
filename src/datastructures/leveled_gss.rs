@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn test_pop_preserves_child_node_sharing() {
         let gss_abc = gss_from_str_stacks(&[(
-            &["C", "B", "A"],
+            &["A", "B", "C"],
             &[1],
         )]);
 
@@ -1762,7 +1762,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 continue;
             }
 
-            vals.reverse();
             if let Some(last_val) = vals.pop() {
                 let mut node = &mut trie;
                 for v in vals {
@@ -1862,7 +1861,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         ) {
             if l.empty {
                 let mut stack = pref.clone();
-                stack.reverse();
                 out.push((stack, acc.clone()));
             }
             for (v, kids) in l.children.iter() {
@@ -1883,7 +1881,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 Upper::Branch(b) => {
                     if let Some(e) = &b.empty {
                         let mut stack = pref.clone();
-                        stack.reverse();
                         out.push((stack, e.clone()));
                     }
                     for (v, kids) in b.children.iter() {
@@ -1897,7 +1894,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 Upper::Interface(i) => {
                     if i.inner.empty {
                         let mut stack = pref.clone();
-                        stack.reverse();
                         out.push((stack, i.acc.clone()));
                     }
                     for (v, kids) in i.inner.children.iter() {
