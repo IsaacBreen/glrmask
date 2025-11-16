@@ -329,7 +329,7 @@ impl NWA {
         closure
     }
 
-    pub fn determinize(&self) -> DWA {
+    pub fn _determinize(&self) -> DWA {
         let mut dwa = DWA::new();
         dwa.states.0.clear();
 
@@ -393,6 +393,28 @@ impl NWA {
             }
         }
         dwa
+    }
+
+    pub fn determinize(&self) -> DWA {
+        let instant = std::time::Instant::now();
+        crate::debug!(4, "Determinizing NWA with {} states...", self.states.len());
+
+        let mut determinize_here = determinize_nwa_to_dwa(self);
+        let num_states = determinize_here.states.len();
+        determinize_here.simplify();
+        crate::debug!(4, "1. Determinization took {:.2?}, resulting DWA has {} states, {} after simplification.", instant.elapsed(), num_states, determinize_here.states.len());
+
+        let mut via_determinize_rs = self.determinize_to_dwa2();
+        let num_states_rs = via_determinize_rs.states.len();
+        via_determinize_rs.simplify();
+        crate::debug!(4, "2. Determinization via Rust code took {:.2?}, resulting DWA has {} states, {} after simplification.", instant.elapsed(), num_states_rs, via_determinize_rs.states.len());
+
+        let mut via_determinize_rustfst = self.determinize_to_dwa_with_rustfst();
+        let num_states_rustfst = via_determinize_rustfst.states.len();
+        via_determinize_rustfst.simplify();
+        crate::debug!(4, "3. Determinization via RustFST took {:.2?}, resulting DWA has {} states, {} after simplification.", instant.elapsed(), num_states_rustfst, via_determinize_rustfst.states.len());
+
+        determinize_here
     }
 
     pub fn determinize_inplace(&mut self) {

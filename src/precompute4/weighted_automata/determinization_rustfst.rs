@@ -297,25 +297,28 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     fst.compute_and_update_properties_all().unwrap();
     assert!(fst.properties().contains(FstProperties::ACCEPTOR), "FST should be an acceptor before determinization");
 
-    crate::debug!(4, "NFA states before rm_epsilon: {}", fst.num_states());
-    rm_epsilon(&mut fst).unwrap();
-    crate::debug!(4, "NFA states after rm_epsilon: {}", fst.num_states());
-
-    crate::debug!(4, "NFA states before minimization: {}", fst.num_states());
-    let min_config = MinimizeConfig::default().with_allow_nondet(true);
-    minimize_with_config(&mut fst, min_config).unwrap();
-    crate::debug!(4, "NFA states after minimization: {}", fst.num_states());
-
     let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
-    crate::debug!(4, "NFA states before determinization: {}", fst.num_states());
-    let mut det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
-    crate::debug!(4, "DFA states after determinization: {}", det_fst.num_states());
-
-    let min_config = MinimizeConfig::default();
-    crate::debug!(4, "DFA states before minimization: {}", det_fst.num_states());
-    minimize_with_config(&mut det_fst, min_config).unwrap();
-    crate::debug!(4, "DFA states after minimization: {}", det_fst.num_states());
-    crate::debug!(5, "Determinized FST:\n{}", det_fst);
+    let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
 
     vector_fst_to_dwa(&det_fst)
+}
+
+impl DWA {
+    pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
+        nwa_to_vector_fst(&NWA::from_dwa(self))
+    }
+
+    pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> DWA {
+        vector_fst_to_dwa(fst)
+    }
+}
+
+impl NWA {
+    pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
+        nwa_to_vector_fst(self)
+    }
+
+    pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> NWA {
+        vector_fst_to_nwa(fst)
+    }
 }

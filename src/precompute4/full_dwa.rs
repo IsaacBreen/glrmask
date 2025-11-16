@@ -28,13 +28,16 @@ impl SimplifyRustfstConfig {
 }
 
 impl NWA {
-    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA { self.determinize_to_dwa() }
+    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA {
+        determinize_nwa_to_dwa(self)
+    }
     pub fn simplify_rustfst(&mut self) { self.simplify(); }
     pub fn simplify_rustfst_with_config(&mut self, _config: SimplifyRustfstConfig) { self.simplify(); }
 }
 
 // Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
 pub use crate::precompute4::template_nwa::FullDWABuildError;
+use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
 
 pub type Precomputed4 = DWA;
 

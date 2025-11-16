@@ -6,6 +6,7 @@ use super::nwa::{NWAState, NWAStates, NWA};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use rustfst::algorithms::{minimize_with_config, MinimizeConfig};
 
 #[derive(Clone, Debug)]
 struct Partition {
@@ -106,7 +107,32 @@ struct DwaStateBuilder {
 
 impl DWA {
     pub fn simplify(&mut self) {
-        let _ = self.simplify_internal();
+        crate::debug!(4, "[DWA::simplify] Num states before simplification: {}", self.states.len());
+        let instant = std::time::Instant::now();
+        let mut internal = self.clone();
+        internal.simplify_internal();
+        crate::debug!(
+            4,
+            "[DWA::simplify] Simplification took {:.3} seconds. Num states: {}",
+            instant.elapsed().as_secs_f64(),
+            internal.states.len()
+        );
+        let mut rustfst = self.clone();
+        rustfst.simplify_with_rustfst();
+        crate::debug!(
+            4,
+            "[DWA::simplify] RustFST minimization took {:.3} seconds. Num states: {}",
+            instant.elapsed().as_secs_f64(),
+            rustfst.states.len()
+        );
+        *self = internal;
+    }
+
+    fn simplify_with_rustfst(&mut self) -> bool {
+        let min_config = MinimizeConfig::default();
+        let mut fst = self.to_rustfst();
+        minimize_with_config(&mut fst, min_config).unwrap();
+        true
     }
 
     fn simplify_internal(&mut self) -> bool {
@@ -563,7 +589,36 @@ struct NwaStateBuilder {
 }
 
 impl NWA {
-    pub fn simplify(&mut self) -> bool {
+    pub fn simplify(&mut self) {
+        crate::debug!(4, "[NWA::simplify] Num states before simplification: {}", self.states.len());
+        let instant = std::time::Instant::now();
+        let mut internal = self.clone();
+        internal.simplify_internal();
+        crate::debug!(
+            4,
+            "[NWA::simplify] Simplification took {:.3} seconds. Num states: {}",
+            instant.elapsed().as_secs_f64(),
+            internal.states.len()
+        );
+        let mut rustfst = self.clone();
+        rustfst.simplify_with_rustfst();
+        crate::debug!(
+            4,
+            "[NWA::simplify] RustFST minimization took {:.3} seconds. Num states: {}",
+            instant.elapsed().as_secs_f64(),
+            rustfst.states.len()
+        );
+        *self = internal;
+    }
+
+    pub fn simplify_with_rustfst(&mut self) -> bool {
+        let min_config = MinimizeConfig::default();
+        let mut fst = self.to_rustfst();
+        minimize_with_config(&mut fst, min_config).unwrap();
+        true
+    }
+
+    pub fn simplify_internal(&mut self) -> bool {
         crate::debug!(5, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         let mut changed = false;
         changed |= self.prune_unreachable();
