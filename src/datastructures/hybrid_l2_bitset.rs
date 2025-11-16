@@ -233,18 +233,24 @@ impl HybridL2Bitset {
     }
 
     pub fn intersection_with(&self, other: &Self, default: Option<HybridBitset>) -> Self {
-        self.zip_op(other, default, |a, b| a & b)
+        self.zip_op(other, default, false, |a, b| a & b)
     }
 
     pub fn union_with(&self, other: &Self, default: Option<HybridBitset>) -> Self {
-        self.zip_op(other, default, |a, b| a | b)
+        self.zip_op(other, default, true, |a, b| a | b)
     }
 
     pub fn symmetric_difference_with(&self, other: &Self, default: Option<HybridBitset>) -> Self {
-        self.zip_op(other, default, |a, b| a ^ b)
+        self.zip_op(other, default, true, |a, b| a ^ b)
     }
 
-    fn zip_op<F>(&self, other: &Self, default: Option<HybridBitset>, op: F) -> Self
+    fn zip_op<F>(
+        &self,
+        other: &Self,
+        default: Option<HybridBitset>,
+        use_default_for_none_none: bool,
+        op: F,
+    ) -> Self
     where
         F: Fn(&HybridBitset, &HybridBitset) -> HybridBitset,
     {
@@ -294,8 +300,12 @@ impl HybridL2Bitset {
                     }
                 }
                 (None, None) => {
-                    if let Some(ref d) = default {
-                        op(d, d)
+                    if use_default_for_none_none {
+                        if let Some(ref d) = default {
+                            op(d, d)
+                        } else {
+                            return;
+                        }
                     } else {
                         return;
                     }
@@ -420,12 +430,12 @@ impl Sub for &HybridL2Bitset {
             return HybridL2Bitset::new();
         }
         if self.is_simple() || rhs.is_simple() {
-            return self.zip_op(rhs, Some(HybridBitset::zeros()), |a, b| a - b);
+            return self.zip_op(rhs, Some(HybridBitset::zeros()), true, |a, b| a - b);
         }
         if let Some(cached) = cache::get_l2_op_cache(cache::BinOp::Sub, &self.inner, &rhs.inner) {
             return HybridL2Bitset { inner: cached };
         }
-        let result = self.zip_op(rhs, Some(HybridBitset::zeros()), |a, b| a - b);
+        let result = self.zip_op(rhs, Some(HybridBitset::zeros()), true, |a, b| a - b);
         cache::put_l2_op_cache(
             cache::BinOp::Sub,
             self.inner.clone(),
