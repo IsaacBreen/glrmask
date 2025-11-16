@@ -369,11 +369,9 @@ fn union_left_bodies(states_arena: &RefCell<NWAStates>, left_bodies: Vec<NWABody
 }
 
 fn simplify_and_determinize_nwa(nwa: &mut NWA) {
-    nwa.simplify_rustfst_with_config(
-        SimplifyRustfstConfig::default()
-            .with_rm_epsilon(true)
-            .with_determinize(true),
-    );
+    nwa.simplify();
+    let dwa = nwa.determinize_to_dwa_with_rustfst();
+    *nwa = NWA::from_dwa(&dwa);
 }
 
 fn simplify_remove_epsilon(nwa: &mut NWA) {
