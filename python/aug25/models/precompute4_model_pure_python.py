@@ -231,6 +231,7 @@ class Model(GraphProvider):
     stats.add_group('commit')
 
     dwa: DWA
+    dwa_shortest_paths: List[int]
     parser_table: ParserTable
     tokenizer: PyTokenizer
     tokenizer_initial_state: int
@@ -353,6 +354,23 @@ class Model(GraphProvider):
             else:
                 state.state_weight = state.state_weight.intersection(computed_weights[i])
 
+        # Compute shortest paths to a final state.
+        num_dwa_states = len(dwa_states)
+        dwa_shortest_paths = [num_dwa_states] * num_dwa_states
+        q = collections.deque()
+
+        for i, state in enumerate(dwa_states):
+            if state.final_weight is not None:
+                dwa_shortest_paths[i] = 0
+                q.append(i)
+
+        while q:
+            v = q.popleft()
+            for u, _ in rev_adj[v]:
+                if dwa_shortest_paths[u] == num_dwa_states:
+                    dwa_shortest_paths[u] = dwa_shortest_paths[v] + 1
+                    q.append(u)
+
         start_state = dwa_json['start_state']
         dwa = DWA(dwa_states, start_state)
 
@@ -404,6 +422,7 @@ class Model(GraphProvider):
 
         model = Model(
             dwa=dwa,
+            dwa_shortest_paths=dwa_shortest_paths,
             parser_table=parser_table,
             tokenizer=tokenizer,
             tokenizer_initial_state=tokenizer.initial_state_id(),
@@ -544,12 +563,13 @@ class Model(GraphProvider):
     def _is_dead(self, gss: GSS) -> bool:
         return gss.reduce_acc().llm_mask.is_empty()
 
-    def _merge_into_queue(self, queue: Dict[int, Dict[int, GSS]], gss: GSS, target_state_id: int):
+    def _merge_into_queue(self, queue: Dict[int, Dict[int, Dict[int, GSS]]], gss: GSS, target_state_id: int):
         depth = gss.max_depth()
-        if target_state_id in queue[depth]:
-            queue[depth][target_state_id] = queue[depth][target_state_id].merge(gss)
+        dist = self.dwa_shortest_paths[target_state_id]
+        if target_state_id in queue[dist][depth]:
+            queue[dist][depth][target_state_id] = queue[dist][depth][target_state_id].merge(gss)
         else:
-            queue[depth][target_state_id] = gss
+            queue[dist][depth][target_state_id] = gss
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
         stats = Stats.get()
@@ -557,10 +577,10 @@ class Model(GraphProvider):
         
         all_ones = self.all_internal_llm_tokens_bitset
         final_mask = RangeSet.empty()
-        
-        # Queue: depth -> {dwa_state_id: GSS}
-        queue: Dict[int, Dict[int, GSS]] = collections.defaultdict(dict)
-        
+
+        # Queue: dist -> depth -> {dwa_state_id: GSS}
+        queue: Dict[int, Dict[int, Dict[int, GSS]]] = collections.defaultdict(lambda: collections.defaultdict(dict))
+
         # 1. Seed initial states
         start_node = self.dwa.states[self.dwa.start_state]
 
@@ -591,59 +611,64 @@ class Model(GraphProvider):
 
         # 2. Main worklist loop
         while queue:
-            max_depth = max(queue.keys())
-            states_at_depth = queue.pop(max_depth)
-            
-            for dwa_id, gss in states_at_depth.items():
-                dwa_state = self.dwa.states[dwa_id]
+            min_dist = min(queue.keys())
+            by_depth = queue.pop(min_dist)
 
-                # Check for final state
-                if dwa_state.final_weight is not None:
-                    acc = gss.reduce_acc()
-                    if acc:
-                        final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
-                        if not final_tokens.is_empty():
-                            final_mask |= final_tokens
+            while by_depth:
+                max_depth = max(by_depth.keys())
+                states_at_depth = by_depth.pop(max_depth)
 
-                gss = self._subtract_weight(gss, final_mask)
+                for dwa_id in sorted(states_at_depth.keys()):
+                    gss = states_at_depth[dwa_id]
+                    dwa_state = self.dwa.states[dwa_id]
 
-                if dwa_state.state_weight is not None:
-                    gss = self._apply_weight(gss, dwa_state.state_weight)
-                    if gss.is_empty():
+                    # Check for final state
+                    if dwa_state.final_weight is not None:
+                        acc = gss.reduce_acc()
+                        if acc:
+                            final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
+                            if not final_tokens.is_empty():
+                                final_mask |= final_tokens
+
+                    gss = self._subtract_weight(gss, final_mask)
+
+                    if dwa_state.state_weight is not None:
+                        gss = self._apply_weight(gss, dwa_state.state_weight)
+                        if gss.is_empty():
+                            continue
+
+                    if self._is_dead(gss):
                         continue
-
-                if self._is_dead(gss):
-                    continue
-                            
-                # Process transitions
-                peeked = gss.peek()
-                if not peeked:
-                    continue
-                    
-                for edge in peeked:
-                    parser_state_id = edge
-                    
-                    # 1. Specific transition
-                    t = dwa_state.transitions.get(parser_state_id)
-                    if t:
-                        target_id, weight = t
-                        isolated = gss.isolate(edge)
-                        popped = isolated.pop()
-                        if not popped.is_empty():
-                            final_gss = self._apply_weight(popped, weight)
-                            if not self._is_dead(final_gss):
-                                self._merge_into_queue(queue, final_gss, target_id)
                                 
-                    # 2. Default transition
-                    t_def = dwa_state.transitions.get(DEFAULT_TRANSITION_SYMBOL)
-                    if t_def:
-                        target_id, weight = t_def
-                        isolated = gss.isolate(edge)
-                        popped = isolated.pop()
-                        if not popped.is_empty():
-                            final_gss = self._apply_weight(popped, weight)
-                            if not self._is_dead(final_gss):
-                                self._merge_into_queue(queue, final_gss, target_id)
+                    # Process transitions
+                    peeked = gss.peek()
+                    if not peeked:
+                        continue
+                        
+                    for edge in peeked:
+                        parser_state_id = edge
+                        
+                        # 1. Specific transition
+                        t = dwa_state.transitions.get(parser_state_id)
+                        if t:
+                            target_id, weight = t
+                            isolated = gss.isolate(edge)
+                            popped = isolated.pop()
+                            if not popped.is_empty():
+                                final_gss = self._apply_weight(popped, weight)
+                                if not self._is_dead(final_gss):
+                                    self._merge_into_queue(queue, final_gss, target_id)
+                                    
+                        # 2. Default transition
+                        t_def = dwa_state.transitions.get(DEFAULT_TRANSITION_SYMBOL)
+                        if t_def:
+                            target_id, weight = t_def
+                            isolated = gss.isolate(edge)
+                            popped = isolated.pop()
+                            if not popped.is_empty():
+                                final_gss = self._apply_weight(popped, weight)
+                                if not self._is_dead(final_gss):
+                                    self._merge_into_queue(queue, final_gss, target_id)
 
         stats.start('get_mask.teardown.final_conversion')
         original_indices = RangeSetOut.empty()
