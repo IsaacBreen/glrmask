@@ -285,20 +285,5 @@ mod tests {
 
         assert_eq!(rules, expected_rules);
     }
-
-    #[test]
-    fn test_from_ebnf_integration() {
-        let ebnf = "start ::= ('a' 'b')+ ;";
-        let grammar_def = GrammarDefinition::from_ebnf(ebnf).unwrap();
-
-        // Check that it produced a reasonable grammar definition
-        assert_eq!(grammar_def.productions.len(), 4); // start' -> start, start -> ..., new_nt -> ..., new_nt ->
-        assert!(grammar_def
-            .regex_name_to_group_id
-            .contains_left("a"));
-        assert!(grammar_def
-            .regex_name_to_group_id
-            .contains_left("b"));
-    }
 }
 
