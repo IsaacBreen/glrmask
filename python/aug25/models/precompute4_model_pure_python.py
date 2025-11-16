@@ -297,6 +297,17 @@ class Model(GraphProvider):
 
             dwa_states.append(DWAState(merged_trans, st_weight, fin_weight))
 
+        for state in dwa_states:
+            if state.state_weight is None:
+                # This state's weight was not precomputed. Let's compute it now.
+                # It's the union of all outgoing transition weights and the final weight.
+                computed_weight = RangeSet.empty()
+                for _, weight in state.transitions.values():
+                    computed_weight = computed_weight.union(weight)
+                if state.final_weight is not None:
+                    computed_weight = computed_weight.union(state.final_weight)
+                state.state_weight = computed_weight
+
         start_state = dwa_json['start_state']
         dwa = DWA(dwa_states, start_state)
 
