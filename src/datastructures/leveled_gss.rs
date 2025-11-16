@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn test_pop_preserves_child_node_sharing() {
         let gss_abc = gss_from_str_stacks(&[(
-            &["A", "B", "C"],
+            &["C", "B", "A"],
             &[1],
         )]);
 
@@ -877,7 +877,7 @@ fn truncate_upper<T, A>(
 ) -> Option<Arc<Upper<T, A>>>
 where
     T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash,
 {
     let ptr = Arc::as_ptr(node) as usize;
     if let Some(cached) = memo_upper.get(&ptr) {
@@ -888,9 +888,9 @@ where
         let sub_gss = LeveledGSS {
             inner: node.clone(),
         };
-        let res = if let Some(acc) = sub_gss.accs_by_depth().get(&0) {
+        let res = if let Some(acc) = sub_gss.reduce_acc() {
             let terminal_lower = new_lower(IHashMap::new(), true);
-            Some(new_interface(terminal_lower, acc.clone()))
+            Some(new_interface(terminal_lower, acc))
         } else {
             None
         };
@@ -1763,6 +1763,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 continue;
             }
 
+            vals.reverse();
             if let Some(last_val) = vals.pop() {
                 let mut node = &mut trie;
                 for v in vals {
@@ -1862,6 +1863,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         ) {
             if l.empty {
                 let mut stack = pref.clone();
+                stack.reverse();
                 out.push((stack, acc.clone()));
             }
             for (v, kids) in l.children.iter() {
@@ -1882,6 +1884,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 Upper::Branch(b) => {
                     if let Some(e) = &b.empty {
                         let mut stack = pref.clone();
+                        stack.reverse();
                         out.push((stack, e.clone()));
                     }
                     for (v, kids) in b.children.iter() {
@@ -1895,6 +1898,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 Upper::Interface(i) => {
                     if i.inner.empty {
                         let mut stack = pref.clone();
+                        stack.reverse();
                         out.push((stack, i.acc.clone()));
                     }
                     for (v, kids) in i.inner.children.iter() {
@@ -2753,10 +2757,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Some(reduced)
     }
 
-    pub fn truncate(&self, max_len: isize) -> Self
-    where
-        A: Ord,
-    {
+    pub fn truncate(&self, max_len: isize) -> Self {
         if max_len < 0 {
             return Self::empty();
         }
@@ -2775,10 +2776,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         new_inner.map_or_else(Self::empty, |inner| Self { inner })
     }
 
-    pub fn split_at_depth(&self, depth: isize) -> (Self, Self)
-    where
-        A: Ord,
-    {
+    pub fn split_at_depth(&self, depth: isize) -> (Self, Self) {
         if depth < 0 {
             return (self.clone(), Self::empty());
         }
