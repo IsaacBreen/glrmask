@@ -106,6 +106,7 @@ struct DwaStateBuilder {
 
 impl DWA {
     pub fn simplify(&mut self) {
+        return;
         let _ = self.simplify_internal();
     }
 
@@ -121,6 +122,7 @@ impl DWA {
     }
 
     fn push_weights_into_transitions_and_finals(&mut self) -> bool {
+        return false;
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -189,6 +191,7 @@ impl DWA {
     }
 
     fn minimize_states(&mut self) -> bool {
+        return false;
         let n = self.states.len();
         if n <= 1 {
             return false;
@@ -284,6 +287,7 @@ impl DWA {
     }
 
     fn prune_unreachable(&mut self) -> bool {
+        return false;
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -350,6 +354,7 @@ impl DWA {
     }
 
     fn prune_dead_ends(&mut self) -> bool {
+        return false;
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -551,6 +556,7 @@ struct NwaStateBuilder {
 
 impl NWA {
     pub fn simplify(&mut self) -> bool {
+        return false;
         let mut changed = false;
         changed |= self.prune_unreachable();
         changed |= self.prune_dead_ends();
@@ -570,6 +576,7 @@ impl NWA {
     }
 
     fn rebuild_from_partition(&mut self, partition: Partition) {
+        return;
         let n = self.states.len();
         if n == 0 {
             return;
@@ -661,6 +668,7 @@ impl NWA {
     }
 
     fn prune_unreachable(&mut self) -> bool {
+        return false;
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -743,6 +751,7 @@ impl NWA {
     }
 
     fn prune_dead_ends(&mut self) -> bool {
+        return false;
         let n = self.states.len();
         if n == 0 {
             return false;

@@ -9,6 +9,7 @@ use crate::precompute4::weighted_automata::{NWA, StateID, Weight};
 /// For any state with a final weight, subtract that weight from all outgoing transitions.
 /// This prunes paths that continue after a word has already been accepted with a given weight.
 pub(crate) fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
+    return false;
     let mut changed = false;
     for i in 0..nwa.states.len() {
         if let Some(final_weight) = nwa.states[i].final_weight.clone() {
@@ -44,6 +45,7 @@ pub(crate) fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
 /// If a default transition for A -> B exists with weight W, subtract W from the weights of all
 /// non-default transitions A -> B (and remove if the resulting weight is empty).
 pub(crate) fn simplify_default_transitions(nwa: &mut NWA) -> bool {
+    return false;
     let mut changed = false;
     for i in 0..nwa.states.len() {
         let state = &mut nwa.states[i];
@@ -129,6 +131,7 @@ fn build_label_follower_map(parser: &GLRParser) -> BTreeMap<ParserStateID, State
 /// Propagate label weights along the NWA and prune transitions whose labels are never reachable.
 /// Currently unused in the main `precompute4` pipeline but kept here as an optional optimization pass.
 pub(crate) fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
+    return ;
     crate::debug!(4, "Starting label propagation and pruning...");
     let now = std::time::Instant::now();
 
