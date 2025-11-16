@@ -2610,10 +2610,15 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     let parser = compiled_grammar.glr_parser;
-    println!("Parser has {} states", parser.table.len());
+    println!("Parser: {}", parser);
 
     // 2. Replicate the GSS setup from `precompute3`
     let mut glr_state = parser.init_glr_parser_with_acc();
+    glr_state.active_state.stack.inner = Arc::new(glr_state.active_state.stack.inner.apply(|acc| {
+        let mut acc = acc.clone();
+        acc.llm_tokens_union = HybridBitset::from_iter((0..50).collect::<Vec<usize>>());
+        acc
+    }));
 
     for i in 0..50 {
         let mut next_glr_state: Option<GLRParserState> = None;
