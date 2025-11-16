@@ -461,41 +461,8 @@ impl PyGrammarConstraint {
         Ok(Self { inner: Arc::new(constraint) })
     }
 
-    fn precompute2_json_string(&self) -> PyResult<String> {
-        // Build [roots_map, arena] JSON array
-        let roots_arr = sep1::json_serialization::JSONNode::Array(
-            self.inner.precomputed2.iter()
-                .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
-                    sid.0.to_json(), idx.to_json()
-                ]))
-                .collect()
-        );
-        let arena_json = self.inner.trie2_god.to_json();
-        let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
-        Ok(top.to_json_string())
-    }
-
-    fn precompute3_json_string(&self) -> PyResult<String> {
-        let roots_arr = sep1::json_serialization::JSONNode::Array(
-            self.inner.precomputed3.iter()
-                .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
-                    sid.0.to_json(), idx.to_json()
-                ]))
-                .collect()
-        );
-        let arena_json = self.inner.trie3_god.to_json();
-        let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
-        Ok(top.to_json_string())
-    }
-
-    fn dump_precomputed0(&self) {
-        self.inner.dump_precomputed0();
-    }
     fn dump_precomputed1(&self) {
         self.inner.dump_precomputed1();
-    }
-    fn dump_precomputed3(&self) {
-        self.inner.dump_precomputed3();
     }
 
     fn get_id_to_token_map(&self, py: Python) -> PyResult<PyObject> {
@@ -504,54 +471,6 @@ impl PyGrammarConstraint {
             dict.set_item(token_id.0, token_bytes.as_slice())?;
         }
         Ok(dict.into())
-    }
-
-    fn original_to_internal_map_precompute0(&self) -> PyResult<BTreeMap<usize, usize>> {
-        Ok(self.inner.precompute0_vocab.original_to_internal.clone())
-    }
-
-    fn internal_to_original_map_precompute0(&self) -> PyResult<BTreeMap<usize, Vec<usize>>> {
-        let mut m = BTreeMap::new();
-        for (k, v) in &self.inner.precompute0_vocab.internal_to_original {
-            m.insert(*k, v.iter().collect());
-        }
-        Ok(m)
-    }
-
-    fn original_to_internal_map_precompute3(&self) -> PyResult<BTreeMap<usize, usize>> {
-        Ok(self.inner.precompute3_vocab.original_to_internal.clone())
-    }
-
-    fn internal_to_original_map_precompute3(&self) -> PyResult<BTreeMap<usize, Vec<usize>>> {
-        let mut m = BTreeMap::new();
-        for (k, v) in &self.inner.precompute3_vocab.internal_to_original {
-            m.insert(*k, v.iter().collect());
-        }
-        Ok(m)
-    }
-
-    fn internal_bv_to_original_precompute0(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-        PyHybridBitset::from(self.inner.internal_bv_to_original_precompute0(&bv.inner))
-    }
-
-    fn original_bv_to_internal_precompute0(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-        PyHybridBitset::from(self.inner.original_bv_to_internal_precompute0(&bv.inner))
-    }
-
-    fn internal_bv_to_original_precompute3(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-        PyHybridBitset::from(self.inner.internal_bv_to_original_precompute3(&bv.inner))
-    }
-
-    fn original_bv_to_internal_precompute3(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-        PyHybridBitset::from(self.inner.original_bv_to_internal_precompute3(&bv.inner))
-    }
-
-    fn all_internal_llm_tokens_bitset_precompute0(&self) -> PyHybridBitset {
-        PyHybridBitset { inner: self.inner.all_internal_llm_tokens_bitset_precompute0() }
-    }
-
-    fn all_internal_llm_tokens_bitset_precompute3(&self) -> PyHybridBitset {
-        PyHybridBitset { inner: self.inner.all_internal_llm_tokens_bitset_precompute3() }
     }
 
     fn tokenizer(&self) -> PyRegex {
@@ -1103,14 +1022,6 @@ impl PyGrammarConstraintState {
             state.state = new_b_tree_map;
         });
         Ok(())
-    }
-
-    fn internal_bv_to_original_precompute0(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-        self.inner.borrow_constraint().internal_bv_to_original_precompute0(bv)
-    }
-
-    fn internal_bv_to_original_precompute3(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-        self.inner.borrow_constraint().internal_bv_to_original_precompute3(bv)
     }
 }
 
