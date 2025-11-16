@@ -311,6 +311,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
         combined_nwa.states.len()
     );
     crate::debug!(4, "Stats for final NWA before DWA determinization:\n{}", combined_nwa.stats());
+    combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| label == 422 || label == 0 || label == 272 || label == 230));
     let mut final_dwa = combined_nwa.determinize_to_dwa_with_rustfst();
     crate::debug!(
         4,
