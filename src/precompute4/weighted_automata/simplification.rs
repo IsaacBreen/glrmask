@@ -170,9 +170,6 @@ impl DWA {
         crate::debug!(5, "[DWA::simplify] After prune_unreachable (2): {}", self.stats());
         changed |= self.prune_dead_ends();
         crate::debug!(5, "[DWA::simplify] After prune_dead_ends (2): {}", self.stats());
-        crate::debug!(
-            5,
-            "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}",
         changed
     }
 }
