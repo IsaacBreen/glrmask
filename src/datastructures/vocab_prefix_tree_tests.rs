@@ -313,28 +313,25 @@ fn test_complex_case() {
     let node_a = tree.root.children.get(&b("a")).unwrap();
     assert_eq!(node_a.token_id, 1);
     assert_eq!(node_a.prefix_length, 1);
-    assert_eq!(node_a.children.len(), 1); // "a" is prefix of "ape", "apple", "apply". "ape" is shortest.
-                                         // So, "a" -> "pe" (for "ape")
-                                         // "ape" -> "le" (for "apple")
-                                         // "ape" -> "ly" (for "apply")
-                                         // This structure is due to merge_nodes logic.
-    assert!(node_a.children.contains_key(&b("pe"))); // Edge from "a" to "ape" node is "pe"
+    // The tokens "ape", "apple", and "apply" all have "a" as their longest token prefix.
+    // Therefore, they should all be children of the "a" node. The implementation does not
+    // create intermediate nodes for non-token prefixes (e.g. "app").
+    assert_eq!(node_a.children.len(), 3);
 
     let node_ape = node_a.children.get(&b("pe")).unwrap();
     assert_eq!(node_ape.token_id, 10);
     assert_eq!(node_ape.prefix_length, 3); // "ape"
-    assert_eq!(node_ape.children.len(), 2); // "apple" and "apply" are children of "ape"
-    assert!(node_ape.children.contains_key(&b("le"))); // Edge from "ape" to "apple" is "le"
-    assert!(node_ape.children.contains_key(&b("ly"))); // Edge from "ape" to "apply" is "ly"
+    assert!(node_ape.children.is_empty());
 
-    let node_apple = node_ape.children.get(&b("le")).unwrap();
+    let node_apple = node_a.children.get(&b("pple")).unwrap();
     assert_eq!(node_apple.token_id, 11);
     assert_eq!(node_apple.prefix_length, 5); // "apple"
+    assert!(node_apple.children.is_empty());
 
-    let node_apply = node_ape.children.get(&b("ly")).unwrap();
+    let node_apply = node_a.children.get(&b("pply")).unwrap();
     assert_eq!(node_apply.token_id, 12);
     assert_eq!(node_apply.prefix_length, 5); // "apply"
-
+    assert!(node_apply.children.is_empty());
 
     // Node "a" reachable: {1, 10, 11, 12}
     let expected_a_bits = RangeSetBlaze::from_iter(vec![1, 10, 11, 12]);
