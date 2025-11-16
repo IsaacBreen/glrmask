@@ -2616,7 +2616,7 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     let mut glr_state = parser.init_glr_parser_with_acc();
     Arc::make_mut(&mut glr_state.active_state.stack).inner = glr_state.active_state.stack.inner.apply(|acc| {
         let mut acc = acc.clone();
-        acc.llm_tokens_union = HybridBitset::from_iter((0..50).collect::<Vec<usize>>());
+        acc.llm_tokens_union = HybridBitset::max_ones();
         acc
     });
 
