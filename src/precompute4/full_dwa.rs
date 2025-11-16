@@ -237,11 +237,15 @@ pub fn precompute4(
 }
 
 fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
+    let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476, DEFAULT_TRANSITION_SYMBOL as usize];
+    combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| allowed.contains(&crate::precompute4::utils::decode_symbol_i16(label).unwrap().1 .0)));
+    combined_nwa.simplify_rustfst();
+    println!("Combined NWA after filtering transitions:\n{}", combined_nwa);
+
     // let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476, DEFAULT_TRANSITION_SYMBOL];
     // combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| allowed.contains(&label) || allowed.contains(&-label) || label == 0));
     crate::debug!(4, "Starting resolve negatives and optimization and determinization of combined NWA...");
     combined_nwa.simplify_rustfst();
-    // println!("Combined NWA after filtering transitions:\n{}", combined_nwa);
     crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
