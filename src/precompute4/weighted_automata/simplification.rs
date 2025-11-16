@@ -691,13 +691,13 @@ impl NWA {
 
         // Worklist fixpoint for F(q) = f0(q) ∨ ⋁_{q --w--> r} (w ∧ F(r)).
         while let Some(v) = queue.pop_front() {
-            let w_v = &final_weights[v];
+            let w_v = final_weights[v].clone();
             if w_v.is_empty() {
                 continue;
             }
 
             for &(u, ref w_uv) in &rev_eps[v] {
-                let candidate = w_v & w_uv;
+                let candidate = &w_v & w_uv;
                 if candidate.is_empty() {
                     continue;
                 }
