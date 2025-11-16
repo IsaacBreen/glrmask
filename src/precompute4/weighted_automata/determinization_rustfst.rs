@@ -305,6 +305,8 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     fst.compute_and_update_properties_all().unwrap();
     assert!(fst.properties().contains(FstProperties::ACCEPTOR), "FST should be an acceptor before determinization");
 
+    rm_epsilon(&mut fst).unwrap();
+
     let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
     let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
 
