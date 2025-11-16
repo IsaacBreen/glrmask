@@ -236,14 +236,14 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     combined_nwa.simplify_rustfst();
     crate::debug!(4, "Initial simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
 
-    crate::debug!(4, "Determinizing combined NWA before negative code resolution...");
-    combined_nwa.determinize_inplace();
-    crate::debug!(
-        4,
-        "Pre-resolution determinization took: {:?}. NWA now has {} states.",
-        now.elapsed(),
-        combined_nwa.states.len()
-    );
+    // crate::debug!(4, "Determinizing combined NWA before negative code resolution...");
+    // combined_nwa.determinize_inplace();
+    // crate::debug!(
+    //     4,
+    //     "Pre-resolution determinization took: {:?}. NWA now has {} states.",
+    //     now.elapsed(),
+    //     combined_nwa.states.len()
+    // );
     crate::debug!(4, "Starting negative code resolution...");
     apply_cancellations(&mut combined_nwa);
     crate::debug!(4, "Applied cancellations.");
