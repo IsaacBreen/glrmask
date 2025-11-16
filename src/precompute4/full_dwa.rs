@@ -232,6 +232,8 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
+        // combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| label == 422 || label == -422 || label == 0)); combined_nwa.states.0.retain(|st| !st.transitions.is_empty() || st.epsilons.is_empty() || st.final_weight.is_some());
+    println!("Combined NWA after filtering transitions:\n{}", combined_nwa);
 
     let now = Instant::now();
     crate::debug!(4, "Starting negative code resolution...");
