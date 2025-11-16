@@ -186,9 +186,10 @@ fn test_resolve_negatives_from_large_nwa_log() {
     // State 50:
     d.set_final_weight(states[50], Weight::from_item(1)).unwrap();
 
-    d.simplify();
-    println!("{}", d);
+    println!("Before negative resolution:\n{}", d);
+    // d.simplify();
     resolve_negative_codes_in_dwa(&mut d);
+    println!("After negative resolution:\n{}", d);
 
     // Assert [0, 422] is accepted with weight in [1].
     assert_eq!(
