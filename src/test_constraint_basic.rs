@@ -2614,11 +2614,11 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
 
     // 2. Replicate the GSS setup from `precompute3`
     let mut glr_state = parser.init_glr_parser_with_acc();
-    glr_state.active_state.stack.inner = Arc::new(glr_state.active_state.stack.inner.apply(|acc| {
+    Arc::make_mut(&mut glr_state.active_state.stack).inner = glr_state.active_state.stack.inner.apply(|acc| {
         let mut acc = acc.clone();
         acc.llm_tokens_union = HybridBitset::from_iter((0..50).collect::<Vec<usize>>());
         acc
-    }));
+    });
 
     for i in 0..50 {
         let mut next_glr_state: Option<GLRParserState> = None;
