@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
 use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
+use crate::precompute4::weighted_automata::StateID;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NWABuildError {
@@ -287,6 +288,8 @@ impl NWA {
         let start = states.add_state();
         Self { states, body: NWABody { start_state: start } }
     }
+
+    pub fn add_state(&mut self) -> StateID { self.states.add_state() }
 
     pub fn add_transition(
         &mut self,
