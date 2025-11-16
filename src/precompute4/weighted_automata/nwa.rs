@@ -418,7 +418,7 @@ impl NWA {
     }
 
     pub fn determinize_inplace(&mut self) {
-        let dwa = self.determinize();
+        let dwa = self.determinize_to_dwa2();
         *self = NWA::from_dwa(&dwa);
     }
 }
