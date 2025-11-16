@@ -132,6 +132,7 @@ impl DWA {
         let min_config = MinimizeConfig::default();
         let mut fst = self.to_rustfst();
         minimize_with_config(&mut fst, min_config).unwrap();
+        *self = DWA::from_rustfst(&fst);
         true
     }
 
@@ -615,6 +616,7 @@ impl NWA {
         let min_config = MinimizeConfig::default().with_allow_nondet(true);
         let mut fst = self.to_rustfst();
         minimize_with_config(&mut fst, min_config).unwrap();
+        *self = NWA::from_rustfst(&fst);
         true
     }
 
