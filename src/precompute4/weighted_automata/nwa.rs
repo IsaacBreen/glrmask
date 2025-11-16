@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
+use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NWABuildError {
@@ -326,6 +327,8 @@ impl NWA {
     }
 
     pub fn determinize(&self) -> DWA {
+        // return determinize_nwa_to_dwa(self);
+        return self.determinize_to_dwa2();
         let mut dwa = DWA::new();
         dwa.states.0.clear();
 
