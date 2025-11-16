@@ -54,8 +54,8 @@ pub fn precompute4(
         Err(e) => panic!("Failed to build template DWAs: {:?}", e),
     };
     // Print the template DWA for terminal ''`''
-    println!("parser: {}", parser);
-    println!("Template DWA for terminal ''`'':\n{}", template_dwas.get(&parser.terminal_map.get_by_left(&crate::glr::grammar::Terminal::Literal(b"`".to_vec())).unwrap()).expect_else(|| "No template DWA for terminal ''`''".to_string()));
+    // println!("parser: {}", parser);
+    // println!("Template DWA for terminal ''`'':\n{}", template_dwas.get(&parser.terminal_map.get_by_left(&crate::glr::grammar::Terminal::Literal(b"`".to_vec())).unwrap()).expect_else(|| "No template DWA for terminal ''`''".to_string()));
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
     if is_debug_level_enabled(5) {
@@ -235,7 +235,8 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
     crate::debug!(4, "Stats for combined NWA before negative resolution:\n{}", combined_nwa.stats());
-        // combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| label == 422 || label == -422 || label == 0)); combined_nwa.states.0.retain(|st| !st.transitions.is_empty() || st.epsilons.is_empty() || st.final_weight.is_some());
+    let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476];
+    combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| allowed.contains(&label) || allowed.contains(&-label) || label == 0)); combined_nwa.states.0.retain(|st| !st.transitions.is_empty() || st.epsilons.is_empty() || st.final_weight.is_some());
     println!("Combined NWA after filtering transitions:\n{}", combined_nwa);
 
     let now = Instant::now();
@@ -243,7 +244,6 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     apply_cancellations(&mut combined_nwa);
     apply_finality_fixpoint(&mut combined_nwa);
     remove_negative_transitions(&mut combined_nwa);
-    combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| label == 422 || label == -422 || label == 0)); combined_nwa.states.0.retain(|st| !st.transitions.is_empty() || st.epsilons.is_empty() || st.final_weight.is_some());
     println!("Combined NWA after filtering transitions:\n{}", combined_nwa);
     combined_nwa.simplify_rustfst();
     crate::debug!(
