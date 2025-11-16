@@ -228,6 +228,7 @@ pub fn precompute4(
 
 fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
     crate::debug!(4, "Starting resolve negatives and optimization and determinization of combined NWA...");
+    combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| label == 422 || label == -422 || label == 0));
     combined_nwa.simplify_rustfst();
     crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
     crate::debug!(4, "Combined NWA has {} states.", combined_nwa.states.len());
@@ -311,7 +312,6 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
         combined_nwa.states.len()
     );
     crate::debug!(4, "Stats for final NWA before DWA determinization:\n{}", combined_nwa.stats());
-    combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| label == 422 || label == 0 || label == 272 || label == 230));
     let mut final_dwa = combined_nwa.determinize_to_dwa_with_rustfst();
     crate::debug!(
         4,
