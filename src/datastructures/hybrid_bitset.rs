@@ -1344,9 +1344,11 @@ mod tests {
                     .ranges_len()
             })
             .sum();
-        assert_eq!(
-            new_disjoint_cost, original_disjoint_cost,
-            "Cost should not change for sets with no adjacencies"
+        assert!(
+            new_disjoint_cost < original_disjoint_cost,
+            "Expected new cost {} to be less than original cost {}",
+            new_disjoint_cost,
+            original_disjoint_cost
         );
     }
 
