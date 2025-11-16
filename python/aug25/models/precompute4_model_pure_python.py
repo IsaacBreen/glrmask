@@ -297,16 +297,59 @@ class Model(GraphProvider):
 
             dwa_states.append(DWAState(merged_trans, st_weight, fin_weight))
 
-        for state in dwa_states:
-            if state.state_weight is None:
-                # This state's weight was not precomputed. Let's compute it now.
-                # It's the union of all outgoing transition weights and the final weight.
-                computed_weight = RangeSet.empty()
-                for _, weight in state.transitions.values():
-                    computed_weight = computed_weight.union(weight)
-                if state.final_weight is not None:
-                    computed_weight = computed_weight.union(state.final_weight)
-                state.state_weight = computed_weight
+        # If any state weights are missing, compute them using a sophisticated propagation method.
+        if any(s.state_weight is None for s in dwa_states):
+            # Build a reverse graph of the DWA for weight propagation.
+            rev_adj = [[] for _ in dwa_states]
+            for u, state in enumerate(dwa_states):
+                for _label, (v, weight) in state.transitions.items():
+                    rev_adj[v].append((u, weight))
+
+            # Initialize weights with final weights, as these are the starting points for propagation.
+            computed_weights = [(s.final_weight if s.final_weight is not None else RangeSet.empty()) for s in dwa_states]
+            worklist = collections.deque([i for i, w in enumerate(computed_weights) if not w.is_empty()])
+            in_worklist = set(worklist)
+
+            # Propagate weights backwards through the graph until a fixed point is reached.
+            with tqdm(total=len(dwa_states), desc="Propagating DWA weights", leave=False) as pbar:
+                processed_for_pbar = set()
+
+                def update_pbar(state_id):
+                    if state_id not in processed_for_pbar:
+                        processed_for_pbar.add(state_id)
+                        pbar.update(1)
+
+                for i in worklist:
+                    update_pbar(i)
+
+                while worklist:
+                    v = worklist.popleft()
+                    in_worklist.remove(v)
+
+                    weight_from_v = computed_weights[v]
+                    if weight_from_v.is_empty():
+                        continue
+
+                    for u, edge_weight in rev_adj[v]:
+                        # The weight to propagate is the union of the edge's weight and the reachable weight from the target state.
+                        propagated = edge_weight.union(weight_from_v)
+                        old_weight = computed_weights[u]
+
+                        if not propagated.issubset(old_weight):
+                            computed_weights[u] = old_weight.union(propagated)
+                            if u not in in_worklist:
+                                worklist.append(u)
+                                in_worklist.add(u)
+                                update_pbar(u)
+                
+                # Ensure the progress bar completes.
+                if pbar.n < len(dwa_states):
+                    pbar.update(len(dwa_states) - pbar.n)
+
+            # Assign the computed, more precise weights to the states that were missing them.
+            for i, state in enumerate(dwa_states):
+                if state.state_weight is None:
+                    state.state_weight = computed_weights[i]
 
         start_state = dwa_json['start_state']
         dwa = DWA(dwa_states, start_state)
