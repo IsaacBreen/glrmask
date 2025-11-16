@@ -487,10 +487,6 @@ class Model(GraphProvider):
             queue[depth][target_state_id] = gss
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
-        print(f"Starting get_mask computation:")
-        for tid, state in self.state.items():
-            print(f"  State {tid}: {state}")
-
         stats = Stats.get()
         stats.start('get_mask')
         
@@ -516,23 +512,16 @@ class Model(GraphProvider):
 
         init_cache = {}
         for sid, gss in self.state.items():
-            print(f"  Initializing from tokenizer state {sid} with GSS: {gss}")
             gss_init = gss.apply(initialize_acc, init_cache)
-            print(f"    After initialization GSS: {gss_init}")
             if gss_init.is_empty():
-                print("    GSS is empty after initialization, skipping.")
                 continue
                 
             # Transition on tokenizer state id
             target = start_node.transitions.get(sid)
-            print(f"    DWA start state transition on {sid}: {target}")
             if target is not None:
                 target_state_id, weight = target
-                print(f"    Found transition to DWA state {target_state_id} with weight {weight}")
                 gss_next = self._apply_weight(gss_init, weight)
-                print(f"    After applying weight {weight}, GSS: {gss_next}")
                 if not gss_next.is_empty():
-                    print(f"    Transitioning to DWA state {target_state_id} with GSS: {gss_next}")
                     self._merge_into_queue(queue, gss_next, target_state_id)
 
         # 2. Main worklist loop
@@ -542,25 +531,20 @@ class Model(GraphProvider):
             
             for dwa_id, gss in states_at_depth.items():
                 dwa_state = self.dwa.states[dwa_id]
-                print(f"Processing DWA state {dwa_id} at depth {max_depth} with GSS: {gss}")
 
                 # Check for final state
                 if dwa_state.final_weight is not None:
                     acc = gss.reduce_acc()
                     if acc:
-                        print(f"  Checking final state with acc: {acc}")
                         final_tokens = acc.llm_mask.intersection(dwa_state.final_weight)
-                        print(f"    Final tokens: {dwa_state.final_weight}")
                         if not final_tokens.is_empty():
-                            print(f"    Adding to final mask: {final_tokens}")
                             final_mask |= final_tokens
                             
                 # Process transitions
                 peeked = gss.peek()
-                print(f"  GSS peeked states: {peeked}")
                 if not peeked:
                     continue
-
+                    
                 for edge in peeked:
                     parser_state_id = edge
                     

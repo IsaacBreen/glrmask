@@ -330,8 +330,6 @@ impl NWA {
     }
 
     pub fn determinize(&self) -> DWA {
-        // return determinize_nwa_to_dwa(self);
-        return self.determinize_to_dwa2();
         let mut dwa = DWA::new();
         dwa.states.0.clear();
 

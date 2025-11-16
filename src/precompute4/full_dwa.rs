@@ -8,7 +8,6 @@ use chrono::Local;
 use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::parser::{ExpectElse, GLRParser};
-use crate::glr::table::StateID;
 use crate::json_serialization::JSONConvertible;
 use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
@@ -36,7 +35,6 @@ impl NWA {
 
 // Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
 pub use crate::precompute4::template_nwa::FullDWABuildError;
-use crate::precompute4::utils::{encode_symbol_i16, DEFAULT_TRANSITION_SYMBOL};
 
 pub type Precomputed4 = DWA;
 
@@ -55,14 +53,6 @@ pub fn precompute4(
         Ok(m) => m,
         Err(e) => panic!("Failed to build template DWAs: {:?}", e),
     };
-    // Print the template DWA for terminal ''`''
-    println!("parser: {}", parser);
-    let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476, DEFAULT_TRANSITION_SYMBOL as usize];
-    let mut template_dwa = template_dwas.get(&parser.terminal_map.get_by_left(&crate::glr::grammar::Terminal::Literal(b"`".to_vec())).unwrap()).expect_else(|| "No template DWA for terminal ''`''".to_string()).clone();
-    template_dwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| allowed.contains(&crate::precompute4::utils::decode_symbol_i16(label).unwrap().1 .0)));
-    template_dwa.simplify();
-    println!("Template DWA for terminal ''`'':\n{}", template_dwa);
-    assert!(template_dwa.states.0.len() > 10);
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
     if is_debug_level_enabled(5) {
@@ -237,12 +227,6 @@ pub fn precompute4(
 }
 
 fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
-    let mut TEMP = 0;
-    let allowed = [0, 69, 79, 101, 131, 151, 161, 165, 166, 279, 280, 286, 300, 310, 371, 374, 375, 376, 400, 422, 423, 429, 436, 437, 438, 458, 459, 476, DEFAULT_TRANSITION_SYMBOL as usize];
-    combined_nwa.states.0.iter_mut().for_each(|st| st.transitions.retain(|&label, _| allowed.contains(&crate::precompute4::utils::decode_symbol_i16(label).unwrap().1 .0)));
-    combined_nwa.simplify_rustfst();
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
-
     crate::debug!(4, "Starting resolve negatives and optimization and determinization of combined NWA...");
     combined_nwa.simplify_rustfst();
     crate::debug!(5, "Resolving negative codes in combined NWA: {}", combined_nwa);
@@ -263,14 +247,10 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     );
     crate::debug!(4, "Stats for combined NWA after negative resolution:\n{}", combined_nwa.stats());
 
-    combined_nwa.simplify_rustfst(); println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
-
     let now = Instant::now();
     crate::debug!(4, "Pruning continuations from final states...");
     prune_continuations_from_final_states(&mut combined_nwa);
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     simplify_remove_epsilon(&mut combined_nwa);
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     crate::debug!(
         4,
         "Pruning and simplifying took: {:?}. NWA now has {} states.",
@@ -281,11 +261,8 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
 
     let now = Instant::now();
     crate::debug!(4, "Simplifying default transitions...");
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     simplify_default_transitions(&mut combined_nwa);
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     simplify_remove_epsilon(&mut combined_nwa);
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     crate::debug!(
         4,
         "Default transition simplification took: {:?}. NWA now has {} states.",
@@ -296,13 +273,9 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
 
     crate::debug!(4, "Starting simplification before final determinization...");
     let now = Instant::now();
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     simplify_remove_epsilon(&mut combined_nwa);
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     combined_nwa.simplify();
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     simplify_remove_epsilon(&mut combined_nwa);
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     crate::debug!(
         4,
         "Simplification before final determinization took: {:?}. NWA now has {} states.",
@@ -328,12 +301,9 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
 
     let now = Instant::now();
     crate::debug!(4, "Determinizing final combined NWA...");
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     combined_nwa = NWA::from_dwa(&combined_nwa.determinize_to_dwa());
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     crate::debug!(4, "Stats after final NWA determinization:\n{}", combined_nwa.stats());
     combined_nwa.simplify_rustfst();
-    println!("Combined {} NWA after filtering transitions:\n{}", TEMP, combined_nwa); TEMP += 1;
     crate::debug!(
         4,
         "Final NWA simplification took: {:?}. NWA now has {} states.",
@@ -342,7 +312,6 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     );
     crate::debug!(4, "Stats for final NWA before DWA determinization:\n{}", combined_nwa.stats());
     let mut final_dwa = combined_nwa.determinize_to_dwa_with_rustfst();
-    println!("Combined {} DWA after filtering transitions:\n{}", TEMP, final_dwa); TEMP += 1;
     crate::debug!(
         4,
         "Final determinize & simplify took: {:?}. Final DWA has {} states.",

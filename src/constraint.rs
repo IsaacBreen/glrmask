@@ -1256,8 +1256,6 @@ impl GrammarConstraint {
             vocab,
             original_to_dummy_map,
         };
-        gc.dump_precomputed1();
-        gc.dump_precomputed4();
         gc
     }
 
