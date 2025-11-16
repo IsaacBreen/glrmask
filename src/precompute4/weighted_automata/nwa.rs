@@ -394,6 +394,11 @@ impl NWA {
         }
         dwa
     }
+
+    pub fn determinize_inplace(&mut self) {
+        let dwa = self.determinize();
+        *self = NWA::from_dwa(&dwa);
+    }
 }
 
 impl Display for NWA {
