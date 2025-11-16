@@ -168,8 +168,8 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                     fst.add_tr(
                         fst_state_id,
                         Tr::new(
-                            (*label as u32) + 1,
-                            (*label as u32) + 1,
+                            ((*label as i32 - i16::MIN as i32) as u32) + 1,
+                            ((*label as i32 - i16::MIN as i32) as u32) + 1,
                             BitsetWeight::new(weight.clone()),
                             state_map[target],
                         ),
@@ -227,7 +227,7 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                 }
                 let res = dwa.add_transition(
                     dwa_state_id,
-                    ((tr.ilabel - 1) as u16) as i16,
+                    ((tr.ilabel - 1) as i32 + i16::MIN as i32) as i16,
                     state_map[&tr.nextstate],
                     tr.weight.value().clone(),
                 );
@@ -282,7 +282,7 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
                 if tr.ilabel == EPS_LABEL {
                     nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
                 } else {
-                    let label = ((tr.ilabel - 1) as u16) as i16;
+                    let label = ((tr.ilabel - 1) as i32 + i16::MIN as i32) as i16;
                     nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
                 }
             }
