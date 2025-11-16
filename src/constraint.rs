@@ -751,8 +751,6 @@ impl JSONConvertible for GrammarConstraint {
                     StageVocab::from_json(n)?
                 } else if let Some(n) = obj.remove("precompute_vocab") {
                     StageVocab::from_json(n)?
-                } else if let Some(n) = obj.remove("precompute0_vocab") {
-                    StageVocab::from_json(n)?
                 } else {
                     return Err("Missing stage vocab (vocab/precompute_vocab/precompute0_vocab)"
                         .to_string());
