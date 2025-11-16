@@ -399,7 +399,7 @@ impl NWA {
         let instant = std::time::Instant::now();
         crate::debug!(4, "Determinizing NWA with {} states...", self.states.len());
 
-        let mut determinize_here = determinize_nwa_to_dwa(self);
+        let mut determinize_here = self._determinize();
         let num_states = determinize_here.states.len();
         determinize_here.simplify();
         crate::debug!(4, "1. Determinization took {:.2?}, resulting DWA has {} states, {} after simplification.", instant.elapsed(), num_states, determinize_here.states.len());
