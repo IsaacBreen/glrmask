@@ -612,7 +612,7 @@ impl NWA {
     }
 
     pub fn simplify_with_rustfst(&mut self) -> bool {
-        let min_config = MinimizeConfig::default();
+        let min_config = MinimizeConfig::default().with_allow_nondet(true);
         let mut fst = self.to_rustfst();
         minimize_with_config(&mut fst, min_config).unwrap();
         true
