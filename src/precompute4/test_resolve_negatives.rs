@@ -33,12 +33,66 @@ fn test_resolve_negatives_simple_cancellation() {
 }
 
 #[test]
+fn test_resolve_negatives_from_nwa_log_2() {
+    let mut nwa = NWA::new();
+    for _ in 0..=16 {
+        nwa.add_state();
+    }
+    nwa.body.start_state = 0;
+
+    // State 0: 0 -> 1 (weight: ALL)
+    nwa.states.add_transition(0, 0, 1, Weight::all());
+    // State 1: 422 -> 2 (weight: ALL)
+    nwa.states.add_transition(1, 422, 2, Weight::all());
+    // State 2: neg(422) -> 3 (weight: ALL)
+    nwa.states.add_transition(2, i16::MIN + 422, 3, Weight::all());
+    // State 3: neg(458) -> 4 (weight: [1])
+    nwa.states.add_transition(3, i16::MIN + 458, 4, Weight::from_item(1));
+    // State 4: 458 -> 5 (weight: ALL)
+    nwa.states.add_transition(4, 458, 5, Weight::all());
+    // State 5: neg(458) -> 6 (weight: ALL)
+    nwa.states.add_transition(5, i16::MIN + 458, 6, Weight::all());
+    // State 6: neg(459) -> 7 (weight: [1])
+    nwa.states.add_transition(6, i16::MIN + 459, 7, Weight::from_item(1));
+    // State 7: 459 -> 8 (weight: ALL)
+    nwa.states.add_transition(7, 459, 8, Weight::all());
+    // State 8: 32767 -> 9 (weight: ALL)
+    nwa.states.add_transition(8, DEFAULT_TRANSITION_SYMBOL, 9, Weight::all());
+    // State 9: 422 -> 10 (weight: ALL)
+    nwa.states.add_transition(9, 422, 10, Weight::all());
+    // State 10: neg(422) -> 11 (weight: ALL)
+    nwa.states.add_transition(10, i16::MIN + 422, 11, Weight::all());
+    // State 11: neg(436) -> 12 (weight: ALL)
+    nwa.states.add_transition(11, i16::MIN + 436, 12, Weight::all());
+    // State 12: neg(458) -> 13 (weight: [1])
+    nwa.states.add_transition(12, i16::MIN + 458, 13, Weight::from_item(1));
+    // State 13: 458 -> 14 (weight: ALL)
+    nwa.states.add_transition(13, 458, 14, Weight::all());
+    // State 14: neg(458) -> 15 (weight: ALL)
+    nwa.states.add_transition(14, i16::MIN + 458, 15, Weight::all());
+    // State 15: neg(459) -> 16 (weight: [1])
+    nwa.states.add_transition(15, i16::MIN + 459, 16, Weight::from_item(1));
+    // State 16: final_weight: ALL
+    nwa.states.0[16].final_weight = Some(Weight::all());
+
+    let mut d = nwa.determinize_to_dwa();
+    resolve_negative_codes_in_dwa(&mut d);
+
+    let mut expected = DWA::new();
+    let s_final = expected.add_state();
+    expected.add_transition(expected.body.start_state, 0, s_final, Weight::all()).unwrap();
+    expected.set_final_weight(s_final, Weight::from_item(1)).unwrap();
+
+    stochastic_equivalence_test(d, expected);
+}
+
+#[test]
 fn test_resolve_negatives_from_complex_nwa_log() {
     let mut nwa = NWA::new();
     for _ in 0..=68 {
         nwa.add_state();
     }
-    nwa.start_state = 68;
+    nwa.body.start_state = 68;
 
     // State 0: final_weight: ALL
     nwa.states.0[0].final_weight = Some(Weight::all());
