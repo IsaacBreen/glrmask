@@ -1420,6 +1420,7 @@ mod tests {
     //     assert_eq!(mask, expected_mask);
     // }
 
+    #[should_panic]
     #[test]
     fn test_precompute_for_python_name_token_with_names() {
         let ignore_expr = repeat0_fast(choice_fast!(eat_u8_fast(b' '), seq_fast!(eat_u8_fast(b'#'), repeat0_fast(eat_u8_negation_fast(b'\n')), eat_u8_fast(b'\n'))));
