@@ -236,6 +236,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
 
     let now = Instant::now();
     crate::debug!(4, "Starting negative code resolution...");
+    combined_nwa.determinize_inplace();
     apply_cancellations(&mut combined_nwa);
     apply_finality_fixpoint(&mut combined_nwa);
     remove_negative_transitions(&mut combined_nwa);
