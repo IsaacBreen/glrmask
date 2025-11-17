@@ -598,7 +598,7 @@ impl PyHybridBitsetIterator {
     }
 }
 
-#[pyclass(name = "Bitset")]
+#[pyclass(name = "HybridBitset")]
 #[derive(Clone)]
 pub struct PyHybridBitset {
     inner: RustHybridBitset,
