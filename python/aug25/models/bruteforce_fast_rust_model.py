@@ -68,7 +68,7 @@ class BruteForceFastRustModel:
             # Check if the next token is valid
             temp_state.commit(representative_token_id)
             
-            if temp_state.is_active():
+            if temp_state.is_valid():
                 original_tokens = self.internal_to_original_map.get(internal_token_id)
                 if original_tokens:
                     allowed_mask = allowed_mask.union(original_tokens)

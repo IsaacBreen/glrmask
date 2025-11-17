@@ -1223,6 +1223,10 @@ impl PyGrammarConstraintState {
         self.inner.with_inner(|state| state.is_active())
     }
 
+    fn is_valid(&self) -> bool {
+        self.inner.with_inner(|state| !state.get_mask().is_empty())
+    }
+
     fn __str__(&self) -> String {
         self.inner.with_inner(|state| format!("{}", state))
     }
