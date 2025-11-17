@@ -2048,12 +2048,30 @@ local_system:
           }
 
           fn clone(&self) -> Self {
-              // Manually clone the state by extracting its nodes and rebuilding it.
-              // This relies on `get_state_map` and `PyGrammarConstraint::state_with_nodes`.
-              let mut constraint = self.inner.borrow_constraint().clone();
-              let state_map = self.get_state_map().expect("Cloning failed: could not get state map");
-              let nodes: Vec<(usize, PyGSSNode)> = state_map.into_iter().collect();
-              constraint.state_with_nodes(nodes).expect("Cloning failed: could not create new state from nodes")
+              // The `ouroboros` crate does not support deriving `Clone` for self-referential structs.
+              // We implement it manually by extracting the non-referential parts of the state,
+              // cloning the "owner" (the `PyGrammarConstraint`), and then using the `ouroboros`
+              // builder to reconstruct the self-referential struct from the cloned parts.
+
+              // Extract the map of active states, which are cloneable and do not contain references.
+              let active_states: BTreeMap<sep1::tokenizer::TokenizerStateID, sep1::glr::parser::ActiveGLRState> =
+                  self.inner.with_inner(|s| {
+                      s.state.iter().map(|(k, v)| (*k, v.active_state.clone())).collect()
+                  });
+
+              // Use the builder to construct a new, cloned instance.
+              Self {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      // 1. Provide a cloned "owner".
+                      constraint: self.inner.borrow_constraint().clone(),
+                      // 2. The builder closure creates the "borrower" fields.
+                      inner_builder: move |c: &PyGrammarConstraint| {
+                          let new_parser_ref = &c.inner.parser;
+                          let new_state_map = active_states.into_iter().map(|(id, active_state)| (id, sep1::glr::parser::GLRParserState { active_state, parser: new_parser_ref })).collect();
+                          Ok::<_, PyErr>(sep1::constraint::GrammarConstraintState { parent: &c.inner, state: new_state_map })
+                      }
+                  }.try_build().expect("Failed to build cloned GrammarConstraintState")
+              }
           }
 
           fn is_active(&self) -> bool {
@@ -4724,5 +4742,119 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Implement manual clone for PyGrammarConstraintState
       by rebuilding state from nodes"'
+    metadata:
+  - user: |-
+      Diff of python/src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: No. It shouldn't be that complicated GrammarConstraintState implements Clone.
+      GrammarConstraint also implements Clone. How hard can this be?
+    metadata:
+  - assistant: |-
+      You are right, the previous approach was overly complicated. My apologies. The key is to manually implement `Clone` by deconstructing the state into its non-referential parts and then reconstructing a new state with a cloned "owner". This avoids the roundabout trip through Python-level methods and is much more direct.
+
+      Here are the step-by-step instructions to replace the complex `clone` implementation with a much cleaner, pure-Rust version.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `python/src/lib.rs`**.
+      2.  Navigate to the `#[pymethods]` block for `PyGrammarConstraintState`.
+      3.  **Replace the entire `clone` method** (currently around line 948) with the following implementation:
+
+          ```rust
+              fn clone(&self) -> Self {
+                  // The `ouroboros` crate does not support deriving `Clone` for self-referential structs.
+                  // We implement it manually by extracting the non-referential parts of the state,
+                  // cloning the "owner" (the `PyGrammarConstraint`), and then using the `ouroboros`
+                  // builder to reconstruct the self-referential struct from the cloned parts.
+          
+                  // Extract the map of active states, which are cloneable and do not contain references.
+                  let active_states: BTreeMap<sep1::tokenizer::TokenizerStateID, sep1::glr::parser::ActiveGLRState> =
+                      self.inner.with_inner(|s| {
+                          s.state.iter().map(|(k, v)| (*k, v.active_state.clone())).collect()
+                      });
+          
+                  // Use the builder to construct a new, cloned instance.
+                  Self {
+                      inner: PyGrammarConstraintStateWrapperTryBuilder {
+                          // 1. Provide a cloned "owner".
+                          constraint: self.inner.borrow_constraint().clone(),
+                          // 2. The builder closure creates the "borrower" fields.
+                          inner_builder: move |c: &PyGrammarConstraint| {
+                              // `c` is a reference to the newly cloned `constraint` above.
+                              // We can now build the `GrammarConstraintState` which borrows from it.
+                              let new_parser_ref = &c.inner.parser;
+                              let new_state_map = active_states.into_iter().map(|(id, active_state)| {
+                                  (id, sep1::glr::parser::GLRParserState { active_state, parser: new_parser_ref })
+                              }).collect();
+          
+                              Ok::<_, PyErr>(sep1::constraint::GrammarConstraintState { parent: &c.inner, state: new_state_map })
+                          }
+                      }.try_build().expect("Failed to build cloned GrammarConstraintState")
+                  }
+              }
+          ```
+
+      ### Git Diff
+
+      Here is the corresponding git diff for the change:
+
+      ```diff
+      diff --git a/python/src/lib.rs b/python/src/lib.rs
+      --- a/python/src/lib.rs
+      +++ b/python/src/lib.rs
+      @@ -947,12 +947,28 @@
+           }
+       
+           fn clone(&self) -> Self {
+      -        // Manually clone the state by extracting its nodes and rebuilding it.
+      -        // This relies on `get_state_map` and `PyGrammarConstraint::state_with_nodes`.
+      -        let mut constraint = self.inner.borrow_constraint().clone();
+      -        let state_map = self.get_state_map().expect("Cloning failed: could not get state map");
+      -        let nodes: Vec<(usize, PyGSSNode)> = state_map.into_iter().collect();
+      -        constraint.state_with_nodes(nodes).expect("Cloning failed: could not create new state from nodes")
+      +        // The `ouroboros` crate does not support deriving `Clone` for self-referential structs.
+      +        // We implement it manually by extracting the non-referential parts of the state,
+      +        // cloning the "owner" (the `PyGrammarConstraint`), and then using the `ouroboros`
+      +        // builder to reconstruct the self-referential struct from the cloned parts.
+      +
+      +        // Extract the map of active states, which are cloneable and do not contain references.
+      +        let active_states: BTreeMap<sep1::tokenizer::TokenizerStateID, sep1::glr::parser::ActiveGLRState> =
+      +            self.inner.with_inner(|s| {
+      +                s.state.iter().map(|(k, v)| (*k, v.active_state.clone())).collect()
+      +            });
+      +
+      +        // Use the builder to construct a new, cloned instance.
+      +        Self {
+      +            inner: PyGrammarConstraintStateWrapperTryBuilder {
+      +                // 1. Provide a cloned "owner".
+      +                constraint: self.inner.borrow_constraint().clone(),
+      +                // 2. The builder closure creates the "borrower" fields.
+      +                inner_builder: move |c: &PyGrammarConstraint| {
+      +                    let new_parser_ref = &c.inner.parser;
+      +                    let new_state_map = active_states.into_iter().map(|(id, active_state)| (id, sep1::glr::parser::GLRParserState { active_state, parser: new_parser_ref })).collect();
+      +                    Ok::<_, PyErr>(sep1::constraint::GrammarConstraintState { parent: &c.inner, state: new_state_map })
+      +                }
+      +            }.try_build().expect("Failed to build cloned GrammarConstraintState")
+      +        }
+           }
+       
+           fn is_active(&self) -> bool {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/src/lib.rs
+      Applying patch to 'python/src/lib.rs' using custom patcher...
+      Successfully applied patch and wrote to python/src/lib.rs.
+    metadata:
+  - user: 'Changes committed with message: "Implement manual clone for PyGrammarConstraintState
+      by rebuilding state via builder"'
     metadata:
 ...
