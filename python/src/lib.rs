@@ -7,15 +7,24 @@ use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-use sep1::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_and_prune as rust_allow_only, gather_gss_stats, popn_collect_isolated_parents as rust_popn_collect, GSSNode as RustGSSNode};
+use sep1::datastructures::gss_acc::Acc as RustAcc;
 use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
 use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
+use sep1::datastructures::leveled_gss::LeveledGSS as RustGSS;
 use sep1::datastructures::u8set::U8Set;
 use sep1::finite_automata::Regex;
-use sep1::finite_automata::{_choice as regex_choice, _seq as regex_seq, eat_u8, eat_u8_negation, eat_u8_seq, eat_u8_set, eat_u8_set_negation, eps, greedy_group, groups as regex_groups, non_greedy_group, opt, prec, rep, rep1, Expr as RegexExpr, ExprGroups as RegexGroups};
-use sep1::glr::parser::{GLRParser, GLRParserState, ParseState};
+use sep1::finite_automata::{
+    _choice as regex_choice, _seq as regex_seq, eat_u8, eat_u8_negation, eat_u8_seq, eat_u8_set,
+    eat_u8_set_negation, eps, greedy_group, groups as regex_groups, non_greedy_group, opt, prec,
+    rep, rep1, Expr as RegexExpr, ExprGroups as RegexGroups,
+};
+use sep1::glr::parser::{GLRParser, GLRParserState, ParseState, ParseStateEdgeContent};
 use sep1::interface::IncrementalParser;
-use sep1::interface::{choice as grammar_choice, eat_any_fast, literal as grammar_literal, optional as grammar_optional, r#ref as grammar_ref, repeat as grammar_repeat, sequence as grammar_sequence, CompiledGrammar, GrammarDefinition, GrammarExpr};
+use sep1::interface::{
+    choice as grammar_choice, eat_any_fast, literal as grammar_literal, optional as grammar_optional,
+    r#ref as grammar_ref, repeat as grammar_repeat, sequence as grammar_sequence, CompiledGrammar,
+    GrammarDefinition, GrammarExpr,
+};
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 use sep1::tokenizer::LLMTokenID;
 use std::collections::hash_map::DefaultHasher;
@@ -90,49 +99,67 @@ impl PyRegexExpr {
 
     #[staticmethod]
     fn eat_u8_seq(s: &[u8]) -> Self {
-        Self { inner: eat_u8_seq(s.to_vec()) }
+        Self {
+            inner: eat_u8_seq(s.to_vec()),
+        }
     }
 
     #[staticmethod]
     pub fn eat_u8_set(set: Vec<u8>) -> Self {
         let u8set = U8Set::from_bytes(&set);
-        Self { inner: eat_u8_set(u8set) }
+        Self {
+            inner: eat_u8_set(u8set),
+        }
     }
 
     #[staticmethod]
     fn eat_u8_negation(c: u8) -> Self {
-        Self { inner: eat_u8_negation(c) }
+        Self {
+            inner: eat_u8_negation(c),
+        }
     }
 
     #[staticmethod]
     fn eat_u8_set_negation(set: Vec<u8>) -> Self {
         let u8set = U8Set::from_bytes(&set);
-        Self { inner: eat_u8_set_negation(u8set) }
+        Self {
+            inner: eat_u8_set_negation(u8set),
+        }
     }
 
     #[staticmethod]
     pub fn eat_any() -> Self {
-        Self { inner: eat_any_fast() }
+        Self {
+            inner: eat_any_fast(),
+        }
     }
 
     #[staticmethod]
     fn rep(expr: PyRegexExpr) -> Self {
-        Self { inner: rep(expr.inner) }
+        Self {
+            inner: rep(expr.inner),
+        }
     }
 
     #[staticmethod]
     fn rep1(expr: PyRegexExpr) -> Self {
-        Self { inner: rep1(expr.inner) }
+        Self {
+            inner: rep1(expr.inner),
+        }
     }
 
     #[staticmethod]
     fn opt(expr: PyRegexExpr) -> Self {
-        Self { inner: opt(expr.inner) }
+        Self {
+            inner: opt(expr.inner),
+        }
     }
 
     #[staticmethod]
     fn prec(precedence: isize, expr: PyRegexExpr) -> PyRegexGroup {
-        PyRegexGroup { inner: prec(precedence, expr.inner) }
+        PyRegexGroup {
+            inner: prec(precedence, expr.inner),
+        }
     }
 
     #[staticmethod]
@@ -142,16 +169,22 @@ impl PyRegexExpr {
 
     #[staticmethod]
     fn seq(exprs: Vec<PyRegexExpr>) -> Self {
-        Self { inner: regex_seq(exprs.into_iter().map(|e| e.inner).collect()) }
+        Self {
+            inner: regex_seq(exprs.into_iter().map(|e| e.inner).collect()),
+        }
     }
 
     #[staticmethod]
     fn choice(exprs: Vec<PyRegexExpr>) -> Self {
-        Self { inner: regex_choice(exprs.into_iter().map(|e| e.inner).collect()) }
+        Self {
+            inner: regex_choice(exprs.into_iter().map(|e| e.inner).collect()),
+        }
     }
 
     fn build(&self) -> PyResult<PyRegex> {
-        Ok(PyRegex { inner: self.inner.clone().build() })
+        Ok(PyRegex {
+            inner: self.inner.clone().build(),
+        })
     }
 }
 
@@ -165,12 +198,16 @@ struct PyRegexGroup {
 impl PyRegexGroup {
     #[staticmethod]
     fn greedy_group(expr: PyRegexExpr) -> Self {
-        Self { inner: greedy_group(expr.inner) }
+        Self {
+            inner: greedy_group(expr.inner),
+        }
     }
 
     #[staticmethod]
     fn non_greedy_group(expr: PyRegexExpr) -> Self {
-        Self { inner: non_greedy_group(expr.inner) }
+        Self {
+            inner: non_greedy_group(expr.inner),
+        }
     }
 }
 
@@ -190,7 +227,9 @@ impl PyRegexGroups {
     }
 
     fn build(&self) -> PyResult<PyRegex> {
-        Ok(PyRegex { inner: self.inner.clone().build() })
+        Ok(PyRegex {
+            inner: self.inner.clone().build(),
+        })
     }
 }
 
@@ -202,10 +241,17 @@ pub struct PyRegex {
 
 #[pymethods]
 impl PyRegex {
-    fn execute_from_state(&self, bytes: &[u8], state_id: usize) -> PyResult<(Option<usize>, Vec<(usize, usize)>)> {
-        let exec_result = self.inner.execute_from_state(bytes, sep1::tokenizer::TokenizerStateID(state_id));
+    fn execute_from_state(
+        &self,
+        bytes: &[u8],
+        state_id: usize,
+    ) -> PyResult<(Option<usize>, Vec<(usize, usize)>)> {
+        let exec_result = self
+            .inner
+            .execute_from_state(bytes, sep1::tokenizer::TokenizerStateID(state_id));
         let end_state = exec_result.end_state;
-        let matches: Vec<(usize, usize)> = exec_result.matches.into_iter().map(|m| (m.id, m.width)).collect();
+        let matches: Vec<(usize, usize)> =
+            exec_result.matches.into_iter().map(|m| (m.id, m.width)).collect();
         Ok((end_state, matches))
     }
 
@@ -235,21 +281,33 @@ pub struct PyGrammarDefinition {
 #[pymethods]
 impl PyGrammarDefinition {
     #[new]
-    fn new(rules: Vec<(String, PyGrammarExpr)>, terminals: Vec<(String, PyRegexExpr)>) -> PyResult<Self> {
+    fn new(
+        rules: Vec<(String, PyGrammarExpr)>,
+        terminals: Vec<(String, PyRegexExpr)>,
+    ) -> PyResult<Self> {
         let inner_rules = rules.into_iter().map(|(s, e)| (s, e.inner)).collect();
         let inner_terminals = terminals.into_iter().map(|(s, e)| (s, e.inner)).collect();
 
-        let grammar_def = GrammarDefinition::from_exprs(inner_rules, inner_terminals)
-             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to compile grammar: {}", e)))?;
+        let grammar_def = GrammarDefinition::from_exprs(inner_rules, inner_terminals).map_err(
+            |e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Failed to compile grammar: {}",
+                    e
+                ))
+            },
+        )?;
 
         Ok(PyGrammarDefinition { inner: grammar_def })
     }
 
     #[staticmethod]
     fn from_ebnf_file(path: &str) -> PyResult<Self> {
-        let grammar_def = GrammarDefinition::from_ebnf_file(path)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(
-                format!("Failed to load or parse EBNF file '{}': {}", path, e)))?;
+        let grammar_def = GrammarDefinition::from_ebnf_file(path).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
+                "Failed to load or parse EBNF file '{}': {}",
+                path, e
+            ))
+        })?;
         Ok(PyGrammarDefinition { inner: grammar_def })
     }
 
@@ -259,7 +317,9 @@ impl PyGrammarDefinition {
 
     fn compile(&self) -> PyResult<PyCompiledGrammar> {
         let compiled_grammar = CompiledGrammar::from_definition(Arc::new(self.inner.clone()));
-        Ok(PyCompiledGrammar { inner: compiled_grammar })
+        Ok(PyCompiledGrammar {
+            inner: compiled_grammar,
+        })
     }
 
     fn print(&self) {
@@ -274,14 +334,21 @@ impl PyGrammarDefinition {
 
     #[staticmethod]
     fn from_json_string(json_str: &str) -> PyResult<Self> {
-        let json_node = JSONNode::from_json_string(json_str)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-        let grammar = GrammarDefinition::from_json(json_node)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarDefinition from JSONNode: {}", e)))?;
+        let json_node = JSONNode::from_json_string(json_str).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to parse JSON string to JSONNode: {}",
+                e
+            ))
+        })?;
+        let grammar = GrammarDefinition::from_json(json_node).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to deserialize GrammarDefinition from JSONNode: {}",
+                e
+            ))
+        })?;
         Ok(PyGrammarDefinition { inner: grammar })
     }
 }
-
 
 #[pyclass(name = "CompiledGrammar")]
 #[derive(Clone)]
@@ -308,10 +375,18 @@ impl PyCompiledGrammar {
 
     #[staticmethod]
     fn from_json_string(json_str: &str) -> PyResult<Self> {
-        let json_node = JSONNode::from_json_string(json_str)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-        let grammar = CompiledGrammar::from_json(json_node)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize CompiledGrammar from JSONNode: {}", e)))?;
+        let json_node = JSONNode::from_json_string(json_str).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to parse JSON string to JSONNode: {}",
+                e
+            ))
+        })?;
+        let grammar = CompiledGrammar::from_json(json_node).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to deserialize CompiledGrammar from JSONNode: {}",
+                e
+            ))
+        })?;
         Ok(PyCompiledGrammar { inner: grammar })
     }
 }
@@ -332,17 +407,30 @@ impl PyGLRParser {
             let actions_dict = PyDict::new_bound(py);
             for (&terminal_id, action) in &row.shifts_and_reduces_full {
                 let py_action = match action {
-                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => ("shift", to_state.0).to_object(py),
-                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                        let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
-                        PyTuple::new_bound(py, &[
-                            "reduce".to_object(py),
-                            nonterminal_id.0.to_object(py),
-                            len.to_object(py),
-                            pids.to_object(py)
-                        ]).to_object(py)
+                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => {
+                        ("shift", to_state.0).to_object(py)
                     }
-                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                        nonterminal_id,
+                        len,
+                        production_ids,
+                    } => {
+                        let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
+                        PyTuple::new_bound(
+                            py,
+                            &[
+                                "reduce".to_object(py),
+                                nonterminal_id.0.to_object(py),
+                                len.to_object(py),
+                                pids.to_object(py),
+                            ],
+                        )
+                        .to_object(py)
+                    }
+                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split {
+                        shift,
+                        reduces,
+                    } => {
                         let py_reduces = PyDict::new_bound(py);
                         for (len, nts) in reduces {
                             let py_nts = PyDict::new_bound(py);
@@ -352,11 +440,15 @@ impl PyGLRParser {
                             }
                             py_reduces.set_item(len, py_nts)?;
                         }
-                        PyTuple::new_bound(py, &[
-                            "split".to_object(py),
-                            shift.map(|s| s.0).to_object(py),
-                            py_reduces.to_object(py)
-                        ]).to_object(py)
+                        PyTuple::new_bound(
+                            py,
+                            &[
+                                "split".to_object(py),
+                                shift.map(|s| s.0).to_object(py),
+                                py_reduces.to_object(py),
+                            ],
+                        )
+                        .to_object(py)
                     }
                 };
                 actions_dict.set_item(terminal_id.0, py_action)?;
@@ -395,7 +487,12 @@ pub struct PyGrammarConstraint {
 #[pymethods]
 impl PyGrammarConstraint {
     #[new]
-    fn new(py: Python, grammar: PyCompiledGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
+    fn new(
+        py: Python,
+        grammar: PyCompiledGrammar,
+        token_to_id: &Bound<'_, PyDict>,
+        max_llm_token_id: usize,
+    ) -> PyResult<Self> {
         let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
         for (key, value) in token_to_id.iter() {
             let token = key.extract::<&[u8]>()?;
@@ -403,49 +500,23 @@ impl PyGrammarConstraint {
             llm_token_map.insert(token.to_vec(), LLMTokenID(id));
         }
 
-        // GrammarConstraint::from_compiled_grammar expects an owned CompiledGrammar.
-        // PyCompiledGrammar holds an owned CompiledGrammar, so we clone it.
-        // The _eof_llm_token_id is not directly used by GrammarConstraint::new,
-        // but it's part of the conceptual model for token ranges.
-        // We can pass max_llm_token_id + 1 or a dedicated EOF marker if needed by constraint logic.
-        // For now, the Rust API for GrammarConstraint::new doesn't take eof_llm_token_id.
-        // The old from_grammar took it, but new from_compiled_grammar doesn't.
-        // Let's assume eof handling is implicit or managed by GrammarConstraintState.
         let constraint = GrammarConstraint::from_compiled_grammar(
             grammar.inner.clone(), // Clone the CompiledGrammar
             llm_token_map,
             max_llm_token_id,
         );
 
-        Ok(Self { inner: Arc::new(constraint) })
+        Ok(Self {
+            inner: Arc::new(constraint),
+        })
     }
 
     fn print(&self) {
-        // Printing GrammarConstraint can be complex.
-        // Consider what information is useful to expose.
         println!("PyGrammarConstraint (details not implemented for print)");
     }
 
     fn print_parser(&self) {
         println!("{}", self.inner.parser);
-    }
-
-    fn state_with_nodes(&mut self, nodes: Vec<(usize, PyGSSNode)>) -> PyResult<PyGrammarConstraintState> {
-        let gss_nodes: Vec<(usize, Arc<RustGSSNode>)> = nodes.into_iter()
-            .map(|(sid, py_node)| (sid, py_node.inner))
-            .collect();
-
-        let constraint_clone = self.clone();
-
-        Ok(PyGrammarConstraintState {
-            inner: PyGrammarConstraintStateWrapperTryBuilder {
-                constraint: constraint_clone,
-                inner_builder: move |c: &PyGrammarConstraint| {
-                    let state = c.inner.state_with_nodes(gss_nodes);
-                    Ok::<_, PyErr>(state)
-                },
-            }.try_build()?
-        })
     }
 
     fn to_json_string(&self) -> PyResult<String> {
@@ -454,11 +525,21 @@ impl PyGrammarConstraint {
 
     #[staticmethod]
     fn from_json_string(json_str: &str) -> PyResult<Self> {
-        let json_node = JSONNode::from_json_string(json_str)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-        let constraint = GrammarConstraint::from_json(json_node)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarConstraint from JSONNode: {}", e)))?;
-        Ok(Self { inner: Arc::new(constraint) })
+        let json_node = JSONNode::from_json_string(json_str).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to parse JSON string to JSONNode: {}",
+                e
+            ))
+        })?;
+        let constraint = GrammarConstraint::from_json(json_node).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to deserialize GrammarConstraint from JSONNode: {}",
+                e
+            ))
+        })?;
+        Ok(Self {
+            inner: Arc::new(constraint),
+        })
     }
 
     fn dump_precomputed1(&self) {
@@ -474,11 +555,15 @@ impl PyGrammarConstraint {
     }
 
     fn tokenizer(&self) -> PyRegex {
-        PyRegex { inner: self.inner.tokenizer.clone() }
+        PyRegex {
+            inner: self.inner.tokenizer.clone(),
+        }
     }
 
     fn glr_parser(&self) -> PyGLRParser {
-        PyGLRParser { inner: Arc::new(self.inner.parser.clone()) }
+        PyGLRParser {
+            inner: Arc::new(self.inner.parser.clone()),
+        }
     }
 
     fn possible_matches(&self, py: Python) -> PyResult<PyObject> {
@@ -486,7 +571,8 @@ impl PyGrammarConstraint {
         for (tokenizer_state_id, terminal_map) in &self.inner.possible_matches {
             let terminal_dict = PyDict::new_bound(py);
             for (terminal_id, llm_token_bv) in terminal_map {
-                terminal_dict.set_item(terminal_id.0, PyHybridBitset { inner: llm_token_bv.clone() })?;
+                terminal_dict
+                    .set_item(terminal_id.0, PyHybridBitset { inner: llm_token_bv.clone() })?;
             }
             dict.set_item(tokenizer_state_id.0, terminal_dict)?;
         }
@@ -520,30 +606,47 @@ pub struct PyHybridBitset {
 impl PyHybridBitset {
     #[new]
     fn new() -> Self {
-        Self { inner: RustHybridBitset::zeros() }
+        Self {
+            inner: RustHybridBitset::zeros(),
+        }
     }
 
     #[staticmethod]
     fn zeros() -> Self {
-        Self { inner: RustHybridBitset::zeros() }
+        Self {
+            inner: RustHybridBitset::zeros(),
+        }
     }
 
     #[staticmethod]
     fn ones(len: usize) -> Self {
-        Self { inner: RustHybridBitset::ones(len) }
+        Self {
+            inner: RustHybridBitset::ones(len),
+        }
     }
 
     #[staticmethod]
     fn from_indices(indices: Vec<usize>) -> Self {
-        Self { inner: RustHybridBitset::from_iter(indices) }
+        Self {
+            inner: RustHybridBitset::from_iter(indices),
+        }
     }
 
     #[staticmethod]
     fn from_ranges(ranges: Vec<(usize, usize)>) -> Self {
-        let json_ranges: Vec<Vec<usize>> = ranges.into_iter().map(|(s,e)| vec![s,e]).collect();
+        let json_ranges: Vec<Vec<usize>> = ranges.into_iter().map(|(s, e)| vec![s, e]).collect();
         let inner = RustHybridBitset::from_json(sep1::json_serialization::JSONNode::Array(
-            json_ranges.into_iter().map(|p| sep1::json_serialization::JSONNode::Array(vec![p[0].to_json(), p[1].to_json()])).collect()
-        )).expect("Bitset::from_ranges JSON");
+            json_ranges
+                .into_iter()
+                .map(|p| {
+                    sep1::json_serialization::JSONNode::Array(vec![
+                        p[0].to_json(),
+                        p[1].to_json(),
+                    ])
+                })
+                .collect(),
+        ))
+        .expect("Bitset::from_ranges JSON");
         Self { inner }
     }
 
@@ -591,11 +694,15 @@ impl PyHybridBitset {
     }
 
     fn union(&self, other: &PyHybridBitset) -> PyHybridBitset {
-        PyHybridBitset { inner: &self.inner | &other.inner }
+        PyHybridBitset {
+            inner: &self.inner | &other.inner,
+        }
     }
 
     fn intersection(&self, other: &PyHybridBitset) -> PyHybridBitset {
-        PyHybridBitset { inner: &self.inner & &other.inner }
+        PyHybridBitset {
+            inner: &self.inner & &other.inner,
+        }
     }
 
     fn __ior__(&mut self, other: &PyHybridBitset) {
@@ -615,11 +722,15 @@ impl PyHybridBitset {
     }
 
     fn difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
-        PyHybridBitset { inner: &self.inner - &other.inner }
+        PyHybridBitset {
+            inner: &self.inner - &other.inner,
+        }
     }
 
     fn symmetric_difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
-        PyHybridBitset { inner: &self.inner ^ &other.inner }
+        PyHybridBitset {
+            inner: &self.inner ^ &other.inner,
+        }
     }
 
     fn is_subset(&self, other: &PyHybridBitset) -> bool {
@@ -640,10 +751,12 @@ impl PyHybridBitset {
 
     #[staticmethod]
     fn from_json_string(s: &str) -> PyResult<Self> {
-        let node = sep1::json_serialization::JSONNode::from_json_string(s)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("parse json: {}", e)))?;
-        let inner = RustHybridBitset::from_json(node)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("bitset from json: {}", e)))?;
+        let node = sep1::json_serialization::JSONNode::from_json_string(s).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("parse json: {}", e))
+        })?;
+        let inner = RustHybridBitset::from_json(node).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("bitset from json: {}", e))
+        })?;
         Ok(Self { inner })
     }
 
@@ -663,15 +776,18 @@ impl PyHybridBitset {
         let mut hasher = DefaultHasher::new();
         self.inner.hash(&mut hasher);
         Ok(hasher.finish() as isize)
-
     }
 }
 
 impl From<RustHybridBitset> for PyHybridBitset {
-    fn from(inner: RustHybridBitset) -> Self { Self { inner } }
+    fn from(inner: RustHybridBitset) -> Self {
+        Self { inner }
+    }
 }
 impl From<PyHybridBitset> for RustHybridBitset {
-    fn from(p: PyHybridBitset) -> Self { p.inner }
+    fn from(p: PyHybridBitset) -> Self {
+        p.inner
+    }
 }
 
 #[pyclass(name = "HybridL2Bitset")]
@@ -683,28 +799,39 @@ pub struct PyHybridL2Bitset {
 #[pymethods]
 impl PyHybridL2Bitset {
     fn range_values(&self) -> Vec<((usize, usize), PyHybridBitset)> {
-        self.inner.range_values().map(|(range, bv)| {
-            let py_range = (*range.start(), *range.end());
-            let py_bv = PyHybridBitset { inner: bv.clone() };
-            (py_range, py_bv)
-        }).collect()
+        self.inner
+            .range_values()
+            .map(|(range, bv)| {
+                let py_range = (*range.start(), *range.end());
+                let py_bv = PyHybridBitset { inner: bv.clone() };
+                (py_range, py_bv)
+            })
+            .collect()
     }
 
     #[staticmethod]
     fn all() -> Self {
-        Self { inner: RustHybridL2Bitset::all() }
+        Self {
+            inner: RustHybridL2Bitset::all(),
+        }
     }
 
     fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
-        PyHybridL2Bitset { inner: &self.inner | &other.inner }
+        PyHybridL2Bitset {
+            inner: &self.inner | &other.inner,
+        }
     }
 
     pub fn complement(&self) -> PyHybridL2Bitset {
-        PyHybridL2Bitset { inner: self.inner.complement() }
+        PyHybridL2Bitset {
+            inner: self.inner.complement(),
+        }
     }
 
     fn get_l2_bitset(&self, state_id: usize) -> PyHybridBitset {
-        PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).unwrap().clone() }
+        PyHybridBitset {
+            inner: self.inner.get_l2_bitset(state_id).unwrap().clone(),
+        }
     }
 
     fn insert_l2_bitset(&mut self, state_id: usize, bitset: &PyHybridBitset) {
@@ -738,40 +865,43 @@ impl PyHybridL2Bitset {
     }
 }
 
-
 #[pyclass(name = "GSSNode")]
 #[derive(Clone)]
 pub struct PyGSSNode {
-    inner: std::sync::Arc<RustGSSNode>,
+    inner: RustGSS,
 }
 
 #[pymethods]
 impl PyGSSNode {
     #[new]
     fn new() -> Self {
-        PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
-    }
-
-    fn ptr(&self) -> usize {
-        // Stable identity for the inner Arc<GSSNode>; useful for change detection
-        let raw = std::sync::Arc::as_ptr(&self.inner);
-        raw as usize
+        PyGSSNode {
+            inner: RustGSS::from_stacks(&[(vec![], RustAcc::new_fresh())]),
+        }
     }
 
     fn is_alive(&self) -> bool {
-        self.inner.is_alive()
+        !self.inner.is_empty()
     }
 
     fn is_ok(&self) -> bool {
-        self.inner.is_ok()
+        !self.inner.is_empty()
     }
 
     fn allowed_llm_tokens(&self) -> PyHybridBitset {
-        PyHybridBitset::from(self.inner.allowed_llm_tokens())
+        PyHybridBitset::from(
+            self.inner.reduce_acc().map_or(RustHybridBitset::zeros(), |acc| acc.llm_tokens_union),
+        )
     }
 
     fn disallowed_terminals(&self) -> PyHybridL2Bitset {
-        PyHybridL2Bitset { inner: self.inner.disallowed_terminals() }
+        PyHybridL2Bitset {
+            inner: self
+                .inner
+                .reduce_acc()
+                .map(|acc| acc.terminals_union.complement())
+                .unwrap_or_else(|| RustHybridL2Bitset::all().complement()),
+        }
     }
 
     fn clone_node(&self) -> PyGSSNode {
@@ -779,48 +909,70 @@ impl PyGSSNode {
     }
 
     fn print_stats(&self) {
-        let stats = gather_gss_stats(&[self.inner.as_ref()]);
+        let stats = self.inner.stats();
         println!("{:#?}", stats);
     }
 
     fn __str__(&self) -> String {
-        self.inner.print()
+        self.inner.to_graph_string(false)
     }
 
     fn flatten(&self) -> Vec<(Vec<usize>, (PyHybridBitset, PyHybridL2Bitset))> {
-        let flattened = self.inner.flatten();
-        flattened.into_iter().map(|(path, acc)| {
-            let path_ids: Vec<usize> = path.into_iter().map(|edge| edge.state_id.0).collect();
-            let py_llm_tokens = PyHybridBitset { inner: acc.llm_tokens_union };
-            let py_terminals_union = PyHybridL2Bitset { inner: acc.terminals_union };
-            (path_ids, (py_llm_tokens, py_terminals_union))
-        }).collect()
+        let flattened = self.inner.to_stacks();
+        flattened
+            .into_iter()
+            .map(|(path, acc)| {
+                let path_ids: Vec<usize> = path.into_iter().map(|edge| edge.state_id.0).collect();
+                let py_llm_tokens = PyHybridBitset {
+                    inner: acc.llm_tokens_union,
+                };
+                let py_terminals_union = PyHybridL2Bitset {
+                    inner: acc.terminals_union,
+                };
+                (path_ids, (py_llm_tokens, py_terminals_union))
+            })
+            .collect()
     }
 
     fn __hash__(&self) -> PyResult<isize> {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        Ok(hasher.finish() as isize)
+        Err(pyo3::exceptions::PyTypeError::new_err("GSSNode is not hashable"))
     }
 
     fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
         match op {
-            CompareOp::Eq => Ok(*self.inner == *other.inner),
-            CompareOp::Ne => Ok(*self.inner != *other.inner),
-            _ => Err(pyo3::exceptions::PyNotImplementedError::new_err("Only == and != are supported for GSSNode")),
+            CompareOp::Eq => {
+                let mut a_stacks = self.inner.to_stacks();
+                let mut b_stacks = other.inner.to_stacks();
+                a_stacks.sort();
+                b_stacks.sort();
+                Ok(a_stacks == b_stacks)
+            }
+            CompareOp::Ne => {
+                let mut a_stacks = self.inner.to_stacks();
+                let mut b_stacks = other.inner.to_stacks();
+                a_stacks.sort();
+                b_stacks.sort();
+                Ok(a_stacks != b_stacks)
+            }
+            _ => Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "Only == and != are supported for GSSNode",
+            )),
         }
     }
 
     fn depth(&self) -> usize {
-        self.inner.max_depth()
+        self.inner.max_depth() as usize
     }
 
     fn predecessors(&self) -> Vec<(usize, PyGSSNode)> {
         let mut result = Vec::new();
         for (edge_content, preds_by_depth) in self.inner.predecessors() {
             for pred_vec in preds_by_depth.values() {
-                for pred_arc in pred_vec {
-                    result.push((edge_content.state_id.0, PyGSSNode { inner: pred_arc.clone() }));
+                for pred_gss in pred_vec {
+                    result.push((
+                        edge_content.state_id.0,
+                        PyGSSNode { inner: pred_gss.clone() },
+                    ));
                 }
             }
         }
@@ -830,27 +982,50 @@ impl PyGSSNode {
 
 #[pyfunction]
 fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
-    let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
-    let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
-    PyGSSNode { inner: merged }
+    let mut it = nodes.into_iter();
+    if let Some(first) = it.next() {
+        let mut merged = first.inner;
+        for node in it {
+            merged = merged.merge(&node.inner);
+        }
+        if depth > 0 {
+            merged = merged.fuse(Some(depth as isize));
+        }
+        PyGSSNode { inner: merged }
+    } else {
+        PyGSSNode {
+            inner: RustGSS::empty(),
+        }
+    }
 }
 
 #[pyfunction]
 fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
-    let mut arc = node.inner.clone();
-    rust_allow_only(&mut arc, &bv.inner);
-    node.inner = arc;
+    node.inner = node.inner.apply_and_prune(|acc| {
+        let mut new_acc = acc.clone();
+        new_acc.llm_tokens_union &= &bv.inner;
+        if new_acc.llm_tokens_union.is_empty() {
+            None
+        } else {
+            Some(new_acc)
+        }
+    });
 }
 
 #[pyfunction]
 fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
-    let mut arc = node.inner.clone();
-    sep1::datastructures::gss_leveled_adapter::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
-    node.inner = arc;
+    node.inner = node.inner.apply(|acc| {
+        let mut new_acc = acc.clone();
+        new_acc.llm_tokens_union = RustHybridBitset::max_ones();
+        new_acc
+    });
 }
 
 #[pyfunction]
-fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
+fn gss_prune_disallowed_terminals(
+    node: &mut PyGSSNode,
+    terminals_map: &Bound<'_, PyDict>,
+) -> PyResult<()> {
     let mut rust_terminals_map = BTreeMap::new();
     for (k, v) in terminals_map.iter() {
         let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
@@ -858,14 +1033,26 @@ fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_
         rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
     }
 
-    let mut arc = node.inner.clone();
-    sep1::datastructures::gss_leveled_adapter::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
-    node.inner = arc;
+    node.inner = node.inner.apply_and_prune(|acc| {
+        for (sid, bv) in &rust_terminals_map {
+            let allowed = acc
+                .terminals_union
+                .get_l2_bitset(sid.0)
+                .unwrap_or(&RustHybridBitset::max_ones());
+            if !bv.is_subset(allowed) {
+                return None;
+            }
+        }
+        Some(acc.clone())
+    });
     Ok(())
 }
 
 #[pyfunction]
-fn gss_prune_llm_tokens_by_disallowed_terminals(node: &mut PyGSSNode, possible_matches: &Bound<'_, PyDict>) -> PyResult<()> {
+fn gss_prune_llm_tokens_by_disallowed_terminals(
+    node: &mut PyGSSNode,
+    possible_matches: &Bound<'_, PyDict>,
+) -> PyResult<()> {
     let mut rust_possible_matches = BTreeMap::new();
     for (k, v) in possible_matches.iter() {
         let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
@@ -879,16 +1066,51 @@ fn gss_prune_llm_tokens_by_disallowed_terminals(node: &mut PyGSSNode, possible_m
         rust_possible_matches.insert(tokenizer_state_id, terminal_map);
     }
 
-    let mut arc = node.inner.clone();
-    sep1::datastructures::gss_leveled_adapter::prune_llm_tokens_by_disallowed_terminals(
-        &mut arc, &rust_possible_matches, &mut std::collections::HashMap::new()
-    );
-    node.inner = arc;
+    node.inner = node.inner.apply_and_prune(|acc| {
+        if acc.terminals_union == RustHybridL2Bitset::all() {
+            return Some(acc.clone());
+        }
+        let mut forbidden_llm_tokens = RustHybridBitset::zeros();
+        let disallowed_terminals_l2 = acc.terminals_union.complement();
+
+        for (range, disallowed_in_range) in disallowed_terminals_l2.range_values() {
+            if disallowed_in_range.is_empty() {
+                continue;
+            }
+            let relevant_matches = rust_possible_matches.range(
+                sep1::tokenizer::TokenizerStateID(*range.start())
+                    ..=sep1::tokenizer::TokenizerStateID(*range.end()),
+            );
+            for (_, state_matches) in relevant_matches {
+                for (terminal_id, llm_tokens) in state_matches {
+                    if disallowed_in_range.contains(terminal_id.0) {
+                        forbidden_llm_tokens |= llm_tokens;
+                    }
+                }
+            }
+        }
+
+        if forbidden_llm_tokens.is_empty() {
+            return Some(acc.clone());
+        }
+
+        let mut new_acc = acc.clone();
+        new_acc.llm_tokens_union -= &forbidden_llm_tokens;
+
+        if new_acc.llm_tokens_union.is_empty() {
+            None
+        } else {
+            Some(new_acc)
+        }
+    });
     Ok(())
 }
 
 #[pyfunction]
-fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
+fn gss_map_allowed_terminals_tokenizer_states(
+    node: &mut PyGSSNode,
+    state_map: &Bound<'_, PyDict>,
+) -> PyResult<()> {
     let mut rust_state_map = BTreeMap::new();
     for (k, v) in state_map.iter() {
         let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
@@ -896,25 +1118,47 @@ fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &
         rust_state_map.insert(from_state, to_state);
     }
 
-    let mut arc = node.inner.clone();
-    sep1::datastructures::gss_leveled_adapter::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
-    node.inner = arc;
+    node.inner = node.inner.apply(|acc| {
+        let mut new_map = BTreeMap::new();
+        for (old, new) in &rust_state_map {
+            if let Some(bv) = acc.terminals_union.get_l2_bitset(old.0) {
+                new_map
+                    .entry(new.0)
+                    .and_modify(|b: &mut RustHybridBitset| *b |= bv.clone())
+                    .or_insert_with(|| bv.clone());
+            }
+        }
+        let mut out = RustHybridL2Bitset::all();
+        for (sid, bv) in new_map {
+            out.insert_l2_bitset(sid, bv);
+        }
+        let mut na = acc.clone();
+        na.terminals_union = out;
+        na
+    });
     Ok(())
 }
 
 #[pyfunction]
 fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
-    let mut arc = node.inner.clone();
-    arc = sep1::datastructures::gss_leveled_adapter::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
-    node.inner = arc;
+    node.inner = node.inner.fuse(Some(levels as isize));
 }
 
 #[pyfunction]
 fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
-    let pairs = rust_popn_collect(&node.inner, n);
-    pairs.into_iter()
-        .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
-        .collect()
+    let popped = node.inner.popn(n as isize);
+    let mut out = Vec::new();
+    for edge in popped.peek() {
+        let iso_inner = popped.isolate(Some(edge.clone()));
+        let num_paths = iso_inner.num_paths();
+        if num_paths > 0 {
+            let gss_node = PyGSSNode { inner: iso_inner };
+            for _ in 0..num_paths {
+                out.push((edge.state_id.0, gss_node.clone()));
+            }
+        }
+    }
+    out
 }
 
 #[self_referencing]
@@ -942,28 +1186,33 @@ impl PyGrammarConstraintState {
                     Ok::<_, PyErr>(state)
                 },
             }
-            .try_build()?
+            .try_build()?,
         })
     }
 
     fn clone(&self) -> Self {
         let constraint = self.inner.borrow_constraint().clone();
-
-        let gss_nodes: Vec<(usize, Arc<RustGSSNode>)> = self.inner.with_inner(|state| {
-            state.state.iter().map(|(id, glr_state)| {
-                (id.0, glr_state.active_state.stack.clone())
-            }).collect()
-        });
+        let gss_map: BTreeMap<sep1::tokenizer::TokenizerStateID, RustGSS> =
+            self.inner.with_inner(|state| {
+                state
+                    .state
+                    .iter()
+                    .map(|(id, glr_state)| (*id, glr_state.stack.clone()))
+                    .collect()
+            });
 
         PyGrammarConstraintState {
             inner: PyGrammarConstraintStateWrapperTryBuilder {
                 constraint,
                 inner_builder: move |c: &PyGrammarConstraint| {
-                    let state = c.inner.state_with_nodes(gss_nodes);
+                    // TODO: This requires a method on GrammarConstraint to build a state from a map of GSSs.
+                    // Assuming `state_from_gss_map` exists for this purpose.
+                    let state = c.inner.state_from_gss_map(gss_map);
                     Ok::<_, PyErr>(state)
                 },
             }
-            .try_build().expect("Failed to clone PyGrammarConstraintState"),
+            .try_build()
+            .expect("Failed to clone PyGrammarConstraintState"),
         }
     }
 
@@ -991,7 +1240,6 @@ impl PyGrammarConstraintState {
     }
 
     fn commit(&mut self, llm_token_id: usize) {
-        // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
         self.inner.with_inner_mut(|state| {
             state.commit(LLMTokenID(llm_token_id));
         });
@@ -1007,8 +1255,13 @@ impl PyGrammarConstraintState {
         self.inner.with_inner(|state| state.print_gss_stats());
     }
 
-    fn compute_commit_maps(&self, py: Python, llm_token_bytes: &[u8]) -> PyResult<(PyObject, PyObject)> {
-        let (state_map, terminals_map) = self.inner.with_inner(|s| s.compute_commit_maps(llm_token_bytes));
+    fn compute_commit_maps(
+        &self,
+        py: Python,
+        llm_token_bytes: &[u8],
+    ) -> PyResult<(PyObject, PyObject)> {
+        let (state_map, terminals_map) =
+            self.inner.with_inner(|s| s.compute_commit_maps(llm_token_bytes));
 
         let py_state_map = PyDict::new_bound(py);
         for (k, v) in state_map {
@@ -1027,7 +1280,12 @@ impl PyGrammarConstraintState {
         let mut out = BTreeMap::new();
         self.inner.with_inner(|state| {
             for (tokenizer_state_id, glr_state) in &state.state {
-                out.insert(tokenizer_state_id.0, PyGSSNode { inner: glr_state.active_state.stack.clone() });
+                out.insert(
+                    tokenizer_state_id.0,
+                    PyGSSNode {
+                        inner: glr_state.stack.clone(),
+                    },
+                );
             }
         });
         Ok(out)
@@ -1037,8 +1295,12 @@ impl PyGrammarConstraintState {
         self.inner.with_inner_mut(|state| {
             let mut new_b_tree_map = BTreeMap::new();
             for (tokenizer_state_id, gss_node) in new_state {
-                let glr_state = state.parent.parser.init_glr_parser_from_stack(gss_node.inner.clone());
-                new_b_tree_map.insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
+                let glr_state = GLRParserState {
+                    parser: state.parent.parser,
+                    stack: gss_node.inner.clone(),
+                };
+                new_b_tree_map
+                    .insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
             }
             state.state = new_b_tree_map;
         });
@@ -1067,7 +1329,8 @@ impl PyIncrementalParser {
             inner: PyIncrementalParserWrapperTryBuilder {
                 grammar, // PyCompiledGrammar is moved in
                 parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
-            }.try_build()?
+            }
+            .try_build()?,
         })
     }
 
@@ -1100,8 +1363,14 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
     m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
     m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
-    m.add_function(wrap_pyfunction!(gss_prune_llm_tokens_by_disallowed_terminals, m)?)?;
-    m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        gss_prune_llm_tokens_by_disallowed_terminals,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        gss_map_allowed_terminals_tokenizer_states,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
     m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
     m.add_class::<PyIncrementalParser>()?;
