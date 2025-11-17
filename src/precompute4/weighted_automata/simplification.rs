@@ -143,28 +143,30 @@ impl DWA {
         let rustfst_time = rustfst_start.elapsed();
         let rustfst_states = rustfst.states.len();
 
-        let state_cmp = match internal_states.cmp(&rustfst_states) {
-            std::cmp::Ordering::Less => "<",
-            std::cmp::Ordering::Equal => "=",
-            std::cmp::Ordering::Greater => ">",
-        };
-        let time_cmp = match internal_time.cmp(&rustfst_time) {
-            std::cmp::Ordering::Less => "<",
-            std::cmp::Ordering::Equal => "=",
-            std::cmp::Ordering::Greater => ">",
-        };
+        if internal_time + rustfst_time > std::time::Duration::from_secs(1) {
+            let state_cmp = match internal_states.cmp(&rustfst_states) {
+                std::cmp::Ordering::Less => "<",
+                std::cmp::Ordering::Equal => "=",
+                std::cmp::Ordering::Greater => ">",
+            };
+            let time_cmp = match internal_time.cmp(&rustfst_time) {
+                std::cmp::Ordering::Less => "<",
+                std::cmp::Ordering::Equal => "=",
+                std::cmp::Ordering::Greater => ">",
+            };
 
-        crate::debug!(
-            4,
-            "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]",
-            initial_states,
-            internal_time,
-            internal_states,
-            rustfst_time,
-            rustfst_states,
-            state_cmp,
-            time_cmp
-        );
+            crate::debug!(
+                4,
+                "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]",
+                initial_states,
+                internal_time,
+                internal_states,
+                rustfst_time,
+                rustfst_states,
+                state_cmp,
+                time_cmp
+            );
+        }
 
         *self = internal;
     }
@@ -666,28 +668,30 @@ impl NWA {
         let rustfst_time = rustfst_start.elapsed();
         let rustfst_states = rustfst.states.len();
 
-        let state_cmp = match internal_states.cmp(&rustfst_states) {
-            std::cmp::Ordering::Less => "<",
-            std::cmp::Ordering::Equal => "=",
-            std::cmp::Ordering::Greater => ">",
-        };
-        let time_cmp = match internal_time.cmp(&rustfst_time) {
-            std::cmp::Ordering::Less => "<",
-            std::cmp::Ordering::Equal => "=",
-            std::cmp::Ordering::Greater => ">",
-        };
+        if internal_time + rustfst_time > std::time::Duration::from_secs(1) {
+            let state_cmp = match internal_states.cmp(&rustfst_states) {
+                std::cmp::Ordering::Less => "<",
+                std::cmp::Ordering::Equal => "=",
+                std::cmp::Ordering::Greater => ">",
+            };
+            let time_cmp = match internal_time.cmp(&rustfst_time) {
+                std::cmp::Ordering::Less => "<",
+                std::cmp::Ordering::Equal => "=",
+                std::cmp::Ordering::Greater => ">",
+            };
 
-        crate::debug!(
-            4,
-            "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]",
-            initial_states,
-            internal_time,
-            internal_states,
-            rustfst_time,
-            rustfst_states,
-            state_cmp,
-            time_cmp
-        );
+            crate::debug!(
+                4,
+                "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]",
+                initial_states,
+                internal_time,
+                internal_states,
+                rustfst_time,
+                rustfst_states,
+                state_cmp,
+                time_cmp
+            );
+        }
 
         *self = internal;
     }

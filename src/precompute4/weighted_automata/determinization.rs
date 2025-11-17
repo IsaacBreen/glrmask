@@ -329,20 +329,24 @@ impl NWA {
             if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
                 DWA::new()
             } else {
-                let mp = MultiProgress::new();
-                let main_pb = mp.add(ProgressBar::new(1));
-                main_pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template(
-                            "{spinner:.green} [{elapsed_precise}] States: \
-                             [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}",
-                        )
-                        .unwrap()
-                        .progress_chars("#>-"),
-                );
-                main_pb.set_message("Determinizing NWA");
+                let show_pbar = self.states.len() > 10000;
+                let mp = if show_pbar { Some(MultiProgress::new()) } else { None };
+                let main_pb = mp.as_ref().map(|mp_instance| {
+                    let pb = mp_instance.add(ProgressBar::new(1));
+                    pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template(
+                                "{spinner:.green} [{elapsed_precise}] States: \
+                                 [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}",
+                            )
+                            .unwrap()
+                            .progress_chars("#>-"),
+                    );
+                    pb.set_message("Determinizing NWA");
+                    pb
+                });
 
-                let mut det = Determinizer::new(self, Some(mp));
+                let mut det = Determinizer::new(self, mp);
                 let mut start_subset: WeightedSubset = WeightedSubset::new();
                 start_subset.insert(self.body.start_state, Weight::all());
                 let start_id = det.register_state(start_subset);
@@ -364,15 +368,19 @@ impl NWA {
                         panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
                     }
 
-                    let total_states = det.seen.len();
-                    main_pb.set_length(total_states as u64);
-                    main_pb.set_position(processed_count as u64);
-                    main_pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
+                    if let Some(pb) = &main_pb {
+                        let total_states = det.seen.len();
+                        pb.set_length(total_states as u64);
+                        pb.set_position(processed_count as u64);
+                        pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
+                    }
 
                     det.expand_state(sid);
                     processed_count += 1;
                 }
-                main_pb.finish_with_message("Determinization complete");
+                if let Some(pb) = main_pb {
+                    pb.finish_with_message("Determinization complete");
+                }
                 det.dwa
             }
         };
