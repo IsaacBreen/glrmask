@@ -1948,6 +1948,66 @@ impl GrammarConstraint {
         let is_equal = original_bv_9 == original_bv_rsb;
         println!("[perf] STRATEGY 9 (Scan o2i):                {:?} (equal: {})", elapsed, is_equal);
 
+        // --- STRATEGY 10: Parallel Scan o2i ---
+        let precompute_instant = std::time::Instant::now();
+        let max_original_id = self.llm_vocab.max_original_llm_token_id;
+        let mut original_to_internal_map_10: Vec<u32> = vec![0; max_original_id + 1];
+        for (internal_id, original_bv) in internal_to_original.iter() {
+            for original_id in original_bv.iter() {
+                if original_id <= max_original_id {
+                    original_to_internal_map_10[original_id] = *internal_id as u32;
+                }
+            }
+        }
+        let mut active_internals_10 = vec![false; self.vocab.internal_max_llm_token + 1];
+        for i in internal_bv.iter() {
+            if i < active_internals_10.len() {
+                active_internals_10[i] = true;
+            }
+        }
+        let _precompute_elapsed = precompute_instant.elapsed();
+
+        let instant = std::time::Instant::now();
+        let original_vocab_size_words = (max_original_id / 64) + 1;
+        let mut result_bitset_words = vec![0u64; original_vocab_size_words];
+
+        result_bitset_words
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(word_idx, word)| {
+                let base_id = word_idx * 64;
+                let mut current_word = 0u64;
+                for bit_idx in 0..64 {
+                    let original_id = base_id + bit_idx;
+                    if original_id > max_original_id {
+                        break;
+                    }
+                    let internal_id =
+                        unsafe { *original_to_internal_map_10.get_unchecked(original_id) } as usize;
+                    if unsafe { *active_internals_10.get_unchecked(internal_id) } {
+                        current_word |= 1 << bit_idx;
+                    }
+                }
+                *word = current_word;
+            });
+
+        let original_bv_10 = result_bitset_words
+            .iter()
+            .enumerate()
+            .flat_map(|(word_idx, &word)| {
+                (0..64).filter_map(move |bit_idx| {
+                    if (word >> bit_idx) & 1 == 1 {
+                        Some(word_idx * 64 + bit_idx)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect::<RangeSetBlaze<usize>>();
+        let elapsed = instant.elapsed();
+        let is_equal = original_bv_10 == original_bv_rsb;
+        println!("[perf] STRATEGY 10 (Parallel Scan o2i):       {:?} (equal: {})", elapsed, is_equal);
+
         HybridBitset::from(original_bv_rsb)
     }
 
