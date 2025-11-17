@@ -5,8 +5,8 @@ from .range_set_abc import RangeSet
 from .rangeset_stats import time_method, time_func, record_metric
 
 
-class BitsetRangeSet(RangeSet[int]):
-    """A BitsetRangeSet implementation backed by the Rust ffi.Bitset."""
+class FFIBitset(RangeSet[int]):
+    """A FFIBitset implementation backed by the Rust ffi.Bitset."""
 
     __slots__ = ('_bitset',)
 
@@ -17,8 +17,8 @@ class BitsetRangeSet(RangeSet[int]):
         self._bitset = ffi.Bitset.from_indices(indices)
 
     @classmethod
-    def from_ffi_bitset(cls, bitset: ffi.Bitset) -> 'BitsetRangeSet':
-        """Creates a BitsetRangeSet from a PyBitset."""
+    def from_ffi_bitset(cls, bitset: ffi.Bitset) -> 'FFIBitset':
+        """Creates a FFIBitset from a PyBitset."""
         self = cls.empty()
         self._bitset = bitset
         return self
@@ -37,7 +37,7 @@ class BitsetRangeSet(RangeSet[int]):
         """Returns the elements of the set as a list."""
         res = self._bitset.to_indices()
         try:
-            record_metric('BitsetRangeSet.to_indices.out_len', len(res))
+            record_metric('FFIBitset.to_indices.out_len', len(res))
         except Exception:
             pass
         return res
@@ -67,62 +67,62 @@ class BitsetRangeSet(RangeSet[int]):
     def contains(self, x: int) -> bool:
         """Return True if x is contained in the set."""
         res = self._bitset.contains(x)
-        record_metric('BitsetRangeSet.contains.true' if res else 'BitsetRangeSet.contains.false', 1)
+        record_metric('FFIBitset.contains.true' if res else 'FFIBitset.contains.false', 1)
         return res
 
     @time_method
-    def union(self, other: RangeSet[int]) -> "BitsetRangeSet":
+    def union(self, other: RangeSet[int]) -> "FFIBitset":
         """Return the union of two RangeSets."""
-        if not isinstance(other, BitsetRangeSet):
-            raise TypeError("other must be a BitsetRangeSet")
+        if not isinstance(other, FFIBitset):
+            raise TypeError("other must be a FFIBitset")
         try:
-            record_metric('BitsetRangeSet.union.in_len_a', len(self))
-            record_metric('BitsetRangeSet.union.in_len_b', len(other))
+            record_metric('FFIBitset.union.in_len_a', len(self))
+            record_metric('FFIBitset.union.in_len_b', len(other))
         except Exception:
             pass
         new_bs = self._bitset.union(other._bitset)
-        res = BitsetRangeSet()
+        res = FFIBitset()
         res._bitset = new_bs
         try:
-            record_metric('BitsetRangeSet.union.out_len', len(res))
+            record_metric('FFIBitset.union.out_len', len(res))
         except Exception:
             pass
         return res
 
     @time_method
-    def intersection(self, other: RangeSet[int]) -> "BitsetRangeSet":
+    def intersection(self, other: RangeSet[int]) -> "FFIBitset":
         """Return the intersection of two RangeSets."""
-        if not isinstance(other, BitsetRangeSet):
-            raise TypeError("other must be a BitsetRangeSet")
+        if not isinstance(other, FFIBitset):
+            raise TypeError("other must be a FFIBitset")
         try:
-            record_metric('BitsetRangeSet.intersection.in_len_a', len(self))
-            record_metric('BitsetRangeSet.intersection.in_len_b', len(other))
+            record_metric('FFIBitset.intersection.in_len_a', len(self))
+            record_metric('FFIBitset.intersection.in_len_b', len(other))
         except Exception:
             pass
         new_bs = self._bitset.intersection(other._bitset)
-        res = BitsetRangeSet()
+        res = FFIBitset()
         res._bitset = new_bs
         try:
-            record_metric('BitsetRangeSet.intersection.out_len', len(res))
+            record_metric('FFIBitset.intersection.out_len', len(res))
         except Exception:
             pass
         return res
 
     @time_method
-    def difference(self, other: RangeSet[int]) -> "BitsetRangeSet":
+    def difference(self, other: RangeSet[int]) -> "FFIBitset":
         """Return the set difference self \\ other."""
-        if not isinstance(other, BitsetRangeSet):
-            raise TypeError("other must be a BitsetRangeSet")
+        if not isinstance(other, FFIBitset):
+            raise TypeError("other must be a FFIBitset")
         try:
-            record_metric('BitsetRangeSet.difference.in_len_a', len(self))
-            record_metric('BitsetRangeSet.difference.in_len_b', len(other))
+            record_metric('FFIBitset.difference.in_len_a', len(self))
+            record_metric('FFIBitset.difference.in_len_b', len(other))
         except Exception:
             pass
         new_bs = self._bitset.difference(other._bitset)
-        res = BitsetRangeSet()
+        res = FFIBitset()
         res._bitset = new_bs
         try:
-            record_metric('BitsetRangeSet.difference.out_len', len(res))
+            record_metric('FFIBitset.difference.out_len', len(res))
         except Exception:
             pass
         return res
@@ -130,78 +130,78 @@ class BitsetRangeSet(RangeSet[int]):
     @time_method
     def issuperset(self, other: RangeSet[int]) -> bool:
         """Return True if self is a superset of other."""
-        if not isinstance(other, BitsetRangeSet):
-            raise TypeError("other must be a BitsetRangeSet")
+        if not isinstance(other, FFIBitset):
+            raise TypeError("other must be a FFIBitset")
         res = self._bitset.is_superset(other._bitset)
-        record_metric('BitsetRangeSet.issuperset.true' if res else 'BitsetRangeSet.issuperset.false', 1)
+        record_metric('FFIBitset.issuperset.true' if res else 'FFIBitset.issuperset.false', 1)
         return res
 
     @time_method
     def issubset(self, other: RangeSet[int]) -> bool:
         """Return True if self is a subset of other."""
-        if not isinstance(other, BitsetRangeSet):
-            raise TypeError("other must be a BitsetRangeSet")
+        if not isinstance(other, FFIBitset):
+            raise TypeError("other must be a FFIBitset")
         res = self._bitset.is_subset(other._bitset)
-        record_metric('BitsetRangeSet.issubset.true' if res else 'BitsetRangeSet.issubset.false', 1)
+        record_metric('FFIBitset.issubset.true' if res else 'FFIBitset.issubset.false', 1)
         return res
 
     @time_method
     def isdisjoint(self, other: RangeSet[int]) -> bool:
         """Return True if self has no elements in common with other."""
-        if not isinstance(other, BitsetRangeSet):
-            raise TypeError("other must be a BitsetRangeSet")
+        if not isinstance(other, FFIBitset):
+            raise TypeError("other must be a FFIBitset")
         res = self._bitset.is_disjoint(other._bitset)
-        record_metric('BitsetRangeSet.isdisjoint.true' if res else 'BitsetRangeSet.isdisjoint.false', 1)
+        record_metric('FFIBitset.isdisjoint.true' if res else 'FFIBitset.isdisjoint.false', 1)
         return res
 
     @time_method
     def union_update(self, other: RangeSet[int]) -> None:
         """Update self with the union of self and other."""
-        if not isinstance(other, BitsetRangeSet):
-            raise TypeError("other must be a BitsetRangeSet")
+        if not isinstance(other, FFIBitset):
+            raise TypeError("other must be a FFIBitset")
         self._bitset |= other._bitset
 
     @time_method
     def intersection_update(self, other: RangeSet[int]) -> None:
         """Update self with the intersection of self and other."""
-        if not isinstance(other, BitsetRangeSet):
-            raise TypeError("other must be a BitsetRangeSet")
+        if not isinstance(other, FFIBitset):
+            raise TypeError("other must be a FFIBitset")
         self._bitset &= other._bitset
 
     @time_method
     def difference_update(self, other: RangeSet[int]) -> None:
         """Update self with the set difference self \\ other."""
-        if not isinstance(other, BitsetRangeSet):
-            raise TypeError("other must be a BitsetRangeSet")
+        if not isinstance(other, FFIBitset):
+            raise TypeError("other must be a FFIBitset")
         self._bitset -= other._bitset
 
     @time_method
     def is_empty(self) -> bool:
         res = self._bitset.is_empty()
-        record_metric('BitsetRangeSet.is_empty.true' if res else 'BitsetRangeSet.is_empty.false', 1)
+        record_metric('FFIBitset.is_empty.true' if res else 'FFIBitset.is_empty.false', 1)
         return res
 
     @time_method
     def __len__(self) -> int:
         v = self._bitset.len()
-        record_metric('BitsetRangeSet.__len__.sum', v)
+        record_metric('FFIBitset.__len__.sum', v)
         return v
 
     def __repr__(self) -> str:
-        return f"BitsetRangeSet({self.intervals!r})"
+        return f"FFIBitset({self.intervals!r})"
 
     @time_method
     def __eq__(self, other) -> bool:
-        if not isinstance(other, BitsetRangeSet):
+        if not isinstance(other, FFIBitset):
             return NotImplemented
         res = self._bitset == other._bitset
-        record_metric('BitsetRangeSet.__eq__.true' if res else 'BitsetRangeSet.__eq__.false', 1)
+        record_metric('FFIBitset.__eq__.true' if res else 'FFIBitset.__eq__.false', 1)
         return res
 
     @time_method
     def __hash__(self) -> int:
         h = hash(self._bitset)
-        record_metric('BitsetRangeSet.__hash__', 1)
+        record_metric('FFIBitset.__hash__', 1)
         return h
 
     def __getstate__(self):
@@ -217,39 +217,39 @@ class BitsetRangeSet(RangeSet[int]):
         """
         Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
         """
-        temp_rs = BitsetRangeSet(ranges)
+        temp_rs = FFIBitset(ranges)
         return temp_rs.to_ranges()
 
     @staticmethod
-    @time_func('BitsetRangeSet.from_ranges')
-    def from_ranges(ranges: List[List[int]]) -> 'BitsetRangeSet':
-        """Creates a BitsetRangeSet from a list of [start, end] lists."""
-        return BitsetRangeSet(ranges)
+    @time_func('FFIBitset.from_ranges')
+    def from_ranges(ranges: List[List[int]]) -> 'FFIBitset':
+        """Creates a FFIBitset from a list of [start, end] lists."""
+        return FFIBitset(ranges)
 
     @staticmethod
-    @time_func('BitsetRangeSet.from_indices')
-    def from_indices(indices: Iterable[int]) -> 'BitsetRangeSet':
-        """Creates a BitsetRangeSet from an iterable of individual indices."""
-        new_set = BitsetRangeSet()
+    @time_func('FFIBitset.from_indices')
+    def from_indices(indices: Iterable[int]) -> 'FFIBitset':
+        """Creates a FFIBitset from an iterable of individual indices."""
+        new_set = FFIBitset()
         idx_list = list(indices)
-        record_metric('BitsetRangeSet.from_indices.in_len', len(idx_list))
+        record_metric('FFIBitset.from_indices.in_len', len(idx_list))
         new_set._bitset = ffi.Bitset.from_indices(idx_list)
         try:
-            record_metric('BitsetRangeSet.from_indices.out_len', len(new_set))
+            record_metric('FFIBitset.from_indices.out_len', len(new_set))
         except Exception:
             pass
         return new_set
 
     @classmethod
-    @time_func('BitsetRangeSet.empty')
-    def empty(cls) -> 'BitsetRangeSet':
-        """Creates an empty BitsetRangeSet."""
-        record_metric('BitsetRangeSet.empty.calls', 1)
-        return BitsetRangeSet()
+    @time_func('FFIBitset.empty')
+    def empty(cls) -> 'FFIBitset':
+        """Creates an empty FFIBitset."""
+        record_metric('FFIBitset.empty.calls', 1)
+        return FFIBitset()
 
     @staticmethod
-    def from_json(data: List[List[int]]) -> 'BitsetRangeSet':
-        return BitsetRangeSet.from_ranges(data)
+    def from_json(data: List[List[int]]) -> 'FFIBitset':
+        return FFIBitset.from_ranges(data)
 
     def to_json(self) -> List[List[int]]:
         return self.to_ranges()
