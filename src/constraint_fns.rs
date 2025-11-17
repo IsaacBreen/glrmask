@@ -10,6 +10,7 @@ use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::BitOrAssign;
+use std::time::Instant;
 use crate::datastructures::gss_acc::Acc;
 
 type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
@@ -24,6 +25,7 @@ impl<'a> GrammarConstraintState<'a> {
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
         let dwa = &self.parent.precomputed4;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
+        let instant = Instant::now();
 
         // 1. Seed initial states
         for (&tokenizer_state_id, glr_state) in &self.state {
@@ -79,6 +81,8 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
         }
+
+        println!("Preprocessing elapsed: {:?}", instant.elapsed());
 
         // 2. Main worklist loop
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
@@ -154,8 +158,11 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
         }
+        println!("Finalization elapsed: {:?}", instant.elapsed());
 
-        self.parent.internal_bv_to_original(&final_mask_internal.into_inner())
+        let final_mask = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        println!("final_mask: {:?}", final_mask);
+        final_mask
     }
 
     #[time_it]
