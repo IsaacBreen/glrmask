@@ -2806,7 +2806,7 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn get_mask(&self) -> LLMTokenBV {
         // Trie3-based get_mask3 has been removed; we always use DWA now.
-        self.get_mask4()
+        self.get_mask4().into()
     }
 
     pub fn print_gss_stats(&self) {
