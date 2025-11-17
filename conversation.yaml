@@ -2019,7 +2019,6 @@ local_system:
       }
 
       #[self_referencing]
-      #[derive(Clone)]
       struct PyGrammarConstraintStateWrapper {
           constraint: PyGrammarConstraint, // Owns the Arc'd constraint
           #[borrows(constraint)]
@@ -2049,9 +2048,12 @@ local_system:
           }
 
           fn clone(&self) -> Self {
-              Self {
-                  inner: self.inner.clone(),
-              }
+              // Manually clone the state by extracting its nodes and rebuilding it.
+              // This relies on `get_state_map` and `PyGrammarConstraint::state_with_nodes`.
+              let mut constraint = self.inner.borrow_constraint().clone();
+              let state_map = self.get_state_map().expect("Cloning failed: could not get state map");
+              let nodes: Vec<(usize, PyGSSNode)> = state_map.into_iter().collect();
+              constraint.state_with_nodes(nodes).expect("Cloning failed: could not create new state from nodes")
           }
 
           fn is_active(&self) -> bool {
@@ -4599,5 +4601,128 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Implement clone for PyGrammarConstraintState
       by deriving Clone on wrapper"'
+    metadata:
+  - user: |-
+      Diff of python/src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=1 maturin develop -r
+      🔗 Found pyo3 bindings
+      🐍 Found CPython 3.12 at /Users/isaacbreen/miniforge3/envs/py312/bin/python
+      📡 Using build options features from pyproject.toml
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      ^[[A    Building [=======================> ] 286/288: sep1                                                                                                                                                           Compiling _sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024/python)
+      error: Clone cannot be derived for self-referencing structs
+         --> src/lib.rs:921:10
+          |
+      921 | #[derive(Clone)]
+          |          ^^^^^
+
+      error[E0422]: cannot find struct, variant or union type `PyGrammarConstraintStateWrapperTryBuilder` in this scope
+         --> src/lib.rs:441:20
+          |
+      441 |             inner: PyGrammarConstraintStateWrapperTryBuilder {
+          |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+      error[E0412]: cannot find type `PyGrammarConstraintStateWrapper` in this scope
+         --> src/lib.rs:931:12
+          |
+      931 |     inner: PyGrammarConstraintStateWrapper,
+          |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+      error[E0422]: cannot find struct, variant or union type `PyGrammarConstraintStateWrapperTryBuilder` in this scope
+         --> src/lib.rs:939:20
+          |
+      939 |             inner: PyGrammarConstraintStateWrapperTryBuilder {
+          |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+      Some errors have detailed explanations: E0412, E0422.
+      For more information about an error, try `rustc --explain E0412`.
+      error: could not compile `_sep1` (lib) due to 4 previous errors
+      💥 maturin failed
+        Caused by: Failed to build a native library through cargo
+        Caused by: Cargo build finished with "exit status: 101": `env -u CARGO PYO3_ENVIRONMENT_SIGNATURE="cpython-3.12-64bit" PYO3_PYTHON="/Users/isaacbreen/miniforge3/envs/py312/bin/python" PYTHON_SYS_EXECUTABLE="/Users/isaacbreen/miniforge3/envs/py312/bin/python" "cargo" "rustc" "--features" "pyo3/extension-module" "--message-format" "json-render-diagnostics" "--manifest-path" "/Users/isaacbreen/Projects2/grammars2024/python/Cargo.toml" "--release" "--lib" "--" "-C" "link-arg=-undefined" "-C" "link-arg=dynamic_lookup" "-C" "link-args=-Wl,-install_name,@rpath/_sep1.cpython-312-darwin.so"`
+    metadata:
+  - assistant: |-
+      You've run into a limitation of the `ouroboros` crate: it cannot automatically derive `Clone` for self-referencing structs. The previous attempt to add `#[derive(Clone)]` was incorrect.
+
+      The solution is to remove the derive macro and implement `clone` manually for `PyGrammarConstraintState`. The correct way to clone the state is to extract its essential information (the current GSS nodes) and then construct a new state object from that information.
+
+      Here are the step-by-step instructions to fix the compilation errors:
+
+      ### Step-by-step Instructions
+
+      1.  **Open `python/src/lib.rs`**.
+      2.  Locate the `PyGrammarConstraintStateWrapper` struct definition (around line 920).
+      3.  **Remove the `#[derive(Clone)]` attribute** from above the struct definition.
+
+          ```rust
+          // Remove this line
+          #[derive(Clone)] 
+          ```
+
+      4.  Locate the `clone` method inside the `#[pymethods]` block for `PyGrammarConstraintState` (around line 948).
+      5.  **Replace the entire `clone` method** with the following implementation, which manually reconstructs the state:
+
+          ```rust
+          fn clone(&self) -> Self {
+              // Manually clone the state by extracting its nodes and rebuilding it.
+              // This relies on `get_state_map` and `PyGrammarConstraint::state_with_nodes`.
+              let mut constraint = self.inner.borrow_constraint().clone();
+              let state_map = self.get_state_map().expect("Cloning failed: could not get state map");
+              let nodes: Vec<(usize, PyGSSNode)> = state_map.into_iter().collect();
+              constraint.state_with_nodes(nodes).expect("Cloning failed: could not create new state from nodes")
+          }
+          ```
+
+      ### Git Diff
+
+      Here is the corresponding git diff to apply these changes:
+
+      ```diff
+      diff --git a/python/src/lib.rs b/python/src/lib.rs
+      --- a/python/src/lib.rs
+      +++ b/python/src/lib.rs
+      @@ -918,7 +918,6 @@
+       }
+       
+       #[self_referencing]
+      -#[derive(Clone)]
+       struct PyGrammarConstraintStateWrapper {
+           constraint: PyGrammarConstraint, // Owns the Arc'd constraint
+           #[borrows(constraint)]
+      @@ -947,9 +946,12 @@
+           }
+       
+           fn clone(&self) -> Self {
+      -        Self {
+      -            inner: self.inner.clone(),
+      -        }
+      +        // Manually clone the state by extracting its nodes and rebuilding it.
+      +        // This relies on `get_state_map` and `PyGrammarConstraint::state_with_nodes`.
+      +        let mut constraint = self.inner.borrow_constraint().clone();
+      +        let state_map = self.get_state_map().expect("Cloning failed: could not get state map");
+      +        let nodes: Vec<(usize, PyGSSNode)> = state_map.into_iter().collect();
+      +        constraint.state_with_nodes(nodes).expect("Cloning failed: could not create new state from nodes")
+           }
+       
+           fn is_active(&self) -> bool {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/src/lib.rs
+      Applying patch to 'python/src/lib.rs' using custom patcher...
+      Successfully applied patch and wrote to python/src/lib.rs.
+    metadata:
+  - user: 'Changes committed with message: "Implement manual clone for PyGrammarConstraintState
+      by rebuilding state from nodes"'
     metadata:
 ...

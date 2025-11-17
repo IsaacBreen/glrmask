@@ -918,7 +918,6 @@ fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
 }
 
 #[self_referencing]
-#[derive(Clone)]
 struct PyGrammarConstraintStateWrapper {
     constraint: PyGrammarConstraint, // Owns the Arc'd constraint
     #[borrows(constraint)]
@@ -948,9 +947,12 @@ impl PyGrammarConstraintState {
     }
 
     fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
+        // Manually clone the state by extracting its nodes and rebuilding it.
+        // This relies on `get_state_map` and `PyGrammarConstraint::state_with_nodes`.
+        let mut constraint = self.inner.borrow_constraint().clone();
+        let state_map = self.get_state_map().expect("Cloning failed: could not get state map");
+        let nodes: Vec<(usize, PyGSSNode)> = state_map.into_iter().collect();
+        constraint.state_with_nodes(nodes).expect("Cloning failed: could not create new state from nodes")
     }
 
     fn is_active(&self) -> bool {
