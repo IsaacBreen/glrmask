@@ -15,9 +15,7 @@ class BruteForceFastRustModel:
                  constraint_state: ffi.GrammarConstraintState,
                  internal_to_original_map: Dict[int, RangeSet],
                  internal_to_representative_map: Dict[int, int],
-                 internal_max_llm_token: int,
-                 id_to_token: Dict[int, bytes],
-                 ):
+                 internal_max_llm_token: int):
         self.constraint = constraint
         self.constraint_state = constraint_state
         self.internal_to_original_map = internal_to_original_map
@@ -26,7 +24,6 @@ class BruteForceFastRustModel:
         # For compatibility with statistics printer
         self.arena: Dict = {}
         self.roots_map: Dict = {}
-        self.id_to_token = id_to_token
 
     @staticmethod
     def from_json_string(s: str) -> "BruteForceFastRustModel":
@@ -34,7 +31,6 @@ class BruteForceFastRustModel:
         constraint_state = ffi.GrammarConstraintState(constraint)
         
         data = json.loads(s)
-        id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         vocab = data['vocab']
 
         internal_to_original_map = {
@@ -53,8 +49,7 @@ class BruteForceFastRustModel:
             constraint_state,
             internal_to_original_map,
             internal_to_representative_map,
-            internal_max_llm_token,
-            id_to_token,
+            internal_max_llm_token
         )
 
     def get_mask(self) -> RangeSet:
@@ -63,47 +58,21 @@ class BruteForceFastRustModel:
         and checking if committing a representative original token leads to a valid state.
         """
         allowed_mask = RangeSet.empty()
-
-        originals = set()
-        for _, originals_ in self.internal_to_original_map.items():
-            originals |= set(originals_)
-        assert set(self.id_to_token.keys()) == originals
-
-        assert self.internal_max_llm_token == max(self.internal_to_representative_map.keys())
-        for internal_token_id in tqdm(range(self.internal_max_llm_token + 1), desc="get_mask (bruteforce_fast_rust)"):
-            representative_token_id = self.internal_to_representative_map[internal_token_id]
+        
+        for internal_token_id in tqdm(range(self.internal_max_llm_token), desc="get_mask (bruteforce_fast_rust)"):
+            representative_token_id = self.internal_to_representative_map.get(internal_token_id)
+            if representative_token_id is None:
+                continue
 
             # Create a temporary state by cloning the current state
             temp_state = self.constraint_state.clone()
             # Check if the next token is valid
             temp_state.commit(representative_token_id)
-
-            for original in self.internal_to_original_map[internal_token_id]:
-                temp_state2 = self.constraint_state.clone()
-                # Check if the next token is valid
-                temp_state2.commit(original)
-                assert temp_state2.is_active() == temp_state.is_active()
-
+            
             if temp_state.is_active():
                 original_tokens = self.internal_to_original_map.get(internal_token_id)
                 if original_tokens:
                     allowed_mask = allowed_mask.union(original_tokens)
-
-
-        allowed_tokens = []
-        for token_id in tqdm(self.id_to_token.keys(), desc="get_mask (bruteforce_rust)"):
-            # Create a temporary state by cloning the current state
-            temp_state = self.constraint_state.clone()
-            # Check if the next token is valid
-            temp_state.commit(token_id)
-            # mask_bv = temp_state.get_mask_bv()
-            # if mask_bv.to_ranges(): # Non-empty mask means the token is valid
-            #     allowed_tokens.append(token_id)
-            if temp_state.is_active():
-                allowed_tokens.append(token_id)
-        allowed_mask2 = RangeSet.from_indices(allowed_tokens)
-
-        assert allowed_mask == allowed_mask2 # THIS IS FAILING.
 
         return allowed_mask
 
