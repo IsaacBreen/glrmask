@@ -44,6 +44,7 @@ use crate::{
 use profiler_macro::{time_it, timeit};
 use std::collections::BTreeMap as StdMap;
 use std::ops::BitOrAssign;
+use rayon::prelude::*;
 use im::HashSet;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ParseState, ParseStateEdgeContent};
@@ -1640,31 +1641,70 @@ impl GrammarConstraint {
         }
 
         // STRATEGY 1
-        let mut instant = std::time::Instant::now();
+        let instant = std::time::Instant::now();
         let mut original_bv = RangeSetBlaze::new();
         for i in internal_bv.iter() {
             if let Some(bv) = internal_to_original.get(&i) {
                 original_bv |= bv.inner.as_ref();
             }
         }
-        println!("STRATEGY 1: {:?}", instant.elapsed());
+        println!("[perf] STRATEGY 1 (BTree + RangeSetBlaze): {:?}", instant.elapsed());
 
         // STRATEGY 2
         let mut i2o2 = BTreeMap::new();
         for (i, bv) in internal_to_original {
-            i2o2.insert(i, bv.inner.iter().collect::<HashSet<_>>());
+            i2o2.insert(*i, bv.inner.iter().collect::<HashSet<_>>());
         }
-        instant = std::time::Instant::now();
+        let instant = std::time::Instant::now();
         let mut bv2 = HashSet::new();
         for i in internal_bv.iter() {
             if let Some(bv) = i2o2.get(&i) {
-                bv2.extend(bv);
+                bv2.extend(bv.iter().copied());
             }
         }
-        instant = std::time::Instant::now();
-        println!("STRATEGY 2: {:?}", instant.elapsed());
+        println!("[perf] STRATEGY 2 (BTree + im::HashSet):    {:?}", instant.elapsed());
 
-        todo!();
+        // STRATEGY 3: HashMap lookup
+        let i2o_hashmap: std::collections::HashMap<_, _> =
+            internal_to_original.iter().map(|(k, v)| (*k, v)).collect();
+        let instant = std::time::Instant::now();
+        let mut original_bv_3 = RangeSetBlaze::new();
+        for i in internal_bv.iter() {
+            if let Some(bv) = i2o_hashmap.get(&i) {
+                original_bv_3 |= bv.inner.as_ref();
+            }
+        }
+        println!("[perf] STRATEGY 3 (HashMap + RangeSetBlaze): {:?}", instant.elapsed());
+
+        // STRATEGY 4: Vec lookup
+        let mut i2o_vec: Vec<Option<LLMTokenBV>> =
+            vec![None; self.vocab.internal_max_llm_token + 1];
+        for (i, bv) in internal_to_original.iter() {
+            if *i < i2o_vec.len() {
+                i2o_vec[*i] = Some(bv.clone());
+            }
+        }
+        let instant = std::time::Instant::now();
+        let mut original_bv_4 = RangeSetBlaze::new();
+        for i in internal_bv.iter() {
+            if let Some(Some(bv)) = i2o_vec.get(i) {
+                original_bv_4 |= bv.inner.as_ref();
+            }
+        }
+        println!("[perf] STRATEGY 4 (Vec + RangeSetBlaze):     {:?}", instant.elapsed());
+
+        // STRATEGY 5: Rayon
+        let instant = std::time::Instant::now();
+        let _original_bv_5 = internal_bv.inner.ranges().par_bridge().map(|range| {
+            let mut partial_bv = RangeSetBlaze::new();
+            for i in range {
+                if let Some(bv) = internal_to_original.get(&i) {
+                    partial_bv |= bv.inner.as_ref();
+                }
+            }
+            partial_bv
+        }).reduce(RangeSetBlaze::new, |a, b| a | b);
+        println!("[perf] STRATEGY 5 (Rayon):                  {:?}", instant.elapsed());
 
         HybridBitset::from(original_bv)
     }
