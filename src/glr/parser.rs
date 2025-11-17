@@ -337,6 +337,10 @@ impl GLRParser {
         ParseState::with_stack(gss)
     }
 
+    pub fn init_parse_state_with_gss(&self, gss: LeveledGSS<ParseStateEdgeContent, Acc>) -> GLRParserState {
+        GLRParserState { parser: self, stack: gss }
+    }
+
     pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
         let initial_parse_state = self.init_parse_state_with_acc();
         GLRParserState { parser: self, stack: initial_parse_state.stack }

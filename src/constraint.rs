@@ -45,7 +45,7 @@ use profiler_macro::{time_it, timeit};
 use std::collections::BTreeMap as StdMap;
 use std::ops::BitOrAssign;
 use crate::datastructures::gss_acc::Acc;
-use crate::glr::parser::ParseStateEdgeContent;
+use crate::glr::parser::{ParseState, ParseStateEdgeContent};
 use crate::glr::table::StateID;
 // ---------------------------------------------------------------------------
 // Basic aliases
@@ -1842,6 +1842,17 @@ impl GrammarConstraint {
         //     );
         // }
         // GrammarConstraintState { parent: self, state }
+    }
+
+    pub fn state_from_gss_map(&self, gss_map: &BTreeMap<TokenizerStateID, GSSNode>) -> GrammarConstraintState {
+        let mut state = BTreeMap::new();
+        for (i, node) in gss_map.iter() {
+            state.insert(
+                *i,
+                self.parser.init_parse_state_with_gss(node.clone()),
+            );
+        }
+        GrammarConstraintState { parent: self, state }
     }
 
     pub fn print_gss_nodes(

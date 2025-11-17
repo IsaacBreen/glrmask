@@ -7,10 +7,10 @@ use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-use sep1::datastructures::gss_acc::Acc as RustAcc;
+use sep1::datastructures::gss_acc::{Acc as RustAcc, Acc};
 use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
 use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
-use sep1::datastructures::leveled_gss::LeveledGSS as RustGSS;
+use sep1::datastructures::leveled_gss::LeveledGSS;
 use sep1::datastructures::u8set::U8Set;
 use sep1::finite_automata::Regex;
 use sep1::finite_automata::{
@@ -32,6 +32,8 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
+
+type RustGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 
 #[pyclass(name = "GrammarExpr")]
 #[derive(Clone)]
@@ -1038,8 +1040,9 @@ fn gss_prune_disallowed_terminals(
             let allowed = acc
                 .terminals_union
                 .get_l2_bitset(sid.0)
-                .unwrap_or(&RustHybridBitset::max_ones());
-            if !bv.is_subset(allowed) {
+                .cloned()
+                .unwrap_or(RustHybridBitset::max_ones());
+            if !bv.is_subset(&allowed) {
                 return None;
             }
         }
@@ -1207,7 +1210,7 @@ impl PyGrammarConstraintState {
                 inner_builder: move |c: &PyGrammarConstraint| {
                     // TODO: This requires a method on GrammarConstraint to build a state from a map of GSSs.
                     // Assuming `state_from_gss_map` exists for this purpose.
-                    let state = c.inner.state_from_gss_map(gss_map);
+                    let state = c.inner.state_from_gss_map(&gss_map);
                     Ok::<_, PyErr>(state)
                 },
             }
@@ -1296,7 +1299,7 @@ impl PyGrammarConstraintState {
             let mut new_b_tree_map = BTreeMap::new();
             for (tokenizer_state_id, gss_node) in new_state {
                 let glr_state = GLRParserState {
-                    parser: state.parent.parser,
+                    parser: &state.parent.parser,
                     stack: gss_node.inner.clone(),
                 };
                 new_b_tree_map
