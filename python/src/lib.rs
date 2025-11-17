@@ -7,6 +7,7 @@ use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
+use sep1::datastructures::bitset::Bitset as RustBitset;
 use sep1::datastructures::gss_acc::{Acc as RustAcc, Acc};
 use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
 use sep1::datastructures::leveled_gss::LeveledGSS;
@@ -791,6 +792,168 @@ impl From<PyHybridBitset> for RustHybridBitset {
     }
 }
 
+#[pyclass(name = "BitsetIterator")]
+struct PyBitsetIterator {
+    inner: Mutex<Box<dyn Iterator<Item = usize> + Send>>,
+}
+
+#[pymethods]
+impl PyBitsetIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<usize> {
+        slf.inner.lock().unwrap().next()
+    }
+}
+
+#[pyclass(name = "Bitset")]
+#[derive(Clone)]
+pub struct PyBitset {
+    inner: RustBitset,
+}
+
+#[pymethods]
+impl PyBitset {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: RustBitset::zeros(),
+        }
+    }
+
+    #[staticmethod]
+    fn zeros() -> Self {
+        Self {
+            inner: RustBitset::zeros(),
+        }
+    }
+
+    #[staticmethod]
+    fn ones(len: usize) -> Self {
+        Self {
+            inner: RustBitset::ones(len),
+        }
+    }
+
+    #[staticmethod]
+    fn from_indices(indices: Vec<usize>) -> Self {
+        Self {
+            inner: RustBitset::from_iter(indices),
+        }
+    }
+
+    fn to_indices(&self) -> Vec<usize> {
+        self.inner.iter_indices().collect()
+    }
+
+    fn __iter__(&self) -> PyBitsetIterator {
+        let indices: Vec<usize> = self.inner.iter_indices().collect();
+        PyBitsetIterator {
+            inner: Mutex::new(Box::new(indices.into_iter())),
+        }
+    }
+
+    fn contains(&self, idx: usize) -> bool {
+        self.inner.contains(idx)
+    }
+
+    fn insert(&mut self, idx: usize) {
+        let _ = self.inner.insert(idx);
+    }
+
+    fn remove(&mut self, idx: usize) {
+        let _ = self.inner.remove(idx);
+    }
+
+    fn set(&mut self, idx: usize, value: bool) {
+        if value {
+            self.inner.insert(idx);
+        } else {
+            self.inner.remove(idx);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn union(&self, other: &PyBitset) -> PyBitset {
+        PyBitset {
+            inner: &self.inner | &other.inner,
+        }
+    }
+
+    fn intersection(&self, other: &PyBitset) -> PyBitset {
+        PyBitset {
+            inner: &self.inner & &other.inner,
+        }
+    }
+
+    fn __ior__(&mut self, other: &PyBitset) {
+        self.inner |= &other.inner;
+    }
+
+    fn __iand__(&mut self, other: &PyBitset) {
+        self.inner &= &other.inner;
+    }
+
+    fn __isub__(&mut self, other: &PyBitset) {
+        self.inner -= &other.inner;
+    }
+
+    fn __ixor__(&mut self, other: &PyBitset) {
+        self.inner ^= &other.inner;
+    }
+
+    fn difference(&self, other: &PyBitset) -> PyBitset {
+        PyBitset {
+            inner: &self.inner - &other.inner,
+        }
+    }
+
+    fn symmetric_difference(&self, other: &PyBitset) -> PyBitset {
+        PyBitset {
+            inner: &self.inner ^ &other.inner,
+        }
+    }
+
+    fn is_subset(&self, other: &PyBitset) -> bool {
+        (&self.inner & &other.inner) == self.inner
+    }
+
+    fn is_superset(&self, other: &PyBitset) -> bool {
+        (&self.inner | &other.inner) == self.inner
+    }
+
+    fn is_disjoint(&self, other: &PyBitset) -> bool {
+        (&self.inner & &other.inner).is_empty()
+    }
+
+    fn __str__(&self) -> String {
+        format!("{:?}", self.inner)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Bitset({:?})", self.inner)
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __hash__(&self) -> PyResult<isize> {
+        let mut hasher = DefaultHasher::new();
+        self.inner.hash(&mut hasher);
+        Ok(hasher.finish() as isize)
+    }
+}
+
 #[pyclass(name = "GSSNode")]
 #[derive(Clone)]
 pub struct PyGSSNode {
@@ -1148,15 +1311,27 @@ impl PyGrammarConstraintState {
         self.__str__()
     }
 
-    fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-        let bools: Vec<bool> = bitset.iter_bits().collect();
+    fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+        let hybrid_bitset = self.inner.with_inner(|state| state.get_mask4());
+        let bitset = RustBitset::from(&hybrid_bitset);
+
+        let bools: Vec<bool> = if bitset.is_empty() {
+            vec![]
+        } else {
+            let max_val = bitset.iter_indices().max().unwrap(); // Safe due to is_empty check
+            let mut bools = vec![false; max_val + 1];
+            for i in bitset.iter_indices() {
+                bools[i] = true;
+            }
+            bools
+        };
         Ok(bools.into_pyarray_bound(py))
     }
 
-    fn get_mask_bv(&mut self) -> PyResult<PyHybridBitset> {
-        let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-        Ok(PyHybridBitset { inner: bitset })
+    fn get_mask_bv(&self) -> PyResult<PyBitset> {
+        let hybrid_bitset = self.inner.with_inner(|state| state.get_mask4());
+        let bitset = RustBitset::from(&hybrid_bitset);
+        Ok(PyBitset { inner: bitset })
     }
 
     fn commit(&mut self, llm_token_id: usize) {
@@ -1277,6 +1452,8 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammarConstraintState>()?;
     m.add_class::<PyHybridBitsetIterator>()?;
     m.add_class::<PyHybridBitset>()?;
+    m.add_class::<PyBitsetIterator>()?;
+    m.add_class::<PyBitset>()?;
     m.add_class::<PyGSSNode>()?;
     m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
     m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
