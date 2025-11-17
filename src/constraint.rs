@@ -3,12 +3,13 @@
 use std::{
     borrow::Borrow,
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, BinaryHeap},
     fmt::{self, Debug, Display, Formatter},
     iter::FromIterator,
     sync::Arc,
 };
-
+use std::cmp::Reverse;
+ 
 use bimap::BiBTreeMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use ordered_hash_map::OrderedHashMap;
@@ -784,6 +785,44 @@ impl JSONConvertible for GrammarConstraint {
                 Ok(gc)
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K-Way Merge Iterator for Strategy 11
+// ---------------------------------------------------------------------------
+
+struct KWayMergeIter<'a> {
+    iters: Vec<std::slice::Iter<'a, u32>>,
+    heap: BinaryHeap<(Reverse<u32>, usize)>, // (Reverse(value), iter_index)
+}
+
+impl<'a> KWayMergeIter<'a> {
+    fn new(slices: Vec<&'a [u32]>) -> Self {
+        let mut iters: Vec<_> = slices.into_iter().map(|s| s.iter()).collect();
+        let mut heap = BinaryHeap::with_capacity(iters.len());
+
+        for (i, iter) in iters.iter_mut().enumerate() {
+            if let Some(&val) = iter.next() {
+                heap.push((Reverse(val), i));
+            }
+        }
+        Self { iters, heap }
+    }
+}
+
+impl<'a> Iterator for KWayMergeIter<'a> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((Reverse(val), i)) = self.heap.pop() {
+            if let Some(&next_val) = self.iters[i].next() {
+                self.heap.push((Reverse(next_val), i));
+            }
+            Some(val)
+        } else {
+            None
         }
     }
 }
@@ -2007,6 +2046,32 @@ impl GrammarConstraint {
             .collect::<RangeSetBlaze<usize>>();
         let is_equal = original_bv_10 == original_bv_rsb;
         println!("[perf] STRATEGY 10 (Parallel Scan o2i):       {:?} (equal: {})", elapsed, is_equal);
+
+        // --- STRATEGY 11: K-Way Merge ---
+        let instant = std::time::Instant::now();
+        let slices: Vec<&[u32]> = internal_bv
+            .iter()
+            .filter_map(|i| {
+                if i < num_internals {
+                    let range_start = start[i] as usize;
+                    let range_end = start[i + 1] as usize;
+                    let slice = &new_to_old[range_start..range_end];
+                    if !slice.is_empty() {
+                        Some(slice)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let merge_iter = KWayMergeIter::new(slices);
+        let original_bv_11 = merge_iter.map(|v| v as usize).collect::<RangeSetBlaze<usize>>();
+        let elapsed = instant.elapsed();
+        let is_equal = original_bv_11 == original_bv_rsb;
+        println!("[perf] STRATEGY 11 (K-Way Merge):             {:?} (equal: {})", elapsed, is_equal);
 
         HybridBitset::from(original_bv_rsb)
     }
