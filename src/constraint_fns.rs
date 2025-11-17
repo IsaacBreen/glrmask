@@ -10,8 +10,6 @@ use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::BitOrAssign;
-use std::sync::Arc;
-use std::time::Instant;
 use crate::datastructures::gss_acc::Acc;
 
 type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
@@ -36,9 +34,9 @@ impl<'a> GrammarConstraintState<'a> {
             // Prune GSS based on disallowed terminals before starting.
             let mut gss = glr_state.stack.clone();
             let possible_matches = &self.parent.possible_matches;
-            let mut gss = gss.apply_and_prune(|acc| {
+            gss = gss.apply_and_prune(|acc| {
                 if acc.terminals_union.is_empty() {
-                    return Some(acc.llm_tokens_union.inner.clone());
+                    return Some(acc.clone());
                 }
                 let mut forbidden_llm_tokens = HybridBitset::zeros();
                 for (&tokenizer_state_id, disallowed_in_state) in &acc.terminals_union {
@@ -53,11 +51,11 @@ impl<'a> GrammarConstraintState<'a> {
                 }
 
                 if forbidden_llm_tokens.is_empty() {
-                    return Some(acc.llm_tokens_union.inner.clone());
+                    return Some(acc.clone());
                 }
                 let mut new_acc = acc.clone();
                 new_acc.llm_tokens_union -= &forbidden_llm_tokens;
-                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc.llm_tokens_union.inner.clone()) }
+                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc) }
             });
 
             if gss.is_empty() {
@@ -65,8 +63,8 @@ impl<'a> GrammarConstraintState<'a> {
             }
 
             if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as i16) {
-                let f = |llm_tokens_union: &Arc<RangeSetBlaze<usize>>| {
-                    let new_rsb = llm_tokens_union.as_ref() & &weight.rsb;
+                let f = |acc: &Acc| {
+                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }
                 };
                 let weighted_gss = gss.apply_and_prune(f);
