@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import collections
 import heapq
-import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, Generator, Any
 import json
@@ -488,8 +487,6 @@ class Model(GraphProvider):
             queue[depth][target_state_id] = gss
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
-        print("START")
-        t0 = time.time()
         stats = Stats.get()
         stats.start('get_mask')
         
@@ -501,8 +498,6 @@ class Model(GraphProvider):
         
         # 1. Seed initial states
         start_node = self.dwa.states[self.dwa.start_state]
-
-        print(time.time() - t0)
 
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -528,7 +523,6 @@ class Model(GraphProvider):
                 gss_next = self._apply_weight(gss_init, weight)
                 if not gss_next.is_empty():
                     self._merge_into_queue(queue, gss_next, target_state_id)
-        print(time.time() - t0)
 
         # 2. Main worklist loop
         while queue:
@@ -575,7 +569,6 @@ class Model(GraphProvider):
                             final_gss = self._apply_weight(popped, weight)
                             if not final_gss.is_empty():
                                 self._merge_into_queue(queue, final_gss, target_id)
-        print(time.time() - t0)
 
         stats.start('get_mask.teardown.final_conversion')
         original_indices = RangeSetOut.empty()
@@ -584,10 +577,9 @@ class Model(GraphProvider):
                 original_indices |= self.internal_to_original_map[i]
         stats.stop('get_mask.teardown.final_conversion')
         stats.stop('get_mask')
-        print(time.time() - t0)
 
-        # if not self.suppress_stats_report:
-        #     Stats.get().report(sort_by='alpha')
+        if not self.suppress_stats_report:
+            Stats.get().report(sort_by='alpha')
 
         return original_indices
 
