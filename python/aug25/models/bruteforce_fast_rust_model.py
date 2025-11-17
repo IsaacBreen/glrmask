@@ -58,6 +58,11 @@ class BruteForceFastRustModel:
         and checking if committing a representative original token leads to a valid state.
         """
         allowed_mask = RangeSet.empty()
+
+        originals = set()
+        for _, originals_ in self.internal_to_original_map.items():
+            originals |= originals_
+        assert set(self.id_to_token.keys()) == originals
         
         for internal_token_id in tqdm(range(self.internal_max_llm_token), desc="get_mask (bruteforce_fast_rust)"):
             representative_token_id = self.internal_to_representative_map.get(internal_token_id)
@@ -68,7 +73,13 @@ class BruteForceFastRustModel:
             temp_state = self.constraint_state.clone()
             # Check if the next token is valid
             temp_state.commit(representative_token_id)
-            
+
+            for original in self.internal_to_original_map.get(internal_token_id):
+                temp_state2 = self.constraint_state.clone()
+                # Check if the next token is valid
+                temp_state2.commit(original)
+                assert temp_state2.is_active() == temp_state.is_active()
+
             if temp_state.is_active():
                 original_tokens = self.internal_to_original_map.get(internal_token_id)
                 if original_tokens:
