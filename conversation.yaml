@@ -10,12 +10,13 @@ local_system:
       use std::{
           borrow::Borrow,
           cell::RefCell,
-          collections::{BTreeMap, BTreeSet, HashMap},
+          collections::{BTreeMap, BTreeSet, HashMap, BinaryHeap},
           fmt::{self, Debug, Display, Formatter},
           iter::FromIterator,
           sync::Arc,
       };
-
+      use std::cmp::Reverse;
+       
       use bimap::BiBTreeMap;
       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
       use ordered_hash_map::OrderedHashMap;
@@ -791,6 +792,44 @@ local_system:
                       Ok(gc)
                   }
                   _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
+              }
+          }
+      }
+
+      // ---------------------------------------------------------------------------
+      // K-Way Merge Iterator for Strategy 11
+      // ---------------------------------------------------------------------------
+
+      struct KWayMergeIter<'a> {
+          iters: Vec<std::slice::Iter<'a, u32>>,
+          heap: BinaryHeap<(Reverse<u32>, usize)>, // (Reverse(value), iter_index)
+      }
+
+      impl<'a> KWayMergeIter<'a> {
+          fn new(slices: Vec<&'a [u32]>) -> Self {
+              let mut iters: Vec<_> = slices.into_iter().map(|s| s.iter()).collect();
+              let mut heap = BinaryHeap::with_capacity(iters.len());
+
+              for (i, iter) in iters.iter_mut().enumerate() {
+                  if let Some(&val) = iter.next() {
+                      heap.push((Reverse(val), i));
+                  }
+              }
+              Self { iters, heap }
+          }
+      }
+
+      impl<'a> Iterator for KWayMergeIter<'a> {
+          type Item = u32;
+
+          fn next(&mut self) -> Option<Self::Item> {
+              if let Some((Reverse(val), i)) = self.heap.pop() {
+                  if let Some(&next_val) = self.iters[i].next() {
+                      self.heap.push((Reverse(next_val), i));
+                  }
+                  Some(val)
+              } else {
+                  None
               }
           }
       }
@@ -1811,12 +1850,12 @@ local_system:
 
               // --- STRATEGY 7: Pre-flattened slices (Strategy A) ---
               let precompute_instant = std::time::Instant::now();
-              let mut data: Vec<usize> = Vec::new();
+              let mut data: Vec<u32> = Vec::new();
               let mut offsets: Vec<usize> = vec![0; self.vocab.internal_max_llm_token + 2];
               for internal_id in 0..=self.vocab.internal_max_llm_token {
                   offsets[internal_id] = data.len();
                   if let Some(original_bv) = internal_to_original.get(&internal_id) {
-                      data.extend(original_bv.iter());
+                      data.extend(original_bv.iter().map(|v| v as u32));
                   }
               }
               offsets[self.vocab.internal_max_llm_token + 1] = data.len();
@@ -1831,7 +1870,7 @@ local_system:
                   }
               }).sum();
 
-              let mut result_vec: Vec<usize> = Vec::with_capacity(total_len);
+              let mut result_vec: Vec<u32> = Vec::with_capacity(total_len);
               for i in internal_bv.iter() {
                   if i <= self.vocab.internal_max_llm_token {
                       let start = offsets[i];
@@ -1840,7 +1879,7 @@ local_system:
                   }
               }
               let elapsed = instant.elapsed();
-              let original_bv_7 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
+              let original_bv_7 = result_vec.into_iter().map(|v| v as usize).collect::<RangeSetBlaze<usize>>();
               let is_equal = original_bv_7 == original_bv_rsb;
               println!("[perf] STRATEGY 7 (Flattened Slices):         {:?} (equal: {})", elapsed, is_equal);
 
@@ -2014,6 +2053,32 @@ local_system:
                   .collect::<RangeSetBlaze<usize>>();
               let is_equal = original_bv_10 == original_bv_rsb;
               println!("[perf] STRATEGY 10 (Parallel Scan o2i):       {:?} (equal: {})", elapsed, is_equal);
+
+              // --- STRATEGY 11: K-Way Merge ---
+              let instant = std::time::Instant::now();
+              let slices: Vec<&[u32]> = internal_bv
+                  .iter()
+                  .filter_map(|i| {
+                      if i < num_internals {
+                          let range_start = start[i] as usize;
+                          let range_end = start[i + 1] as usize;
+                          let slice = &new_to_old[range_start..range_end];
+                          if !slice.is_empty() {
+                              Some(slice)
+                          } else {
+                              None
+                          }
+                      } else {
+                          None
+                      }
+                  })
+                  .collect();
+
+              let merge_iter = KWayMergeIter::new(slices);
+              let original_bv_11 = merge_iter.map(|v| v as usize).collect::<RangeSetBlaze<usize>>();
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_11 == original_bv_rsb;
+              println!("[perf] STRATEGY 11 (K-Way Merge):             {:?} (equal: {})", elapsed, is_equal);
 
               HybridBitset::from(original_bv_rsb)
           }
@@ -5033,14 +5098,82 @@ local_system:
               let is_equal = original_bv_6 == original_bv_rsb;
               println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
 
+              // --- STRATEGY 6b: Sparse Bitset Matrix ---
+              // This strategy is a variant of Strategy 6 that uses a sparse representation for
+              // the bitset matrix to save memory and potentially speed up computation if the
+              // original vocabulary is sparse.
+              // To change the word size, modify the `Word` type alias and `WORD_BITS` constant.
+              // Supported types: u64, u32, u16.
+              {
+                  type Word = u64;
+                  const WORD_BITS: usize = 64;
+
+                  let max_original_id = self.llm_vocab.max_original_llm_token_id;
+                  let original_vocab_size_words = (max_original_id / WORD_BITS) + 1;
+                  let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
+
+                  let mut sparse_matrix: Vec<Vec<(u16, Word)>> = vec![Vec::new(); num_internal_tokens];
+
+                  for (internal_id, original_bv) in internal_to_original.iter() {
+                      if *internal_id >= num_internal_tokens {
+                          continue;
+                      }
+
+                      let mut temp_row = BTreeMap::<u16, Word>::new();
+                      for original_id in original_bv.iter() {
+                          if original_id > max_original_id {
+                              continue;
+                          }
+                          let word_idx = (original_id / WORD_BITS) as u16;
+                          let bit_idx = original_id % WORD_BITS;
+                          *temp_row.entry(word_idx).or_insert(0) |= 1 << bit_idx;
+                      }
+                      if !temp_row.is_empty() {
+                          sparse_matrix[*internal_id] = temp_row.into_iter().collect();
+                      }
+                  }
+
+                  let instant = std::time::Instant::now();
+                  let mut result_bitset_words = vec![0 as Word; original_vocab_size_words];
+                  for internal_id in internal_bv.iter() {
+                      if internal_id >= num_internal_tokens {
+                          continue;
+                      }
+                      let sparse_row = &sparse_matrix[internal_id];
+                      for &(word_idx, word) in sparse_row {
+                          result_bitset_words[word_idx as usize] |= word;
+                      }
+                  }
+                  let elapsed = instant.elapsed();
+
+                  let original_bv_6b = result_bitset_words
+                      .iter()
+                      .enumerate()
+                      .flat_map(|(word_idx, &word)| {
+                          (0..WORD_BITS).filter_map(move |bit_idx| {
+                              if (word >> bit_idx) & 1 == 1 {
+                                  Some(word_idx * WORD_BITS + bit_idx)
+                              } else {
+                                  None
+                              }
+                          })
+                      })
+                      .collect::<RangeSetBlaze<usize>>();
+                  let is_equal = original_bv_6b == original_bv_rsb;
+                  println!(
+                      "[perf] STRATEGY 6b (Sparse Bitset Matrix u{}): {:?} (equal: {})",
+                      WORD_BITS, elapsed, is_equal
+                  );
+              }
+
               // --- STRATEGY 7: Pre-flattened slices (Strategy A) ---
               let precompute_instant = std::time::Instant::now();
-              let mut data: Vec<usize> = Vec::new();
+              let mut data: Vec<u32> = Vec::new();
               let mut offsets: Vec<usize> = vec![0; self.vocab.internal_max_llm_token + 2];
               for internal_id in 0..=self.vocab.internal_max_llm_token {
                   offsets[internal_id] = data.len();
                   if let Some(original_bv) = internal_to_original.get(&internal_id) {
-                      data.extend(original_bv.iter());
+                      data.extend(original_bv.iter().map(|v| v as u32));
                   }
               }
               offsets[self.vocab.internal_max_llm_token + 1] = data.len();
@@ -5055,7 +5188,7 @@ local_system:
                   }
               }).sum();
 
-              let mut result_vec: Vec<usize> = Vec::with_capacity(total_len);
+              let mut result_vec: Vec<u32> = Vec::with_capacity(total_len);
               for i in internal_bv.iter() {
                   if i <= self.vocab.internal_max_llm_token {
                       let start = offsets[i];
@@ -5064,7 +5197,7 @@ local_system:
                   }
               }
               let elapsed = instant.elapsed();
-              let original_bv_7 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
+              let original_bv_7 = result_vec.into_iter().map(|v| v as usize).collect::<RangeSetBlaze<usize>>();
               let is_equal = original_bv_7 == original_bv_rsb;
               println!("[perf] STRATEGY 7 (Flattened Slices):         {:?} (equal: {})", elapsed, is_equal);
 
@@ -6487,12 +6620,13 @@ messages:
       use std::{
           borrow::Borrow,
           cell::RefCell,
-          collections::{BTreeMap, BTreeSet, HashMap},
+          collections::{BTreeMap, BTreeSet, HashMap, BinaryHeap},
           fmt::{self, Debug, Display, Formatter},
           iter::FromIterator,
           sync::Arc,
       };
-
+      use std::cmp::Reverse;
+       
       use bimap::BiBTreeMap;
       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
       use ordered_hash_map::OrderedHashMap;
@@ -7268,6 +7402,44 @@ messages:
                       Ok(gc)
                   }
                   _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
+              }
+          }
+      }
+
+      // ---------------------------------------------------------------------------
+      // K-Way Merge Iterator for Strategy 11
+      // ---------------------------------------------------------------------------
+
+      struct KWayMergeIter<'a> {
+          iters: Vec<std::slice::Iter<'a, u32>>,
+          heap: BinaryHeap<(Reverse<u32>, usize)>, // (Reverse(value), iter_index)
+      }
+
+      impl<'a> KWayMergeIter<'a> {
+          fn new(slices: Vec<&'a [u32]>) -> Self {
+              let mut iters: Vec<_> = slices.into_iter().map(|s| s.iter()).collect();
+              let mut heap = BinaryHeap::with_capacity(iters.len());
+
+              for (i, iter) in iters.iter_mut().enumerate() {
+                  if let Some(&val) = iter.next() {
+                      heap.push((Reverse(val), i));
+                  }
+              }
+              Self { iters, heap }
+          }
+      }
+
+      impl<'a> Iterator for KWayMergeIter<'a> {
+          type Item = u32;
+
+          fn next(&mut self) -> Option<Self::Item> {
+              if let Some((Reverse(val), i)) = self.heap.pop() {
+                  if let Some(&next_val) = self.iters[i].next() {
+                      self.heap.push((Reverse(next_val), i));
+                  }
+                  Some(val)
+              } else {
+                  None
               }
           }
       }
@@ -8288,12 +8460,12 @@ messages:
 
               // --- STRATEGY 7: Pre-flattened slices (Strategy A) ---
               let precompute_instant = std::time::Instant::now();
-              let mut data: Vec<usize> = Vec::new();
+              let mut data: Vec<u32> = Vec::new();
               let mut offsets: Vec<usize> = vec![0; self.vocab.internal_max_llm_token + 2];
               for internal_id in 0..=self.vocab.internal_max_llm_token {
                   offsets[internal_id] = data.len();
                   if let Some(original_bv) = internal_to_original.get(&internal_id) {
-                      data.extend(original_bv.iter());
+                      data.extend(original_bv.iter().map(|v| v as u32));
                   }
               }
               offsets[self.vocab.internal_max_llm_token + 1] = data.len();
@@ -8308,7 +8480,7 @@ messages:
                   }
               }).sum();
 
-              let mut result_vec: Vec<usize> = Vec::with_capacity(total_len);
+              let mut result_vec: Vec<u32> = Vec::with_capacity(total_len);
               for i in internal_bv.iter() {
                   if i <= self.vocab.internal_max_llm_token {
                       let start = offsets[i];
@@ -8317,7 +8489,7 @@ messages:
                   }
               }
               let elapsed = instant.elapsed();
-              let original_bv_7 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
+              let original_bv_7 = result_vec.into_iter().map(|v| v as usize).collect::<RangeSetBlaze<usize>>();
               let is_equal = original_bv_7 == original_bv_rsb;
               println!("[perf] STRATEGY 7 (Flattened Slices):         {:?} (equal: {})", elapsed, is_equal);
 
@@ -8491,6 +8663,32 @@ messages:
                   .collect::<RangeSetBlaze<usize>>();
               let is_equal = original_bv_10 == original_bv_rsb;
               println!("[perf] STRATEGY 10 (Parallel Scan o2i):       {:?} (equal: {})", elapsed, is_equal);
+
+              // --- STRATEGY 11: K-Way Merge ---
+              let instant = std::time::Instant::now();
+              let slices: Vec<&[u32]> = internal_bv
+                  .iter()
+                  .filter_map(|i| {
+                      if i < num_internals {
+                          let range_start = start[i] as usize;
+                          let range_end = start[i + 1] as usize;
+                          let slice = &new_to_old[range_start..range_end];
+                          if !slice.is_empty() {
+                              Some(slice)
+                          } else {
+                              None
+                          }
+                      } else {
+                          None
+                      }
+                  })
+                  .collect();
+
+              let merge_iter = KWayMergeIter::new(slices);
+              let original_bv_11 = merge_iter.map(|v| v as usize).collect::<RangeSetBlaze<usize>>();
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_11 == original_bv_rsb;
+              println!("[perf] STRATEGY 11 (K-Way Merge):             {:?} (equal: {})", elapsed, is_equal);
 
               HybridBitset::from(original_bv_rsb)
           }
@@ -9669,23 +9867,10 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: |-
-      ```
-                               count      mean       std       min       25%       50%       75%        max
-      strategy                                                                                             
-      BTree + RangeSetBlaze    929.0  3.924634  0.656089  0.115583  3.825333  3.935958  4.048583   9.680208
-      BTree + im::HashSet      929.0  5.833101  1.581654  0.083208  5.311709  5.847416  6.377792  20.485333
-      Bitset Matrix            929.0  0.306631  0.070017  0.024583  0.283084  0.302542  0.322125   1.171625
-      Flattened Slices         929.0  0.051223  0.014336  0.002042  0.050125  0.054000  0.058041   0.167042
-      HashMap + RangeSetBlaze  929.0  3.943435  0.665641  0.107833  3.841375  3.954750  4.083708  11.931375
-      Parallel Scan o2i        929.0  0.136167  0.252810  0.056125  0.079667  0.098583  0.124958   4.669584
-      Rayon                    929.0  2.875021  0.952840  0.246917  2.220875  2.544583  3.826500   8.580541
-      Renumbering              929.0  0.047430  0.014083  0.001666  0.035625  0.050000  0.055125   0.140708
-      Scan o2i                 929.0  0.103563  0.016814  0.055500  0.099041  0.100584  0.102500   0.327041
-      Vec + RangeSetBlaze      929.0  3.759618  0.628269  0.090000  3.645750  3.769500  3.903583   8.384209
-      ```
-
-      Device a new strategy that's much faster than any of the existing ones. Note that there's no one preferred metric, but 'max' metrics and those closer to 'max' are generally more important than 'min' ones. I mean we really care about realistic worst-case performance.
+  - user: "Add a variant of strategy 6 that, instead of storing all blocks in `bitset_slice:
+      &[u64]`, stores `bitset_slice: &[(u16, u64)]`. This way it's possible to skip
+      0-words. And, in fact, write it in such a way that it's easy to swap out the
+      word size `u64` eg with `u32` or `u16`."
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9705,217 +9890,170 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here is a new, high-performance strategy for mapping internal token bitsets to original token bitsets, along with the necessary code changes.
+      Here are the step-by-step instructions to add the new sparse bitset matrix strategy, followed by the corresponding git diff.
 
-      This new strategy, "K-Way Merge," builds upon the fastest existing approach ("Renumbering"). The "Renumbering" strategy pre-calculates a mapping where all original token IDs are grouped by their corresponding internal ID and stored contiguously in a large vector. However, it still suffers from a performance bottleneck: after collecting all the necessary groups of original IDs, it performs a full sort on the combined list.
+      ### Instructions
 
-      The "K-Way Merge" strategy eliminates this expensive final sort. Since each individual group of original IDs is already sorted, we can use a much more efficient k-way merge algorithm (implemented with a min-heap) to produce the final, globally sorted list of token IDs directly. This approach has a better time complexity, especially for the worst-case scenarios you're interested in, as its performance scales with `log(k)` (where `k` is the number of active internal token groups) instead of `log(N)` (where `N` is the total number of original tokens).
+      1.  Open the file `src/constraint.rs`.
+      2.  Navigate to the `internal_bv_to_original_with_map` method within the `impl GrammarConstraint` block.
+      3.  Locate the end of "STRATEGY 6". You will find this line:
+          ```rust
+          println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
+          ```
+      4.  Immediately after that line, and before the comment for "STRATEGY 7", insert the following code block:
 
-      Here are the step-by-step instructions to implement it:
-
-      ### Step 1: Add Necessary Imports
-
-      In `src/constraint.rs`, locate the `use` statements at the top of the file. You'll need to import `BinaryHeap` for the merge algorithm and `Reverse` to use it as a min-heap.
-
-      1.  Modify the existing `use std::collections` line to include `BinaryHeap`.
-      2.  Add a new line to import `std::cmp::Reverse`.
-
-      The section should look like this after your changes:
-
-      ```rust
-      use std::{
-          borrow::Borrow,
-          cell::RefCell,
-          collections::{BTreeMap, BTreeSet, HashMap, BinaryHeap},
-          fmt::{self, Debug, Display, Formatter},
-          iter::FromIterator,
-          sync::Arc,
-      };
-      use std::cmp::Reverse;
-      ```
-
-      ### Step 2: Define the K-Way Merge Iterator
-
-      Still in `src/constraint.rs`, add the code for the `KWayMergeIter` struct. This helper will perform the efficient merge operation. A good place for this is just before the `impl GrammarConstraint` block, after the `JSONConvertible` implementation.
-
-      ```rust
-      // ---------------------------------------------------------------------------
-      // K-Way Merge Iterator for Strategy 11
-      // ---------------------------------------------------------------------------
-
-      struct KWayMergeIter<'a> {
-          iters: Vec<std::slice::Iter<'a, u32>>,
-          heap: BinaryHeap<(Reverse<u32>, usize)>, // (Reverse(value), iter_index)
-      }
-
-      impl<'a> KWayMergeIter<'a> {
-          fn new(slices: Vec<&'a [u32]>) -> Self {
-              let mut iters: Vec<_> = slices.into_iter().map(|s| s.iter()).collect();
-              let mut heap = BinaryHeap::with_capacity(iters.len());
-
-              for (i, iter) in iters.iter_mut().enumerate() {
-                  if let Some(&val) = iter.next() {
-                      heap.push((Reverse(val), i));
-                  }
-              }
-              Self { iters, heap }
-          }
-      }
-
-      impl<'a> Iterator for KWayMergeIter<'a> {
-          type Item = u32;
-
-          fn next(&mut self) -> Option<Self::Item> {
-              if let Some((Reverse(val), i)) = self.heap.pop() {
-                  if let Some(&next_val) = self.iters[i].next() {
-                      self.heap.push((Reverse(next_val), i));
-                  }
-                  Some(val)
-              } else {
-                  None
-              }
-          }
-      }
-      ```
-
-      ### Step 3: Implement the New Strategy
-
-      Finally, navigate to the `internal_bv_to_original_with_map` function within the `impl GrammarConstraint` block. Add the code for the new "Strategy 11" at the end of the function, just before the final `HybridBitset::from(original_bv_rsb)` return statement. This new code will reuse the pre-computed data from "Strategy 8" but apply the more efficient merge logic.
-
-      ```rust
-              // ... after the println! for STRATEGY 10
-
-              // --- STRATEGY 11: K-Way Merge ---
-              let instant = std::time::Instant::now();
-              let slices: Vec<&[u32]> = internal_bv
-                  .iter()
-                  .filter_map(|i| {
-                      if i < num_internals {
-                          let range_start = start[i] as usize;
-                          let range_end = start[i + 1] as usize;
-                          let slice = &new_to_old[range_start..range_end];
-                          if !slice.is_empty() {
-                              Some(slice)
-                          } else {
-                              None
+          ```rust
+                  // --- STRATEGY 6b: Sparse Bitset Matrix ---
+                  // This strategy is a variant of Strategy 6 that uses a sparse representation for
+                  // the bitset matrix to save memory and potentially speed up computation if the
+                  // original vocabulary is sparse.
+                  // To change the word size, modify the `Word` type alias and `WORD_BITS` constant.
+                  // Supported types: u64, u32, u16.
+                  {
+                      type Word = u64;
+                      const WORD_BITS: usize = 64;
+          
+                      let max_original_id = self.llm_vocab.max_original_llm_token_id;
+                      let original_vocab_size_words = (max_original_id / WORD_BITS) + 1;
+                      let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
+          
+                      let mut sparse_matrix: Vec<Vec<(u16, Word)>> = vec![Vec::new(); num_internal_tokens];
+          
+                      for (internal_id, original_bv) in internal_to_original.iter() {
+                          if *internal_id >= num_internal_tokens {
+                              continue;
                           }
-                      } else {
-                          None
+          
+                          let mut temp_row = BTreeMap::<u16, Word>::new();
+                          for original_id in original_bv.iter() {
+                              if original_id > max_original_id {
+                                  continue;
+                              }
+                              let word_idx = (original_id / WORD_BITS) as u16;
+                              let bit_idx = original_id % WORD_BITS;
+                              *temp_row.entry(word_idx).or_insert(0) |= 1 << bit_idx;
+                          }
+                          if !temp_row.is_empty() {
+                              sparse_matrix[*internal_id] = temp_row.into_iter().collect();
+                          }
                       }
-                  })
-                  .collect();
-
-              let merge_iter = KWayMergeIter::new(slices);
-              let original_bv_11 = merge_iter.map(|v| v as usize).collect::<RangeSetBlaze<usize>>();
-              let elapsed = instant.elapsed();
-              let is_equal = original_bv_11 == original_bv_rsb;
-              println!("[perf] STRATEGY 11 (K-Way Merge):             {:?} (equal: {})", elapsed, is_equal);
-      ```
-
-      ---
+          
+                      let instant = std::time::Instant::now();
+                      let mut result_bitset_words = vec![0 as Word; original_vocab_size_words];
+                      for internal_id in internal_bv.iter() {
+                          if internal_id >= num_internal_tokens {
+                              continue;
+                          }
+                          let sparse_row = &sparse_matrix[internal_id];
+                          for &(word_idx, word) in sparse_row {
+                              result_bitset_words[word_idx as usize] |= word;
+                          }
+                      }
+                      let elapsed = instant.elapsed();
+          
+                      let original_bv_6b = result_bitset_words
+                          .iter()
+                          .enumerate()
+                          .flat_map(|(word_idx, &word)| {
+                              (0..WORD_BITS).filter_map(move |bit_idx| {
+                                  if (word >> bit_idx) & 1 == 1 {
+                                      Some(word_idx * WORD_BITS + bit_idx)
+                                  } else {
+                                      None
+                                  }
+                              })
+                          })
+                          .collect::<RangeSetBlaze<usize>>();
+                      let is_equal = original_bv_6b == original_bv_rsb;
+                      println!(
+                          "[perf] STRATEGY 6b (Sparse Bitset Matrix u{}): {:?} (equal: {})",
+                          WORD_BITS, elapsed, is_equal
+                      );
+                  }
+          ```
 
       ### Git Diff
 
-      Here is the git diff that applies the changes described above.
+      Here is the git diff to apply the changes directly.
 
       ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -4,12 +4,13 @@
-       use std::{
-           borrow::Borrow,
-           cell::RefCell,
-      -    collections::{BTreeMap, BTreeSet, HashMap},
-      +    collections::{BTreeMap, BTreeSet, HashMap, BinaryHeap},
-           fmt::{self, Debug, Display, Formatter},
-           iter::FromIterator,
-           sync::Arc,
-       };
-      -
-      +use std::cmp::Reverse;
-      + 
-       use bimap::BiBTreeMap;
-       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-       use ordered_hash_map::OrderedHashMap;
-      @@ -835,6 +836,43 @@
-           }
-       }
+      @@ -1700,6 +1700,67 @@
+               let is_equal = original_bv_6 == original_bv_rsb;
+               println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
        
-      +// ---------------------------------------------------------------------------
-      +// K-Way Merge Iterator for Strategy 11
-      +// ---------------------------------------------------------------------------
+      +        // --- STRATEGY 6b: Sparse Bitset Matrix ---
+      +        // This strategy is a variant of Strategy 6 that uses a sparse representation for
+      +        // the bitset matrix to save memory and potentially speed up computation if the
+      +        // original vocabulary is sparse.
+      +        // To change the word size, modify the `Word` type alias and `WORD_BITS` constant.
+      +        // Supported types: u64, u32, u16.
+      +        {
+      +            type Word = u64;
+      +            const WORD_BITS: usize = 64;
       +
-      +struct KWayMergeIter<'a> {
-      +    iters: Vec<std::slice::Iter<'a, u32>>,
-      +    heap: BinaryHeap<(Reverse<u32>, usize)>, // (Reverse(value), iter_index)
-      +}
+      +            let max_original_id = self.llm_vocab.max_original_llm_token_id;
+      +            let original_vocab_size_words = (max_original_id / WORD_BITS) + 1;
+      +            let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
       +
-      +impl<'a> KWayMergeIter<'a> {
-      +    fn new(slices: Vec<&'a [u32]>) -> Self {
-      +        let mut iters: Vec<_> = slices.into_iter().map(|s| s.iter()).collect();
-      +        let mut heap = BinaryHeap::with_capacity(iters.len());
+      +            let mut sparse_matrix: Vec<Vec<(u16, Word)>> = vec![Vec::new(); num_internal_tokens];
       +
-      +        for (i, iter) in iters.iter_mut().enumerate() {
-      +            if let Some(&val) = iter.next() {
-      +                heap.push((Reverse(val), i));
-      +            }
-      +        }
-      +        Self { iters, heap }
-      +    }
-      +}
-      +
-      +impl<'a> Iterator for KWayMergeIter<'a> {
-      +    type Item = u32;
-      +
-      +    fn next(&mut self) -> Option<Self::Item> {
-      +        if let Some((Reverse(val), i)) = self.heap.pop() {
-      +            if let Some(&next_val) = self.iters[i].next() {
-      +                self.heap.push((Reverse(next_val), i));
-      +            }
-      +            Some(val)
-      +        } else {
-      +            None
-      +        }
-      +    }
-      +}
-      +
-       // ---------------------------------------------------------------------------
-       // Constructors
-       // ---------------------------------------------------------------------------
-      @@ -1828,6 +1866,33 @@
-               let is_equal = original_bv_10 == original_bv_rsb;
-               println!("[perf] STRATEGY 10 (Parallel Scan o2i):       {:?} (equal: {})", elapsed, is_equal);
-       
-      +        // --- STRATEGY 11: K-Way Merge ---
-      +        let instant = std::time::Instant::now();
-      +        let slices: Vec<&[u32]> = internal_bv
-      +            .iter()
-      +            .filter_map(|i| {
-      +                if i < num_internals {
-      +                    let range_start = start[i] as usize;
-      +                    let range_end = start[i + 1] as usize;
-      +                    let slice = &new_to_old[range_start..range_end];
-      +                    if !slice.is_empty() {
-      +                        Some(slice)
-      +                    } else {
-      +                        None
-      +                    }
-      +                } else {
-      +                    None
+      +            for (internal_id, original_bv) in internal_to_original.iter() {
+      +                if *internal_id >= num_internal_tokens {
+      +                    continue;
       +                }
-      +            })
-      +            .collect();
       +
-      +        let merge_iter = KWayMergeIter::new(slices);
-      +        let original_bv_11 = merge_iter.map(|v| v as usize).collect::<RangeSetBlaze<usize>>();
-      +        let elapsed = instant.elapsed();
-      +        let is_equal = original_bv_11 == original_bv_rsb;
-      +        println!("[perf] STRATEGY 11 (K-Way Merge):             {:?} (equal: {})", elapsed, is_equal);
+      +                let mut temp_row = BTreeMap::<u16, Word>::new();
+      +                for original_id in original_bv.iter() {
+      +                    if original_id > max_original_id {
+      +                        continue;
+      +                    }
+      +                    let word_idx = (original_id / WORD_BITS) as u16;
+      +                    let bit_idx = original_id % WORD_BITS;
+      +                    *temp_row.entry(word_idx).or_insert(0) |= 1 << bit_idx;
+      +                }
+      +                if !temp_row.is_empty() {
+      +                    sparse_matrix[*internal_id] = temp_row.into_iter().collect();
+      +                }
+      +            }
       +
-               HybridBitset::from(original_bv_rsb)
-           }
-       
+      +            let instant = std::time::Instant::now();
+      +            let mut result_bitset_words = vec![0 as Word; original_vocab_size_words];
+      +            for internal_id in internal_bv.iter() {
+      +                if internal_id >= num_internal_tokens {
+      +                    continue;
+      +                }
+      +                let sparse_row = &sparse_matrix[internal_id];
+      +                for &(word_idx, word) in sparse_row {
+      +                    result_bitset_words[word_idx as usize] |= word;
+      +                }
+      +            }
+      +            let elapsed = instant.elapsed();
+      +
+      +            let original_bv_6b = result_bitset_words
+      +                .iter()
+      +                .enumerate()
+      +                .flat_map(|(word_idx, &word)| {
+      +                    (0..WORD_BITS).filter_map(move |bit_idx| {
+      +                        if (word >> bit_idx) & 1 == 1 {
+      +                            Some(word_idx * WORD_BITS + bit_idx)
+      +                        } else {
+      +                            None
+      +                        }
+      +                    })
+      +                })
+      +                .collect::<RangeSetBlaze<usize>>();
+      +            let is_equal = original_bv_6b == original_bv_rsb;
+      +            println!(
+      +                "[perf] STRATEGY 6b (Sparse Bitset Matrix u{}): {:?} (equal: {})",
+      +                WORD_BITS, elapsed, is_equal
+      +            );
+      +        }
+      +
+               // --- STRATEGY 7: Pre-flattened slices (Strategy A) ---
+               let precompute_instant = std::time::Instant::now();
+               let mut data: Vec<u32> = Vec::new();
 
       ```
     metadata:
@@ -9928,7 +10066,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Add Strategy 11 (K-Way Merge) for faster
-      internal-to-original bitset mapping"'
+  - user: 'Changes committed with message: "feat: Add Strategy 6b (Sparse Bitset Matrix)
+      for internal_bv_to_original_with_map"'
     metadata:
 ...
