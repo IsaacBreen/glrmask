@@ -2,7 +2,6 @@ from typing import Dict, List
 import json
 import _sep1 as ffi
 from ..common_interface import RangeSet
-from tqdm import tqdm
 
 class BruteForceFastRustModel:
     """
@@ -59,7 +58,7 @@ class BruteForceFastRustModel:
         """
         allowed_mask = RangeSet.empty()
         
-        for internal_token_id in tqdm(range(self.internal_max_llm_token + 1), desc="get_mask (bruteforce_fast_rust)"):
+        for internal_token_id in range(self.internal_max_llm_token + 1):
             representative_token_id = self.internal_to_representative_map.get(internal_token_id)
             if representative_token_id is None:
                 continue
