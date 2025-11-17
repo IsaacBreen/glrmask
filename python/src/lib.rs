@@ -580,6 +580,16 @@ impl PyGrammarConstraint {
         }
         Ok(dict.into())
     }
+
+    pub fn internal_bv_to_original_bitset(&self, internal_bv: &PyBitset) -> PyResult<PyBitset> {
+        let original_bv = self.inner.internal_bv_to_original(&internal_bv.inner.clone().into());
+        Ok(PyBitset { inner: original_bv })
+    }
+
+    pub fn internal_bv_to_original_hybrid_bitset(&self, internal_bv: &PyHybridBitset) -> PyResult<PyBitset> {
+        let original_bv = self.inner.internal_bv_to_original(&internal_bv.inner);
+        Ok(PyBitset { inner: original_bv })
+    }
 }
 
 #[pyclass(name = "HybridBitsetIterator")]
