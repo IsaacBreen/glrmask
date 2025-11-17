@@ -947,7 +947,9 @@ impl PyGrammarConstraintState {
     }
 
     fn clone(&self) -> Self {
-        Self::new(self.inner.with_inner(|state| state.clone()))
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 
     fn is_active(&self) -> bool {
