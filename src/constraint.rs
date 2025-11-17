@@ -1909,6 +1909,192 @@ impl GrammarConstraint {
             );
         }
 
+        {
+            type Word = u32;
+            const WORD_BITS: usize = 32;
+
+            let max_original_id = self.llm_vocab.max_original_llm_token_id;
+            let original_vocab_size_words = (max_original_id / WORD_BITS) + 1;
+            let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
+
+            let mut sparse_matrix: Vec<Vec<(u16, Word)>> = vec![Vec::new(); num_internal_tokens];
+
+            for (internal_id, original_bv) in internal_to_original.iter() {
+                if *internal_id >= num_internal_tokens {
+                    continue;
+                }
+
+                let mut temp_row = BTreeMap::<u16, Word>::new();
+                for original_id in original_bv.iter() {
+                    if original_id > max_original_id {
+                        continue;
+                    }
+                    let word_idx = (original_id / WORD_BITS) as u16;
+                    let bit_idx = original_id % WORD_BITS;
+                    *temp_row.entry(word_idx).or_insert(0) |= 1 << bit_idx;
+                }
+                if !temp_row.is_empty() {
+                    sparse_matrix[*internal_id] = temp_row.into_iter().collect();
+                }
+            }
+
+            let instant = std::time::Instant::now();
+            let mut result_bitset_words = vec![0 as Word; original_vocab_size_words];
+            for internal_id in internal_bv.iter() {
+                if internal_id >= num_internal_tokens {
+                    continue;
+                }
+                let sparse_row = &sparse_matrix[internal_id];
+                for &(word_idx, word) in sparse_row {
+                    result_bitset_words[word_idx as usize] |= word;
+                }
+            }
+            let elapsed = instant.elapsed();
+
+            let original_bv_6b = result_bitset_words
+                .iter()
+                .enumerate()
+                .flat_map(|(word_idx, &word)| {
+                    (0..WORD_BITS).filter_map(move |bit_idx| {
+                        if (word >> bit_idx) & 1 == 1 {
+                            Some(word_idx * WORD_BITS + bit_idx)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect::<RangeSetBlaze<usize>>();
+            let is_equal = original_bv_6b == original_bv_rsb;
+            println!(
+                "[perf] STRATEGY 6c (Sparse Bitset Matrix u{}): {:?} (equal: {})",
+                WORD_BITS, elapsed, is_equal
+            );
+        }
+
+        {
+            type Word = u16;
+            const WORD_BITS: usize = 16;
+
+            let max_original_id = self.llm_vocab.max_original_llm_token_id;
+            let original_vocab_size_words = (max_original_id / WORD_BITS) + 1;
+            let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
+
+            let mut sparse_matrix: Vec<Vec<(u16, Word)>> = vec![Vec::new(); num_internal_tokens];
+
+            for (internal_id, original_bv) in internal_to_original.iter() {
+                if *internal_id >= num_internal_tokens {
+                    continue;
+                }
+
+                let mut temp_row = BTreeMap::<u16, Word>::new();
+                for original_id in original_bv.iter() {
+                    if original_id > max_original_id {
+                        continue;
+                    }
+                    let word_idx = (original_id / WORD_BITS) as u16;
+                    let bit_idx = original_id % WORD_BITS;
+                    *temp_row.entry(word_idx).or_insert(0) |= 1 << bit_idx;
+                }
+                if !temp_row.is_empty() {
+                    sparse_matrix[*internal_id] = temp_row.into_iter().collect();
+                }
+            }
+
+            let instant = std::time::Instant::now();
+            let mut result_bitset_words = vec![0 as Word; original_vocab_size_words];
+            for internal_id in internal_bv.iter() {
+                if internal_id >= num_internal_tokens {
+                    continue;
+                }
+                let sparse_row = &sparse_matrix[internal_id];
+                for &(word_idx, word) in sparse_row {
+                    result_bitset_words[word_idx as usize] |= word;
+                }
+            }
+            let elapsed = instant.elapsed();
+
+            let original_bv_6b = result_bitset_words
+                .iter()
+                .enumerate()
+                .flat_map(|(word_idx, &word)| {
+                    (0..WORD_BITS).filter_map(move |bit_idx| {
+                        if (word >> bit_idx) & 1 == 1 {
+                            Some(word_idx * WORD_BITS + bit_idx)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect::<RangeSetBlaze<usize>>();
+            let is_equal = original_bv_6b == original_bv_rsb;
+            println!(
+                "[perf] STRATEGY 6d (Sparse Bitset Matrix u{}): {:?} (equal: {})",
+                WORD_BITS, elapsed, is_equal
+            );
+        }
+
+        {
+            type Word = u8;
+            const WORD_BITS: usize = 8;
+
+            let max_original_id = self.llm_vocab.max_original_llm_token_id;
+            let original_vocab_size_words = (max_original_id / WORD_BITS) + 1;
+            let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
+
+            let mut sparse_matrix: Vec<Vec<(u16, Word)>> = vec![Vec::new(); num_internal_tokens];
+
+            for (internal_id, original_bv) in internal_to_original.iter() {
+                if *internal_id >= num_internal_tokens {
+                    continue;
+                }
+
+                let mut temp_row = BTreeMap::<u16, Word>::new();
+                for original_id in original_bv.iter() {
+                    if original_id > max_original_id {
+                        continue;
+                    }
+                    let word_idx = (original_id / WORD_BITS) as u16;
+                    let bit_idx = original_id % WORD_BITS;
+                    *temp_row.entry(word_idx).or_insert(0) |= 1 << bit_idx;
+                }
+                if !temp_row.is_empty() {
+                    sparse_matrix[*internal_id] = temp_row.into_iter().collect();
+                }
+            }
+
+            let instant = std::time::Instant::now();
+            let mut result_bitset_words = vec![0 as Word; original_vocab_size_words];
+            for internal_id in internal_bv.iter() {
+                if internal_id >= num_internal_tokens {
+                    continue;
+                }
+                let sparse_row = &sparse_matrix[internal_id];
+                for &(word_idx, word) in sparse_row {
+                    result_bitset_words[word_idx as usize] |= word;
+                }
+            }
+            let elapsed = instant.elapsed();
+
+            let original_bv_6b = result_bitset_words
+                .iter()
+                .enumerate()
+                .flat_map(|(word_idx, &word)| {
+                    (0..WORD_BITS).filter_map(move |bit_idx| {
+                        if (word >> bit_idx) & 1 == 1 {
+                            Some(word_idx * WORD_BITS + bit_idx)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect::<RangeSetBlaze<usize>>();
+            let is_equal = original_bv_6b == original_bv_rsb;
+            println!(
+                "[perf] STRATEGY 6e (Sparse Bitset Matrix u{}): {:?} (equal: {})",
+                WORD_BITS, elapsed, is_equal
+            );
+        }
+
         // --- STRATEGY 7: Pre-flattened slices (Strategy A) ---
         let precompute_instant = std::time::Instant::now();
         let mut data: Vec<u32> = Vec::new();
