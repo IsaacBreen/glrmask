@@ -1312,8 +1312,7 @@ impl PyGrammarConstraintState {
     }
 
     fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let hybrid_bitset = self.inner.with_inner(|state| state.get_mask4());
-        let bitset = RustBitset::from(&hybrid_bitset);
+        let bitset = self.inner.with_inner(|state| state.get_mask4());
 
         let bools: Vec<bool> = if bitset.is_empty() {
             vec![]
