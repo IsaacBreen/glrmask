@@ -2779,6 +2779,9 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn is_active(&self) -> bool { !self.state.is_empty() }
 
     pub fn is_valid(&self) -> bool {
+        if self.state.is_empty() {
+            return false;
+        }
         if self.state.contains_key(&self.parent.tokenizer.initial_state_id()) {
             return true;
         }
@@ -2791,8 +2794,7 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
         }
-        true
-
+        false
     }
 
     pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
