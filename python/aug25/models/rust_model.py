@@ -30,7 +30,7 @@ class Model:
 
         # print("\n--- get_mask END (rust_model.py) ---")
         # print(f"get_mask() returned {RangeSet.from_ranges(mask_bv.to_ranges())}")
-        return RangeSet.from_ranges(mask_bv.to_ranges())
+        return RangeSet.from_ffi_hybridbitset(mask_bv)
 
     def commit(self, token_id: int):
         """Commits a token to the underlying Rust state."""

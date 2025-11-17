@@ -7,13 +7,20 @@ from .rangeset_stats import time_method, time_func, record_metric
 
 
 class FFIRangeSet(RangeSet[int]):
-    """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
+    """A FFIRangeSet implementation backed by the Rust ffi.HybridBitset."""
 
     __slots__ = ('_bitset',)
 
     def __init__(self, intervals: Iterable[Tuple[int, int]] = ()):
-        # ffi.Bitset.from_ranges expects a list of [start, end] lists/tuples
-        self._bitset = ffi.Bitset.from_ranges(list(intervals))
+        # ffi.HybridBitset.from_ranges expects a list of [start, end] lists/tuples
+        self._bitset = ffi.HybridBitset.from_ranges(list(intervals))
+
+    @classmethod
+    def from_ffi_hybridbitset(cls, bitset: ffi.HybridBitset) -> 'FFIRangeSet':
+        """Creates a FFIRangeSet from a PyHybridBitset."""
+        self = cls()
+        self._bitset = bitset
+        return self
 
     @property
     def intervals(self) -> Tuple[Tuple[int, int], ...]:
@@ -192,7 +199,7 @@ class FFIRangeSet(RangeSet[int]):
 
     def __setstate__(self, state):
         """Restore the RangeSet from its pickleable representation."""
-        self._bitset = ffi.Bitset.from_ranges(state)
+        self._bitset = ffi.HybridBitset.from_ranges(state)
 
     @staticmethod
     def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
@@ -200,7 +207,7 @@ class FFIRangeSet(RangeSet[int]):
         Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
         This can be achieved by creating a temporary FFIRangeSet.
         """
-        # The ffi.Bitset constructor handles merging and sorting.
+        # The ffi.HybridBitset constructor handles merging and sorting.
         temp_rs = FFIRangeSet.from_ranges(ranges)
         return temp_rs._bitset.to_ranges()
 
@@ -215,7 +222,7 @@ class FFIRangeSet(RangeSet[int]):
         except Exception:
             pass
         ranges = [tuple(r) for r in ranges]
-        self._bitset = ffi.Bitset.from_ranges(ranges)
+        self._bitset = ffi.HybridBitset.from_ranges(ranges)
         try:
             record_metric('FFIRangeSet.from_ranges.out_len', len(self))
         except Exception:
@@ -230,7 +237,7 @@ class FFIRangeSet(RangeSet[int]):
         # The FFI function expects a list.
         idx_list = list(indices)
         record_metric('FFIRangeSet.from_indices.in_len', len(idx_list))
-        new_set._bitset = ffi.Bitset.from_indices(idx_list)
+        new_set._bitset = ffi.HybridBitset.from_indices(idx_list)
         try:
             record_metric('FFIRangeSet.from_indices.out_len', len(new_set))
         except Exception:
