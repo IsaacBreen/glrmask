@@ -696,10 +696,6 @@ pub fn optimize_trie1_size(
     crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
 }
 
-/// Breaks structural cycles in the Trie1 graph by "unrolling" strongly connected components.
-/// This makes the graph a DAG, which can be simpler for some analysis tools.
-/// The transformation preserves token-aware paths, relying on the property that no single
-/// LLM token can traverse a cycle.
 fn break_cycles_trie1(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
@@ -718,99 +714,165 @@ fn break_cycles_trie1(
     let all_nodes_vec = &traversal_data.nodes;
     let sccs = &traversal_data.sccs;
 
-    #[derive(Debug)]
-    enum Modification {
-        AddEdge(PrecomputeNode1Index, Option<GrammarTokenID>, PrecomputeNode1Index, LLMTokenBV),
-        RemoveEdge(PrecomputeNode1Index, Option<GrammarTokenID>, PrecomputeNode1Index),
-    }
-    let mut modifications = Vec::new();
-
+    // Process each SCC independently. The SCCs are computed on the original graph; newly
+    // created layer nodes will not appear in any SCC and thus will not be processed again.
     for scc_node_positions in sccs {
-        let is_trivial_scc = if scc_node_positions.len() == 1 {
-            let pos = scc_node_positions[0];
-            let u_idx = all_nodes_vec[pos];
-            let u_guard = u_idx.read(trie1_god).unwrap();
-            !u_guard.children().values().any(|dm| dm.contains_key(&u_idx))
-        } else {
-            scc_node_positions.len() < 2
-        };
-
-        if is_trivial_scc {
+        // Materialize nodes in this SCC.
+        let mut scc_nodes: Vec<PrecomputeNode1Index> =
+            scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
+        if scc_nodes.is_empty() {
             continue;
         }
 
-        let scc_nodes_set: HashSet<PrecomputeNode1Index> = scc_node_positions.iter().map(|&pos| all_nodes_vec[pos]).collect();
-        let mut scc_nodes: Vec<_> = scc_nodes_set.iter().cloned().collect();
-        scc_nodes.sort(); // For deterministic behavior
+        // Deterministic order for reproducibility.
+        scc_nodes.sort();
+        let scc_size = scc_nodes.len();
+        // In the specialized graph for any fixed token t, an internal path inside this SCC
+        // can visit at most scc_size distinct nodes, hence has length at most scc_size - 1.
+        let max_internal_steps = scc_size - 1;
 
-        crate::debug!(3, "Breaking cycles in SCC of size {}", scc_nodes.len());
+        crate::debug!(
+            3,
+            "Breaking cycles in SCC of size {}, max_internal_steps={}",
+            scc_size,
+            max_internal_steps
+        );
 
-        // 1. Create a copy of each node in the SCC.
-        let copies: HashMap<_, _> = scc_nodes.iter().map(|v| {
-            let value_clone = {
-                v.read(trie1_god).unwrap().value.clone()
-            };
-            let v_copy_idx = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(value_clone)));
-            (*v, v_copy_idx)
-        }).collect();
+        let scc_nodes_set: HashSet<PrecomputeNode1Index> =
+            scc_nodes.iter().cloned().collect();
 
-        type SpanningTreeEdge = (PrecomputeNode1Index, PrecomputeNode1Index);
+        // Collect internal and external outgoing edges for nodes in this SCC.
+        //
+        // internal_edges: edges u -(ek,bv)-> v with u,v ∈ S (the SCC).
+        // external_edges: edges u -(ek,bv)-> x with u ∈ S, x ∉ S.
+        let mut internal_edges: Vec<(
+            PrecomputeNode1Index,
+            Option<GrammarTokenID>,
+            PrecomputeNode1Index,
+            LLMTokenBV,
+        )> = Vec::new();
+        let mut external_edges: Vec<(
+            PrecomputeNode1Index,
+            Option<GrammarTokenID>,
+            PrecomputeNode1Index,
+            LLMTokenBV,
+        )> = Vec::new();
 
-        // 2. Find a spanning tree of the SCC subgraph to preserve connectivity in the copied component.
-        let mut spanning_tree_edges = BTreeSet::<SpanningTreeEdge>::new();
-        let mut q = VecDeque::new();
-        let mut visited = HashSet::new();
-        if let Some(start_node) = scc_nodes.first() {
-            q.push_back(*start_node);
-            visited.insert(*start_node);
-
-            while let Some(u) = q.pop_front() {
-                let u_guard = u.read(trie1_god).unwrap();
-                // Iterate children in a deterministic order for deterministic spanning tree
-                let mut child_edges: Vec<_> = u_guard.children().iter().flat_map(|(ek, dm)| dm.iter().map(move |(v, bv)| (ek, v, bv))).collect();
-                child_edges.sort_by_key(|(ek, v, _)| (*ek, *v));
-
-                for (ek, v, _) in child_edges {
-                    if scc_nodes_set.contains(v) && visited.insert(*v) {
-                        q.push_back(*v);
-                        spanning_tree_edges.insert((u, *v));
-                    }
-                }
-            }
-        }
-
-        // 3. Schedule edge modifications.
         for u in &scc_nodes {
-            let u_copy = copies[u];
-            let u_guard = u.read(trie1_god).unwrap();
-            let children_snapshot = u_guard.children().clone();
-            drop(u_guard);
-
-            for (ek, dm) in children_snapshot {
+            let g = u.read(trie1_god).expect("read");
+            for (ek, dm) in g.children() {
                 for (v, bv) in dm {
-                    if scc_nodes_set.contains(&v) { // Internal edge
-                        let v_copy = copies[&v];
-                        modifications.push(Modification::RemoveEdge(*u, ek.clone(), v));
-                        modifications.push(Modification::AddEdge(*u, ek.clone(), v_copy, bv.clone()));
-                        if spanning_tree_edges.contains(&(*u, v)) {
-                            modifications.push(Modification::AddEdge(u_copy, ek, v_copy, bv));
-                        }
-                    } else { // Exit edge
-                        modifications.push(Modification::AddEdge(u_copy, ek, v, bv));
+                    if bv.is_empty() {
+                        continue;
+                    }
+                    if scc_nodes_set.contains(v) {
+                        internal_edges.push((*u, *ek, *v, bv.clone()));
+                    } else {
+                        external_edges.push((*u, *ek, *v, bv.clone()));
                     }
                 }
             }
         }
-    }
 
-    // 4. Apply all scheduled modifications.
-    for m in modifications {
-        match m {
-            Modification::AddEdge(u, ek, v, bv) => {
-                trie1_god.insert_edge_simple(u, v, ek, bv);
+        // If there are no internal edges, there is nothing to unroll for this SCC.
+        if internal_edges.is_empty() {
+            continue;
+        }
+
+        // Create layered copies for each node at depths 1..=max_internal_steps.
+        //
+        // Layer 0 is the original node. For depth d>0, (u,d) is a fresh clone of u.
+        let mut layer_nodes: HashMap<(PrecomputeNode1Index, usize), PrecomputeNode1Index> =
+            HashMap::new();
+        if max_internal_steps > 0 {
+            for u in &scc_nodes {
+                let value_clone = {
+                    let g = u.read(trie1_god).expect("read");
+                    g.value.clone()
+                };
+                for depth in 1..=max_internal_steps {
+                    let new_idx = PrecomputeNode1Index::new(
+                        trie1_god.insert(PrecomputeNode1::new(value_clone.clone())),
+                    );
+                    layer_nodes.insert((*u, depth), new_idx);
+                }
             }
-            Modification::RemoveEdge(u, ek, v) => {
-                trie1_god.remove_edge(u, v, &ek);
+        }
+
+        // Remove all internal edges from the original nodes in the SCC.
+        //
+        // After this step, nodes in S keep only their outgoing edges to outside of S.
+        // Internal connectivity will be reintroduced via layered edges.
+        for u in &scc_nodes {
+            let mut w = u.write(trie1_god).expect("write");
+            let old_children = std::mem::take(w.children_mut());
+            let mut new_children: BTreeMap<
+                Option<GrammarTokenID>,
+                OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>,
+            > = BTreeMap::new();
+
+            for (ek, dm) in old_children {
+                let mut new_dm: OrderedHashMap<PrecomputeNode1Index, LLMTokenBV> =
+                    OrderedHashMap::new();
+                for (v, bv) in dm {
+                    if !scc_nodes_set.contains(&v) {
+                        new_dm.insert(v, bv);
+                    }
+                    // Internal edges (including self‑loops) are dropped here and
+                    // reintroduced below in layered form.
+                }
+                if !new_dm.is_empty() {
+                    new_children.insert(ek, new_dm);
+                }
+            }
+            *w.children_mut() = new_children;
+        }
+
+        // Add external edges for every layer depth 0..=max_internal_steps.
+        //
+        // Intuition: a token may exit the SCC after any number of internal steps (including
+        // zero), so each layer representing "having taken d internal steps since the last
+        // entry into this SCC" needs the same outgoing edges to the outside world.
+        for (u, ek, dst, bv) in &external_edges {
+            for depth in 0..=max_internal_steps {
+                let from = if depth == 0 {
+                    *u
+                } else {
+                    *layer_nodes
+                        .get(&(*u, depth))
+                        .expect("layer node missing for external edge")
+                };
+                trie1_god.insert_edge_simple(from, *dst, *ek, bv.clone());
+            }
+        }
+
+        // Add layered internal edges: from depth d of u to depth d+1 of v, for
+        // d = 0..max_internal_steps-1.
+        //
+        // Every edge u -(ek,bv)-> v is replicated for each depth, but always increasing
+        // the layer index, so there can be no structural cycle inside the SCC after
+        // this transformation.
+        for (u, ek, v, bv) in &internal_edges {
+            for depth in 0..max_internal_steps {
+                let from = if depth == 0 {
+                    *u
+                } else {
+                    *layer_nodes
+                        .get(&(*u, depth))
+                        .expect("layer node missing for internal edge source")
+                };
+                let to = if max_internal_steps == 0 {
+                    // This case can only happen for single‑node SCCs, where the only
+                    // internal edges are self‑loops. Under the invariant that no token
+                    // can traverse a cycle, these edges must have empty masks and were
+                    // already eliminated by the filtering above.
+                    continue;
+                } else {
+                    *layer_nodes
+                        .get(&(*v, depth + 1))
+                        .expect("layer node missing for internal edge destination")
+                };
+                trie1_god.insert_edge_simple(from, to, *ek, bv.clone());
             }
         }
     }
