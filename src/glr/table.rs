@@ -219,7 +219,6 @@ impl JSONConvertible for SubstringGoto {
     }
 }
 
-pub type ShiftsAndReducesWithoutDefaultReduce = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
 pub type ShiftsAndReducesFull = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -257,35 +256,6 @@ impl JSONConvertible for Reduce {
     }
 }
 
-#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub struct DefaultReduce {
-    pub clone_and_merge: bool,
-    pub reduce: Option<(Reduce, TerminalBV)>,
-}
-
-impl JSONConvertible for DefaultReduce {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("clone_and_merge".to_string(), self.clone_and_merge.to_json());
-        obj.insert("reduce".to_string(), self.reduce.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => Ok(DefaultReduce {
-                clone_and_merge: bool::from_json(
-                    obj.remove("clone_and_merge")
-                        .ok_or_else(|| "Missing field clone_and_merge for DefaultReduce".to_string())?,
-                )?,
-                reduce: Option::<(Reduce, TerminalBV)>::from_json(
-                    obj.remove("reduce").ok_or_else(|| "Missing field reduce for DefaultReduce".to_string())?,
-                )?,
-            }),
-            _ => Err("Expected JSONNode::Object for DefaultReduce".to_string()),
-        }
-    }
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage7Row {
     pub shifts_and_reduces_full: ShiftsAndReducesFull,
@@ -294,40 +264,23 @@ struct Stage7Row {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
     pub shifts_and_reduces_full: ShiftsAndReducesFull,
-    pub default_reduce: DefaultReduce,
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
 impl JSONConvertible for Row {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert(
-            "shifts_and_reduces_without_default_reduce".to_string(),
-            self.shifts_and_reduces_without_default_reduce.to_json(),
-        );
         obj.insert("shifts_and_reduces_full".to_string(), self.shifts_and_reduces_full.to_json());
-        obj.insert("default_reduce".to_string(), self.default_reduce.to_json());
         obj.insert("gotos".to_string(), self.gotos.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => Ok(Row {
-                shifts_and_reduces_without_default_reduce:
-                    ShiftsAndReducesWithoutDefaultReduce::from_json(
-                        obj.remove("shifts_and_reduces_without_default_reduce").ok_or_else(|| {
-                            "Missing field shifts_and_reduces_without_default_reduce for Row".to_string()
-                        })?,
-                    )?,
                 shifts_and_reduces_full: ShiftsAndReducesFull::from_json(
                     obj.remove("shifts_and_reduces_full")
                         .ok_or_else(|| "Missing field shifts_and_reduces_full for Row".to_string())?,
-                )?,
-                default_reduce: DefaultReduce::from_json(
-                    obj.remove("default_reduce")
-                        .ok_or_else(|| "Missing field default_reduce for Row".to_string())?,
                 )?,
                 gotos: BTreeMap::<NonTerminalID, Goto>::from_json(
                     obj.remove("gotos").ok_or_else(|| "Missing field gotos for Row".to_string())?,
@@ -553,7 +506,7 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
 
 fn stage_5(
     stage_4_table: Stage4Table,
-    productions: &[Production],
+    _productions: &[Production],
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
 ) -> Stage5Result {
     let mut stage_5_table = BTreeMap::new();
@@ -708,112 +661,12 @@ fn stage_7(
 
 fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
     let mut stage_8_table = BTreeMap::new();
-
     for (state_id, row) in stage_7_table {
         let Stage7Row { shifts_and_reduces_full, gotos } = row;
-
-        let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
-        for action in shifts_and_reduces_full.values() {
-            let mut process_reduces = |reduces: &BTreeMap<
-                usize,
-                BTreeMap<NonTerminalID, BTreeSet<ProductionID>>,
-            >| {
-                for (&len, nts) in reduces {
-                    for (&nt_id, pids) in nts {
-                        let entry = reduce_counts.entry((nt_id, len)).or_default();
-                        entry.0 += 1;
-                        entry.1.extend(pids.iter().cloned());
-                    }
-                }
-            };
-            match action {
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt_id, len, production_ids } => {
-                    let entry = reduce_counts.entry((*nt_id, *len)).or_default();
-                    entry.0 += 1;
-                    entry.1.extend(production_ids.iter().cloned());
-                }
-                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
-                _ => {}
-            }
-        }
-
-        let promoted_reduce_key = reduce_counts
-            .iter()
-            .find_map(|(key, (_, pids))| if pids.contains(&ProductionID(0)) { Some(*key) } else { None })
-            .or_else(|| {
-                reduce_counts
-                    .iter()
-                    .max_by_key(|(_, (count, _))| *count)
-                    .map(|(key, _)| *key)
-            });
-
-        let (shifts_and_reduces_without_default_reduce, default_reduce) =
-            if let Some((nonterminal_id, len)) = promoted_reduce_key {
-                let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
-                let mut eligible_terminals = TerminalBV::zeros();
-                for (&tid, action) in &shifts_and_reduces_full {
-                    let is_eligible = match action {
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                            nonterminal_id: action_nt_id,
-                            len: action_len,
-                            ..
-                        } => *action_nt_id == nonterminal_id && *action_len == len,
-                        Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
-                            reduces.get(&len).map_or(false, |nts| nts.contains_key(&nonterminal_id))
-                        }
-                        _ => false,
-                    };
-                    if is_eligible {
-                        eligible_terminals.insert(tid.0);
-                    }
-                }
-
-                let shifts_and_reduces_without_default =
-                    shifts_and_reduces_full
-                        .iter()
-                        .filter_map(|(&tid, action)| {
-                            let mut new_action = action.clone();
-                            let mut was_modified = false;
-                            match &mut new_action {
-                                Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                                    nonterminal_id: action_nt_id,
-                                    len: action_len,
-                                    ..
-                                } if *action_nt_id == nonterminal_id && *action_len == len => {
-                                    return None;
-                                }
-                                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
-                                    if let Some(nts) = reduces.get_mut(&len) {
-                                        if nts.remove(&nonterminal_id).is_some() {
-                                            was_modified = true;
-                                            if nts.is_empty() { reduces.remove(&len); }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                            if was_modified { new_action.simplify(); }
-                            Some((tid, new_action))
-                        })
-                        .collect::<ShiftsAndReducesWithoutDefaultReduce>();
-
-                let default_reduce = DefaultReduce {
-                    clone_and_merge: !shifts_and_reduces_without_default.is_empty(),
-                    reduce: Some((Reduce { nonterminal_id, len, production_ids }, eligible_terminals)),
-                };
-                (shifts_and_reduces_without_default, default_reduce)
-            } else {
-                let shifts_and_reduces_without_default = shifts_and_reduces_full.clone();
-                let default_reduce = DefaultReduce { clone_and_merge: true, reduce: None };
-                (shifts_and_reduces_without_default, default_reduce)
-            };
-
         stage_8_table.insert(
             state_id,
             Row {
-                shifts_and_reduces_without_default_reduce,
                 shifts_and_reduces_full,
-                default_reduce,
                 gotos,
             },
         );
@@ -886,7 +739,7 @@ pub fn generate_glr_parser_with_maps(
     crate::debug!(2, "Validating initial grammar");
     validate(productions).expect("Initial grammar validation failed");
 
-    let original_productions = productions.to_vec();
+    let _original_productions = productions.to_vec();
     let start_production_id = 0;
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
@@ -926,78 +779,13 @@ pub fn generate_glr_parser_with_maps(
     let (stage_7_table, item_set_map, start_state_id, everything_state_id) =
         stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
     crate::debug!(2, "Stage 8");
-    let mut final_table = stage_8(stage_7_table);
+    let final_table = stage_8(stage_7_table);
 
     crate::debug!(2, "Stage 9: Precomputing substring gotos");
     let substring_gotos = stage_9(&final_table, &non_terminal_map);
 
     crate::debug!(2, "Stage 10: Precomputing reduce goto map");
     let reduce_goto_map = stage_10(&final_table);
-
-    if FORCE_LR0_TABLE {
-        crate::debug!(2, "Forcing LR(0) table by broadcasting reductions.");
-        let all_terminal_ids: Vec<TerminalID> = terminal_map.right_values().copied().collect();
-
-        for row in final_table.values_mut() {
-            let mut all_reduces_for_state: BTreeMap<
-                usize,
-                BTreeMap<NonTerminalID, BTreeSet<ProductionID>>,
-            > = BTreeMap::new();
-            for action in row.shifts_and_reduces_full.values() {
-                match action {
-                    Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                        nonterminal_id,
-                        len,
-                        production_ids,
-                    } => {
-                        all_reduces_for_state
-                            .entry(*len)
-                            .or_default()
-                            .entry(*nonterminal_id)
-                            .or_default()
-                            .extend(production_ids.iter().cloned());
-                    }
-                    Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
-                        for (&len, nts) in reduces {
-                            for (&nt_id, pids) in nts {
-                                all_reduces_for_state
-                                    .entry(len)
-                                    .or_default()
-                                    .entry(nt_id)
-                                    .or_default()
-                                    .extend(pids.iter().cloned());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if all_reduces_for_state.is_empty() {
-                continue;
-            }
-
-            for &terminal_id in &all_terminal_ids {
-                let existing_action = row.shifts_and_reduces_full.get(&terminal_id);
-                let shift_part = if let Some(action) = existing_action {
-                    match action {
-                        Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(*sid),
-                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                let mut new_action =
-                    Stage7ShiftsAndReducesLookaheadValue::Split { shift: shift_part, reduces: all_reduces_for_state.clone() };
-                new_action.simplify();
-                row.shifts_and_reduces_full.insert(terminal_id, new_action);
-            }
-
-            row.shifts_and_reduces_without_default_reduce = row.shifts_and_reduces_full.clone();
-            row.default_reduce = DefaultReduce { clone_and_merge: false, reduce: None };
-        }
-    }
 
     crate::debug!(2, "Done generating GLR parser");
     print_summary();

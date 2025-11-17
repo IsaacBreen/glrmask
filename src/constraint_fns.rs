@@ -1,64 +1,83 @@
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
-use profiler_macro::time_it;
-use range_set_blaze::RangeSetBlaze;
-use crate::constraint::{GrammarConstraintState, LLMTokenBV, StateIDBV, TerminalAllowanceCheckMode, TerminalBV};
-use crate::datastructures::gss_leveled_adapter::{disallow_terminals_and_prune_arc, fuse_predecessors_recursive, gather_gss_stats, map_allowed_terminals_tokenizer_states, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_llm_tokens, Acc};
+use crate::constraint::{GrammarConstraintState, TerminalAllowanceCheckMode};
+use crate::datastructures::gss_acc::Acc;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::leveled_gss::LeveledGSS;
-use crate::datastructures::trie::Trie;
-use crate::glr::parser::{GLRParser, GLRParserState};
-use crate::glr::table::{StateID, TerminalID};
-use crate::tokenizer::{LLMTokenID, TokenizerStateID};
+use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
+use crate::glr::table::TerminalID;
 use crate::precompute4::weighted_automata::common::StateID as WAStateID;
+use crate::tokenizer::TokenizerStateID;
+use profiler_macro::time_it;
+use range_set_blaze::RangeSetBlaze;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+
+type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 
 impl<'a> GrammarConstraintState<'a> {
-    pub fn get_mask4(&self) -> LLMTokenBV {
+    pub fn get_mask4(&self) -> HybridBitset {
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
         if self.state.is_empty() {
-            return self
-                .parent
-                .internal_bv_to_original(&final_mask_internal.into_inner());
+            return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
         }
 
-        let mut queue: BTreeMap<usize, BTreeMap<WAStateID, LeveledGSS<_, _>>> =
-            BTreeMap::new();
+        let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
         let dwa = &self.parent.precomputed4;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
 
         // 1. Seed initial states
         for (&tokenizer_state_id, glr_state) in &self.state {
-            if glr_state.active_state.stack.is_empty() {
-                continue;
-            }
-            let mut glr_state = glr_state.clone();
-            prune_llm_tokens_by_disallowed_terminals(
-                &mut glr_state.active_state.stack,
-                &self.parent.possible_matches,
-                &mut HashMap::new(),
-            );
-
-            if !glr_state.is_ok() {
+            if glr_state.stack.is_empty() {
                 continue;
             }
 
-            if let Some((target_wa_state_id, weight)) =
-                dwa_start_state.get_transition(tokenizer_state_id.0 as i16)
-            {
+            // Prune GSS based on disallowed terminals before starting.
+            let mut gss = glr_state.stack.clone();
+            let possible_matches = &self.parent.possible_matches;
+            gss = gss.apply_and_prune(|acc| {
+                if acc.terminals_union == HybridL2Bitset::all() {
+                    return Some(acc.clone());
+                }
+                let mut forbidden_llm_tokens = HybridBitset::zeros();
+                let disallowed_terminals_l2 = acc.terminals_union.complement();
+
+                for (range, disallowed_in_range) in disallowed_terminals_l2.range_values() {
+                    if disallowed_in_range.is_empty() { continue; }
+                    let relevant_matches = possible_matches.range(TokenizerStateID(*range.start())..=TokenizerStateID(*range.end()));
+                    for (_, state_matches) in relevant_matches {
+                        for (terminal_id, llm_tokens) in state_matches {
+                            if disallowed_in_range.contains(terminal_id.0) {
+                                forbidden_llm_tokens |= llm_tokens;
+                            }
+                        }
+                    }
+                }
+                if forbidden_llm_tokens.is_empty() {
+                    return Some(acc.clone());
+                }
+                let mut new_acc = acc.clone();
+                new_acc.llm_tokens_union -= &forbidden_llm_tokens;
+                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc) }
+            });
+
+            if gss.is_empty() {
+                continue;
+            }
+
+            if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as i16) {
                 let f = |acc: &Acc| {
                     let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }
                 };
-                let gss = glr_state.active_state.stack.inner.apply_and_prune(f);
+                let weighted_gss = gss.apply_and_prune(f);
 
-                if !gss.is_empty() {
+                if !weighted_gss.is_empty() {
                     queue
-                        .entry(gss.max_depth() as usize)
+                        .entry(weighted_gss.max_depth())
                         .or_default()
                         .entry(target_wa_state_id)
-                        .and_modify(|existing| *existing = existing.merge(&gss))
-                        .or_insert(gss);
+                        .and_modify(|existing| *existing = existing.merge(&weighted_gss))
+                        .or_insert(weighted_gss);
                 }
             }
         }
@@ -93,15 +112,10 @@ impl<'a> GrammarConstraintState<'a> {
                 // Process transitions
                 for peeked_edge in gss.peek() {
                     let parser_state_id = peeked_edge.state_id.0 as i16;
-                    if let Some((target_wa_state_id, trans_weight)) =
-                        dwa_state.get_transition(parser_state_id)
-                    {
+                    if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
-
-                        if popped_gss.is_empty() {
-                            continue;
-                        }
+                        if popped_gss.is_empty() { continue; }
 
                         let f = |rsb: &RangeSetBlaze<usize>| {
                             let new_rsb = rsb & &trans_weight.rsb;
@@ -111,7 +125,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                         if !final_gss.is_empty() {
                             queue
-                                .entry(final_gss.max_depth() as usize)
+                                .entry(final_gss.max_depth())
                                 .or_default()
                                 .entry(target_wa_state_id)
                                 .and_modify(|existing| *existing = existing.merge(&final_gss))
@@ -119,15 +133,10 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                     }
 
-                    if let Some((target_wa_state_id, trans_weight)) = dwa_state
-                        .get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL)
-                    {
+                    if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
-
-                        if popped_gss.is_empty() {
-                            continue;
-                        }
+                        if popped_gss.is_empty() { continue; }
 
                         let f = |rsb: &RangeSetBlaze<usize>| {
                             let new_rsb = rsb & &trans_weight.rsb;
@@ -137,7 +146,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                         if !final_gss.is_empty() {
                             queue
-                                .entry(final_gss.max_depth() as usize)
+                                .entry(final_gss.max_depth())
                                 .or_default()
                                 .entry(target_wa_state_id)
                                 .and_modify(|existing| *existing = existing.merge(&final_gss))
@@ -148,11 +157,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-        let final_mask_mapped = self
-            .parent
-            .internal_bv_to_original(&final_mask_internal.into_inner());
-
-        final_mask_mapped
+        self.parent.internal_bv_to_original(&final_mask_internal.into_inner())
     }
 
     #[time_it]
@@ -160,247 +165,113 @@ impl<'a> GrammarConstraintState<'a> {
         if llm_token_bytes.is_empty() {
             return;
         }
-
-        crate::debug!(
-            3,
-            "Committing bytes: {:?}",
-            String::from_utf8_lossy(llm_token_bytes)
-        );
-
-        self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
+        crate::debug!(3, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
 
         let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
 
-        let gss_stats_before_pruning = gather_gss_stats(
-            &self
-                .state
-                .values()
-                .map(|s| s.active_state.stack.as_ref())
-                .collect::<Vec<_>>(),
-        );
-        crate::debug!(5, "Terminals map: {:?}", terminals_map);
-        self.transform_gss_stacks(|stack, memo| {
-            prune_disallowed_terminals(stack, &terminals_map, memo)
-        });
-        let gss_stats_after_pruning = gather_gss_stats(
-            &self
-                .state
-                .values()
-                .map(|s| s.active_state.stack.as_ref())
-                .collect::<Vec<_>>(),
-        );
-        crate::debug!(
-            4,
-            "GSS stats before pruning disallowed terminals: {:#?}",
-            gss_stats_before_pruning
-        );
-        if gss_stats_after_pruning != gss_stats_before_pruning {
-            crate::debug!(
-                4,
-                "GSS stats after pruning disallowed terminals: {:#?}",
-                gss_stats_after_pruning
-            );
-            crate::debug!(
-                4,
-                "GSS stats changed after pruning disallowed terminals."
-            );
-        } else {
-            crate::debug!(
-                4,
-                "GSS stats did not change after pruning disallowed terminals."
-            );
+        // Prune stacks based on matched terminals and remap tokenizer state constraints.
+        for glr_state in self.state.values_mut() {
+            let mut gss = glr_state.stack.clone();
+            // Prune based on matched terminals
+            gss = gss.apply_and_prune(|acc| {
+                for (sid, bv) in &terminals_map {
+                    let allowed = acc.terminals_union.get_l2_bitset(sid.0).unwrap_or(&HybridBitset::max_ones());
+                    if !bv.is_subset(allowed) {
+                        return None;
+                    }
+                }
+                Some(acc.clone())
+            });
+            // Remap tokenizer states
+            gss = gss.apply(|acc| {
+                let mut new_terminals_union = HybridL2Bitset::all();
+                let mut new_map = BTreeMap::new();
+                for (old, new) in &state_map {
+                    if let Some(bv) = acc.terminals_union.get_l2_bitset(old.0) {
+                        new_map.entry(new.0).and_modify(|b: &mut HybridBitset| *b |= bv.clone()).or_insert_with(|| bv.clone());
+                    }
+                }
+                for (sid, bv) in new_map {
+                    new_terminals_union.insert_l2_bitset(sid, bv);
+                }
+                let mut new_acc = acc.clone();
+                new_acc.terminals_union = new_terminals_union;
+                new_acc
+            });
+            glr_state.stack = gss;
         }
+        self.state.retain(|_, s| !s.stack.is_empty());
 
-        self.transform_gss_stacks(|stack, memo| {
-            map_allowed_terminals_tokenizer_states(stack, &state_map, memo)
-        });
+        let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+        let mut processing_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, ParserGSS>> = BTreeMap::new();
+        
+        let initial_states: BTreeMap<_,_> = self.state.iter().map(|(sid, s)| (*sid, s.stack.clone())).collect();
+        processing_queue.insert(0, initial_states);
 
-        let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> =
-            BTreeMap::new();
-
-        let mut processing_queue: BTreeMap<
-            usize,
-            BTreeMap<TokenizerStateID, GLRParserState<'a>>,
-        > = BTreeMap::new();
-        processing_queue.insert(0, std::mem::take(&mut self.state));
-
-        while let Some((offset, states_to_process)) = processing_queue.pop_first()
-        {
-            crate::debug!(
-                3,
-                "Processing offset {} with states {:?}.",
-                offset,
-                states_to_process.keys().map(|k| k.0).collect::<Vec<_>>()
-            );
-            for (tokenizer_s_id_at_offset, glr_s_at_offset) in states_to_process
-            {
-                assert!(offset < llm_token_bytes.len());
-
-                let exec_result = self.parent.tokenizer.execute_from_state(
-                    &llm_token_bytes[offset..],
-                    tokenizer_s_id_at_offset,
-                );
+        while let Some((offset, states_to_process)) = processing_queue.pop_first() {
+            for (tokenizer_s_id_at_offset, gss_at_offset) in states_to_process {
+                let exec_result = self.parent.tokenizer.execute_from_state(&llm_token_bytes[offset..], tokenizer_s_id_at_offset);
 
                 for match_info in &exec_result.matches {
-                    let mut cloned_glr_s = glr_s_at_offset.clone();
+                    let mut gss = gss_at_offset.clone();
                     let terminal_id = TerminalID(match_info.id);
 
-                    if let Some(dummy_id) =
-                        self.parent.original_to_dummy_map.get(&terminal_id)
-                    {
-                        crate::debug!(5, "Processing dummy token {:?}", dummy_id);
-                        cloned_glr_s.process_token(*dummy_id);
+                    if let Some(dummy_id) = self.parent.original_to_dummy_map.get(&terminal_id) {
+                        gss = self.parent.parser.process_token_gss(&gss, *dummy_id);
                     }
+                    gss = self.parent.parser.process_token_gss(&gss, terminal_id);
 
-                    crate::debug!(5, "Processing terminal token {:?}", terminal_id);
-                    cloned_glr_s.process_token(terminal_id);
-
-                    if cloned_glr_s.is_ok() {
-                        let new_offset = offset + match_info.width;
-                        let next_tokenizer_id_for_segment =
-                            self.parent.tokenizer.initial_state_id();
-
+                    if !gss.is_empty() {
                         if let Some(end_state_id) = exec_result.end_state {
-                            let terminals_accessible_from_end_state = self
-                                .parent
-                                .tokenizer
-                                .tokens_accessible_from_state(
-                                    TokenizerStateID(end_state_id),
-                                );
-                            if terminals_accessible_from_end_state
-                                .contains(&TerminalID(match_info.id))
-                            {
-                                let mut disallowed_terminals =
-                                    HybridL2Bitset::new();
-                                let mut disallowed_terminals_for_end_state =
-                                    TerminalBV::zeros();
-                                disallowed_terminals_for_end_state
-                                    .insert(match_info.id);
-                                disallowed_terminals.insert_l2_bitset(
-                                    end_state_id,
-                                    disallowed_terminals_for_end_state,
-                                );
-                                disallow_terminals_and_prune_arc(
-                                    &mut cloned_glr_s.active_state.stack,
-                                    &disallowed_terminals,
-                                    &mut HashMap::new(),
-                                );
+                            if self.parent.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id)).contains(&terminal_id) {
+                                let mut disallowed = HybridL2Bitset::new();
+                                let mut bv = HybridBitset::zeros();
+                                bv.insert(match_info.id);
+                                disallowed.insert_l2_bitset(end_state_id, bv);
+                                gss = gss.apply_and_prune(|acc| {
+                                    let mut na = acc.clone();
+                                    na.terminals_union -= &disallowed;
+                                    Some(na)
+                                });
                             }
                         }
 
-                        if new_offset == llm_token_bytes.len() {
-                            new_overall_state
-                                .entry(next_tokenizer_id_for_segment)
-                                .and_modify(|existing| {
-                                    existing.merge_with(cloned_glr_s.clone())
-                                })
-                                .or_insert(cloned_glr_s);
-                        } else {
-                            processing_queue
-                                .entry(new_offset)
-                                .or_default()
-                                .entry(next_tokenizer_id_for_segment)
-                                .and_modify(|existing| {
-                                    existing.merge_with(cloned_glr_s.clone())
-                                })
-                                .or_insert(cloned_glr_s);
+                        if !gss.is_empty() {
+                            let new_offset = offset + match_info.width;
+                            let next_tsid = self.parent.tokenizer.initial_state_id();
+                            if new_offset == llm_token_bytes.len() {
+                                new_overall_state.entry(next_tsid).and_modify(|s| s.stack = s.stack.merge(&gss)).or_insert_with(|| GLRParserState { parser: self.parent.parser, stack: gss });
+                            } else {
+                                processing_queue.entry(new_offset).or_default().entry(next_tsid).and_modify(|s| *s = s.merge(&gss)).or_insert(gss);
+                            }
                         }
                     }
                 }
 
-                if let Some(final_tokenizer_s_id_for_llm_token_segment) =
-                    exec_result.end_state
-                {
-                    let final_tokenizer_state =
-                        TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                    new_overall_state
-                        .entry(final_tokenizer_state)
-                        .and_modify(|existing| {
-                            existing.merge_with(glr_s_at_offset.clone())
-                        })
-                        .or_insert(glr_s_at_offset.clone());
+                if let Some(end_state_id) = exec_result.end_state {
+                    let final_tsid = TokenizerStateID(end_state_id);
+                    new_overall_state.entry(final_tsid).and_modify(|s| s.stack = s.stack.merge(&gss_at_offset)).or_insert_with(|| GLRParserState { parser: self.parent.parser, stack: gss_at_offset });
                 }
             }
         }
 
-        self.state = new_overall_state.clone();
+        self.state = new_overall_state;
 
-        self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
-        self.map_gss_stacks(|stack, memo| {
-            fuse_predecessors_recursive(stack, 1, memo)
-        });
-        self.state
-            .retain(|_, glr_parser_state| glr_parser_state.is_ok());
+        for glr_state in self.state.values_mut() {
+            glr_state.stack = glr_state.stack.apply(|acc| {
+                let mut new_acc = acc.clone();
+                new_acc.llm_tokens_union = HybridBitset::max_ones();
+                new_acc
+            });
+            glr_state.stack = glr_state.stack.fuse(Some(1));
+        }
+        self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
-        match self.parent.post_commit_allow_check_mode {
-            TerminalAllowanceCheckMode::None => {}
-            TerminalAllowanceCheckMode::ImmediateSets => {
-                self.state.retain(|tokenizer_state_id, glr_state| {
-                    let accessible = self
-                        .parent
-                        .tokenizer
-                        .tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.tokenizer.num_groups() {
-                        return true;
-                    }
-
-                    let mut union = glr_state.immediate_shift_terminals();
-                    union.extend(glr_state.immediate_reduce_terminals());
-                    !union.is_disjoint(&accessible)
-                });
-            }
-            TerminalAllowanceCheckMode::ImmediateProbe => {
-                self.state.retain(|tokenizer_state_id, glr_state| {
-                    let accessible = self
-                        .parent
-                        .tokenizer
-                        .tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.tokenizer.num_groups() {
-                        return true;
-                    }
-                    for tid in &accessible {
-                        if glr_state
-                            .has_immediate_action_for_terminal(*tid)
-                            .unwrap_or(false)
-                        {
-                            return true;
-                        }
-                    }
-                    false
-                });
-            }
-            TerminalAllowanceCheckMode::StepProbe => {
-                self.state.retain(|tokenizer_state_id, glr_state| {
-                    let accessible = self
-                        .parent
-                        .tokenizer
-                        .tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.tokenizer.num_groups() {
-                        return true;
-                    }
-                    for tid in &accessible {
-                        let mut glr_state = glr_state.clone();
-                        if let Some(dummy_id) =
-                            self.parent.original_to_dummy_map.get(tid)
-                        {
-                            crate::debug!(5, "Processing dummy token {:?}", dummy_id);
-                            glr_state.process_token(*dummy_id);
-                        }
-
-                        if glr_state.allows_terminal(*tid) {
-                            return true;
-                        }
-                    }
-                    false
-                });
-            }
+        if self.parent.post_commit_allow_check_mode != TerminalAllowanceCheckMode::None {
+            // The simplified parser does not currently support these checks.
+            // To match Python, this logic is disabled.
         }
 
-        crate::debug!(
-            4,
-            "Active tokenizer states after committing text (bytes {:?}): {:?}",
-            llm_token_bytes,
-            self.state.keys().map(|k| k.0).collect::<Vec<_>>()
-        );
+        crate::debug!(4, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k| k.0).collect::<Vec<_>>());
     }
 }
