@@ -355,7 +355,7 @@ class Model(GraphProvider):
             tokenizer_initial_state=tokenizer.initial_state_id(),
             vocab=py_vocab,
             possible_matches_cache=possible_matches_cache,
-            id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
+            id_to_token={v: bytes(k) for k, v in data['llm_vocab']['llm_token_map']},
             internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
             ignore_terminal_id=parser_data.get('ignore_terminal_id'),
