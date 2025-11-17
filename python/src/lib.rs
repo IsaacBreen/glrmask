@@ -948,15 +948,22 @@ impl PyGrammarConstraintState {
 
     fn clone(&self) -> Self {
         let constraint = self.inner.borrow_constraint().clone();
+
+        let gss_nodes: Vec<(usize, Arc<RustGSSNode>)> = self.inner.with_inner(|state| {
+            state.state.iter().map(|(id, glr_state)| {
+                (id.0, glr_state.active_state.stack.clone())
+            }).collect()
+        });
+
         PyGrammarConstraintState {
             inner: PyGrammarConstraintStateWrapperTryBuilder {
                 constraint,
-                inner_builder: |c: &PyGrammarConstraint| {
-                    let state = self.inner.borrow_inner().clone();
+                inner_builder: move |c: &PyGrammarConstraint| {
+                    let state = c.inner.state_with_nodes(gss_nodes);
                     Ok::<_, PyErr>(state)
                 },
             }
-            .try_build().expect("Failed to clone GLRParserState"),
+            .try_build().expect("Failed to clone PyGrammarConstraintState"),
         }
     }
 

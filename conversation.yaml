@@ -1,10 +1,10 @@
 local_system:
   attached_files:
     - python/src/lib.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
-    python/src/lib.rs: |-
+    python/src/lib.rs: |
       #![recursion_limit = "256"]
 
       use bimap::BiBTreeMap;
@@ -20,7 +20,7 @@ local_system:
       use sep1::datastructures::u8set::U8Set;
       use sep1::finite_automata::Regex;
       use sep1::finite_automata::{_choice as regex_choice, _seq as regex_seq, eat_u8, eat_u8_negation, eat_u8_seq, eat_u8_set, eat_u8_set_negation, eps, greedy_group, groups as regex_groups, non_greedy_group, opt, prec, rep, rep1, Expr as RegexExpr, ExprGroups as RegexGroups};
-      use sep1::glr::parser::GLRParser;
+      use sep1::glr::parser::{GLRParser, GLRParserState, ParseState};
       use sep1::interface::IncrementalParser;
       use sep1::interface::{choice as grammar_choice, eat_any_fast, literal as grammar_literal, optional as grammar_optional, r#ref as grammar_ref, repeat as grammar_repeat, sequence as grammar_sequence, CompiledGrammar, GrammarDefinition, GrammarExpr};
       use sep1::json_serialization::{JSONConvertible, JSONNode};
@@ -954,7 +954,17 @@ local_system:
           }
 
           fn clone(&self) -> Self {
-              todo!()
+              let constraint = self.inner.borrow_constraint().clone();
+              PyGrammarConstraintState {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      constraint,
+                      inner_builder: |c: &PyGrammarConstraint| {
+                          let state = self.inner.borrow_inner().clone();
+                          Ok::<_, PyErr>(state)
+                      },
+                  }
+                  .try_build().expect("Failed to clone GLRParserState"),
+              }
           }
 
           fn is_active(&self) -> bool {
@@ -1114,7 +1124,7 @@ local_system:
       use sep1::datastructures::u8set::U8Set;
       use sep1::finite_automata::Regex;
       use sep1::finite_automata::{_choice as regex_choice, _seq as regex_seq, eat_u8, eat_u8_negation, eat_u8_seq, eat_u8_set, eat_u8_set_negation, eps, greedy_group, groups as regex_groups, non_greedy_group, opt, prec, rep, rep1, Expr as RegexExpr, ExprGroups as RegexGroups};
-      use sep1::glr::parser::GLRParser;
+      use sep1::glr::parser::{GLRParser, GLRParserState, ParseState};
       use sep1::interface::IncrementalParser;
       use sep1::interface::{choice as grammar_choice, eat_any_fast, literal as grammar_literal, optional as grammar_optional, r#ref as grammar_ref, repeat as grammar_repeat, sequence as grammar_sequence, CompiledGrammar, GrammarDefinition, GrammarExpr};
       use sep1::json_serialization::{JSONConvertible, JSONNode};
@@ -2048,12 +2058,24 @@ local_system:
           }
 
           fn clone(&self) -> Self {
-              // Manually clone the state by extracting its nodes and rebuilding it.
-              // This relies on `get_state_map` and `PyGrammarConstraint::state_with_nodes`.
-              let mut constraint = self.inner.borrow_constraint().clone();
-              let state_map = self.get_state_map().expect("Cloning failed: could not get state map");
-              let nodes: Vec<(usize, PyGSSNode)> = state_map.into_iter().collect();
-              constraint.state_with_nodes(nodes).expect("Cloning failed: could not create new state from nodes")
+              let constraint = self.inner.borrow_constraint().clone();
+
+              let gss_nodes: Vec<(usize, Arc<RustGSSNode>)> = self.inner.with_inner(|state| {
+                  state.state.iter().map(|(id, glr_state)| {
+                      (id.0, glr_state.active_state.stack.clone())
+                  }).collect()
+              });
+
+              PyGrammarConstraintState {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      constraint,
+                      inner_builder: move |c: &PyGrammarConstraint| {
+                          let state = c.inner.state_with_nodes(gss_nodes);
+                          Ok::<_, PyErr>(state)
+                      },
+                  }
+                  .try_build().expect("Failed to clone PyGrammarConstraintState"),
+              }
           }
 
           fn is_active(&self) -> bool {
@@ -2255,7 +2277,7 @@ messages:
       use sep1::datastructures::u8set::U8Set;
       use sep1::finite_automata::Regex;
       use sep1::finite_automata::{_choice as regex_choice, _seq as regex_seq, eat_u8, eat_u8_negation, eat_u8_seq, eat_u8_set, eat_u8_set_negation, eps, greedy_group, groups as regex_groups, non_greedy_group, opt, prec, rep, rep1, Expr as RegexExpr, ExprGroups as RegexGroups};
-      use sep1::glr::parser::GLRParser;
+      use sep1::glr::parser::{GLRParser, GLRParserState, ParseState};
       use sep1::interface::IncrementalParser;
       use sep1::interface::{choice as grammar_choice, eat_any_fast, literal as grammar_literal, optional as grammar_optional, r#ref as grammar_ref, repeat as grammar_repeat, sequence as grammar_sequence, CompiledGrammar, GrammarDefinition, GrammarExpr};
       use sep1::json_serialization::{JSONConvertible, JSONNode};
@@ -3189,7 +3211,17 @@ messages:
           }
 
           fn clone(&self) -> Self {
-              todo!()
+              let constraint = self.inner.borrow_constraint().clone();
+              PyGrammarConstraintState {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      constraint,
+                      inner_builder: |c: &PyGrammarConstraint| {
+                          let state = self.inner.borrow_inner().clone();
+                          Ok::<_, PyErr>(state)
+                      },
+                  }
+                  .try_build().expect("Failed to clone GLRParserState"),
+              }
           }
 
           fn is_active(&self) -> bool {
@@ -3332,1202 +3364,25 @@ messages:
           m.add_class::<PyIncrementalParser>()?;
           Ok(())
       }
+
       ```
     metadata:
       filename: python/src/lib.rs
-  - user: Implement PyGrammarConstraintState::clone
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide the full, final contents of any created or modified files in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the full, final contents of any created or modified files.
-                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
-                    ```python "path/to/your_file.py"
-                    ... full code ...
-                    ```
-                  - Do not include placeholders; the code must be complete and immediately usable.
-                  - Do NOT output git diffs in this mode.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: simple
-      phase: default
-  - assistant: |-
-      The `PyGrammarConstraintState` is a wrapper around a self-referencing struct created with `ouroboros`. To implement `clone`, we rely on the `ouroboros` macro generating a `clone` method for the inner wrapper struct, assuming all its fields (`PyGrammarConstraint` and `GrammarConstraintState`) are cloneable.
-
-      Here are the step-by-step instructions:
-
-      1.  Open the file `python/src/lib.rs`.
-      2.  Locate the `impl PyGrammarConstraintState` block (around line 720).
-      3.  Replace the existing `clone` method implementation:
-
-      ```rust
-          fn clone(&self) -> Self {
-              todo!()
-          }
-      ```
-
-      with the following implementation:
-
-      ```rust
-          fn clone(&self) -> Self {
-              Self {
-                  inner: self.inner.clone(),
-              }
-          }
-      ```
-
-      This clones the inner `PyGrammarConstraintStateWrapper`, which handles the self-referential nature correctly.
-
-      Here is the full content of the modified file:
-
-      ```rust "python/src/lib.rs"
-      #![recursion_limit = "256"]
-
-      use bimap::BiBTreeMap;
-      use numpy::{IntoPyArray, PyArray1};
-      use ouroboros::self_referencing;
-      use pyo3::basic::CompareOp;
-      use pyo3::prelude::*;
-      use pyo3::types::{PyDict, PyTuple};
-      use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-      use sep1::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_and_prune as rust_allow_only, gather_gss_stats, popn_collect_isolated_parents as rust_popn_collect, GSSNode as RustGSSNode};
-      use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
-      use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
-      use sep1::datastructures::u8set::U8Set;
-      use sep1::finite_automata::Regex;
-      use sep1::finite_automata::{_choice as regex_choice, _seq as regex_seq, eat_u8, eat_u8_negation, eat_u8_seq, eat_u8_set, eat_u8_set_negation, eps, greedy_group, groups as regex_groups, non_greedy_group, opt, prec, rep, rep1, Expr as RegexExpr, ExprGroups as RegexGroups};
-      use sep1::glr::parser::GLRParser;
-      use sep1::interface::IncrementalParser;
-      use sep1::interface::{choice as grammar_choice, eat_any_fast, literal as grammar_literal, optional as grammar_optional, r#ref as grammar_ref, repeat as grammar_repeat, sequence as grammar_sequence, CompiledGrammar, GrammarDefinition, GrammarExpr};
-      use sep1::json_serialization::{JSONConvertible, JSONNode};
-      use sep1::tokenizer::LLMTokenID;
-      use std::collections::hash_map::DefaultHasher;
-      use std::collections::BTreeMap;
-      use std::hash::{Hash, Hasher};
-      use std::sync::Arc;
-      use std::sync::Mutex;
-
-      #[pyclass(name = "GrammarExpr")]
-      #[derive(Clone)]
-      struct PyGrammarExpr {
-          inner: GrammarExpr,
-      }
-
-      #[pymethods]
-      impl PyGrammarExpr {
-          #[staticmethod]
-          fn r#ref(name: &str) -> PyResult<Self> {
-              Ok(Self {
-                  inner: grammar_ref(name),
-              })
-          }
-
-          #[staticmethod]
-          fn sequence(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_sequence(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_choice(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
-
-          #[staticmethod]
-          fn optional(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_optional(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn repeat(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_repeat(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn literal(bytes: Vec<u8>) -> Self {
-              Self {
-                  inner: grammar_literal(bytes),
-              }
-          }
-      }
-
-      #[pyclass(name = "RegexExpr")]
-      #[derive(Clone)]
-      struct PyRegexExpr {
-          inner: RegexExpr,
-      }
-
-      #[pymethods]
-      impl PyRegexExpr {
-          #[staticmethod]
-          fn eat_u8(c: u8) -> Self {
-              Self { inner: eat_u8(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_seq(s: &[u8]) -> Self {
-              Self { inner: eat_u8_seq(s.to_vec()) }
-          }
-
-          #[staticmethod]
-          pub fn eat_u8_set(set: Vec<u8>) -> Self {
-              let u8set = U8Set::from_bytes(&set);
-              Self { inner: eat_u8_set(u8set) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_negation(c: u8) -> Self {
-              Self { inner: eat_u8_negation(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_set_negation(set: Vec<u8>) -> Self {
-              let u8set = U8Set::from_bytes(&set);
-              Self { inner: eat_u8_set_negation(u8set) }
-          }
-
-          #[staticmethod]
-          pub fn eat_any() -> Self {
-              Self { inner: eat_any_fast() }
-          }
-
-          #[staticmethod]
-          fn rep(expr: PyRegexExpr) -> Self {
-              Self { inner: rep(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn rep1(expr: PyRegexExpr) -> Self {
-              Self { inner: rep1(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn opt(expr: PyRegexExpr) -> Self {
-              Self { inner: opt(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn prec(precedence: isize, expr: PyRegexExpr) -> PyRegexGroup {
-              PyRegexGroup { inner: prec(precedence, expr.inner) }
-          }
-
-          #[staticmethod]
-          fn eps() -> Self {
-              Self { inner: eps() }
-          }
-
-          #[staticmethod]
-          fn seq(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_seq(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_choice(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass(name = "RegexGroup")]
-      #[derive(Clone)]
-      struct PyRegexGroup {
-          inner: sep1::finite_automata::ExprGroup,
-      }
-
-      #[pymethods]
-      impl PyRegexGroup {
-          #[staticmethod]
-          fn greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: greedy_group(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn non_greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: non_greedy_group(expr.inner) }
-          }
-      }
-
-      #[pyclass(name = "RegexGroups")]
-      #[derive(Clone)]
-      struct PyRegexGroups {
-          inner: RegexGroups,
-      }
-
-      #[pymethods]
-      impl PyRegexGroups {
-          #[staticmethod]
-          fn groups(groups: Vec<PyRegexGroup>) -> Self {
-              Self {
-                  inner: regex_groups(groups.into_iter().map(|g| g.inner).collect()),
-              }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass(name = "Regex")]
-      #[derive(Clone)]
-      pub struct PyRegex {
-          inner: Regex,
-      }
-
-      #[pymethods]
-      impl PyRegex {
-          fn execute_from_state(&self, bytes: &[u8], state_id: usize) -> PyResult<(Option<usize>, Vec<(usize, usize)>)> {
-              let exec_result = self.inner.execute_from_state(bytes, sep1::tokenizer::TokenizerStateID(state_id));
-              let end_state = exec_result.end_state;
-              let matches: Vec<(usize, usize)> = exec_result.matches.into_iter().map(|m| (m.id, m.width)).collect();
-              Ok((end_state, matches))
-          }
-
-          fn tokens_accessible_from_state(&self, state_id: usize) -> PyResult<Vec<usize>> {
-              let accessible = self
-                  .inner
-                  .tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id));
-              let out: Vec<usize> = accessible.into_iter().map(|tid| tid.0).collect();
-              Ok(out)
-          }
-
-          fn initial_state_id(&self) -> usize {
-              self.inner.initial_state_id().0
-          }
-
-          fn max_state(&self) -> usize {
-              self.inner.max_state()
-          }
-      }
-
-      #[pyclass(name = "GrammarDefinition")]
-      #[derive(Clone)]
-      pub struct PyGrammarDefinition {
-          inner: GrammarDefinition,
-      }
-
-      #[pymethods]
-      impl PyGrammarDefinition {
-          #[new]
-          fn new(rules: Vec<(String, PyGrammarExpr)>, terminals: Vec<(String, PyRegexExpr)>) -> PyResult<Self> {
-              let inner_rules = rules.into_iter().map(|(s, e)| (s, e.inner)).collect();
-              let inner_terminals = terminals.into_iter().map(|(s, e)| (s, e.inner)).collect();
-
-              let grammar_def = GrammarDefinition::from_exprs(inner_rules, inner_terminals)
-                   .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to compile grammar: {}", e)))?;
-
-              Ok(PyGrammarDefinition { inner: grammar_def })
-          }
-
-          #[staticmethod]
-          fn from_ebnf_file(path: &str) -> PyResult<Self> {
-              let grammar_def = GrammarDefinition::from_ebnf_file(path)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(
-                      format!("Failed to load or parse EBNF file '{}': {}", path, e)))?;
-              Ok(PyGrammarDefinition { inner: grammar_def })
-          }
-
-          fn simplify(&mut self) {
-              self.inner.simplify();
-          }
-
-          fn compile(&self) -> PyResult<PyCompiledGrammar> {
-              let compiled_grammar = CompiledGrammar::from_definition(Arc::new(self.inner.clone()));
-              Ok(PyCompiledGrammar { inner: compiled_grammar })
-          }
-
-          fn print(&self) {
-              // The Debug impl for GrammarDefinition is quite verbose.
-              // Consider a more Python-friendly summary or selective printing.
-              println!("{}", self.inner);
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let grammar = GrammarDefinition::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarDefinition from JSONNode: {}", e)))?;
-              Ok(PyGrammarDefinition { inner: grammar })
-          }
-      }
-
-
-      #[pyclass(name = "CompiledGrammar")]
-      #[derive(Clone)]
-      pub struct PyCompiledGrammar {
-          inner: CompiledGrammar,
-      }
-
-      #[pymethods]
-      impl PyCompiledGrammar {
-          // If direct access to GLRParser is needed in Python, expose it.
-          // fn glr_parser(&self) -> PyGLRParser {
-          //     PyGLRParser { inner: self.inner.glr_parser().clone() } // Clone if GLRParser is Clone
-          // }
-
-          fn print(&self) {
-              // The Debug impl for CompiledGrammar is quite verbose.
-              // Consider a more Python-friendly summary or selective printing.
-              println!("{}", self.inner);
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let grammar = CompiledGrammar::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize CompiledGrammar from JSONNode: {}", e)))?;
-              Ok(PyCompiledGrammar { inner: grammar })
-          }
-      }
-
-      #[pyclass(name = "GLRParser")]
-      #[derive(Clone)]
-      pub struct PyGLRParser {
-          inner: Arc<GLRParser>,
-      }
-
-      #[pymethods]
-      impl PyGLRParser {
-          fn get_parse_table<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-              let table_dict = PyDict::new_bound(py);
-              for (&state_id, row) in &self.inner.table {
-                  let row_dict = PyDict::new_bound(py);
-
-                  let actions_dict = PyDict::new_bound(py);
-                  for (&terminal_id, action) in &row.shifts_and_reduces_full {
-                      let py_action = match action {
-                          sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => ("shift", to_state.0).to_object(py),
-                          sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                              let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
-                              PyTuple::new_bound(py, &[
-                                  "reduce".to_object(py),
-                                  nonterminal_id.0.to_object(py),
-                                  len.to_object(py),
-                                  pids.to_object(py)
-                              ]).to_object(py)
-                          }
-                          sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                              let py_reduces = PyDict::new_bound(py);
-                              for (len, nts) in reduces {
-                                  let py_nts = PyDict::new_bound(py);
-                                  for (nt, pids) in nts {
-                                      let pids_vec: Vec<usize> = pids.iter().map(|p| p.0).collect();
-                                      py_nts.set_item(nt.0, pids_vec)?;
-                                  }
-                                  py_reduces.set_item(len, py_nts)?;
-                              }
-                              PyTuple::new_bound(py, &[
-                                  "split".to_object(py),
-                                  shift.map(|s| s.0).to_object(py),
-                                  py_reduces.to_object(py)
-                              ]).to_object(py)
-                          }
-                      };
-                      actions_dict.set_item(terminal_id.0, py_action)?;
-                  }
-                  row_dict.set_item("shifts_and_reduces", actions_dict)?;
-
-                  let gotos_dict = PyDict::new_bound(py);
-                  for (&nonterminal_id, goto) in &row.gotos {
-                      let py_goto = (goto.state_id.map(|s| s.0), goto.accept).to_object(py);
-                      gotos_dict.set_item(nonterminal_id.0, py_goto)?;
-                  }
-                  row_dict.set_item("gotos", gotos_dict)?;
-
-                  table_dict.set_item(state_id.0, row_dict)?;
-              }
-
-              let result_dict = PyDict::new_bound(py);
-              result_dict.set_item("start_state_id", self.inner.start_state_id.0)?;
-              result_dict.set_item("table", table_dict)?;
-
-              Ok(result_dict)
-          }
-
-          #[getter]
-          fn ignore_terminal_id(&self) -> Option<usize> {
-              self.inner.ignore_terminal_id.map(|tid| tid.0)
-          }
-      }
-
-      #[pyclass(name = "GrammarConstraint")]
-      #[derive(Clone)]
-      pub struct PyGrammarConstraint {
-          inner: Arc<GrammarConstraint>,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraint {
-          #[new]
-          fn new(py: Python, grammar: PyCompiledGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
-              let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
-              for (key, value) in token_to_id.iter() {
-                  let token = key.extract::<&[u8]>()?;
-                  let id = value.extract::<usize>()?;
-                  llm_token_map.insert(token.to_vec(), LLMTokenID(id));
-              }
-
-              // GrammarConstraint::from_compiled_grammar expects an owned CompiledGrammar.
-              // PyCompiledGrammar holds an owned CompiledGrammar, so we clone it.
-              // The _eof_llm_token_id is not directly used by GrammarConstraint::new,
-              // but it's part of the conceptual model for token ranges.
-              // We can pass max_llm_token_id + 1 or a dedicated EOF marker if needed by constraint logic.
-              // For now, the Rust API for GrammarConstraint::new doesn't take eof_llm_token_id.
-              // The old from_grammar took it, but new from_compiled_grammar doesn't.
-              // Let's assume eof handling is implicit or managed by GrammarConstraintState.
-              let constraint = GrammarConstraint::from_compiled_grammar(
-                  grammar.inner.clone(), // Clone the CompiledGrammar
-                  llm_token_map,
-                  max_llm_token_id,
-              );
-
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn print(&self) {
-              // Printing GrammarConstraint can be complex.
-              // Consider what information is useful to expose.
-              println!("PyGrammarConstraint (details not implemented for print)");
-          }
-
-          fn print_parser(&self) {
-              println!("{}", self.inner.parser);
-          }
-
-          fn state_with_nodes(&mut self, nodes: Vec<(usize, PyGSSNode)>) -> PyResult<PyGrammarConstraintState> {
-              let gss_nodes: Vec<(usize, Arc<RustGSSNode>)> = nodes.into_iter()
-                  .map(|(sid, py_node)| (sid, py_node.inner))
-                  .collect();
-
-              let constraint_clone = self.clone();
-
-              Ok(PyGrammarConstraintState {
-                  inner: PyGrammarConstraintStateWrapperTryBuilder {
-                      constraint: constraint_clone,
-                      inner_builder: move |c: &PyGrammarConstraint| {
-                          let state = c.inner.state_with_nodes(gss_nodes);
-                          Ok::<_, PyErr>(state)
-                      },
-                  }.try_build()?
-              })
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let constraint = GrammarConstraint::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarConstraint from JSONNode: {}", e)))?;
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn dump_precomputed1(&self) {
-              self.inner.dump_precomputed1();
-          }
-
-          fn get_id_to_token_map(&self, py: Python) -> PyResult<PyObject> {
-              let dict = PyDict::new_bound(py);
-              for (token_bytes, token_id) in self.inner.llm_vocab.llm_token_map.iter() {
-                  dict.set_item(token_id.0, token_bytes.as_slice())?;
-              }
-              Ok(dict.into())
-          }
-
-          fn tokenizer(&self) -> PyRegex {
-              PyRegex { inner: self.inner.tokenizer.clone() }
-          }
-
-          fn glr_parser(&self) -> PyGLRParser {
-              PyGLRParser { inner: Arc::new(self.inner.parser.clone()) }
-          }
-
-          fn possible_matches(&self, py: Python) -> PyResult<PyObject> {
-              let dict = PyDict::new_bound(py);
-              for (tokenizer_state_id, terminal_map) in &self.inner.possible_matches {
-                  let terminal_dict = PyDict::new_bound(py);
-                  for (terminal_id, llm_token_bv) in terminal_map {
-                      terminal_dict.set_item(terminal_id.0, PyHybridBitset { inner: llm_token_bv.clone() })?;
-                  }
-                  dict.set_item(tokenizer_state_id.0, terminal_dict)?;
-              }
-              Ok(dict.into())
-          }
-      }
-
-      #[pyclass(name = "HybridBitsetIterator")]
-      struct PyHybridBitsetIterator {
-          inner: Mutex<Box<dyn Iterator<Item = usize> + Send>>,
-      }
-
-      #[pymethods]
-      impl PyHybridBitsetIterator {
-          fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-              slf
-          }
-
-          fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<usize> {
-              slf.inner.lock().unwrap().next()
-          }
-      }
-
-      #[pyclass(name = "Bitset")]
-      #[derive(Clone)]
-      pub struct PyHybridBitset {
-          inner: RustHybridBitset,
-      }
-
-      #[pymethods]
-      impl PyHybridBitset {
-          #[new]
-          fn new() -> Self {
-              Self { inner: RustHybridBitset::zeros() }
-          }
-
-          #[staticmethod]
-          fn zeros() -> Self {
-              Self { inner: RustHybridBitset::zeros() }
-          }
-
-          #[staticmethod]
-          fn ones(len: usize) -> Self {
-              Self { inner: RustHybridBitset::ones(len) }
-          }
-
-          #[staticmethod]
-          fn from_indices(indices: Vec<usize>) -> Self {
-              Self { inner: RustHybridBitset::from_iter(indices) }
-          }
-
-          #[staticmethod]
-          fn from_ranges(ranges: Vec<(usize, usize)>) -> Self {
-              let json_ranges: Vec<Vec<usize>> = ranges.into_iter().map(|(s,e)| vec![s,e]).collect();
-              let inner = RustHybridBitset::from_json(sep1::json_serialization::JSONNode::Array(
-                  json_ranges.into_iter().map(|p| sep1::json_serialization::JSONNode::Array(vec![p[0].to_json(), p[1].to_json()])).collect()
-              )).expect("Bitset::from_ranges JSON");
-              Self { inner }
-          }
-
-          fn to_indices(&self) -> Vec<usize> {
-              self.inner.iter_indices().collect()
-          }
-
-          fn to_ranges(&self) -> Vec<(usize, usize)> {
-              self.inner.iter_ranges().collect()
-          }
-
-          fn __iter__(&self) -> PyHybridBitsetIterator {
-              PyHybridBitsetIterator {
-                  inner: Mutex::new(Box::new(self.inner.clone().into_iter())),
-              }
-          }
-
-          fn iter_ranges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyIterator>> {
-              let ranges: Vec<(usize, usize)> = self.inner.iter_ranges().collect();
-              pyo3::types::PyList::new_bound(py, &ranges).as_ref().iter()
-          }
-
-          fn contains(&self, idx: usize) -> bool {
-              self.inner.contains(idx)
-          }
-
-          fn insert(&mut self, idx: usize) {
-              let _ = self.inner.insert(idx);
-          }
-
-          fn remove(&mut self, idx: usize) {
-              let _ = self.inner.remove(idx);
-          }
-
-          fn set(&mut self, idx: usize, value: bool) {
-              self.inner.set(idx, value);
-          }
-
-          fn is_empty(&self) -> bool {
-              self.inner.is_empty()
-          }
-
-          fn len(&self) -> usize {
-              self.inner.len()
-          }
-
-          fn union(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner | &other.inner }
-          }
-
-          fn intersection(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner & &other.inner }
-          }
-
-          fn __ior__(&mut self, other: &PyHybridBitset) {
-              self.inner |= &other.inner;
-          }
-
-          fn __iand__(&mut self, other: &PyHybridBitset) {
-              self.inner &= &other.inner;
-          }
-
-          fn __isub__(&mut self, other: &PyHybridBitset) {
-              self.inner -= &other.inner;
-          }
-
-          fn __ixor__(&mut self, other: &PyHybridBitset) {
-              self.inner ^= &other.inner;
-          }
-
-          fn difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner - &other.inner }
-          }
-
-          fn symmetric_difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner ^ &other.inner }
-          }
-
-          fn is_subset(&self, other: &PyHybridBitset) -> bool {
-              self.inner.is_subset(&other.inner)
-          }
-
-          fn is_superset(&self, other: &PyHybridBitset) -> bool {
-              self.inner.is_superset(&other.inner)
-          }
-
-          fn is_disjoint(&self, other: &PyHybridBitset) -> bool {
-              self.inner.is_disjoint(&other.inner)
-          }
-
-          fn to_json_string(&self) -> String {
-              self.inner.to_json().to_json_string()
-          }
-
-          #[staticmethod]
-          fn from_json_string(s: &str) -> PyResult<Self> {
-              let node = sep1::json_serialization::JSONNode::from_json_string(s)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("parse json: {}", e)))?;
-              let inner = RustHybridBitset::from_json(node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("bitset from json: {}", e)))?;
-              Ok(Self { inner })
-          }
-
-          fn __str__(&self) -> String {
-              format!("{:?}", self.inner)
-          }
-
-          fn __repr__(&self) -> String {
-              format!("HybridBitset({:?})", self.inner)
-          }
-
-          fn __eq__(&self, other: &Self) -> bool {
-              self.inner == other.inner
-          }
-
-          fn __hash__(&self) -> PyResult<isize> {
-              let mut hasher = DefaultHasher::new();
-              self.inner.hash(&mut hasher);
-              Ok(hasher.finish() as isize)
-
-          }
-      }
-
-      impl From<RustHybridBitset> for PyHybridBitset {
-          fn from(inner: RustHybridBitset) -> Self { Self { inner } }
-      }
-      impl From<PyHybridBitset> for RustHybridBitset {
-          fn from(p: PyHybridBitset) -> Self { p.inner }
-      }
-
-      #[pyclass(name = "HybridL2Bitset")]
-      #[derive(Clone)]
-      pub struct PyHybridL2Bitset {
-          inner: RustHybridL2Bitset,
-      }
-
-      #[pymethods]
-      impl PyHybridL2Bitset {
-          fn range_values(&self) -> Vec<((usize, usize), PyHybridBitset)> {
-              self.inner.range_values().map(|(range, bv)| {
-                  let py_range = (*range.start(), *range.end());
-                  let py_bv = PyHybridBitset { inner: bv.clone() };
-                  (py_range, py_bv)
-              }).collect()
-          }
-
-          #[staticmethod]
-          fn all() -> Self {
-              Self { inner: RustHybridL2Bitset::all() }
-          }
-
-          fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
-              PyHybridL2Bitset { inner: &self.inner | &other.inner }
-          }
-
-          pub fn complement(&self) -> PyHybridL2Bitset {
-              PyHybridL2Bitset { inner: self.inner.complement() }
-          }
-
-          fn get_l2_bitset(&self, state_id: usize) -> PyHybridBitset {
-              PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).unwrap().clone() }
-          }
-
-          fn insert_l2_bitset(&mut self, state_id: usize, bitset: &PyHybridBitset) {
-              self.inner.insert_l2_bitset(state_id, bitset.inner.clone());
-          }
-
-          fn is_empty(&self) -> bool {
-              self.inner.is_empty()
-          }
-
-          fn len(&self) -> usize {
-              self.inner.len()
-          }
-
-          fn __str__(&self) -> String {
-              format!("{:?}", self.inner)
-          }
-
-          fn __repr__(&self) -> String {
-              format!("HybridL2Bitset({:?})", self.inner)
-          }
-
-          fn __eq__(&self, other: &Self) -> bool {
-              self.inner == other.inner
-          }
-
-          fn __hash__(&self) -> PyResult<isize> {
-              let mut hasher = DefaultHasher::new();
-              self.inner.hash(&mut hasher);
-              Ok(hasher.finish() as isize)
-          }
-      }
-
-
-      #[pyclass(name = "GSSNode")]
-      #[derive(Clone)]
-      pub struct PyGSSNode {
-          inner: std::sync::Arc<RustGSSNode>,
-      }
-
-      #[pymethods]
-      impl PyGSSNode {
-          #[new]
-          fn new() -> Self {
-              PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
-          }
-
-          fn ptr(&self) -> usize {
-              // Stable identity for the inner Arc<GSSNode>; useful for change detection
-              let raw = std::sync::Arc::as_ptr(&self.inner);
-              raw as usize
-          }
-
-          fn is_alive(&self) -> bool {
-              self.inner.is_alive()
-          }
-
-          fn is_ok(&self) -> bool {
-              self.inner.is_ok()
-          }
-
-          fn allowed_llm_tokens(&self) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.allowed_llm_tokens())
-          }
-
-          fn disallowed_terminals(&self) -> PyHybridL2Bitset {
-              PyHybridL2Bitset { inner: self.inner.disallowed_terminals() }
-          }
-
-          fn clone_node(&self) -> PyGSSNode {
-              self.clone()
-          }
-
-          fn print_stats(&self) {
-              let stats = gather_gss_stats(&[self.inner.as_ref()]);
-              println!("{:#?}", stats);
-          }
-
-          fn __str__(&self) -> String {
-              self.inner.print()
-          }
-
-          fn flatten(&self) -> Vec<(Vec<usize>, (PyHybridBitset, PyHybridL2Bitset))> {
-              let flattened = self.inner.flatten();
-              flattened.into_iter().map(|(path, acc)| {
-                  let path_ids: Vec<usize> = path.into_iter().map(|edge| edge.state_id.0).collect();
-                  let py_llm_tokens = PyHybridBitset { inner: acc.llm_tokens_union };
-                  let py_terminals_union = PyHybridL2Bitset { inner: acc.terminals_union };
-                  (path_ids, (py_llm_tokens, py_terminals_union))
-              }).collect()
-          }
-
-          fn __hash__(&self) -> PyResult<isize> {
-              let mut hasher = DefaultHasher::new();
-              self.inner.hash(&mut hasher);
-              Ok(hasher.finish() as isize)
-          }
-
-          fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
-              match op {
-                  CompareOp::Eq => Ok(*self.inner == *other.inner),
-                  CompareOp::Ne => Ok(*self.inner != *other.inner),
-                  _ => Err(pyo3::exceptions::PyNotImplementedError::new_err("Only == and != are supported for GSSNode")),
-              }
-          }
-
-          fn depth(&self) -> usize {
-              self.inner.max_depth()
-          }
-
-          fn predecessors(&self) -> Vec<(usize, PyGSSNode)> {
-              let mut result = Vec::new();
-              for (edge_content, preds_by_depth) in self.inner.predecessors() {
-                  for pred_vec in preds_by_depth.values() {
-                      for pred_arc in pred_vec {
-                          result.push((edge_content.state_id.0, PyGSSNode { inner: pred_arc.clone() }));
-                      }
-                  }
-              }
-              result
-          }
-      }
-
-      #[pyfunction]
-      fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
-          let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
-          let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
-          PyGSSNode { inner: merged }
-      }
-
-      #[pyfunction]
-      fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
-          let mut arc = node.inner.clone();
-          rust_allow_only(&mut arc, &bv.inner);
-          node.inner = arc;
-      }
-
-      #[pyfunction]
-      fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
-          let mut arc = node.inner.clone();
-          sep1::datastructures::gss_leveled_adapter::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
-          node.inner = arc;
-      }
-
-      #[pyfunction]
-      fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
-          let mut rust_terminals_map = BTreeMap::new();
-          for (k, v) in terminals_map.iter() {
-              let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
-              let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
-              rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
-          }
-
-          let mut arc = node.inner.clone();
-          sep1::datastructures::gss_leveled_adapter::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
-          node.inner = arc;
-          Ok(())
-      }
-
-      #[pyfunction]
-      fn gss_prune_llm_tokens_by_disallowed_terminals(node: &mut PyGSSNode, possible_matches: &Bound<'_, PyDict>) -> PyResult<()> {
-          let mut rust_possible_matches = BTreeMap::new();
-          for (k, v) in possible_matches.iter() {
-              let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
-              let terminal_map_py = v.downcast::<PyDict>()?;
-              let mut terminal_map = BTreeMap::new();
-              for (term_k, term_v) in terminal_map_py.iter() {
-                  let terminal_id = sep1::glr::table::TerminalID(term_k.extract::<usize>()?);
-                  let llm_token_bv = term_v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
-                  terminal_map.insert(terminal_id, llm_token_bv);
-              }
-              rust_possible_matches.insert(tokenizer_state_id, terminal_map);
-          }
-
-          let mut arc = node.inner.clone();
-          sep1::datastructures::gss_leveled_adapter::prune_llm_tokens_by_disallowed_terminals(
-              &mut arc, &rust_possible_matches, &mut std::collections::HashMap::new()
-          );
-          node.inner = arc;
-          Ok(())
-      }
-
-      #[pyfunction]
-      fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
-          let mut rust_state_map = BTreeMap::new();
-          for (k, v) in state_map.iter() {
-              let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
-              let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
-              rust_state_map.insert(from_state, to_state);
-          }
-
-          let mut arc = node.inner.clone();
-          sep1::datastructures::gss_leveled_adapter::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
-          node.inner = arc;
-          Ok(())
-      }
-
-      #[pyfunction]
-      fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
-          let mut arc = node.inner.clone();
-          arc = sep1::datastructures::gss_leveled_adapter::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
-          node.inner = arc;
-      }
-
-      #[pyfunction]
-      fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
-          let pairs = rust_popn_collect(&node.inner, n);
-          pairs.into_iter()
-              .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
-              .collect()
-      }
-
-      #[self_referencing]
-      struct PyGrammarConstraintStateWrapper {
-          constraint: PyGrammarConstraint, // Owns the Arc'd constraint
-          #[borrows(constraint)]
-          #[covariant]
-          inner: GrammarConstraintState<'this>,
-      }
-
-      #[pyclass(name = "GrammarConstraintState")]
-      pub struct PyGrammarConstraintState {
-          inner: PyGrammarConstraintStateWrapper,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraintState {
-          #[new]
-          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              Ok(PyGrammarConstraintState {
-                  inner: PyGrammarConstraintStateWrapperTryBuilder {
-                      constraint,
-                      inner_builder: |c: &PyGrammarConstraint| {
-                          let state = c.inner.init();
-                          Ok::<_, PyErr>(state)
-                      },
-                  }
-                  .try_build()?
-              })
-          }
-
-          fn clone(&self) -> Self {
-              Self {
-                  inner: self.inner.clone(),
-              }
-          }
-
-          fn is_active(&self) -> bool {
-              self.inner.with_inner(|state| state.is_active())
-          }
-
-          fn __str__(&self) -> String {
-              self.inner.with_inner(|state| format!("{}", state))
-          }
-
-          fn __repr__(&self) -> String {
-              self.__str__()
-          }
-
-          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-              let bools: Vec<bool> = bitset.iter_bits().collect();
-              Ok(bools.into_pyarray_bound(py))
-          }
-
-          fn get_mask_bv(&mut self) -> PyResult<PyHybridBitset> {
-              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-              Ok(PyHybridBitset { inner: bitset })
-          }
-
-          fn commit(&mut self, llm_token_id: usize) {
-              // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
-              self.inner.with_inner_mut(|state| {
-                  state.commit(LLMTokenID(llm_token_id));
-              });
-          }
-
-          fn commit_bytes(&mut self, llm_token_bytes: &[u8]) {
-              self.inner.with_inner_mut(|state| {
-                  state.commit_bytes(llm_token_bytes);
-              });
-          }
-
-          fn print_stats(&self) {
-              self.inner.with_inner(|state| state.print_gss_stats());
-          }
-
-          fn compute_commit_maps(&self, py: Python, llm_token_bytes: &[u8]) -> PyResult<(PyObject, PyObject)> {
-              let (state_map, terminals_map) = self.inner.with_inner(|s| s.compute_commit_maps(llm_token_bytes));
-
-              let py_state_map = PyDict::new_bound(py);
-              for (k, v) in state_map {
-                  py_state_map.set_item(k.0, v.0)?;
-              }
-
-              let py_terminals_map = PyDict::new_bound(py);
-              for (k, v) in terminals_map {
-                  py_terminals_map.set_item(k.0, PyHybridBitset { inner: v })?;
-              }
-
-              Ok((py_state_map.into(), py_terminals_map.into()))
-          }
-
-          fn get_state_map(&self) -> PyResult<BTreeMap<usize, PyGSSNode>> {
-              let mut out = BTreeMap::new();
-              self.inner.with_inner(|state| {
-                  for (tokenizer_state_id, glr_state) in &state.state {
-                      out.insert(tokenizer_state_id.0, PyGSSNode { inner: glr_state.active_state.stack.clone() });
-                  }
-              });
-              Ok(out)
-          }
-
-          fn set_state_map(&mut self, new_state: BTreeMap<usize, PyGSSNode>) -> PyResult<()> {
-              self.inner.with_inner_mut(|state| {
-                  let mut new_b_tree_map = BTreeMap::new();
-                  for (tokenizer_state_id, gss_node) in new_state {
-                      let glr_state = state.parent.parser.init_glr_parser_from_stack(gss_node.inner.clone());
-                      new_b_tree_map.insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
-                  }
-                  state.state = new_b_tree_map;
-              });
-              Ok(())
-          }
-      }
-
-      #[self_referencing]
-      struct PyIncrementalParserWrapper {
-          grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
-          #[borrows(grammar)]
-          #[covariant]
-          parser: IncrementalParser<'this>,
-      }
-
-      #[pyclass(name = "IncrementalParser")]
-      pub struct PyIncrementalParser {
-          inner: PyIncrementalParserWrapper,
-      }
-
-      #[pymethods]
-      impl PyIncrementalParser {
-          #[new]
-          fn new(grammar: PyCompiledGrammar) -> PyResult<Self> {
-              Ok(PyIncrementalParser {
-                  inner: PyIncrementalParserWrapperTryBuilder {
-                      grammar, // PyCompiledGrammar is moved in
-                      parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
-                  }.try_build()?
-              })
-          }
-
-          fn feed(&mut self, bytes: &[u8]) {
-              self.inner.with_parser_mut(|p| p.feed(bytes));
-          }
-
-          fn is_valid(&self) -> bool {
-              self.inner.with_parser(|p| p.is_valid())
-          }
-      }
-
-      #[pymodule]
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-          m.add_class::<PyGrammarExpr>()?;
-          m.add_class::<PyRegexExpr>()?;
-          m.add_class::<PyRegexGroup>()?;
-          m.add_class::<PyRegexGroups>()?;
-          m.add_class::<PyRegex>()?;
-          m.add_class::<PyGrammarDefinition>()?;
-          m.add_class::<PyCompiledGrammar>()?;
-          m.add_class::<PyGLRParser>()?;
-          m.add_class::<PyGrammarConstraint>()?;
-          m.add_class::<PyGrammarConstraintState>()?;
-          m.add_class::<PyHybridBitsetIterator>()?;
-          m.add_class::<PyHybridBitset>()?;
-          m.add_class::<PyHybridL2Bitset>()?;
-          m.add_class::<PyGSSNode>()?;
-          m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_prune_llm_tokens_by_disallowed_terminals, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
-          m.add_class::<PyIncrementalParser>()?;
-          Ok(())
-      }
-      ```
-    metadata:
-  - user: |
-      Could not identify target file on fence open line 1:
-      ```rust
-      Could not identify target file on fence open line 2:
-      ```rust
-      Identified target file 'python/src/lib.rs' on fence open line 3:
-      ```rust "python/src/lib.rs"
-      Found 3 code blocks.
-      Matching against available files:
-        1: python/src/lib.rs
-      --- Phase 1: Processing explicit file paths in fences ---
-      Assigned block to python/src/lib.rs based on explicit fence path.
-      Remaining unassigned blocks: 2, Available files: 0
-      --- Phase 6: Applying changes to assigned files ---
-      Warning: Code block starting near line 1 was not assigned to any file.
-      Warning: Code block starting near line 1 was not assigned to any file.
-      Successfully updated file: python/src/lib.rs
-    metadata:
-  - user: 'Changes committed with message: "Implement clone for PyGrammarConstraintState"'
-    metadata:
-  - user: |-
-      Diff of python/src/lib.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
   - user: |-
       RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=1 maturin develop -r
       🔗 Found pyo3 bindings
       🐍 Found CPython 3.12 at /Users/isaacbreen/miniforge3/envs/py312/bin/python
       📡 Using build options features from pyproject.toml
-         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
          Compiling _sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024/python)
-      error[E0599]: no method named `clone` found for struct `PyGrammarConstraintStateWrapper` in the current scope
-         --> src/lib.rs:951:31
+      error: lifetime may not live long enough
+         --> src/lib.rs:956:21
           |
-      920 | #[self_referencing]
-          | ------------------- method `clone` not found for this struct
+      949 |     fn clone(&self) -> Self {
+          |              - let's call the lifetime of this reference `'1`
       ...
-      951 |             inner: self.inner.clone(),
-          |                               ^^^^^ method not found in `PyGrammarConstraintStateWrapper`
-          |
-          = help: items from traits can only be used if the trait is implemented and in scope
-          = note: the following trait defines an item `clone`, perhaps you need to implement it:
-                  candidate #1: `Clone`
+      956 |                     Ok::<_, PyErr>(state)
+          |                     ^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'static`
 
-      For more information about this error, try `rustc --explain E0599`.
       error: could not compile `_sep1` (lib) due to 1 previous error
       💥 maturin failed
         Caused by: Failed to build a native library through cargo
@@ -4551,162 +3406,104 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The compiler is correct that the `ouroboros`-generated struct `PyGrammarConstraintStateWrapper` does not automatically implement `Clone`. You need to explicitly ask `ouroboros` to derive it. Here are the steps to fix the compilation error.
+      Hello! I see you're running into a lifetime-related compilation error in your Rust code. This is a classic issue when working with self-referential structs and closures that capture their environment. The `ouroboros` crate requires the builder closure to be valid for any lifetime, which usually means it must have a `'static` lifetime. Your current `clone` implementation captures `self`, which has a shorter lifetime, causing the error.
+
+      The fix is to reconstruct the `GrammarConstraintState` by extracting its essential, non-lifetime-bound data (the GSS nodes) and then using that data to build a new state associated with the newly cloned `GrammarConstraint`. This avoids capturing `self` in the closure.
+
+      Here are the step-by-step instructions to fix the issue:
 
       ### Step-by-step Instructions
 
-      1.  **Open `python/src/lib.rs`**.
-      2.  **Locate the `PyGrammarConstraintStateWrapper` struct definition**, which is around line 920.
-      3.  **Add `#[derive(Clone)]`** to the struct definition. This will instruct the `ouroboros` macro to generate a `clone` implementation for the wrapper struct.
+      1.  **Open the file:** `python/src/lib.rs`
 
-      The struct definition should be changed from this:
-      ```rust
-      #[self_referencing]
-      struct PyGrammarConstraintStateWrapper {
-      ```
-      to this:
-      ```rust
-      #[self_referencing]
-      #[derive(Clone)]
-      struct PyGrammarConstraintStateWrapper {
-      ```
+      2.  **Locate the `clone` method:** Navigate to the implementation of `PyGrammarConstraintState`, specifically to the `clone` method (around line 949).
 
-      ### Git Diff
+      3.  **Replace the method:** Replace the entire body of the `clone` function with the following code. This new implementation correctly extracts the state without creating invalid lifetime dependencies.
 
-      Here is the git diff for the change:
-
-      ```diff
-      diff --git a/python/src/lib.rs b/python/src/lib.rs
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -918,6 +918,7 @@
-       }
-       
-       #[self_referencing]
-      +#[derive(Clone)]
-       struct PyGrammarConstraintStateWrapper {
-           constraint: PyGrammarConstraint, // Owns the Arc'd constraint
-           #[borrows(constraint)]
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/src/lib.rs
-      Applying patch to 'python/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to python/src/lib.rs.
-    metadata:
-  - user: 'Changes committed with message: "Implement clone for PyGrammarConstraintState
-      by deriving Clone on wrapper"'
-    metadata:
-  - user: |-
-      Diff of python/src/lib.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=1 maturin develop -r
-      🔗 Found pyo3 bindings
-      🐍 Found CPython 3.12 at /Users/isaacbreen/miniforge3/envs/py312/bin/python
-      📡 Using build options features from pyproject.toml
-         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-      ^[[A    Building [=======================> ] 286/288: sep1                                                                                                                                                           Compiling _sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024/python)
-      error: Clone cannot be derived for self-referencing structs
-         --> src/lib.rs:921:10
-          |
-      921 | #[derive(Clone)]
-          |          ^^^^^
-
-      error[E0422]: cannot find struct, variant or union type `PyGrammarConstraintStateWrapperTryBuilder` in this scope
-         --> src/lib.rs:441:20
-          |
-      441 |             inner: PyGrammarConstraintStateWrapperTryBuilder {
-          |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
-
-      error[E0412]: cannot find type `PyGrammarConstraintStateWrapper` in this scope
-         --> src/lib.rs:931:12
-          |
-      931 |     inner: PyGrammarConstraintStateWrapper,
-          |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
-
-      error[E0422]: cannot find struct, variant or union type `PyGrammarConstraintStateWrapperTryBuilder` in this scope
-         --> src/lib.rs:939:20
-          |
-      939 |             inner: PyGrammarConstraintStateWrapperTryBuilder {
-          |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
-
-      Some errors have detailed explanations: E0412, E0422.
-      For more information about an error, try `rustc --explain E0412`.
-      error: could not compile `_sep1` (lib) due to 4 previous errors
-      💥 maturin failed
-        Caused by: Failed to build a native library through cargo
-        Caused by: Cargo build finished with "exit status: 101": `env -u CARGO PYO3_ENVIRONMENT_SIGNATURE="cpython-3.12-64bit" PYO3_PYTHON="/Users/isaacbreen/miniforge3/envs/py312/bin/python" PYTHON_SYS_EXECUTABLE="/Users/isaacbreen/miniforge3/envs/py312/bin/python" "cargo" "rustc" "--features" "pyo3/extension-module" "--message-format" "json-render-diagnostics" "--manifest-path" "/Users/isaacbreen/Projects2/grammars2024/python/Cargo.toml" "--release" "--lib" "--" "-C" "link-arg=-undefined" "-C" "link-arg=dynamic_lookup" "-C" "link-args=-Wl,-install_name,@rpath/_sep1.cpython-312-darwin.so"`
-    metadata:
-  - assistant: |-
-      You've run into a limitation of the `ouroboros` crate: it cannot automatically derive `Clone` for self-referencing structs. The previous attempt to add `#[derive(Clone)]` was incorrect.
-
-      The solution is to remove the derive macro and implement `clone` manually for `PyGrammarConstraintState`. The correct way to clone the state is to extract its essential information (the current GSS nodes) and then construct a new state object from that information.
-
-      Here are the step-by-step instructions to fix the compilation errors:
-
-      ### Step-by-step Instructions
-
-      1.  **Open `python/src/lib.rs`**.
-      2.  Locate the `PyGrammarConstraintStateWrapper` struct definition (around line 920).
-      3.  **Remove the `#[derive(Clone)]` attribute** from above the struct definition.
-
-          ```rust
-          // Remove this line
-          #[derive(Clone)] 
-          ```
-
-      4.  Locate the `clone` method inside the `#[pymethods]` block for `PyGrammarConstraintState` (around line 948).
-      5.  **Replace the entire `clone` method** with the following implementation, which manually reconstructs the state:
-
+          The current implementation is:
           ```rust
           fn clone(&self) -> Self {
-              // Manually clone the state by extracting its nodes and rebuilding it.
-              // This relies on `get_state_map` and `PyGrammarConstraint::state_with_nodes`.
-              let mut constraint = self.inner.borrow_constraint().clone();
-              let state_map = self.get_state_map().expect("Cloning failed: could not get state map");
-              let nodes: Vec<(usize, PyGSSNode)> = state_map.into_iter().collect();
-              constraint.state_with_nodes(nodes).expect("Cloning failed: could not create new state from nodes")
+              let constraint = self.inner.borrow_constraint().clone();
+              PyGrammarConstraintState {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      constraint,
+                      inner_builder: |c: &PyGrammarConstraint| {
+                          let state = self.inner.borrow_inner().clone();
+                          Ok::<_, PyErr>(state)
+                      },
+                  }
+                  .try_build().expect("Failed to clone GLRParserState"),
+              }
           }
           ```
 
+          Replace it with this new version:
+          ```rust
+          fn clone(&self) -> Self {
+              let constraint = self.inner.borrow_constraint().clone();
+
+              let gss_nodes: Vec<(usize, Arc<RustGSSNode>)> = self.inner.with_inner(|state| {
+                  state.state.iter().map(|(id, glr_state)| {
+                      (id.0, glr_state.active_state.stack.clone())
+                  }).collect()
+              });
+
+              PyGrammarConstraintState {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      constraint,
+                      inner_builder: move |c: &PyGrammarConstraint| {
+                          let state = c.inner.state_with_nodes(gss_nodes);
+                          Ok::<_, PyErr>(state)
+                      },
+                  }
+                  .try_build().expect("Failed to clone PyGrammarConstraintState"),
+              }
+          }
+          ```
+
+      After applying this change, the compiler should no longer complain about lifetimes, and your project should build successfully.
+
       ### Git Diff
 
-      Here is the corresponding git diff to apply these changes:
+      For your convenience, here is the change in `git diff` format:
 
       ```diff
       diff --git a/python/src/lib.rs b/python/src/lib.rs
+      index 8675127..548c772 100644
       --- a/python/src/lib.rs
       +++ b/python/src/lib.rs
-      @@ -918,7 +918,6 @@
-       }
-       
-       #[self_referencing]
-      -#[derive(Clone)]
-       struct PyGrammarConstraintStateWrapper {
-           constraint: PyGrammarConstraint, // Owns the Arc'd constraint
-           #[borrows(constraint)]
-      @@ -947,9 +946,12 @@
+      @@ -948,17 +948,22 @@
            }
        
            fn clone(&self) -> Self {
-      -        Self {
-      -            inner: self.inner.clone(),
+               let constraint = self.inner.borrow_constraint().clone();
+      -        PyGrammarConstraintState {
+      -            inner: PyGrammarConstraintStateWrapperTryBuilder {
+      -                constraint,
+      -                inner_builder: |c: &PyGrammarConstraint| {
+      -                    let state = self.inner.borrow_inner().clone();
+      -                    Ok::<_, PyErr>(state)
+      -                },
+      -            }
+      -            .try_build().expect("Failed to clone GLRParserState"),
       -        }
-      +        // Manually clone the state by extracting its nodes and rebuilding it.
-      +        // This relies on `get_state_map` and `PyGrammarConstraint::state_with_nodes`.
-      +        let mut constraint = self.inner.borrow_constraint().clone();
-      +        let state_map = self.get_state_map().expect("Cloning failed: could not get state map");
-      +        let nodes: Vec<(usize, PyGSSNode)> = state_map.into_iter().collect();
-      +        constraint.state_with_nodes(nodes).expect("Cloning failed: could not create new state from nodes")
+      +
+      +        let gss_nodes: Vec<(usize, Arc<RustGSSNode>)> = self.inner.with_inner(|state| {
+      +            state.state.iter().map(|(id, glr_state)| {
+      +                (id.0, glr_state.active_state.stack.clone())
+      +            }).collect()
+      +        });
+      +
+      +        PyGrammarConstraintState {
+      +            inner: PyGrammarConstraintStateWrapperTryBuilder {
+      +                constraint,
+      +                inner_builder: move |c: &PyGrammarConstraint| {
+      +                    let state = c.inner.state_with_nodes(gss_nodes);
+      +                    Ok::<_, PyErr>(state)
+      +                },
+      +            }
+      +            .try_build().expect("Failed to clone PyGrammarConstraintState"),
+      +        }
            }
        
            fn is_active(&self) -> bool {
@@ -4722,7 +3519,7 @@ messages:
       Applying patch to 'python/src/lib.rs' using custom patcher...
       Successfully applied patch and wrote to python/src/lib.rs.
     metadata:
-  - user: 'Changes committed with message: "Implement manual clone for PyGrammarConstraintState
-      by rebuilding state from nodes"'
+  - user: 'Changes committed with message: "Fix lifetime error in PyGrammarConstraintState::clone
+      by rebuilding state from extracted GSS nodes"'
     metadata:
 ...
