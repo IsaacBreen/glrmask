@@ -314,7 +314,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
 
     let now = Instant::now();
     crate::debug!(4, "Determinizing final combined NWA...");
-    combined_nwa = NWA::from_dwa(&combined_nwa.determinize_to_dwa());
+    combined_nwa = NWA::from_dwa(&combined_nwa.determinize_to_dwa2());
     crate::debug!(4, "Stats after final NWA determinization:\n{}", combined_nwa.stats());
     combined_nwa.simplify_rustfst();
     crate::debug!(
