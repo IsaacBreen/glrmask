@@ -90,18 +90,6 @@ impl<'a> GrammarConstraintState<'a> {
             for (current_wa_state_id, mut gss) in states_at_depth {
                 let dwa_state = &dwa.states[current_wa_state_id];
 
-                // Apply state weight
-                if let Some(state_weight) = &dwa_state.state_weight {
-                    let f = |rsb: &RangeSetBlaze<usize>| {
-                        let new_rsb = rsb & &state_weight.rsb;
-                        if new_rsb.is_empty() { None } else { Some(new_rsb) }
-                    };
-                    gss = gss.apply_and_prune(f);
-                    if gss.is_empty() {
-                        continue;
-                    }
-                }
-
                 // Check for final state
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
