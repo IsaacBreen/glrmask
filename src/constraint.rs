@@ -1651,12 +1651,12 @@ impl GrammarConstraint {
         println!("[perf] STRATEGY 1 (BTree + RangeSetBlaze): {:?}", instant.elapsed());
 
         // STRATEGY 2
-        let mut i2o2 = BTreeMap::new();
+        let mut i2o2: HashMap<usize, HashSet<usize>> = HashMap::new();
         for (i, bv) in internal_to_original {
             i2o2.insert(*i, bv.inner.iter().collect::<HashSet<_>>());
         }
         let instant = std::time::Instant::now();
-        let mut bv2 = HashSet::new();
+        let mut bv2: HashSet<usize> = HashSet::new();
         for i in internal_bv.iter() {
             if let Some(bv) = i2o2.get(&i) {
                 bv2.extend(bv.iter().copied());
