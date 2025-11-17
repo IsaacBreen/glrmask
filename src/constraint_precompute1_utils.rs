@@ -41,7 +41,7 @@ impl Default for Trie1Config {
     fn default() -> Self {
         Self {
             enabled: true,
-            break_cycles: false,
+            break_cycles: true,
             early_flatten_epsilon: false,
             minimize_by_signature: true,
             merge_equivalent_llm_tokens: true,
