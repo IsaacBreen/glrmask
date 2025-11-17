@@ -947,29 +947,16 @@ impl PyGrammarConstraintState {
     }
 
     fn clone(&self) -> Self {
-        // The `ouroboros` crate does not support deriving `Clone` for self-referential structs.
-        // We implement it manually by extracting the non-referential parts of the state,
-        // cloning the "owner" (the `PyGrammarConstraint`), and then using the `ouroboros`
-        // builder to reconstruct the self-referential struct from the cloned parts.
-
-        // Extract the map of active states, which are cloneable and do not contain references.
-        let active_states: BTreeMap<sep1::tokenizer::TokenizerStateID, (ParseState, _)> =
-            self.inner.with_inner(|s| {
-                s.state.iter().map(|(k, v)| (*k, (v.active_state.clone(), v.phase))).collect()
-            });
-
-        // Use the builder to construct a new, cloned instance.
-        Self {
+        let constraint = self.inner.borrow_constraint().clone();
+        PyGrammarConstraintState {
             inner: PyGrammarConstraintStateWrapperTryBuilder {
-                // 1. Provide a cloned "owner".
-                constraint: self.inner.borrow_constraint().clone(),
-                // 2. The builder closure creates the "borrower" fields.
-                inner_builder: move |c: &PyGrammarConstraint| {
-                    let new_parser_ref = &c.inner.parser;
-                    let new_state_map = active_states.into_iter().map(|(id, (active_state, phase))| (id, GLRParserState { active_state, parser: new_parser_ref, phase })).collect();
-                    Ok::<_, PyErr>(sep1::constraint::GrammarConstraintState { parent: &c.inner, state: new_state_map })
-                }
-            }.try_build().expect("Failed to build cloned GrammarConstraintState")
+                constraint,
+                inner_builder: |c: &PyGrammarConstraint| {
+                    let state = self.inner.borrow_inner().clone();
+                    Ok::<_, PyErr>(state)
+                },
+            }
+            .try_build().expect("Failed to clone GLRParserState"),
         }
     }
 
