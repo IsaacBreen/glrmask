@@ -1784,6 +1784,7 @@ impl GrammarConstraint {
                 result_bitset_words[i] |= bitset_slice[i];
             }
         }
+        let elapsed = instant.elapsed();
         // To be fair, we must convert back to the required type.
         let original_bv_6 = result_bitset_words
             .iter()
@@ -1798,7 +1799,6 @@ impl GrammarConstraint {
                 })
             })
             .collect::<RangeSetBlaze<usize>>();
-        let elapsed = instant.elapsed();
         let is_equal = original_bv_6 == original_bv_rsb;
         println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
 
@@ -1832,8 +1832,8 @@ impl GrammarConstraint {
                 result_vec.extend_from_slice(&data[start..end]);
             }
         }
-        let original_bv_7 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
         let elapsed = instant.elapsed();
+        let original_bv_7 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
         let is_equal = original_bv_7 == original_bv_rsb;
         println!("[perf] STRATEGY 7 (Flattened Slices):         {:?} (equal: {})", elapsed, is_equal);
 
@@ -1896,8 +1896,8 @@ impl GrammarConstraint {
                 result_vec.extend(new_to_old[range_start..range_end].iter().map(|&v| v as usize));
             }
         }
-        let original_bv_8 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
         let elapsed = instant.elapsed();
+        let original_bv_8 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
         let is_equal = original_bv_8 == original_bv_rsb;
         println!("[perf] STRATEGY 8 (Renumbering):             {:?} (equal: {})", elapsed, is_equal);
 
@@ -1931,6 +1931,7 @@ impl GrammarConstraint {
                 result_bitset_words[word_idx] |= 1 << bit_idx;
             }
         }
+        let elapsed = instant.elapsed();
         let original_bv_9 = result_bitset_words
             .iter()
             .enumerate()
@@ -1944,7 +1945,6 @@ impl GrammarConstraint {
                 })
             })
             .collect::<RangeSetBlaze<usize>>();
-        let elapsed = instant.elapsed();
         let is_equal = original_bv_9 == original_bv_rsb;
         println!("[perf] STRATEGY 9 (Scan o2i):                {:?} (equal: {})", elapsed, is_equal);
 
@@ -1990,6 +1990,7 @@ impl GrammarConstraint {
                 }
                 *word = current_word;
             });
+        let elapsed = instant.elapsed();
 
         let original_bv_10 = result_bitset_words
             .iter()
@@ -2004,7 +2005,6 @@ impl GrammarConstraint {
                 })
             })
             .collect::<RangeSetBlaze<usize>>();
-        let elapsed = instant.elapsed();
         let is_equal = original_bv_10 == original_bv_rsb;
         println!("[perf] STRATEGY 10 (Parallel Scan o2i):       {:?} (equal: {})", elapsed, is_equal);
 
