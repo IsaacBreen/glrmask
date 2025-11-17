@@ -9,6 +9,7 @@ use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::ops::BitOrAssign;
 use crate::datastructures::gss_acc::Acc;
 
 type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
@@ -182,7 +183,7 @@ impl<'a> GrammarConstraintState<'a> {
             });
             // Remap tokenizer states
             gss = gss.apply(|acc| {
-                let mut new_terminals_union = BTreeMap::new();
+                let mut new_terminals_union: BTreeMap<usize, HybridBitset> = BTreeMap::new();
                 for (old, new) in &state_map {
                     if let Some(bv) = acc.terminals_union.get(&old.0) {
                         new_terminals_union.entry(new.0).or_default().bitor_assign(bv);

@@ -2,6 +2,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::leveled_gss::Merge as LGMerge;
 use std::collections::BTreeMap;
+use std::ops::BitOrAssign;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Acc {
