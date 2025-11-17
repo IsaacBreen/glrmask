@@ -1835,10 +1835,10 @@ impl GrammarConstraint {
         nodes: Vec<(usize, Arc<GSSNode>)>,
     ) -> GrammarConstraintState<'_> {
         let mut state = BTreeMap::new();
-        for (i, _node) in nodes.into_iter() {
+        for (i, node) in nodes.into_iter() {
             state.insert(
                 TokenizerStateID(i),
-                self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
+                self.parser.init_glr_parser_from_stack(node),
             );
         }
         GrammarConstraintState { parent: self, state }
