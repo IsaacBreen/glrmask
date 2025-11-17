@@ -1635,6 +1635,26 @@ impl GrammarConstraint {
         internal_bv: &LLMTokenBV,
         internal_to_original: &BTreeMap<usize, LLMTokenBV>,
     ) -> LLMTokenBV {
+        if !internal_to_original.is_empty() {
+            let i2o_num_entries = internal_to_original.len();
+            let i2o_total_ranges: usize = internal_to_original
+                .values()
+                .map(|bv| bv.inner().ranges_len())
+                .sum();
+            let i2o_total_len: usize = internal_to_original.values().map(|bv| bv.len()).sum();
+            let i2o_avg_ranges = i2o_total_ranges as f64 / i2o_num_entries as f64;
+            let i2o_avg_len = i2o_total_len as f64 / i2o_num_entries as f64;
+
+            println!("[perf] internal_bv_to_original_with_map stats:");
+            println!("  - internal_to_original map:");
+            println!("    - Entries: {}", i2o_num_entries);
+            println!("    - Avg ranges per value: {:.2}", i2o_avg_ranges);
+            println!("    - Avg len per value: {:.2}", i2o_avg_len);
+            println!("  - input internal_bv:");
+            println!("    - Total len: {}", internal_bv.len());
+            println!("    - Num ranges: {}", internal_bv.inner().ranges_len());
+        }
+
         let mut internal_bv = internal_bv.clone();
         if internal_bv.is_all() {
             internal_bv = HybridBitset::ones(self.vocab.internal_max_llm_token + 1);
@@ -1642,13 +1662,24 @@ impl GrammarConstraint {
 
         // STRATEGY 1
         let instant = std::time::Instant::now();
-        let mut original_bv = RangeSetBlaze::new();
+        let mut original_bv_rsb = RangeSetBlaze::new();
         for i in internal_bv.iter() {
             if let Some(bv) = internal_to_original.get(&i) {
-                original_bv |= bv.inner.as_ref();
+                original_bv_rsb |= bv.inner.as_ref();
             }
         }
-        println!("[perf] STRATEGY 1 (BTree + RangeSetBlaze): {:?}", instant.elapsed());
+        let elapsed1 = instant.elapsed();
+
+        let output_len = {
+            let count_u128 = original_bv_rsb.len();
+            count_u128.try_into().unwrap_or(usize::MAX)
+        };
+        let output_ranges = original_bv_rsb.ranges_len();
+        println!("  - output original_bv:");
+        println!("    - Total len: {}", output_len);
+        println!("    - Num ranges: {}", output_ranges);
+
+        println!("[perf] STRATEGY 1 (BTree + RangeSetBlaze): {:?}", elapsed1);
 
         // STRATEGY 2
         let mut i2o2: HashMap<usize, HashSet<usize>> = HashMap::new();
@@ -1706,7 +1737,7 @@ impl GrammarConstraint {
         }).reduce(RangeSetBlaze::new, |a, b| a | b);
         println!("[perf] STRATEGY 5 (Rayon):                  {:?}", instant.elapsed());
 
-        HybridBitset::from(original_bv)
+        HybridBitset::from(original_bv_rsb)
     }
 
     fn original_bv_to_internal_with_map(
