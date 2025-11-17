@@ -947,12 +947,30 @@ impl PyGrammarConstraintState {
     }
 
     fn clone(&self) -> Self {
-        // Manually clone the state by extracting its nodes and rebuilding it.
-        // This relies on `get_state_map` and `PyGrammarConstraint::state_with_nodes`.
-        let mut constraint = self.inner.borrow_constraint().clone();
-        let state_map = self.get_state_map().expect("Cloning failed: could not get state map");
-        let nodes: Vec<(usize, PyGSSNode)> = state_map.into_iter().collect();
-        constraint.state_with_nodes(nodes).expect("Cloning failed: could not create new state from nodes")
+        // The `ouroboros` crate does not support deriving `Clone` for self-referential structs.
+        // We implement it manually by extracting the non-referential parts of the state,
+        // cloning the "owner" (the `PyGrammarConstraint`), and then using the `ouroboros`
+        // builder to reconstruct the self-referential struct from the cloned parts.
+
+        // Extract the map of active states, which are cloneable and do not contain references.
+        let active_states: BTreeMap<sep1::tokenizer::TokenizerStateID, sep1::glr::parser::ActiveGLRState> =
+            self.inner.with_inner(|s| {
+                s.state.iter().map(|(k, v)| (*k, v.active_state.clone())).collect()
+            });
+
+        // Use the builder to construct a new, cloned instance.
+        Self {
+            inner: PyGrammarConstraintStateWrapperTryBuilder {
+                // 1. Provide a cloned "owner".
+                constraint: self.inner.borrow_constraint().clone(),
+                // 2. The builder closure creates the "borrower" fields.
+                inner_builder: move |c: &PyGrammarConstraint| {
+                    let new_parser_ref = &c.inner.parser;
+                    let new_state_map = active_states.into_iter().map(|(id, active_state)| (id, sep1::glr::parser::GLRParserState { active_state, parser: new_parser_ref })).collect();
+                    Ok::<_, PyErr>(sep1::constraint::GrammarConstraintState { parent: &c.inner, state: new_state_map })
+                }
+            }.try_build().expect("Failed to build cloned GrammarConstraintState")
+        }
     }
 
     fn is_active(&self) -> bool {
