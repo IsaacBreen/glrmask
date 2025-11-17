@@ -123,6 +123,16 @@ pub struct StageVocab {
     pub internal_to_original_sparse_matrix: Vec<Vec<(u16, u64)>>,
 }
 
+impl JSONConvertible for LLMVocab {
+    fn to_json(&self) -> JSONNode {
+        todo!()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        todo!()
+    }
+}
+
 impl JSONConvertible for StageVocab {
     fn to_json(&self) -> JSONNode {
         let mut m = StdMap::new();
