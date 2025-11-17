@@ -1802,6 +1802,152 @@ impl GrammarConstraint {
         let is_equal = original_bv_6 == original_bv_rsb;
         println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
 
+        // --- STRATEGY 7: Pre-flattened slices (Strategy A) ---
+        let precompute_instant = std::time::Instant::now();
+        let mut data: Vec<usize> = Vec::new();
+        let mut offsets: Vec<usize> = vec![0; self.vocab.internal_max_llm_token + 2];
+        for internal_id in 0..=self.vocab.internal_max_llm_token {
+            offsets[internal_id] = data.len();
+            if let Some(original_bv) = internal_to_original.get(&internal_id) {
+                data.extend(original_bv.iter());
+            }
+        }
+        offsets[self.vocab.internal_max_llm_token + 1] = data.len();
+        let _precompute_elapsed = precompute_instant.elapsed();
+
+        let instant = std::time::Instant::now();
+        let total_len: usize = internal_bv.iter().map(|i| {
+            if i <= self.vocab.internal_max_llm_token {
+                offsets[i + 1] - offsets[i]
+            } else {
+                0
+            }
+        }).sum();
+
+        let mut result_vec: Vec<usize> = Vec::with_capacity(total_len);
+        for i in internal_bv.iter() {
+            if i <= self.vocab.internal_max_llm_token {
+                let start = offsets[i];
+                let end = offsets[i + 1];
+                result_vec.extend_from_slice(&data[start..end]);
+            }
+        }
+        let original_bv_7 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
+        let elapsed = instant.elapsed();
+        let is_equal = original_bv_7 == original_bv_rsb;
+        println!("[perf] STRATEGY 7 (Flattened Slices):         {:?} (equal: {})", elapsed, is_equal);
+
+        // --- STRATEGY 8: Renumbering (Strategy B) ---
+        let precompute_instant = std::time::Instant::now();
+        let max_original_id = self.llm_vocab.max_original_llm_token_id;
+        let num_internals = self.vocab.internal_max_llm_token + 1;
+
+        // 1. Build original_to_internal
+        let mut o2i: Vec<u32> = vec![0; max_original_id + 1];
+        for (internal_id, original_bv) in internal_to_original.iter() {
+            for original_id in original_bv.iter() {
+                if original_id <= max_original_id {
+                    o2i[original_id] = *internal_id as u32;
+                }
+            }
+        }
+
+        // 2. Build counts
+        let mut counts = vec![0u32; num_internals];
+        for &internal_id in o2i.iter() {
+            counts[internal_id as usize] += 1;
+        }
+
+        // 3. Build start offsets
+        let mut start = Vec::with_capacity(num_internals + 1);
+        let mut current_pos = 0u32;
+        for &count in &counts {
+            start.push(current_pos);
+            current_pos += count;
+        }
+        start.push(current_pos);
+
+        // 4. Build new_to_old map
+        let mut new_to_old = vec![0u32; max_original_id + 1];
+        let mut write_pos = start[..num_internals].to_vec();
+        for (old_id, &internal_id) in o2i.iter().enumerate() {
+            let i = internal_id as usize;
+            let pos = write_pos[i] as usize;
+            if pos < new_to_old.len() {
+                new_to_old[pos] = old_id as u32;
+            }
+            write_pos[i] += 1;
+        }
+        let _precompute_elapsed = precompute_instant.elapsed();
+
+        let instant = std::time::Instant::now();
+        let total_len: usize = internal_bv.iter().map(|i| {
+            if i < num_internals {
+                (start[i + 1] - start[i]) as usize
+            } else {
+                0
+            }
+        }).sum();
+        let mut result_vec = Vec::with_capacity(total_len);
+        for internal_id in internal_bv.iter() {
+            if internal_id < num_internals {
+                let range_start = start[internal_id] as usize;
+                let range_end = start[internal_id + 1] as usize;
+                result_vec.extend(new_to_old[range_start..range_end].iter().map(|&v| v as usize));
+            }
+        }
+        let original_bv_8 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
+        let elapsed = instant.elapsed();
+        let is_equal = original_bv_8 == original_bv_rsb;
+        println!("[perf] STRATEGY 8 (Renumbering):             {:?} (equal: {})", elapsed, is_equal);
+
+        // --- STRATEGY 9: Scan original_to_internal (Dense Bitset) ---
+        let precompute_instant = std::time::Instant::now();
+        let max_original_id = self.llm_vocab.max_original_llm_token_id;
+        let mut original_to_internal_map: Vec<u32> = vec![0; max_original_id + 1];
+        for (internal_id, original_bv) in internal_to_original.iter() {
+            for original_id in original_bv.iter() {
+                if original_id <= max_original_id {
+                    original_to_internal_map[original_id] = *internal_id as u32;
+                }
+            }
+        }
+        let mut active_internals = vec![false; self.vocab.internal_max_llm_token + 1];
+        for i in internal_bv.iter() {
+            if i < active_internals.len() {
+                active_internals[i] = true;
+            }
+        }
+        let _precompute_elapsed = precompute_instant.elapsed();
+
+        let instant = std::time::Instant::now();
+        let original_vocab_size_words = (max_original_id / 64) + 1;
+        let mut result_bitset_words = vec![0u64; original_vocab_size_words];
+        for original_id in 0..=max_original_id {
+            let internal_id = original_to_internal_map[original_id] as usize;
+            if active_internals[internal_id] {
+                let word_idx = original_id / 64;
+                let bit_idx = original_id % 64;
+                result_bitset_words[word_idx] |= 1 << bit_idx;
+            }
+        }
+        let original_bv_9 = result_bitset_words
+            .iter()
+            .enumerate()
+            .flat_map(|(word_idx, &word)| {
+                (0..64).filter_map(move |bit_idx| {
+                    if (word >> bit_idx) & 1 == 1 {
+                        Some(word_idx * 64 + bit_idx)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect::<RangeSetBlaze<usize>>();
+        let elapsed = instant.elapsed();
+        let is_equal = original_bv_9 == original_bv_rsb;
+        println!("[perf] STRATEGY 9 (Scan o2i):                {:?} (equal: {})", elapsed, is_equal);
+
         HybridBitset::from(original_bv_rsb)
     }
 

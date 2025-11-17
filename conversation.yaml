@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - src/datastructures/hybrid_bitset.rs
     - src/constraint.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/datastructures/hybrid_bitset.rs: |+
@@ -3146,7 +3146,10 @@ local_system:
                       bv2.extend(bv.iter().copied());
                   }
               }
-              println!("[perf] STRATEGY 2 (BTree + im::HashSet):    {:?}", instant.elapsed());
+              let elapsed = instant.elapsed();
+              let bv2_rsb: RangeSetBlaze<usize> = bv2.iter().copied().collect();
+              let is_equal = bv2_rsb == original_bv_rsb;
+              println!("[perf] STRATEGY 2 (BTree + im::HashSet):    {:?} (equal: {})", elapsed, is_equal);
 
               // STRATEGY 3: HashMap lookup
               let i2o_hashmap: std::collections::HashMap<_, _> =
@@ -3158,7 +3161,9 @@ local_system:
                       original_bv_3 |= bv.inner.as_ref();
                   }
               }
-              println!("[perf] STRATEGY 3 (HashMap + RangeSetBlaze): {:?}", instant.elapsed());
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_3 == original_bv_rsb;
+              println!("[perf] STRATEGY 3 (HashMap + RangeSetBlaze): {:?} (equal: {})", elapsed, is_equal);
 
               // STRATEGY 4: Vec lookup
               let mut i2o_vec: Vec<Option<LLMTokenBV>> =
@@ -3175,11 +3180,13 @@ local_system:
                       original_bv_4 |= bv.inner.as_ref();
                   }
               }
-              println!("[perf] STRATEGY 4 (Vec + RangeSetBlaze):     {:?}", instant.elapsed());
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_4 == original_bv_rsb;
+              println!("[perf] STRATEGY 4 (Vec + RangeSetBlaze):     {:?} (equal: {})", elapsed, is_equal);
 
               // STRATEGY 5: Rayon
               let instant = std::time::Instant::now();
-              let _original_bv_5 = internal_bv.inner.ranges().par_bridge().map(|range| {
+              let original_bv_5 = internal_bv.inner.ranges().par_bridge().map(|range| {
                   let mut partial_bv = RangeSetBlaze::new();
                   for i in range {
                       if let Some(bv) = internal_to_original.get(&i) {
@@ -3188,7 +3195,65 @@ local_system:
                   }
                   partial_bv
               }).reduce(RangeSetBlaze::new, |a, b| a | b);
-              println!("[perf] STRATEGY 5 (Rayon):                  {:?}", instant.elapsed());
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_5 == original_bv_rsb;
+              println!("[perf] STRATEGY 5 (Rayon):                  {:?} (equal: {})", elapsed, is_equal);
+
+              // STRATEGY 6: Pre-computed Bitset Matrix
+              let max_original_id = self.llm_vocab.max_original_llm_token_id;
+              let original_vocab_size_words = (max_original_id / 64) + 1;
+              let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
+
+              let mut internal_to_original_bitset_matrix: Vec<u64> =
+                  vec![0; num_internal_tokens * original_vocab_size_words];
+
+              for (internal_id, original_bv) in internal_to_original.iter() {
+                  if *internal_id >= num_internal_tokens {
+                      continue;
+                  }
+                  let row_start_idx = *internal_id * original_vocab_size_words;
+
+                  for original_id in original_bv.iter() {
+                      if original_id > max_original_id {
+                          continue;
+                      }
+                      let word_idx = original_id / 64;
+                      let bit_idx = original_id % 64;
+                      internal_to_original_bitset_matrix[row_start_idx + word_idx] |= 1 << bit_idx;
+                  }
+              }
+
+              let instant = std::time::Instant::now();
+              let mut result_bitset_words = vec![0u64; original_vocab_size_words];
+              for internal_id in internal_bv.iter() {
+                  if internal_id >= num_internal_tokens {
+                      continue;
+                  }
+                  let row_start_idx = internal_id * original_vocab_size_words;
+                  let bitset_slice = &internal_to_original_bitset_matrix
+                      [row_start_idx..row_start_idx + original_vocab_size_words];
+
+                  for i in 0..original_vocab_size_words {
+                      result_bitset_words[i] |= bitset_slice[i];
+                  }
+              }
+              // To be fair, we must convert back to the required type.
+              let original_bv_6 = result_bitset_words
+                  .iter()
+                  .enumerate()
+                  .flat_map(|(word_idx, &word)| {
+                      (0..64).filter_map(move |bit_idx| {
+                          if (word >> bit_idx) & 1 == 1 {
+                              Some(word_idx * 64 + bit_idx)
+                          } else {
+                              None
+                          }
+                      })
+                  })
+                  .collect::<RangeSetBlaze<usize>>();
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_6 == original_bv_rsb;
+              println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
 
               HybridBitset::from(original_bv_rsb)
           }
@@ -7614,6 +7679,152 @@ local_system:
               let is_equal = original_bv_6 == original_bv_rsb;
               println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
 
+              // --- STRATEGY 7: Pre-flattened slices (Strategy A) ---
+              let precompute_instant = std::time::Instant::now();
+              let mut data: Vec<usize> = Vec::new();
+              let mut offsets: Vec<usize> = vec![0; self.vocab.internal_max_llm_token + 2];
+              for internal_id in 0..=self.vocab.internal_max_llm_token {
+                  offsets[internal_id] = data.len();
+                  if let Some(original_bv) = internal_to_original.get(&internal_id) {
+                      data.extend(original_bv.iter());
+                  }
+              }
+              offsets[self.vocab.internal_max_llm_token + 1] = data.len();
+              let _precompute_elapsed = precompute_instant.elapsed();
+
+              let instant = std::time::Instant::now();
+              let total_len: usize = internal_bv.iter().map(|i| {
+                  if i <= self.vocab.internal_max_llm_token {
+                      offsets[i + 1] - offsets[i]
+                  } else {
+                      0
+                  }
+              }).sum();
+
+              let mut result_vec: Vec<usize> = Vec::with_capacity(total_len);
+              for i in internal_bv.iter() {
+                  if i <= self.vocab.internal_max_llm_token {
+                      let start = offsets[i];
+                      let end = offsets[i + 1];
+                      result_vec.extend_from_slice(&data[start..end]);
+                  }
+              }
+              let original_bv_7 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_7 == original_bv_rsb;
+              println!("[perf] STRATEGY 7 (Flattened Slices):         {:?} (equal: {})", elapsed, is_equal);
+
+              // --- STRATEGY 8: Renumbering (Strategy B) ---
+              let precompute_instant = std::time::Instant::now();
+              let max_original_id = self.llm_vocab.max_original_llm_token_id;
+              let num_internals = self.vocab.internal_max_llm_token + 1;
+
+              // 1. Build original_to_internal
+              let mut o2i: Vec<u32> = vec![0; max_original_id + 1];
+              for (internal_id, original_bv) in internal_to_original.iter() {
+                  for original_id in original_bv.iter() {
+                      if original_id <= max_original_id {
+                          o2i[original_id] = *internal_id as u32;
+                      }
+                  }
+              }
+
+              // 2. Build counts
+              let mut counts = vec![0u32; num_internals];
+              for &internal_id in o2i.iter() {
+                  counts[internal_id as usize] += 1;
+              }
+
+              // 3. Build start offsets
+              let mut start = Vec::with_capacity(num_internals + 1);
+              let mut current_pos = 0u32;
+              for &count in &counts {
+                  start.push(current_pos);
+                  current_pos += count;
+              }
+              start.push(current_pos);
+
+              // 4. Build new_to_old map
+              let mut new_to_old = vec![0u32; max_original_id + 1];
+              let mut write_pos = start[..num_internals].to_vec();
+              for (old_id, &internal_id) in o2i.iter().enumerate() {
+                  let i = internal_id as usize;
+                  let pos = write_pos[i] as usize;
+                  if pos < new_to_old.len() {
+                      new_to_old[pos] = old_id as u32;
+                  }
+                  write_pos[i] += 1;
+              }
+              let _precompute_elapsed = precompute_instant.elapsed();
+
+              let instant = std::time::Instant::now();
+              let total_len: usize = internal_bv.iter().map(|i| {
+                  if i < num_internals {
+                      (start[i + 1] - start[i]) as usize
+                  } else {
+                      0
+                  }
+              }).sum();
+              let mut result_vec = Vec::with_capacity(total_len);
+              for internal_id in internal_bv.iter() {
+                  if internal_id < num_internals {
+                      let range_start = start[internal_id] as usize;
+                      let range_end = start[internal_id + 1] as usize;
+                      result_vec.extend(new_to_old[range_start..range_end].iter().map(|&v| v as usize));
+                  }
+              }
+              let original_bv_8 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_8 == original_bv_rsb;
+              println!("[perf] STRATEGY 8 (Renumbering):             {:?} (equal: {})", elapsed, is_equal);
+
+              // --- STRATEGY 9: Scan original_to_internal (Dense Bitset) ---
+              let precompute_instant = std::time::Instant::now();
+              let max_original_id = self.llm_vocab.max_original_llm_token_id;
+              let mut original_to_internal_map: Vec<u32> = vec![0; max_original_id + 1];
+              for (internal_id, original_bv) in internal_to_original.iter() {
+                  for original_id in original_bv.iter() {
+                      if original_id <= max_original_id {
+                          original_to_internal_map[original_id] = *internal_id as u32;
+                      }
+                  }
+              }
+              let mut active_internals = vec![false; self.vocab.internal_max_llm_token + 1];
+              for i in internal_bv.iter() {
+                  if i < active_internals.len() {
+                      active_internals[i] = true;
+                  }
+              }
+              let _precompute_elapsed = precompute_instant.elapsed();
+
+              let instant = std::time::Instant::now();
+              let original_vocab_size_words = (max_original_id / 64) + 1;
+              let mut result_bitset_words = vec![0u64; original_vocab_size_words];
+              for original_id in 0..=max_original_id {
+                  let internal_id = original_to_internal_map[original_id] as usize;
+                  if active_internals[internal_id] {
+                      let word_idx = original_id / 64;
+                      let bit_idx = original_id % 64;
+                      result_bitset_words[word_idx] |= 1 << bit_idx;
+                  }
+              }
+              let original_bv_9 = result_bitset_words
+                  .iter()
+                  .enumerate()
+                  .flat_map(|(word_idx, &word)| {
+                      (0..64).filter_map(move |bit_idx| {
+                          if (word >> bit_idx) & 1 == 1 {
+                              Some(word_idx * 64 + bit_idx)
+                          } else {
+                              None
+                          }
+                      })
+                  })
+                  .collect::<RangeSetBlaze<usize>>();
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_9 == original_bv_rsb;
+              println!("[perf] STRATEGY 9 (Scan o2i):                {:?} (equal: {})", elapsed, is_equal);
+
               HybridBitset::from(original_bv_rsb)
           }
 
@@ -11976,7 +12187,10 @@ messages:
                       bv2.extend(bv.iter().copied());
                   }
               }
-              println!("[perf] STRATEGY 2 (BTree + im::HashSet):    {:?}", instant.elapsed());
+              let elapsed = instant.elapsed();
+              let bv2_rsb: RangeSetBlaze<usize> = bv2.iter().copied().collect();
+              let is_equal = bv2_rsb == original_bv_rsb;
+              println!("[perf] STRATEGY 2 (BTree + im::HashSet):    {:?} (equal: {})", elapsed, is_equal);
 
               // STRATEGY 3: HashMap lookup
               let i2o_hashmap: std::collections::HashMap<_, _> =
@@ -11988,7 +12202,9 @@ messages:
                       original_bv_3 |= bv.inner.as_ref();
                   }
               }
-              println!("[perf] STRATEGY 3 (HashMap + RangeSetBlaze): {:?}", instant.elapsed());
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_3 == original_bv_rsb;
+              println!("[perf] STRATEGY 3 (HashMap + RangeSetBlaze): {:?} (equal: {})", elapsed, is_equal);
 
               // STRATEGY 4: Vec lookup
               let mut i2o_vec: Vec<Option<LLMTokenBV>> =
@@ -12005,11 +12221,13 @@ messages:
                       original_bv_4 |= bv.inner.as_ref();
                   }
               }
-              println!("[perf] STRATEGY 4 (Vec + RangeSetBlaze):     {:?}", instant.elapsed());
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_4 == original_bv_rsb;
+              println!("[perf] STRATEGY 4 (Vec + RangeSetBlaze):     {:?} (equal: {})", elapsed, is_equal);
 
               // STRATEGY 5: Rayon
               let instant = std::time::Instant::now();
-              let _original_bv_5 = internal_bv.inner.ranges().par_bridge().map(|range| {
+              let original_bv_5 = internal_bv.inner.ranges().par_bridge().map(|range| {
                   let mut partial_bv = RangeSetBlaze::new();
                   for i in range {
                       if let Some(bv) = internal_to_original.get(&i) {
@@ -12018,7 +12236,65 @@ messages:
                   }
                   partial_bv
               }).reduce(RangeSetBlaze::new, |a, b| a | b);
-              println!("[perf] STRATEGY 5 (Rayon):                  {:?}", instant.elapsed());
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_5 == original_bv_rsb;
+              println!("[perf] STRATEGY 5 (Rayon):                  {:?} (equal: {})", elapsed, is_equal);
+
+              // STRATEGY 6: Pre-computed Bitset Matrix
+              let max_original_id = self.llm_vocab.max_original_llm_token_id;
+              let original_vocab_size_words = (max_original_id / 64) + 1;
+              let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
+
+              let mut internal_to_original_bitset_matrix: Vec<u64> =
+                  vec![0; num_internal_tokens * original_vocab_size_words];
+
+              for (internal_id, original_bv) in internal_to_original.iter() {
+                  if *internal_id >= num_internal_tokens {
+                      continue;
+                  }
+                  let row_start_idx = *internal_id * original_vocab_size_words;
+
+                  for original_id in original_bv.iter() {
+                      if original_id > max_original_id {
+                          continue;
+                      }
+                      let word_idx = original_id / 64;
+                      let bit_idx = original_id % 64;
+                      internal_to_original_bitset_matrix[row_start_idx + word_idx] |= 1 << bit_idx;
+                  }
+              }
+
+              let instant = std::time::Instant::now();
+              let mut result_bitset_words = vec![0u64; original_vocab_size_words];
+              for internal_id in internal_bv.iter() {
+                  if internal_id >= num_internal_tokens {
+                      continue;
+                  }
+                  let row_start_idx = internal_id * original_vocab_size_words;
+                  let bitset_slice = &internal_to_original_bitset_matrix
+                      [row_start_idx..row_start_idx + original_vocab_size_words];
+
+                  for i in 0..original_vocab_size_words {
+                      result_bitset_words[i] |= bitset_slice[i];
+                  }
+              }
+              // To be fair, we must convert back to the required type.
+              let original_bv_6 = result_bitset_words
+                  .iter()
+                  .enumerate()
+                  .flat_map(|(word_idx, &word)| {
+                      (0..64).filter_map(move |bit_idx| {
+                          if (word >> bit_idx) & 1 == 1 {
+                              Some(word_idx * 64 + bit_idx)
+                          } else {
+                              None
+                          }
+                      })
+                  })
+                  .collect::<RangeSetBlaze<usize>>();
+              let elapsed = instant.elapsed();
+              let is_equal = original_bv_6 == original_bv_rsb;
+              println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
 
               HybridBitset::from(original_bv_rsb)
           }
@@ -13198,142 +13474,569 @@ messages:
     metadata:
       filename: src/constraint.rs
   - user: |-
-      Excellent question. You've hit a performance wall where the overhead of general-purpose data structures is the problem, and the solution requires moving to a specialized, low-level representation that is perfectly tailored to the hardware. Your goal of <100µs is ambitious, and 1µs is likely physically impossible, but we can get very, very close to the absolute hardware limits.
+      You’re already very close to what is essentially the optimal algorithmic structure. The remaining factor‑of‑10 is almost entirely about using the partition structure in the right way and avoiding doing unnecessary work per query.
 
-      Let's rigorously break this down.
+      I’ll structure this as:
 
-      ### Mathematical & Physical Foundation
+      1. Formalizing the problem.
+      2. Proving what asymptotic performance is *possible* and what is impossible.
+      3. Explaining why your bitset matrix is ~15× more work than needed.
+      4. Presenting two “best possible” strategies:
+         - Strategy A: copy pre‑flattened per‑internal slices (explicit output).
+         - Strategy B: renumber originals so each internal is a single contiguous range (compressed output).
+      5. How to implement these efficiently in Rust.
+      6. Answering your specific ideas (codegen per internal, setting ranges in bitsets).
 
-      1.  **The Problem:** We are computing a large union. Given an input set of internal indices `I_in`, we want to compute `S_out = ⋃_{i ∈ I_in} S_i`, where `S_i` is the pre-defined set of original numbers for internal index `i`.
-      2.  **The Bottleneck is Memory, not CPU:** Your current 1-2ms time is almost certainly dominated by memory access patterns that are unfriendly to the CPU cache, and by the algorithmic overhead of merging sorted lists of ranges (`RangeSetBlaze`) or managing hash tables (`HashSet`).
-          *   To achieve microsecond-level performance, we must operate on data that is either entirely within the CPU's L1/L2 cache or is accessed in a perfectly linear, predictable pattern that the CPU's prefetcher can optimize.
-      3.  **The Physical Limit (Back-of-the-Envelope Calculation):**
-          *   Let's assume `N_orig = 128,000` and `N_int = 5,000`.
-          *   The fastest possible representation for a set of numbers in a dense domain is a **bitset**. A bitset for 128k numbers requires `128,000 / 8 = 16,000 bytes = 16 KB`.
-          *   Your input set has `k ≈ 1000` internal numbers.
-          *   To calculate the union, you must, at a minimum, read the data corresponding to these 1000 internal numbers. If each of their original sets is stored as a 16KB bitset, the total data to read is `1000 * 16 KB = 16 MB`.
-          *   High-end consumer RAM (DDR5) has a bandwidth of about 50-100 GB/s. Let's be optimistic and say 100 GB/s.
-          *   The time to simply *read* this data from RAM is `16 MB / 100 GB/s = 0.016 GB / 100 GB/s = 0.00016 seconds = 160 microseconds (µs)`.
+      ---
 
-      **Hypothesis 1: The 1µs goal is physically impossible for an arbitrary input set of 1000 internal numbers. The absolute performance is bounded by memory bandwidth, likely in the ~100-200µs range.**
+      ## 1. Formalizing the problem
 
-      Our goal, therefore, is to design an algorithm that is **entirely memory-bound**, with CPU computation being effectively "free" in comparison.
+      You have:
 
-      ### The Optimal Strategy: Pre-computed Bitset Matrix
+      - A universe of “original” numbers:
+        
+        \[
+        U = \{0,1,\dots,N-1\}
+        \]
+        
+        with \(N \approx 50{,}000\) (in your stats: `Entries * Avg len per value ≈ 1485 * 33.84 ≈ 50k`).
 
-      This approach leverages the fact that the mapping is fixed to create the most hardware-friendly representation possible.
+      - A set of “internal” indices:
+        
+        \[
+        I = \{0,1,\dots,M-1\}
+        \]
+        
+        with \(M \approx 1{,}500\) (or up to ~5k in other cases).
 
-      #### 1. Setup / Pre-computation
+      - A **partition** of \(U\) into subsets \(C_i \subseteq U\) for each internal \(i\):
 
-      We will represent the `internal -> set<original>` mapping as a giant, 2D matrix of bits, stored as `u64` words for maximum performance.
+        - The \(C_i\) are disjoint.
+        - Their union is all of \(U\).
+        - Equivalently, there is a function \(f: U \to I\) assigning to each original exactly one internal.
 
-      *   **Data Structure:** A single, contiguous block of memory (a `Vec<u64>` in Rust).
-      *   **Dimensions:** `N_int` rows by `N_orig_words` columns.
-          *   `N_int` is the number of internal numbers (~5000).
-          *   `N_orig_words = ceil(max_original_number / 64)`. For 100k originals, this is `ceil(100000 / 64) = 1563`.
-      *   **Layout:** The matrix is stored in row-major order. Row `i` is the complete bitset for internal number `i`.
-      *   **Total Size:** `5000 * 1563 * 8 bytes ≈ 62.5 MB`. This fits easily in RAM.
+      So \(C_i = f^{-1}(i)\).
 
-      **Rust Implementation (Setup):**
+      **Query:** Given a subset \(S \subseteq I\) (“a set of internals”), compute the union of original elements:
+
+      \[
+      A(S) = \bigcup_{i \in S} C_i = \{u \in U : f(u) \in S\}
+      \]
+
+      You measure this in Rust as `internal_bv_to_original_with_map`, with stats like:
+
+      - `internal_to_original map` has:
+        - `Entries: 1485` (M).
+        - `Avg len per value: 33.84` (so N ≈ 50k).
+      - `input internal_bv`:
+        - `Total len: 906–1045` (|S|).
+      - `output original_bv`:
+        - `Total len: 16739–48874` (|A(S)|).
+
+      Currently best runtime:
+
+      - Strategies with RangeSetBlaze / HashSet: ~2ms.
+      - Bitset matrix: ~282–437µs.
+
+      Target: <100µs, ideally ~20µs per query.
+
+      ---
+
+      ## 2. What is fundamentally possible?
+
+      Two key points:
+
+      - Because the partition is fixed, you are allowed arbitrary precomputation.
+      - At query time, you must *materialize* some representation of the resulting set.
+
+      There are two relevant regimes:
+
+      ### 2.1. If you output **explicit elements** (e.g. `Vec<u32>` or equivalent)
+
+      Then the size of the output is \(|A(S)|\), and **any algorithm that actually produces those elements must do at least \(\Omega(|A(S)|)\) work**.
+
+      Reason: To even write down the \(|A(S)|\) distinct numbers on a Random Access Machine model, you need at least one write per element. That’s already \(|A(S)|\) operations, ignoring all other overhead. Formally, any procedure that outputs an explicit list must probe at least one word per output element, so you get a cell‑probe lower bound of \(\Omega(|A(S)|)\).
+
+      In your data, \(|A(S)|\) is often ~50k. On a modern CPU:
+
+      - 50k 32‑bit integers = 200KB output.
+      - To output that you must at least touch ~200KB of memory.
+      - Reading the corresponding original identifiers adds another ~200KB.
+      - So you’re moving ~400KB / query.
+
+      If your effective single‑core memory bandwidth from cache is on the order of 40 GB/s, that’s:
+
+      \[
+      400\text{ KB} / 40\text{ GB/s} \approx 10\ \mu\text{s}
+      \]
+
+      plus loop overhead, bounds checks, etc. So **20–50µs** is *plausible*, but you cannot hope for substantially below that if you actually materialize all elements every time.
+
+      ### 2.2. If you output a **compressed representation** (intervals, bitset, etc.)
+
+      You can sometimes do better than \(\Omega(|A(S)|)\), if the representation lets you store many elements in a single “symbol”.
+
+      Example: if each internal’s original set is a single contiguous range in some numbering, then \(A(S)\) can be represented as at most \(|S|\) ranges. Then the lower bound becomes \(\Omega(|S|)\), not \(\Omega(|A(S)|)\).
+
+      We’ll exploit exactly this in Strategy B: renumber the universe so that each internal corresponds to one contiguous block.
+
+      ---
+
+      ## 3. Why the bitset matrix is ~15× more work than needed
+
+      Assume your bitset matrix does roughly the following:
+
+      - Represent each internal \(i\) as a bitset \(B_i \in \{0,1\}^N\) over originals.
+      - To compute \(A(S)\), you OR together all rows \(B_i\) for \(i \in S\).
+
+      Each bitset has \(N\) bits, i.e. \(\lceil N / 64\rceil\) 64‑bit words. Let
+
+      \[
+      W = \left\lceil \frac{N}{64} \right\rceil \approx \frac{50{,}000}{64} \approx 782.
+      \]
+
+      For each query with \(|S| = K\), the naive matrix OR approach does:
+
+      - \(K\) passes over the \(W\)-word bitsets,
+      - i.e. about \(K \cdot W\) 64‑bit OR operations.
+
+      With your typical numbers:
+
+      - \(K \approx 900\)–1000.
+      - So ~\(K\cdot W \approx 900 \cdot 782 ≈ 700{,}000\) 64‑bit words processed.
+
+      On the other hand, the *size of the union* \(|A(S)|\) is at most \(N = 50k\).
+
+      Rough ratio:
+
+      \[
+      \frac{K \cdot W}{N} \approx \frac{900 \cdot 782}{50{,}000} \approx 14
+      \]
+
+      So the bitset matrix visits ~14 times more 64‑bit words than the minimal \(\Omega(|A(S)|)\) lower bound for explicit output. Your empirical factor (282–437µs vs a theoretical ~20µs) matches this: 282µs / 14 ≈ 20µs.
+
+      **Conclusion**: The bitset matrix is dominated by redundant work: it touches each bit multiple times (once per internal row), instead of touching each output element only once.
+
+      We should instead do *one pass per output element*, not per internal row.
+
+      ---
+
+      ## 4. Two “best possible” strategies
+
+      The partition property is extremely powerful:
+
+      > Each original belongs to exactly one internal.
+
+      Equivalently, you have a labeling function \(f: U \to I\). 
+
+      We can use that in two optimal ways.
+
+      ### Strategy A: Pre‑flatten by internal and copy slices
+
+      Goal: Fast *explicit* list of original IDs, with time almost exactly proportional to \(|A(S)|\).
+
+      **Preprocessing (one‑time, heavy allowed)**:
+
+      1. For each internal \(i \in I\), build a sorted `Vec<OriginalId>` of its elements:
+         
+         ```text
+         C_0, C_1, ..., C_{M-1}
+         ```
+
+         (You already have something like this as RangeSetBlaze sets; just flatten them.)
+
+      2. Flatten all these into one large array `data` and store offsets:
+
+         ```text
+         data = concatenation of C_0, C_1, ..., C_{M-1}
+         offset[i] = starting index of C_i in data
+         // so C_i corresponds to data[offset[i] .. offset[i+1]]
+         ```
+
+         In Rust types:
+
+         ```rust
+         struct InternalToOriginal {
+             data:   Vec<u32>,    // all originals, grouped by internal
+             offset: Vec<u32>,    // len = M+1, offsets into `data`
+         }
+         ```
+
+         Memory usage ~N integers (~200KB for 50k 32‑bit ints) plus M+1 offsets.
+
+      **Query algorithm**: Given a set \(S\subseteq I\) of internals, return a `Vec<OriginalId>` representing the union.
+
+      We do:
+
+      1. Compute total output size:
+
+         \[
+         L = \sum_{i \in S} |C_i| = \left|\bigcup_{i\in S} C_i\right| = |A(S)|.
+         \]
+
+      2. Allocate a `Vec<OriginalId>` of length `L`.
+
+      3. For each \(i \in S\), `memcpy` the slice `C_i` into the next part of the output.
+
+      Pseudocode:
 
       ```rust
-      const MAX_ORIGINAL: usize = 100_000; // Or whatever your max is
-      const NUM_INTERNAL: usize = 5_000;
-      const NUM_ORIGINAL_WORDS: usize = (MAX_ORIGINAL + 63) / 64;
-
-      // This is your precomputed data structure.
-      // It's a flattened 2D array.
-      let mut precomputed_matrix: Vec<u64> = vec![0; NUM_INTERNAL * NUM_ORIGINAL_WORDS];
-
-      // Example of how to populate it from your original map
-      // (e.g., map_from_internal_to_originals: Vec<Vec<u32>>)
-      for internal_idx in 0..NUM_INTERNAL {
-          let original_numbers = &map_from_internal_to_originals[internal_idx];
-          let row_start_idx = internal_idx * NUM_ORIGINAL_WORDS;
-          let bitset_slice = &mut precomputed_matrix[row_start_idx .. row_start_idx + NUM_ORIGINAL_WORDS];
-          
-          for &original_num in original_numbers {
-              let word_idx = original_num as usize / 64;
-              let bit_idx = original_num as usize % 64;
-              bitset_slice[word_idx] |= 1 << bit_idx;
+      fn union_explicit(&self, internals: &[u32]) -> Vec<u32> {
+          // 1. Compute total size
+          let mut total = 0usize;
+          for &i in internals {
+              let i = i as usize;
+              total += (self.offset[i + 1] - self.offset[i]) as usize;
           }
+
+          // 2. Allocate result
+          let mut out = Vec::with_capacity(total);
+
+          // 3. Copy each block
+          for &i in internals {
+              let i = i as usize;
+              let start = self.offset[i] as usize;
+              let end   = self.offset[i + 1] as usize;
+              out.extend_from_slice(&self.data[start..end]);
+          }
+
+          out
       }
       ```
 
-      #### 2. The Ultra-Fast Query Algorithm
+      Because the partition has no overlaps, *no element will be copied twice*, even if your vec of internals has duplicates (you can dedup ahead of time if necessary).
 
-      The query operation becomes a series of full bitset unions.
+      **Complexity**:
 
-      *   **Input:** A set of internal numbers to query. For maximum speed, this should be a `Vec<u32>` or a slice `&[u32]`. Iterating a `RangeSetBlaze` or `HashSet` adds overhead we want to avoid in the hot loop.
-      *   **Output:** A dense bitset, represented as `[u64; NUM_ORIGINAL_WORDS]`.
-      *   **Algorithm:**
-          1.  Allocate the output bitset on the stack (if it's small enough) or the heap, and initialize to zero.
-          2.  Iterate through each `internal_idx` in your input set.
-          3.  For each `internal_idx`, retrieve its pre-computed bitset (a slice of `NUM_ORIGINAL_WORDS` `u64`s from the matrix).
-          4.  Perform a word-by-word bitwise `OR` of this slice into your output bitset.
+      - Let \(K = |S|\), \(L = |A(S)|\).
+      - Preprocessing: \(O(N)\) or \(O(N\log N)\) if you sort originals per internal.
+      - Query:
+        - \(O(K)\) to sum lengths.
+        - \(O(L)\) to copy the data (with `memcpy`).
 
-      **Hypothesis 2: A tight loop performing word-by-word bitwise ORs on linearly-accessed memory will be heavily optimized by the compiler into SIMD instructions (e.g., AVX2/AVX-512), making the computation almost negligible compared to the memory access time.**
+      So overall \(O(K + L)\). Since typically \(L ≈ 50k\), \(K ≈ 1000\), the dominating part is \(O(L)\).
 
-      **Rust Implementation (Query):**
+      **Performance estimate**:
+
+      - Total memory moved per query ≈ `L * (sizeof(u32) read + sizeof(u32) write)` ≈ `L * 8` bytes.
+      - For worst‑case \(L ≈ N ≈ 50k\): 50k * 8 = 400KB.
+      - On ~40 GB/s core: 400KB / 40GB/s ≈ 10µs.
+      - Add loop/branch overhead: maybe 5–20µs.
+
+      So **this plausibly gets you into the 20–50µs range** on a single core, if everything stays in cache.
+
+      And notice: this is already nearly optimal for explicit output, due to the lower bound \(\Omega(L)\).
+
+      #### Discussion: Sorting, RangeSets, and unsorted output
+
+      The output of this algorithm will be **grouped by internal**, not by ascending original ID. e.g.:
+
+      - `C_2 = [1, 10, 100]`, `C_5 = [2, 3]`
+      - `S = {2, 5}`
+      - Output might be `[1, 10, 100, 2, 3]`.
+
+      If you need the output sorted by the original value, you must either:
+
+      - sort the result (cost: \(O(L \log L)\), probably too slow), or
+      - choose a clever numbering so that the concatenation is in sorted order for your purposes (see Strategy B).
+
+      If you’re just going to use this as a “set of IDs” (e.g. to index into other arrays or sets), unsorted is often fine.
+
+      If you want to get back to a `RangeSetBlaze` on original IDs, you’d likely do:
+
+      1. Generate the explicit list via this cheap procedure.
+      2. Sort the list and compress to ranges if necessary.
+
+      But then the sorting dominates; so if conversion to RangeSetBlaze is needed per query, your target of ~20µs will be hard. The only way to avoid that is to choose a numbering where the union is inherently nice (Strategy B).
+
+      ---
+
+      ### Strategy B: Renumber originals so each internal is one contiguous range
+
+      This is the **theoretically optimal** strategy if you’re happy to work in a *new* index space for your original numbers.
+
+      Key idea: Because you control preprocessing and the mapping is a partition, you can relabel original IDs arbitrarily without losing information.
+
+      #### Preprocessing
+
+      Define a new numbering of the original domain:
+
+      - First list all elements of `C_0`, then all of `C_1`, etc.
+      - Assign new IDs `0, 1, …, N-1` in that order.
+
+      Formally:
+
+      1. Compute counts:
+
+         ```rust
+         let mut counts = vec![0u32; M];
+         // original_to_internal: Vec<u16> of length N
+         for &i in original_to_internal.iter() {
+             counts[i as usize] += 1;
+         }
+         ```
+
+      2. Compute prefix sums to get start offsets:
+
+         ```rust
+         let mut start = Vec::with_capacity(M + 1);
+         let mut cur = 0u32;
+         for &c in &counts {
+             start.push(cur);
+             cur += c;
+         }
+         start.push(cur); // start[M] == N
+         ```
+
+      3. Allocate `new_to_old` of length `N`, then fill it:
+
+         ```rust
+         let mut new_to_old = vec![0u32; N];
+         // We'll also need a moving index per internal
+         let mut write_pos = start[..M].to_vec();  // copy first M entries
+
+         for (old, &int) in original_to_internal.iter().enumerate() {
+             let i = int as usize;
+             let pos = write_pos[i] as usize;
+             new_to_old[pos] = old as u32;
+             write_pos[i] += 1;
+         }
+         ```
+
+      Now:
+
+      - For each internal \(i\), its new‑domain block is the contiguous range:
+
+        \[
+        R_i = [ \text{start}[i], \text{start}[i+1] )
+        \]
+
+      - The mapping `new_to_old` lets you recover the original IDs if needed.
+
+      **Important**: In **this new numbering**, each \(C_i\) is *exactly* one contiguous block.
+
+      #### How to answer queries in the new domain
+
+      Given a subset \(S \subseteq I\), the set of originals is represented in the new domain as:
+
+      \[
+      \bigcup_{i \in S} R_i
+      \]
+
+      This is a union of *disjoint, non‑overlapping, non‑touching* ranges.
+
+      So you can represent \(A(S)\) compactly as:
+
+      - A vector of ranges: e.g. a `RangeSetBlaze<u32>` in the new domain, or
+      - Even just a `Vec<Range<u32>>` or equivalent.
+
+      **Algorithm**:
 
       ```rust
-      // The precomputed_matrix from the setup phase
-      // input_internals: A Vec<u32> or slice &[u32] of internal indices
+      fn internals_to_new_ranges(start: &[u32], internals: &[u32]) -> Vec<std::ops::Range<u32>> {
+          let mut res = Vec::with_capacity(internals.len());
+          for &i in internals {
+              let i = i as usize;
+              res.push(start[i] .. start[i + 1]);
+          }
+          res
+      }
+      ```
 
-      #[inline(always)] // Encourage inlining for performance
-      pub fn map_internals_to_originals_fast(
-          precomputed_matrix: &[u64],
-          input_internals: &[u32],
-      ) -> Vec<u64> {
-          // Allocate the result vector. Initializing with `with_capacity` and `resize`
-          // can be slightly faster than `vec![0; ...]` as it avoids a potential memset.
-          let mut result_bitset = vec![0; NUM_ORIGINAL_WORDS];
+      That’s literally just:
 
-          // The hot loop
-          for &internal_idx in input_internals {
-              let row_start_idx = internal_idx as usize * NUM_ORIGINAL_WORDS;
-              let bitset_slice = &precomputed_matrix[row_start_idx .. row_start_idx + NUM_ORIGINAL_WORDS];
+      - For each internal in `S`: look up two integers and push a range.
 
-              // This inner loop is the key.
-              // It's simple, with no branches and linear memory access.
-              // The compiler will almost certainly auto-vectorize this.
-              for i in 0..NUM_ORIGINAL_WORDS {
-                  result_bitset[i] |= bitset_slice[i];
+      **Complexity**:
+
+      - \(O(|S|)\).
+      - With \(|S| ≈ 1000\), this is negligible — tenths of a microsecond.
+
+      Now, if all your downstream operations can be done **in this new coordinate space**, you’ve essentially solved the problem:
+
+      - `internal set → new original set` is \(O(|S|)\).
+      - You never have to touch the ~50k elements until you want to *explicitly enumerate* the final result.
+
+      If at some later point you *do* need explicit original IDs, you can expand using `new_to_old`:
+
+      ```rust
+      fn expand_new_ranges_to_old(
+          new_ranges: &[Range<u32>],
+          new_to_old: &[u32],
+      ) -> Vec<u32> {
+          let total: usize = new_ranges.iter().map(|r| (r.end - r.start) as usize).sum();
+          let mut out = Vec::with_capacity(total);
+
+          for r in new_ranges {
+              out.extend(new_to_old[r.start as usize .. r.end as usize].iter().copied());
+          }
+          out
+      }
+      ```
+
+      That expansion is essentially the same cost as Strategy A’s copying, and again is \(\Theta(|A(S)|)\).
+
+      The crucial advantage is:
+
+      - Many intermediate operations (union, intersection, counting, etc.) can be done purely on the ranges, *without ever expanding*.
+
+      If this matches your usage pattern (lots of set algebra, rare element enumeration), Strategy B is as fast as it gets.
+
+      ---
+
+      ## 5. Dense bitset output: a nearly optimal variant
+
+      You also mentioned an idea:
+
+      > Keeping the input as rangesetblaze but making the output a dense bitset.  
+      > [...] iterate over the ranges in the matching original rsbs and then set the entire ranges of bits in the output bitset at once.
+
+      This is basically a variant of Strategy A, but the output is a bitset on `N` bits.
+
+      One efficient way given the partition:
+
+      1. Precompute:
+
+         - `original_to_internal: [u16; N]` — mapping each original index to an internal index.
+         - Represent internal query set \(S\) as a bitset or boolean array of length `M`.
+
+      2. Query:
+
+         - Initialize output bitset `out` of length `N` bits to 0.
+         - For each original `u` (0..N‑1):
+           - Let `i = original_to_internal[u]`.
+           - If internal `i` is active in `S`, set `out[u] = 1`.
+
+      This is exactly:
+
+      ```rust
+      fn internals_to_original_bitset(
+          original_to_internal: &[u16],
+          active_internal: &[bool], // length M
+          out_bitset: &mut [u64],   // length ceil(N / 64)
+      ) {
+          // Assume out_bitset is zero-initialized
+          for (u, &int) in original_to_internal.iter().enumerate() {
+              let i = int as usize;
+              if active_internal[i] {
+                  let word = u / 64;
+                  let bit = u % 64;
+                  out_bitset[word] |= 1u64 << bit;
               }
           }
-
-          result_bitset
       }
       ```
 
-      To get maximum performance, compile with: `RUSTFLAGS="-C target-cpu=native -C opt-level=3" cargo build --release`.
+      **Complexity**: \(O(N)\) always, independent of \(|S|\).
 
-      ### Performance Analysis & Proof of Validity
+      - With \(N \approx 50k\), that’s 50k iterations.
+      - Each iteration does 1 load from `original_to_internal`, 1 load from `active_internal`, and one conditional OR into output. That’s maybe 3–5 simple operations.
+      - Memory traffic: ~2 bytes (u16) + 1 byte (bool) + maybe 1 byte average per bitset word overlapped ≈ ~200–300KB read+write total.
 
-      1.  **Correctness:** The bitwise `OR` operation is the mathematical equivalent of set union. Since each row `i` in the matrix correctly represents the set `S_i`, the cumulative `OR` of rows for all `i ∈ I_in` correctly computes `⋃_{i ∈ I_in} S_i`. The output is valid.
-      2.  **Cache Performance:**
-          *   The `result_bitset` is small (~16 KB) and is written to repeatedly. It will almost certainly live in the L1 cache for the entire duration of the function.
-          *   The access to `precomputed_matrix` is the bottleneck. For each `internal_idx`, we jump to a new location (`row_start_idx`). This will likely cause an L3 cache miss or a RAM access. This is the unavoidable cost of retrieving the data for that internal number.
-          *   However, once we have the starting address of `bitset_slice`, the inner loop `for i in 0..NUM_ORIGINAL_WORDS` is a **perfectly linear scan** over contiguous memory (16 KB at a time). The CPU's hardware prefetcher will excel here, streaming the data into the caches ahead of time.
-      3.  **SIMD Vectorization:** The inner loop is a textbook example of something that can be vectorized. A modern CPU with AVX2 or AVX-512 can perform `OR` operations on 256 or 512 bits (4 or 8 `u64`s) in a single instruction. This means the loop of 1563 iterations can be reduced to ~390 or ~195 SIMD instructions. This is why the CPU computation is "free" compared to the time it takes to fetch the 16 KB slice from memory.
-      4.  **Why Rayon Didn't Help:** Your current task is likely memory-bound, not CPU-bound. Parallelizing with Rayon adds overhead for thread management. Worse, it causes multiple threads to contend for the same memory bus as they all try to fetch different rows from the matrix, potentially leading to worse, not better, performance. This new algorithm is also memory-bound, so Rayon will not help here either.
+      So you’re again in the 10–30µs theoretical range.
 
-      ### Addressing Your Ideas
+      This method is optimal when you must output a dense bitset of fixed size every time.
 
-      *   **"Hardcoding" into C code / switch statements:** This is a very clever idea, and it's essentially a manual, extreme form of optimization. You would be generating code like `case 123: union_with_set_123(&result);`. The function `union_with_set_123` would contain the hardcoded `result[i] |= mask` commands. A modern compiler, when faced with the bitset matrix approach, will generate code that is nearly as fast (or faster, due to better SIMD instruction scheduling) without the astronomical complexity, compile times, and binary size. The bottleneck remains memory access, which your idea doesn't solve.
-      *   **Output as a dense bitset:** Yes, this is exactly right. This is a core component of the optimal solution. Using `RangeSetBlaze` for the output means you are repeatedly paying the cost of merging sorted lists, which gets slower as the output set grows. A bitset has a fixed `O(N)` cost for a union.
+      Note the contrast with the bitset matrix:
 
-      ### Summary & Expected Performance
+      - Matrix: touches `N/64` words **for each** internal in `S` → ~700k word ops.
+      - This: touches each original exactly once per query → ~50k iterations.
 
-      1.  **Pre-computation:** Convert your `internal -> set<original>` map into a single, massive, row-major `Vec<u64>` where each row is a dense bitset.
-      2.  **Query:** Write a simple, tight loop that iterates through your input internal indices. For each index, it finds the corresponding row (slice) in the matrix and performs a fast, word-by-word `OR` into a result bitset.
-      3.  **Compile:** Use release mode with `-C target-cpu=native` to unlock auto-vectorization (SIMD).
+      So again roughly a factor of \(|S| \cdot (\text{words per bitset}) / N \approx 14\) improvement.
 
-      This approach pushes the problem to the physical limits of your machine's memory subsystem. You will not get 1µs, but you should see a **dramatic improvement** from 2.5ms down to the **100-200µs** range, which is likely the best that is physically possible. This represents a 10-20x speedup and is the absolute best you can practically achieve.
+      If you want to combine this with RangeSetBlaze, you can convert the bitset to ranges afterwards, but that costs \(O(N)\) anyway; if your final consumer can use the bitset directly, that’s better.
+
+      ---
+
+      ## 6. Answering your specific ideas
+
+      ### 6.1. “Generated C code with a function per internal”
+
+      > compiling some C code with a separate function for each internal index, writing the original indices for that internal index to a bitset [...]
+
+      This is essentially a more convoluted way to do Strategy A or the “group by internal” approach: for each internal, you run a hard‑coded loop over its originals.
+
+      But modern compilers + a simple loop over slices will already inline and optimize heavily. Example:
+
+      ```c
+      for (int i = 0; i < k; ++i) {
+          int internal = S[i];
+          const int *arr = data + offset[internal];
+          int len = len[internal];
+          for (int j = 0; j < len; ++j) {
+              out[ out_pos++ ] = arr[j];
+          }
+      }
+      ```
+
+      The compiler can treat each `internal`’s block as a small slice and optimize well. You don’t get a fundamental advantage from having a separate function per internal; you just explode code size and possibly harm I‑cache usage.
+
+      So from a theoretical and practical standpoint, codegen per internal can’t beat a well‑implemented flattened‑array approach. It just dresses the same algorithm in more complicated clothes.
+
+      ### 6.2. “Setting ranges of bits at once via bit masks”
+
+      > iterating over the ranges in the matching original rsbs and then set the entire ranges of bits in the output bitset at once. i.e. Set an entire range of bits to 1.
+
+      This is a fine optimization if you keep your internal→original maps as *ranges*. You can implement it efficiently as:
+
+      - For the interior of a long range, use `memset` or OR with precomputed `0xFFFF...` words.
+      - Handle the head/tail partial words with masks.
+
+      But because your partition is sparse and fragmented (average ~19.5 ranges per internal, avg range length ~33.8), the sum of lengths of ranges is exactly the number of elements in each class. So the total cost to set bits across all ranges is still \(\Theta(|A(S)|)\) bit operations.
+
+      In terms of memory traffic, it ends up similar to Strategy A or the bitset scanning; you don’t gain an asymptotic advantage, you just reduce a small constant factor near range boundaries.
+
+      Implementing correct and robust partial‑word range writes is also more complex than just copying slices of integers. If your outputs are consumed as integer lists or range sets anyway, Strategy A or B is simpler and at least as fast in practice.
+
+      ---
+
+      ## 7. Putting it together: What is “absolute best”?
+
+      Given your constraints:
+
+      - Fixed partition mapping.
+      - N ≈ 50k, M ≈ 1.5k–5k.
+      - |S| ≈ 1k, |A(S)| ≈ 17k–50k.
+      - Goal: <100µs, ideally ≈20µs.
+
+      And the lower bound \(\Omega(|A(S)|)\) for explicit outputs, the **best you can do** is essentially:
+
+      - Do **one pass per element in the final result**, no more.
+
+      That’s exactly what:
+
+      - Strategy A does for a vector output.
+      - Strategy B does for a range‑based compressed output (in a new coordinate system).
+      - The “scan original_to_internal” bitset approach does for dense bitsets.
+
+      By contrast, your bitset matrix does roughly **one pass per internal in S**, not per element in the result, hence the ~15× overhead.
+
+      ### Concrete recommendation
+
+      1. If you are primarily consuming these sets as *bitsets or explicit lists*:
+         
+         - Use **Strategy A** (pre‑flattened slices) for explicit list; or
+         - Use **scan original_to_internal** for bitset output.
+
+         Expect runtimes around 20–50µs per query on a modern core, well below your current ~300µs.
+
+      2. If you frequently need set operations on original sets but rarely enumerate elements:
+         
+         - Use **Strategy B**: renumber originals so each internal is a contiguous block. Represent query results as a union of ranges in this new domain.
+         - All internal→original mapping then becomes O(|S|), which is **far** below even your 20µs target, and expansion to actual element IDs can be deferred or avoided.
+
+      3. Avoid the bitset matrix approach for large |S|; it’s provably doing about an order of magnitude more work than necessary.
+
+      4. Codegen per internal or similar tricks won’t fundamentally beat the above strategies; at best they can shave a small constant factor on top of an already optimal \(O(|A(S)|)\) algorithm.
+
+      ---
+
+      If you want, I can sketch a concrete Rust module implementing Strategy A (with fully safe code) and a microbenchmark harness, so you can drop it into your existing perf setup and directly compare timings against your current “Bitset Matrix” strategy.
     metadata:
-  - user: Add a new strategy to internal_bv_to_original_with_map based on these suggestions.
-      Don't add a field to GrammarConstraint. For internal_to_original_bitset_matrix
-      and original_vocab_size_words you can just compute it in internal_bv_to_original_with_map
+  - user: Add a new strategy to internal_bv_to_original_with_map based on these suggestions
+      (or strategies, if there's multiple suggested strategies above - I want to explore
+      all possibilities). Don't add a field to GrammarConstraint. For any required
+      precomputed data, you can just compute it in internal_bv_to_original_with_map
       every time it's needed (but don't time that part - that's allowed). This code
       is just for experimentation, after all.
     metadata:
@@ -13355,86 +14058,167 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement the high-performance bitset matrix strategy, followed by the corresponding git diff.
+      Of course. Based on the analysis, here are three highly optimized strategies for mapping internal token bitsets to original token bitsets. These strategies are designed for experimentation and compute their required data structures on-the-fly.
 
       ### Step-by-step Instructions
 
       1.  **Open the file `src/constraint.rs`**.
 
-      2.  Navigate to the function `internal_bv_to_original_with_map` inside the `impl GrammarConstraint` block. This function contains several experimental strategies for performance comparison.
+      2.  **Navigate to the `internal_bv_to_original_with_map` method** inside the `impl GrammarConstraint` block.
 
-      3.  At the end of this function, just before the final return statement (`HybridBitset::from(original_bv_rsb)`), insert the new code for "Strategy 6". This new strategy implements the highly optimized bitset matrix approach we discussed.
+      3.  **Locate the end of the method**, just before the final return statement (`HybridBitset::from(original_bv_rsb)`).
 
-          The code you will add performs the following actions:
-          *   It first builds a dense bitset matrix in row-major order from the `internal_to_original` map. Each row represents an internal token, and the bitset within that row marks all corresponding original tokens. This setup is not timed.
-          *   It then starts a timer and executes the fast union logic: it iterates through the input `internal_bv`, and for each internal token, it performs a word-by-word bitwise `OR` of the corresponding row from the matrix into a result bitset.
-          *   To ensure a fair performance comparison with the other strategies that return a `RangeSetBlaze`, it converts the final dense bitset back into a `RangeSetBlaze`.
-          *   Finally, it stops the timer and prints the performance of this new strategy to the console.
+      4.  **Insert the following code block** after the existing "STRATEGY 6" `println!` and before the final `return`. This block adds three new experimental strategies for performance comparison.
 
-          Here is the exact location for the insertion:
+          *   **Strategy 7 (Flattened Slices):** This strategy pre-flattens all original IDs into a single large vector, grouped by internal ID, and uses an offset vector to quickly copy the relevant slices into the result. This is extremely fast if the final result is needed as an explicit list of numbers.
 
-          ```rust
-          // ... inside internal_bv_to_original_with_map in src/constraint.rs
-                  }).reduce(RangeSetBlaze::new, |a, b| a | b);
-                  println!("[perf] STRATEGY 5 (Rayon):                  {:?}", instant.elapsed());
-          
-                  // <<< INSERT THE NEW STRATEGY 6 CODE HERE >>>
-          
-                  HybridBitset::from(original_bv_rsb)
-              }
-          ```
+          *   **Strategy 8 (Renumbering):** This strategy precomputes a new, temporary numbering for original IDs where each internal ID corresponds to a single contiguous range. The query then reconstructs the original IDs from these ranges. This demonstrates the power of re-indexing to simplify the problem structure.
 
-      ### Git Diffs
+          *   **Strategy 9 (Scan `original_to_internal`):** This strategy builds a reverse map from each original ID to its internal ID. The query then iterates through all original IDs, checks if their corresponding internal ID is active, and efficiently builds a dense bitset of the results. This is optimal when the final output is needed as a dense bitmask.
+
+      After inserting the code, you can run your performance tests to see how these theoretically optimal algorithms compare to the previous implementations.
+
+      ### Git Diff
 
       Here is the git diff to apply the changes to `src/constraint.rs`.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1610,6 +1610,57 @@
-               }).reduce(RangeSetBlaze::new, |a, b| a | b);
-               println!("[perf] STRATEGY 5 (Rayon):                  {:?}", instant.elapsed());
+      @@ -1610,6 +1610,111 @@
+               let is_equal = original_bv_6 == original_bv_rsb;
+               println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
        
-      +        // STRATEGY 6: Pre-computed Bitset Matrix
-      +        let max_original_id = self.llm_vocab.max_original_llm_token_id;
-      +        let original_vocab_size_words = (max_original_id / 64) + 1;
-      +        let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
-      +
-      +        let mut internal_to_original_bitset_matrix: Vec<u64> =
-      +            vec![0; num_internal_tokens * original_vocab_size_words];
-      +
-      +        for (internal_id, original_bv) in internal_to_original.iter() {
-      +            if *internal_id >= num_internal_tokens {
-      +                continue;
-      +            }
-      +            let row_start_idx = *internal_id * original_vocab_size_words;
-      +
-      +            for original_id in original_bv.iter() {
-      +                if original_id > max_original_id {
-      +                    continue;
-      +                }
-      +                let word_idx = original_id / 64;
-      +                let bit_idx = original_id % 64;
-      +                internal_to_original_bitset_matrix[row_start_idx + word_idx] |= 1 << bit_idx;
+      +        // --- STRATEGY 7: Pre-flattened slices (Strategy A) ---
+      +        let precompute_instant = std::time::Instant::now();
+      +        let mut data: Vec<usize> = Vec::new();
+      +        let mut offsets: Vec<usize> = vec![0; self.vocab.internal_max_llm_token + 2];
+      +        for internal_id in 0..=self.vocab.internal_max_llm_token {
+      +            offsets[internal_id] = data.len();
+      +            if let Some(original_bv) = internal_to_original.get(&internal_id) {
+      +                data.extend(original_bv.iter());
       +            }
       +        }
+      +        offsets[self.vocab.internal_max_llm_token + 1] = data.len();
+      +        let _precompute_elapsed = precompute_instant.elapsed();
       +
       +        let instant = std::time::Instant::now();
-      +        let mut result_bitset_words = vec![0u64; original_vocab_size_words];
-      +        for internal_id in internal_bv.iter() {
-      +            if internal_id >= num_internal_tokens {
-      +                continue;
+      +        let total_len: usize = internal_bv.iter().map(|i| {
+      +            if i <= self.vocab.internal_max_llm_token {
+      +                offsets[i + 1] - offsets[i]
+      +            } else {
+      +                0
       +            }
-      +            let row_start_idx = internal_id * original_vocab_size_words;
-      +            let bitset_slice = &internal_to_original_bitset_matrix
-      +                [row_start_idx..row_start_idx + original_vocab_size_words];
+      +        }).sum();
       +
-      +            for i in 0..original_vocab_size_words {
-      +                result_bitset_words[i] |= bitset_slice[i];
+      +        let mut result_vec: Vec<usize> = Vec::with_capacity(total_len);
+      +        for i in internal_bv.iter() {
+      +            if i <= self.vocab.internal_max_llm_token {
+      +                let start = offsets[i];
+      +                let end = offsets[i + 1];
+      +                result_vec.extend_from_slice(&data[start..end]);
       +            }
       +        }
-      +        // To be fair, we must convert back to the required type.
-      +        let _original_bv_6 = result_bitset_words
+      +        let original_bv_7 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
+      +        let elapsed = instant.elapsed();
+      +        let is_equal = original_bv_7 == original_bv_rsb;
+      +        println!("[perf] STRATEGY 7 (Flattened Slices):         {:?} (equal: {})", elapsed, is_equal);
+      +
+      +        // --- STRATEGY 8: Renumbering (Strategy B) ---
+      +        let precompute_instant = std::time::Instant::now();
+      +        let max_original_id = self.llm_vocab.max_original_llm_token_id;
+      +        let num_internals = self.vocab.internal_max_llm_token + 1;
+      +
+      +        // 1. Build original_to_internal
+      +        let mut o2i: Vec<u32> = vec![0; max_original_id + 1];
+      +        for (internal_id, original_bv) in internal_to_original.iter() {
+      +            for original_id in original_bv.iter() {
+      +                if original_id <= max_original_id {
+      +                    o2i[original_id] = *internal_id as u32;
+      +                }
+      +            }
+      +        }
+      +
+      +        // 2. Build counts
+      +        let mut counts = vec![0u32; num_internals];
+      +        for &internal_id in o2i.iter() {
+      +            counts[internal_id as usize] += 1;
+      +        }
+      +
+      +        // 3. Build start offsets
+      +        let mut start = Vec::with_capacity(num_internals + 1);
+      +        let mut current_pos = 0u32;
+      +        for &count in &counts {
+      +            start.push(current_pos);
+      +            current_pos += count;
+      +        }
+      +        start.push(current_pos);
+      +
+      +        // 4. Build new_to_old map
+      +        let mut new_to_old = vec![0u32; max_original_id + 1];
+      +        let mut write_pos = start[..num_internals].to_vec();
+      +        for (old_id, &internal_id) in o2i.iter().enumerate() {
+      +            let i = internal_id as usize;
+      +            let pos = write_pos[i] as usize;
+      +            if pos < new_to_old.len() {
+      +                new_to_old[pos] = old_id as u32;
+      +            }
+      +            write_pos[i] += 1;
+      +        }
+      +        let _precompute_elapsed = precompute_instant.elapsed();
+      +
+      +        let instant = std::time::Instant::now();
+      +        let total_len: usize = internal_bv.iter().map(|i| {
+      +            if i < num_internals {
+      +                (start[i + 1] - start[i]) as usize
+      +            } else {
+      +                0
+      +            }
+      +        }).sum();
+      +        let mut result_vec = Vec::with_capacity(total_len);
+      +        for internal_id in internal_bv.iter() {
+      +            if internal_id < num_internals {
+      +                let range_start = start[internal_id] as usize;
+      +                let range_end = start[internal_id + 1] as usize;
+      +                result_vec.extend(new_to_old[range_start..range_end].iter().map(|&v| v as usize));
+      +            }
+      +        }
+      +        let original_bv_8 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
+      +        let elapsed = instant.elapsed();
+      +        let is_equal = original_bv_8 == original_bv_rsb;
+      +        println!("[perf] STRATEGY 8 (Renumbering):             {:?} (equal: {})", elapsed, is_equal);
+      +
+      +        // --- STRATEGY 9: Scan original_to_internal (Dense Bitset) ---
+      +        let precompute_instant = std::time::Instant::now();
+      +        let max_original_id = self.llm_vocab.max_original_llm_token_id;
+      +        let mut original_to_internal_map: Vec<u32> = vec![0; max_original_id + 1];
+      +        for (internal_id, original_bv) in internal_to_original.iter() {
+      +            for original_id in original_bv.iter() {
+      +                if original_id <= max_original_id {
+      +                    original_to_internal_map[original_id] = *internal_id as u32;
+      +                }
+      +            }
+      +        }
+      +        let mut active_internals = vec![false; self.vocab.internal_max_llm_token + 1];
+      +        for i in internal_bv.iter() {
+      +            if i < active_internals.len() {
+      +                active_internals[i] = true;
+      +            }
+      +        }
+      +        let _precompute_elapsed = precompute_instant.elapsed();
+      +
+      +        let instant = std::time::Instant::now();
+      +        let original_vocab_size_words = (max_original_id / 64) + 1;
+      +        let mut result_bitset_words = vec![0u64; original_vocab_size_words];
+      +        for original_id in 0..=max_original_id {
+      +            let internal_id = original_to_internal_map[original_id] as usize;
+      +            if active_internals[internal_id] {
+      +                let word_idx = original_id / 64;
+      +                let bit_idx = original_id % 64;
+      +                result_bitset_words[word_idx] |= 1 << bit_idx;
+      +            }
+      +        }
+      +        let original_bv_9 = result_bitset_words
       +            .iter()
       +            .enumerate()
       +            .flat_map(|(word_idx, &word)| {
@@ -13447,7 +14231,9 @@ messages:
       +                })
       +            })
       +            .collect::<RangeSetBlaze<usize>>();
-      +        println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?}", instant.elapsed());
+      +        let elapsed = instant.elapsed();
+      +        let is_equal = original_bv_9 == original_bv_rsb;
+      +        println!("[perf] STRATEGY 9 (Scan o2i):                {:?} (equal: {})", elapsed, is_equal);
       +
                HybridBitset::from(original_bv_rsb)
            }
@@ -13464,168 +14250,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Add Strategy 6 (Pre-computed Bitset Matrix)
-      to internal_bv_to_original_with_map for performance testing"'
-    metadata:
-  - user: |-
-      Diff of src/datastructures/hybrid_bitset.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Modify the code so that after each strategy it checks that the resulting
-      bitvec equals the first (reference) strategy's. Don't assert or panic if not,
-      just print it on that same result line as the timing get printed on. Don't count
-      the time that it takes to convert to a form where we can do the equality check.
-    metadata:
-  - assistant: |-
-      Of course. Here are the step-by-step instructions to add correctness checks to your performance experiments, followed by the git diff.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file `src/constraint.rs`**.
-
-      2.  Navigate to the function `internal_bv_to_original_with_map` within the `impl GrammarConstraint` block.
-
-      3.  This function contains several performance experiments labeled "STRATEGY". We will modify each one from Strategy 2 onwards to compare its result against Strategy 1.
-
-      4.  **For Strategy 2 (`BTree + im::HashSet`):**
-          *   Find the line `println!("[perf] STRATEGY 2 ...")`.
-          *   Before this line, capture the elapsed time into a variable.
-          *   After capturing the time, convert the result (`bv2`, which is an `im::HashSet`) into a `RangeSetBlaze` so it can be compared with the reference result `original_bv_rsb`.
-          *   Perform the equality check.
-          *   Modify the `println!` to include the elapsed time variable and the boolean result of the equality check.
-
-      5.  **For Strategy 3 (`HashMap + RangeSetBlaze`):**
-          *   Find the line `println!("[perf] STRATEGY 3 ...")`.
-          *   Before this line, capture the elapsed time.
-          *   The result `original_bv_3` is already a `RangeSetBlaze`, so no conversion is needed.
-          *   Perform the equality check against `original_bv_rsb`.
-          *   Modify the `println!` to include the timing and the equality check result.
-
-      6.  **For Strategy 4 (`Vec + RangeSetBlaze`):**
-          *   Find the line `println!("[perf] STRATEGY 4 ...")`.
-          *   Before this line, capture the elapsed time.
-          *   The result `original_bv_4` is already a `RangeSetBlaze`.
-          *   Perform the equality check against `original_bv_rsb`.
-          *   Modify the `println!` to include the timing and the equality check result.
-
-      7.  **For Strategy 5 (`Rayon`):**
-          *   Find the line that begins `let _original_bv_5 = ...`. Change `_original_bv_5` to `original_bv_5` so you can use the variable.
-          *   Find the line `println!("[perf] STRATEGY 5 ...")`.
-          *   Before this line, capture the elapsed time.
-          *   The result `original_bv_5` is already a `RangeSetBlaze`.
-          *   Perform the equality check against `original_bv_rsb`.
-          *   Modify the `println!` to include the timing and the equality check result.
-
-      8.  **For Strategy 6 (`Bitset Matrix`):**
-          *   Find the line that begins `let _original_bv_6 = ...`. Change `_original_bv_6` to `original_bv_6`.
-          *   Find the line `println!("[perf] STRATEGY 6 ...")`.
-          *   Before this line, capture the elapsed time.
-          *   The result `original_bv_6` is a `RangeSetBlaze`.
-          *   Perform the equality check against `original_bv_rsb`.
-          *   Modify the `println!` to include the timing and the equality check result.
-
-      ### Git Diffs
-
-      Here is the git diff to apply these changes.
-
-      ```diff
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -1568,14 +1568,20 @@
-                       bv2.extend(bv.iter().copied());
-                   }
-               }
-      -        println!("[perf] STRATEGY 2 (BTree + im::HashSet):    {:?}", instant.elapsed());
-      +        let elapsed = instant.elapsed();
-      +        let bv2_rsb: RangeSetBlaze<usize> = bv2.iter().copied().collect();
-      +        let is_equal = bv2_rsb == original_bv_rsb;
-      +        println!("[perf] STRATEGY 2 (BTree + im::HashSet):    {:?} (equal: {})", elapsed, is_equal);
-       
-               // STRATEGY 3: HashMap lookup
-               let i2o_hashmap: std::collections::HashMap<_, _> =
-                   internal_to_original.iter().map(|(k, v)| (*k, v)).collect();
-               let instant = std::time::Instant::now();
-               let mut original_bv_3 = RangeSetBlaze::new();
-               for i in internal_bv.iter() {
-                   if let Some(bv) = i2o_hashmap.get(&i) {
-                       original_bv_3 |= bv.inner.as_ref();
-                   }
-               }
-      -        println!("[perf] STRATEGY 3 (HashMap + RangeSetBlaze): {:?}", instant.elapsed());
-      +        let elapsed = instant.elapsed();
-      +        let is_equal = original_bv_3 == original_bv_rsb;
-      +        println!("[perf] STRATEGY 3 (HashMap + RangeSetBlaze): {:?} (equal: {})", elapsed, is_equal);
-       
-               // STRATEGY 4: Vec lookup
-               let mut i2o_vec: Vec<Option<LLMTokenBV>> =
-      @@ -1589,11 +1595,14 @@
-                       original_bv_4 |= bv.inner.as_ref();
-                   }
-               }
-      -        println!("[perf] STRATEGY 4 (Vec + RangeSetBlaze):     {:?}", instant.elapsed());
-      +        let elapsed = instant.elapsed();
-      +        let is_equal = original_bv_4 == original_bv_rsb;
-      +        println!("[perf] STRATEGY 4 (Vec + RangeSetBlaze):     {:?} (equal: {})", elapsed, is_equal);
-       
-               // STRATEGY 5: Rayon
-               let instant = std::time::Instant::now();
-      -        let _original_bv_5 = internal_bv.inner.ranges().par_bridge().map(|range| {
-      +        let original_bv_5 = internal_bv.inner.ranges().par_bridge().map(|range| {
-                   let mut partial_bv = RangeSetBlaze::new();
-                   for i in range {
-                       if let Some(bv) = internal_to_original.get(&i) {
-      @@ -1602,7 +1611,9 @@
-                   }
-                   partial_bv
-               }).reduce(RangeSetBlaze::new, |a, b| a | b);
-      -        println!("[perf] STRATEGY 5 (Rayon):                  {:?}", instant.elapsed());
-      +        let elapsed = instant.elapsed();
-      +        let is_equal = original_bv_5 == original_bv_rsb;
-      +        println!("[perf] STRATEGY 5 (Rayon):                  {:?} (equal: {})", elapsed, is_equal);
-       
-               // STRATEGY 6: Pre-computed Bitset Matrix
-               let max_original_id = self.llm_vocab.max_original_llm_token_id;
-      @@ -1638,7 +1649,7 @@
-                   }
-               }
-               // To be fair, we must convert back to the required type.
-      -        let _original_bv_6 = result_bitset_words
-      +        let original_bv_6 = result_bitset_words
-                   .iter()
-                   .enumerate()
-                   .flat_map(|(word_idx, &word)| {
-      @@ -1652,7 +1663,9 @@
-                       })
-                   })
-                   .collect::<RangeSetBlaze<usize>>();
-      -        println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?}", instant.elapsed());
-      +        let elapsed = instant.elapsed();
-      +        let is_equal = original_bv_6 == original_bv_rsb;
-      +        println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
-       
-               HybridBitset::from(original_bv_rsb)
-           }
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
-    metadata:
-  - user: 'Changes committed with message: "Add correctness checks (equality against
-      reference) and timing to all performance strategies in internal_bv_to_original_with_map"'
+  - user: 'Changes committed with message: "Add experimental performance strategies
+      7, 8, and 9 to internal_bv_to_original_with_map"'
     metadata:
 ...
