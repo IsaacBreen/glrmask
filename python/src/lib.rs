@@ -5,11 +5,11 @@ use numpy::{IntoPyArray, PyArray1};
 use ouroboros::self_referencing;
 use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyIterator, PySet, PyTuple};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-use sep1::datastructures::bitset::Bitset as RustBitset;
+use sep1::datastructures::bitset::{Bitset as RustBitset, Bitset};
 use sep1::datastructures::gss_acc::{Acc as RustAcc, Acc};
-use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
+use sep1::datastructures::hybrid_bitset::{HybridBitset as RustHybridBitset, HybridBitset};
 use sep1::datastructures::leveled_gss::LeveledGSS;
 use sep1::datastructures::u8set::U8Set;
 use sep1::finite_automata::Regex;
@@ -588,6 +588,11 @@ impl PyGrammarConstraint {
 
     pub fn internal_bv_to_original_hybrid_bitset(&self, internal_bv: &PyHybridBitset) -> PyResult<PyBitset> {
         let original_bv = self.inner.internal_bv_to_original(&internal_bv.inner);
+        Ok(PyBitset { inner: original_bv })
+    }
+
+    pub fn internal_bv_to_original(&self, it: Bound<'_, PyIterator>) -> PyResult<PyBitset> {
+        let original_bv = self.inner.internal_bv_to_original(&HybridBitset::from_iter(it.extract::<Vec<usize>>()?));
         Ok(PyBitset { inner: original_bv })
     }
 }
