@@ -2778,6 +2778,8 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn is_active(&self) -> bool { !self.state.is_empty() }
 
+    pub fn is_valid(&self) -> bool { self.is_active() }
+
     pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
         &self.state
     }

@@ -1224,7 +1224,7 @@ impl PyGrammarConstraintState {
     }
 
     fn is_valid(&self) -> bool {
-        self.inner.with_inner(|state| !state.get_mask().is_empty())
+        self.inner.with_inner(|state| state.is_valid())
     }
 
     fn __str__(&self) -> String {
