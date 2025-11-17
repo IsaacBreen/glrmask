@@ -1,6 +1,6 @@
 from typing import Dict, Optional
 import _sep1 as ffi
-from ..common_interface import RangeSet
+from ..range_set.ffi_bitset import FFIBitset as Bitset
 
 class Model:
     """
@@ -22,7 +22,7 @@ class Model:
         # print(f"MASK 2: {s.get_mask()}")
         return Model(constraint_state)
 
-    def get_mask(self) -> RangeSet:
+    def get_mask(self) -> Bitset:
         """Calls the underlying Rust implementation for get_mask."""
         # print("\n--- get_mask START (rust_model.py) ---")
 
@@ -30,7 +30,7 @@ class Model:
 
         # print("\n--- get_mask END (rust_model.py) ---")
         # print(f"get_mask() returned {RangeSet.from_ranges(mask_bv.to_ranges())}")
-        return RangeSet.from_ffi_bitset(mask_bv)
+        return Bitset.from_ffi_bitset(mask_bv)
 
     def commit(self, token_id: int):
         """Commits a token to the underlying Rust state."""
