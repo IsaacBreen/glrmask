@@ -843,7 +843,7 @@ impl Display for GLRParser {
 pub struct GLRParserState<'a> {
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
-    phase: ParserPhase,
+    pub phase: ParserPhase,
 }
 
 // key for work map: (depth, state_id)

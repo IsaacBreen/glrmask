@@ -13,7 +13,7 @@ use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset
 use sep1::datastructures::u8set::U8Set;
 use sep1::finite_automata::Regex;
 use sep1::finite_automata::{_choice as regex_choice, _seq as regex_seq, eat_u8, eat_u8_negation, eat_u8_seq, eat_u8_set, eat_u8_set_negation, eps, greedy_group, groups as regex_groups, non_greedy_group, opt, prec, rep, rep1, Expr as RegexExpr, ExprGroups as RegexGroups};
-use sep1::glr::parser::GLRParser;
+use sep1::glr::parser::{GLRParser, GLRParserState, ParseState};
 use sep1::interface::IncrementalParser;
 use sep1::interface::{choice as grammar_choice, eat_any_fast, literal as grammar_literal, optional as grammar_optional, r#ref as grammar_ref, repeat as grammar_repeat, sequence as grammar_sequence, CompiledGrammar, GrammarDefinition, GrammarExpr};
 use sep1::json_serialization::{JSONConvertible, JSONNode};
@@ -953,9 +953,9 @@ impl PyGrammarConstraintState {
         // builder to reconstruct the self-referential struct from the cloned parts.
 
         // Extract the map of active states, which are cloneable and do not contain references.
-        let active_states: BTreeMap<sep1::tokenizer::TokenizerStateID, sep1::glr::parser::ActiveGLRState> =
+        let active_states: BTreeMap<sep1::tokenizer::TokenizerStateID, (ParseState, _)> =
             self.inner.with_inner(|s| {
-                s.state.iter().map(|(k, v)| (*k, v.active_state.clone())).collect()
+                s.state.iter().map(|(k, v)| (*k, (v.active_state.clone(), v.phase))).collect()
             });
 
         // Use the builder to construct a new, cloned instance.
@@ -966,7 +966,7 @@ impl PyGrammarConstraintState {
                 // 2. The builder closure creates the "borrower" fields.
                 inner_builder: move |c: &PyGrammarConstraint| {
                     let new_parser_ref = &c.inner.parser;
-                    let new_state_map = active_states.into_iter().map(|(id, active_state)| (id, sep1::glr::parser::GLRParserState { active_state, parser: new_parser_ref })).collect();
+                    let new_state_map = active_states.into_iter().map(|(id, (active_state, phase))| (id, GLRParserState { active_state, parser: new_parser_ref, phase })).collect();
                     Ok::<_, PyErr>(sep1::constraint::GrammarConstraintState { parent: &c.inner, state: new_state_map })
                 }
             }.try_build().expect("Failed to build cloned GrammarConstraintState")
