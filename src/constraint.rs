@@ -125,11 +125,36 @@ pub struct StageVocab {
 
 impl JSONConvertible for LLMVocab {
     fn to_json(&self) -> JSONNode {
-        todo!()
+        let mut m = StdMap::new();
+        m.insert(
+            "llm_token_map".to_string(),
+            self.llm_token_map.to_json(),
+        );
+        m.insert(
+            "max_original_llm_token_id".to_string(),
+            self.max_original_llm_token_id.to_json(),
+        );
+        JSONNode::Object(m)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        todo!()
+        match node {
+            JSONNode::Object(mut obj) => {
+                let llm_token_map = obj
+                    .remove("llm_token_map")
+                    .ok_or("LLMVocab: missing llm_token_map".to_string())
+                    .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
+                let max_original_llm_token_id = obj
+                    .remove("max_original_llm_token_id")
+                    .ok_or("LLMVocab: missing max_original_llm_token_id".to_string())
+                    .and_then(usize::from_json)?;
+                Ok(LLMVocab {
+                    llm_token_map,
+                    max_original_llm_token_id,
+                })
+            }
+            _ => Err("LLMVocab: expected object".to_string()),
+        }
     }
 }
 
@@ -768,6 +793,7 @@ impl JSONConvertible for GrammarConstraint {
             self.terminal_map_by_llm.to_json(),
         );
         obj.insert("vocab".to_string(), self.vocab.to_json());
+        obj.insert("llm_vocab".to_string(), self.llm_vocab.to_json());
         obj.insert(
             "original_to_dummy_map".to_string(),
             self.original_to_dummy_map.to_json(),
@@ -843,41 +869,49 @@ impl JSONConvertible for GrammarConstraint {
                         None => DedupValueMap::new(),
                     };
 
+                // Handle llm_vocab deserialization with fallback
+                let llm_vocab = if let Some(n) = obj.remove("llm_vocab") {
+                    Arc::new(LLMVocab::from_json(n)?)
+                } else {
+                    // Fallback to old format
+                    let max_original_llm_token_id = obj
+                        .remove("max_original_llm_token_id")
+                        .ok_or_else(|| "Missing field max_original_llm_token_id".to_string())
+                        .and_then(usize::from_json)?;
+
+                    let llm_token_map = obj
+                        .remove("llm_token_map")
+                        .ok_or_else(|| "Missing field llm_token_map".to_string())
+                        .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
+
+                    Arc::new(LLMVocab {
+                        llm_token_map,
+                        max_original_llm_token_id,
+                    })
+                };
+
                 // Stage vocab: new key "vocab", fall back to old names if present.
                 let mut vocab_node = if let Some(n) = obj.remove("vocab") {
                     n
                 } else if let Some(n) = obj.remove("precompute_vocab") {
                     n
                 } else {
-                    return Err("Missing stage vocab (vocab/precompute_vocab/precompute0_vocab)"
-                        .to_string());
+                    return Err(
+                        "Missing stage vocab (vocab/precompute_vocab/precompute0_vocab)"
+                            .to_string(),
+                    );
                 };
 
                 // For backward compatibility, inject max_original_llm_token_id into vocab JSON if needed.
-                // This is a bit of a hack to make StageVocab self-contained.
-                let max_original_llm_token_id = if let JSONNode::Object(ref vocab_obj) = vocab_node {
-                    if vocab_obj.contains_key("max_original_llm_token_id") {
-                        // It's already there, great.
-                        0 // dummy value, won't be used
-                    } else {
-                        // Not in vocab, must be at top level (old format)
-                        obj.remove("max_original_llm_token_id")
-                            .ok_or_else(|| "Missing field max_original_llm_token_id".to_string())
-                            .and_then(usize::from_json)?
-                    }
-                } else { 0 };
-
                 if let JSONNode::Object(ref mut vocab_obj) = vocab_node {
                     if !vocab_obj.contains_key("max_original_llm_token_id") {
-                        vocab_obj.insert("max_original_llm_token_id".to_string(), max_original_llm_token_id.to_json());
+                        vocab_obj.insert(
+                            "max_original_llm_token_id".to_string(),
+                            llm_vocab.max_original_llm_token_id.to_json(),
+                        );
                     }
                 }
                 let vocab = StageVocab::from_json(vocab_node)?;
-
-                let llm_token_map = obj
-                    .remove("llm_token_map")
-                    .ok_or_else(|| "Missing field llm_token_map".to_string())
-                    .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
 
                 let original_to_dummy_map = match obj.remove("original_to_dummy_map") {
                     Some(n) => BTreeMap::<TerminalID, TerminalID>::from_json(n)?,
@@ -888,11 +922,7 @@ impl JSONConvertible for GrammarConstraint {
                     tokenizer,
                     parser,
                     precomputed1,
-                    precomputed4,
-                    llm_vocab: Arc::new(LLMVocab {
-                        llm_token_map,
-                        max_original_llm_token_id,
-                    }),
+                    precomputed4,                    llm_vocab,
                     token_name_map,
                     possible_matches,
                     state_map_by_llm,
