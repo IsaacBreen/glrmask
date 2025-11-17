@@ -67,7 +67,7 @@ impl<'a> GrammarConstraintState<'a> {
 
             if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as i16) {
                 let f = |llm_tokens_union: &Arc<RangeSetBlaze<usize>>| {
-                    let new_rsb = llm_tokens_union & &Arc::new(weight.rsb.clone());
+                    let new_rsb = llm_tokens_union.as_ref() & &weight.rsb;
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }
                 };
                 let weighted_gss = gss.apply_and_prune(f);
