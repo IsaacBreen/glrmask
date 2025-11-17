@@ -918,6 +918,7 @@ fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
 }
 
 #[self_referencing]
+#[derive(Clone)]
 struct PyGrammarConstraintStateWrapper {
     constraint: PyGrammarConstraint, // Owns the Arc'd constraint
     #[borrows(constraint)]
