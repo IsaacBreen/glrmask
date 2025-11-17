@@ -126,24 +126,46 @@ struct DwaStateBuilder {
 
 impl DWA {
     pub fn simplify(&mut self) {
-        crate::debug!(4, "[DWA::simplify] Num states before simplification: {}", self.states.len());
-        let instant = std::time::Instant::now();
+        let initial_states = self.states.len();
+        if initial_states == 0 {
+            return;
+        }
+
         let mut internal = self.clone();
+        let internal_start = std::time::Instant::now();
         internal.simplify_internal();
-        crate::debug!(
-            4,
-            "[DWA::simplify] Simplification took {:.3} seconds. Num states: {}",
-            instant.elapsed().as_secs_f64(),
-            internal.states.len()
-        );
+        let internal_time = internal_start.elapsed();
+        let internal_states = internal.states.len();
+
         let mut rustfst = self.clone();
+        let rustfst_start = std::time::Instant::now();
         rustfst.simplify_with_rustfst();
+        let rustfst_time = rustfst_start.elapsed();
+        let rustfst_states = rustfst.states.len();
+
+        let state_cmp = match internal_states.cmp(&rustfst_states) {
+            std::cmp::Ordering::Less => "<",
+            std::cmp::Ordering::Equal => "=",
+            std::cmp::Ordering::Greater => ">",
+        };
+        let time_cmp = match internal_time.cmp(&rustfst_time) {
+            std::cmp::Ordering::Less => "<",
+            std::cmp::Ordering::Equal => "=",
+            std::cmp::Ordering::Greater => ">",
+        };
+
         crate::debug!(
             4,
-            "[DWA::simplify] RustFST minimization took {:.3} seconds. Num states: {}",
-            instant.elapsed().as_secs_f64(),
-            rustfst.states.len()
+            "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]",
+            initial_states,
+            internal_time,
+            internal_states,
+            rustfst_time,
+            rustfst_states,
+            state_cmp,
+            time_cmp
         );
+
         *self = internal;
     }
 
@@ -627,24 +649,46 @@ struct NwaStateBuilder {
 
 impl NWA {
     pub fn simplify(&mut self) {
-        crate::debug!(4, "[NWA::simplify] Num states before simplification: {}", self.states.len());
-        let instant = std::time::Instant::now();
+        let initial_states = self.states.len();
+        if initial_states == 0 {
+            return;
+        }
+
         let mut internal = self.clone();
+        let internal_start = std::time::Instant::now();
         internal.simplify_internal();
-        crate::debug!(
-            4,
-            "[NWA::simplify] Simplification took {:.3} seconds. Num states: {}",
-            instant.elapsed().as_secs_f64(),
-            internal.states.len()
-        );
+        let internal_time = internal_start.elapsed();
+        let internal_states = internal.states.len();
+
         let mut rustfst = self.clone();
+        let rustfst_start = std::time::Instant::now();
         rustfst.simplify_with_rustfst();
+        let rustfst_time = rustfst_start.elapsed();
+        let rustfst_states = rustfst.states.len();
+
+        let state_cmp = match internal_states.cmp(&rustfst_states) {
+            std::cmp::Ordering::Less => "<",
+            std::cmp::Ordering::Equal => "=",
+            std::cmp::Ordering::Greater => ">",
+        };
+        let time_cmp = match internal_time.cmp(&rustfst_time) {
+            std::cmp::Ordering::Less => "<",
+            std::cmp::Ordering::Equal => "=",
+            std::cmp::Ordering::Greater => ">",
+        };
+
         crate::debug!(
             4,
-            "[NWA::simplify] RustFST minimization took {:.3} seconds. Num states: {}",
-            instant.elapsed().as_secs_f64(),
-            rustfst.states.len()
+            "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]",
+            initial_states,
+            internal_time,
+            internal_states,
+            rustfst_time,
+            rustfst_states,
+            state_cmp,
+            time_cmp
         );
+
         *self = internal;
     }
 

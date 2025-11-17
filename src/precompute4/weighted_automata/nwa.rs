@@ -396,25 +396,61 @@ impl NWA {
     }
 
     pub fn determinize(&self) -> DWA {
-        let instant = std::time::Instant::now();
-        crate::debug!(4, "Determinizing NWA with {} states...", self.states.len());
+        let initial_states = self.states.len();
 
-        let mut determinize_here = self._determinize();
-        let num_states = determinize_here.states.len();
-        determinize_here.simplify();
-        crate::debug!(4, "1. Determinization took {:.2?}, resulting DWA has {} states, {} after simplification.", instant.elapsed(), num_states, determinize_here.states.len());
+        // 1. Internal (_determinize)
+        let internal_start = std::time::Instant::now();
+        let mut internal_dwa = self._determinize();
+        let internal_states_before_simp = internal_dwa.states.len();
+        internal_dwa.simplify();
+        let internal_time_total = internal_start.elapsed();
+        let internal_states_after_simp = internal_dwa.states.len();
 
-        let mut via_determinize_rs = self.determinize_to_dwa2();
-        let num_states_rs = via_determinize_rs.states.len();
-        via_determinize_rs.simplify();
-        crate::debug!(4, "2. Determinization via Rust code took {:.2?}, resulting DWA has {} states, {} after simplification.", instant.elapsed(), num_states_rs, via_determinize_rs.states.len());
+        // 2. Rust (determinize_to_dwa2)
+        let rust_start = std::time::Instant::now();
+        let mut rust_dwa = self.determinize_to_dwa2();
+        let rust_states_before_simp = rust_dwa.states.len();
+        rust_dwa.simplify();
+        let rust_time_total = rust_start.elapsed();
+        let rust_states_after_simp = rust_dwa.states.len();
 
-        let mut via_determinize_rustfst = self.determinize_to_dwa_with_rustfst();
-        let num_states_rustfst = via_determinize_rustfst.states.len();
-        via_determinize_rustfst.simplify();
-        crate::debug!(4, "3. Determinization via RustFST took {:.2?}, resulting DWA has {} states, {} after simplification.", instant.elapsed(), num_states_rustfst, via_determinize_rustfst.states.len());
+        // 3. RustFST (determinize_to_dwa_with_rustfst)
+        let rustfst_start = std::time::Instant::now();
+        let mut rustfst_dwa = self.determinize_to_dwa_with_rustfst();
+        let rustfst_states_before_simp = rustfst_dwa.states.len();
+        rustfst_dwa.simplify();
+        let rustfst_time_total = rustfst_start.elapsed();
+        let rustfst_states_after_simp = rustfst_dwa.states.len();
 
-        determinize_here
+        // Comparisons
+        let s1 = internal_states_after_simp;
+        let s2 = rust_states_after_simp;
+        let s3 = rustfst_states_after_simp;
+        let t1 = internal_time_total;
+        let t2 = rust_time_total;
+        let t3 = rustfst_time_total;
+
+        let best_s = s1.min(s2).min(s3);
+        let best_t = t1.min(t2).min(t3);
+
+        let s1_marker = if s1 == best_s { "*" } else { " " };
+        let s2_marker = if s2 == best_s { "*" } else { " " };
+        let s3_marker = if s3 == best_s { "*" } else { " " };
+
+        let t1_marker = if t1 == best_t { "*" } else { " " };
+        let t2_marker = if t2 == best_t { "*" } else { " " };
+        let t3_marker = if t3 == best_t { "*" } else { " " };
+
+        crate::debug!(
+            4,
+            "[Determinize NWA({})] Internal: t={:.2?}{}, s={}->{}{}| Rust: t={:.2?}{}, s={}->{}{}| RustFST: t={:.2?}{}, s={}->{}{}",
+            initial_states,
+            t1, t1_marker, internal_states_before_simp, s1, s1_marker,
+            t2, t2_marker, rust_states_before_simp, s2, s2_marker,
+            t3, t3_marker, rustfst_states_before_simp, s3, s3_marker
+        );
+
+        internal_dwa
     }
 
     pub fn determinize_inplace(&mut self) {
