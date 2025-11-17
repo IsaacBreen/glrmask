@@ -2544,6 +2544,23 @@ impl Merge for RangeSetBlaze<usize> {
     fn merge(&self, other: &Self) -> Self { self | other }
 }
 
+impl Merge for Arc<RangeSetBlaze<usize>> {
+    fn merge(&self, other: &Self) -> Self {
+        if Arc::ptr_eq(self, other) {
+            return self.clone();
+        }
+        let mut merged = self.as_ref().clone();
+        merged |= other.as_ref();
+        if merged == **self {
+            self.clone()
+        } else if merged == **other {
+            other.clone()
+        } else {
+            Arc::new(merged)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GrammarConstraintState
 // ---------------------------------------------------------------------------
