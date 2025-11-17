@@ -234,6 +234,7 @@ class Model(GraphProvider):
     parser_table: ParserTable
     tokenizer: PyTokenizer
     tokenizer_initial_state: int
+    vocab: ffi.StageVocab
     possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
     id_to_token: Dict[int, bytes]
     internal_to_original_map: Dict[int, RangeSetOut]
@@ -251,6 +252,7 @@ class Model(GraphProvider):
         data = json.loads(s)
         dumps, bs_from_json = json.dumps, ffi.HybridBitset.from_json_string
 
+        py_vocab = ffi.StageVocab.from_json_string(dumps(data['vocab']))
         vocab = data['vocab']
         all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
 
@@ -351,6 +353,7 @@ class Model(GraphProvider):
             parser_table=parser_table,
             tokenizer=tokenizer,
             tokenizer_initial_state=tokenizer.initial_state_id(),
+            vocab=py_vocab,
             possible_matches_cache=possible_matches_cache,
             id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
             internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
@@ -571,10 +574,8 @@ class Model(GraphProvider):
                                 self._merge_into_queue(queue, final_gss, target_id)
 
         stats.start('get_mask.teardown.final_conversion')
-        original_indices = RangeSetOut.empty()
-        for i in final_mask.iter_indices():
-            if i in self.internal_to_original_map:
-                original_indices |= self.internal_to_original_map[i]
+        original_bitset = self.vocab.internal_bv_to_original(final_mask.inner)
+        original_indices = RangeSetOut.from_indices(original_bitset.to_indices())
         stats.stop('get_mask.teardown.final_conversion')
         stats.stop('get_mask')
 

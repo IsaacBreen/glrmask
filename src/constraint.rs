@@ -119,6 +119,8 @@ pub struct StageVocab {
     pub original_to_internal: BTreeMap<usize, usize>,
     pub internal_to_original: BTreeMap<usize, LLMTokenBV>,
     pub internal_max_llm_token: usize,
+    pub max_original_llm_token_id: usize,
+    pub internal_to_original_sparse_matrix: Vec<Vec<(u16, u64)>>,
 }
 
 impl JSONConvertible for StageVocab {
@@ -137,6 +139,14 @@ impl JSONConvertible for StageVocab {
             "internal_max_llm_token".to_string(),
             self.internal_max_llm_token.to_json(),
         );
+        m.insert(
+            "max_original_llm_token_id".to_string(),
+            self.max_original_llm_token_id.to_json(),
+        );
+        m.insert(
+            "internal_to_original_sparse_matrix".to_string(),
+            self.internal_to_original_sparse_matrix.to_json(),
+        );
         JSONNode::Object(m)
     }
 
@@ -151,6 +161,10 @@ impl JSONConvertible for StageVocab {
                     .remove("internal_max_llm_token")
                     .ok_or("StageVocab: missing internal_max_llm_token".to_string())
                     .and_then(usize::from_json)?;
+                let max_original_llm_token_id = obj
+                    .remove("max_original_llm_token_id")
+                    .ok_or("StageVocab: missing max_original_llm_token_id".to_string())
+                    .and_then(usize::from_json)?;
                 let ito_vec: Vec<(usize, Vec<usize>)> = obj
                     .remove("internal_to_original")
                     .ok_or("StageVocab: missing internal_to_original".to_string())
@@ -159,14 +173,101 @@ impl JSONConvertible for StageVocab {
                     .into_iter()
                     .map(|(k, v)| (k, v.into_iter().collect()))
                     .collect();
+                let internal_to_original_sparse_matrix =
+                    match obj.remove("internal_to_original_sparse_matrix") {
+                        Some(n) => Vec::<Vec<(u16, u64)>>::from_json(n)?,
+                        None => {
+                            // For backward compatibility, compute it if missing.
+                            Self::build_internal_to_original_sparse_matrix(
+                                &internal_to_original,
+                                max_original_llm_token_id,
+                                internal_max_llm_token,
+                            )
+                        }
+                    };
+
                 Ok(StageVocab {
                     original_to_internal,
                     internal_to_original,
                     internal_max_llm_token,
+                    max_original_llm_token_id,
+                    internal_to_original_sparse_matrix,
                 })
             }
             _ => Err("StageVocab: expected object".to_string()),
         }
+    }
+}
+
+impl StageVocab {
+    pub(crate) fn build_internal_to_original_sparse_matrix(
+        internal_to_original: &BTreeMap<usize, LLMTokenBV>,
+        max_original_llm_token_id: usize,
+        internal_max_llm_token: usize,
+    ) -> Vec<Vec<(u16, u64)>> {
+        type Word = u64;
+        const WORD_BITS: usize = 64;
+
+        let num_internal_tokens = internal_max_llm_token + 1;
+        let mut sparse_matrix: Vec<Vec<(u16, Word)>> = vec![Vec::new(); num_internal_tokens];
+
+        for (internal_id, original_bv) in internal_to_original.iter() {
+            if *internal_id >= num_internal_tokens {
+                continue;
+            }
+
+            let mut temp_row = BTreeMap::<u16, Word>::new();
+            for original_id in original_bv.iter() {
+                if original_id > max_original_llm_token_id {
+                    continue;
+                }
+                let word_idx = (original_id / WORD_BITS) as u16;
+                let bit_idx = original_id % WORD_BITS;
+                *temp_row.entry(word_idx).or_insert(0) |= 1 << bit_idx;
+            }
+            if !temp_row.is_empty() {
+                sparse_matrix[*internal_id] = temp_row.into_iter().collect();
+            }
+        }
+        sparse_matrix
+    }
+
+    /// Convert an internal BV (using `self.vocab`) back to original IDs.
+    pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> Bitset {
+        let mut internal_bv = internal_bv.clone();
+        if internal_bv.is_all() {
+            internal_bv = HybridBitset::ones(self.internal_max_llm_token + 1);
+        }
+
+        type Word = u64;
+        const WORD_BITS: usize = 64;
+
+        let max_original_id = self.max_original_llm_token_id;
+        let original_vocab_size_words = (max_original_id / WORD_BITS) + 1;
+        let num_internal_tokens = self.internal_max_llm_token + 1;
+
+        let mut result_bitset_words = vec![0 as Word; original_vocab_size_words];
+        for internal_id in internal_bv.iter() {
+            if internal_id >= num_internal_tokens {
+                continue;
+            }
+            // It's possible for an internal ID to exist in the bitvector but not have a
+            // corresponding entry in the sparse matrix if it corresponds to no original tokens.
+            if let Some(sparse_row) = self.internal_to_original_sparse_matrix.get(internal_id) {
+                for &(word_idx, word) in sparse_row {
+                    result_bitset_words[word_idx as usize] |= word;
+                }
+            }
+        }
+
+        Bitset::from_words_vec(result_bitset_words)
+    }
+
+    pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
+        GrammarConstraint::original_bv_to_internal_with_map(
+            original_bv,
+            &self.original_to_internal,
+        )
     }
 }
 
@@ -588,9 +689,6 @@ pub struct GrammarConstraint {
 
     /// Maps original terminal IDs to dummy terminal IDs (if any).
     pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
-
-    /// Precomputed sparse bitset matrix for internal->original token ID mapping.
-    pub(crate) internal_to_original_sparse_matrix: Vec<Vec<(u16, u64)>>,
 }
 
 impl GrammarConstraint {
@@ -625,10 +723,7 @@ impl GrammarConstraint {
         assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
         assert_eq!(self.vocab, other.vocab);
         assert_eq!(self.original_to_dummy_map, other.original_to_dummy_map);
-        assert_eq!(
-            self.internal_to_original_sparse_matrix,
-            other.internal_to_original_sparse_matrix
-        );
+
         // precomputed4 still has no PartialEq; skip.
     }
 }
@@ -640,14 +735,6 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("parser".to_string(), self.parser.to_json());
         obj.insert("precomputed1".to_string(), self.precomputed1.to_json());
         obj.insert("precomputed4".to_string(), self.precomputed4.to_json());
-        obj.insert(
-            "llm_token_map".to_string(),
-            self.llm_vocab.llm_token_map.to_json(),
-        );
-        obj.insert(
-            "max_original_llm_token_id".to_string(),
-            self.llm_vocab.max_original_llm_token_id.to_json(),
-        );
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert(
             "possible_matches".to_string(),
@@ -675,10 +762,6 @@ impl JSONConvertible for GrammarConstraint {
             "original_to_dummy_map".to_string(),
             self.original_to_dummy_map.to_json(),
         );
-        obj.insert(
-            "internal_to_original_sparse_matrix".to_string(),
-            self.internal_to_original_sparse_matrix.to_json(),
-        );
         JSONNode::Object(obj)
     }
 
@@ -702,16 +785,6 @@ impl JSONConvertible for GrammarConstraint {
                     .ok_or_else(|| "Missing field precomputed4".to_string())
                     .and_then(Precomputed4::from_json)?;
 
-                let llm_token_map = obj
-                    .remove("llm_token_map")
-                    .ok_or_else(|| "Missing field llm_token_map".to_string())
-                    .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
-                let max_original_llm_token_id = obj
-                    .remove("max_original_llm_token_id")
-                    .ok_or_else(|| {
-                        "Missing field max_original_llm_token_id".to_string()
-                    })
-                    .and_then(usize::from_json)?;
                 let token_name_map = obj
                     .remove("token_name_map")
                     .ok_or_else(|| "Missing field token_name_map".to_string())
@@ -761,34 +834,47 @@ impl JSONConvertible for GrammarConstraint {
                     };
 
                 // Stage vocab: new key "vocab", fall back to old names if present.
-                let vocab = if let Some(n) = obj.remove("vocab") {
-                    StageVocab::from_json(n)?
+                let mut vocab_node = if let Some(n) = obj.remove("vocab") {
+                    n
                 } else if let Some(n) = obj.remove("precompute_vocab") {
-                    StageVocab::from_json(n)?
+                    n
                 } else {
                     return Err("Missing stage vocab (vocab/precompute_vocab/precompute0_vocab)"
                         .to_string());
                 };
+
+                // For backward compatibility, inject max_original_llm_token_id into vocab JSON if needed.
+                // This is a bit of a hack to make StageVocab self-contained.
+                let max_original_llm_token_id = if let JSONNode::Object(ref vocab_obj) = vocab_node {
+                    if vocab_obj.contains_key("max_original_llm_token_id") {
+                        // It's already there, great.
+                        0 // dummy value, won't be used
+                    } else {
+                        // Not in vocab, must be at top level (old format)
+                        obj.remove("max_original_llm_token_id")
+                            .ok_or_else(|| "Missing field max_original_llm_token_id".to_string())
+                            .and_then(usize::from_json)?
+                    }
+                } else { 0 };
+
+                if let JSONNode::Object(ref mut vocab_obj) = vocab_node {
+                    if !vocab_obj.contains_key("max_original_llm_token_id") {
+                        vocab_obj.insert("max_original_llm_token_id".to_string(), max_original_llm_token_id.to_json());
+                    }
+                }
+                let vocab = StageVocab::from_json(vocab_node)?;
+
+                let llm_token_map = obj
+                    .remove("llm_token_map")
+                    .ok_or_else(|| "Missing field llm_token_map".to_string())
+                    .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
 
                 let original_to_dummy_map = match obj.remove("original_to_dummy_map") {
                     Some(n) => BTreeMap::<TerminalID, TerminalID>::from_json(n)?,
                     None => BTreeMap::new(),
                 };
 
-                let internal_to_original_sparse_matrix =
-                    match obj.remove("internal_to_original_sparse_matrix") {
-                        Some(n) => Vec::<Vec<(u16, u64)>>::from_json(n)?,
-                        None => {
-                            // For backward compatibility, compute it if missing.
-                            Self::build_internal_to_original_sparse_matrix(
-                                &vocab.internal_to_original,
-                                max_original_llm_token_id,
-                                vocab.internal_max_llm_token,
-                            )
-                        }
-                    };
-
-                let mut gc = GrammarConstraint {
+                let gc = GrammarConstraint {
                     tokenizer,
                     parser,
                     precomputed1,
@@ -806,7 +892,6 @@ impl JSONConvertible for GrammarConstraint {
                     post_commit_allow_check_mode,
                     vocab,
                     original_to_dummy_map,
-                    internal_to_original_sparse_matrix,
                 };
                 Ok(gc)
             }
@@ -1186,6 +1271,9 @@ impl GrammarConstraint {
             original_to_internal: original_to_internal_map.clone(),
             internal_to_original: internal_to_original_map.clone(),
             internal_max_llm_token: internal_max_llm_token,
+            // These will be finalized after trie optimization
+            max_original_llm_token_id: 0,
+            internal_to_original_sparse_matrix: vec![],
         };
 
         // Verify dummy-terminal map has no overlapping originals and build original->dummy map.
@@ -1306,13 +1394,15 @@ impl GrammarConstraint {
             &trie1_god,
         );
 
-        let internal_to_original_sparse_matrix = Self::build_internal_to_original_sparse_matrix(
+        let internal_to_original_sparse_matrix = StageVocab::build_internal_to_original_sparse_matrix(
             &vocab.internal_to_original,
             max_original_llm_token_id,
             vocab.internal_max_llm_token,
         );
+        vocab.max_original_llm_token_id = max_original_llm_token_id;
+        vocab.internal_to_original_sparse_matrix = internal_to_original_sparse_matrix;
 
-        let mut gc = GrammarConstraint {
+        let gc = GrammarConstraint {
             tokenizer,
             parser,
             precomputed1,
@@ -1327,7 +1417,6 @@ impl GrammarConstraint {
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             vocab,
             original_to_dummy_map,
-            internal_to_original_sparse_matrix,
         };
         gc
     }
@@ -1666,38 +1755,6 @@ impl GrammarConstraint {
     // Vocab helpers
     // -----------------------------------------------------------------------
 
-    pub(crate) fn build_internal_to_original_sparse_matrix(
-        internal_to_original: &BTreeMap<usize, LLMTokenBV>,
-        max_original_llm_token_id: usize,
-        internal_max_llm_token: usize,
-    ) -> Vec<Vec<(u16, u64)>> {
-        type Word = u64;
-        const WORD_BITS: usize = 64;
-
-        let num_internal_tokens = internal_max_llm_token + 1;
-        let mut sparse_matrix: Vec<Vec<(u16, Word)>> = vec![Vec::new(); num_internal_tokens];
-
-        for (internal_id, original_bv) in internal_to_original.iter() {
-            if *internal_id >= num_internal_tokens {
-                continue;
-            }
-
-            let mut temp_row = BTreeMap::<u16, Word>::new();
-            for original_id in original_bv.iter() {
-                if original_id > max_original_llm_token_id {
-                    continue;
-                }
-                let word_idx = (original_id / WORD_BITS) as u16;
-                let bit_idx = original_id % WORD_BITS;
-                *temp_row.entry(word_idx).or_insert(0) |= 1 << bit_idx;
-            }
-            if !temp_row.is_empty() {
-                sparse_matrix[*internal_id] = temp_row.into_iter().collect();
-            }
-        }
-        sparse_matrix
-    }
-
     // -----------------------------------------------------------------------
     pub fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
         LLMTokenBV::ones(self.vocab.internal_max_llm_token + 1)
@@ -1705,40 +1762,11 @@ impl GrammarConstraint {
 
     /// Convert an internal BV (using `self.vocab`) back to original IDs.
     pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> Bitset {
-        let mut internal_bv = internal_bv.clone();
-        if internal_bv.is_all() {
-            internal_bv = HybridBitset::ones(self.vocab.internal_max_llm_token + 1);
-        }
-
-        type Word = u64;
-        const WORD_BITS: usize = 64;
-
-        let max_original_id = self.llm_vocab.max_original_llm_token_id;
-        let original_vocab_size_words = (max_original_id / WORD_BITS) + 1;
-        let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
-
-        let mut result_bitset_words = vec![0 as Word; original_vocab_size_words];
-        for internal_id in internal_bv.iter() {
-            if internal_id >= num_internal_tokens {
-                continue;
-            }
-            // It's possible for an internal ID to exist in the bitvector but not have a
-            // corresponding entry in the sparse matrix if it corresponds to no original tokens.
-            if let Some(sparse_row) = self.internal_to_original_sparse_matrix.get(internal_id) {
-                for &(word_idx, word) in sparse_row {
-                    result_bitset_words[word_idx as usize] |= word;
-                }
-            }
-        }
-
-        Bitset::from_words_vec(result_bitset_words)
+        self.vocab.internal_bv_to_original(internal_bv)
     }
 
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
-        self.original_bv_to_internal_with_map(
-            original_bv,
-            &self.vocab.original_to_internal,
-        )
+        self.vocab.original_bv_to_internal(original_bv)
     }
 
     pub fn internal_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
@@ -1758,7 +1786,7 @@ impl GrammarConstraint {
     }
 
     fn original_bv_to_internal_with_map(
-        &self,
+        
         original_bv: &LLMTokenBV,
         original_to_internal: &BTreeMap<usize, usize>,
     ) -> LLMTokenBV {

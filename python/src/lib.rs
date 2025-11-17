@@ -6,7 +6,7 @@ use ouroboros::self_referencing;
 use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyIterator, PySet, PyTuple};
-use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
+use sep1::constraint::{GrammarConstraint, GrammarConstraintState, StageVocab};
 use sep1::datastructures::bitset::{Bitset as RustBitset, Bitset};
 use sep1::datastructures::gss_acc::{Acc as RustAcc, Acc};
 use sep1::datastructures::hybrid_bitset::{HybridBitset as RustHybridBitset, HybridBitset};
@@ -581,18 +581,58 @@ impl PyGrammarConstraint {
         Ok(dict.into())
     }
 
-    pub fn internal_bv_to_original_bitset(&self, internal_bv: &PyBitset) -> PyResult<PyBitset> {
-        let original_bv = self.inner.internal_bv_to_original(&internal_bv.inner.clone().into());
+    pub fn internal_bv_to_original_bitset(&self, internal_bv: &PyHybridBitset) -> PyResult<PyBitset> {
+        let original_bv = self.inner.vocab.internal_bv_to_original(&internal_bv.inner);
         Ok(PyBitset { inner: original_bv })
     }
 
     pub fn internal_bv_to_original_hybrid_bitset(&self, internal_bv: &PyHybridBitset) -> PyResult<PyBitset> {
-        let original_bv = self.inner.internal_bv_to_original(&internal_bv.inner);
+        let original_bv = self.inner.vocab.internal_bv_to_original(&internal_bv.inner);
         Ok(PyBitset { inner: original_bv })
     }
 
     pub fn internal_bv_to_original(&self, it: Bound<'_, PyIterator>) -> PyResult<PyBitset> {
-        let original_bv = self.inner.internal_bv_to_original(&HybridBitset::from_iter(it.extract::<Vec<usize>>()?));
+        let original_bv = self.inner.vocab.internal_bv_to_original(&HybridBitset::from_iter(it.extract::<Vec<usize>>()?));
+        Ok(PyBitset { inner: original_bv })
+    }
+
+    #[getter]
+    fn vocab(&self) -> PyStageVocab {
+        PyStageVocab {
+            inner: Arc::new(self.inner.vocab.clone()),
+        }
+    }
+}
+
+#[pyclass(name = "StageVocab")]
+#[derive(Clone)]
+pub struct PyStageVocab {
+    inner: Arc<StageVocab>,
+}
+
+#[pymethods]
+impl PyStageVocab {
+    #[staticmethod]
+    fn from_json_string(json_str: &str) -> PyResult<Self> {
+        let json_node = JSONNode::from_json_string(json_str).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to parse JSON string to JSONNode: {}",
+                e
+            ))
+        })?;
+        let vocab = StageVocab::from_json(json_node).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to deserialize StageVocab from JSONNode: {}",
+                e
+            ))
+        })?;
+        Ok(Self {
+            inner: Arc::new(vocab),
+        })
+    }
+
+    pub fn internal_bv_to_original(&self, internal_bv: &PyHybridBitset) -> PyResult<PyBitset> {
+        let original_bv = self.inner.internal_bv_to_original(&internal_bv.inner);
         Ok(PyBitset { inner: original_bv })
     }
 }
@@ -1462,6 +1502,7 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCompiledGrammar>()?;
     m.add_class::<PyGLRParser>()?;
     m.add_class::<PyGrammarConstraint>()?;
+    m.add_class::<PyStageVocab>()?;
     m.add_class::<PyGrammarConstraintState>()?;
     m.add_class::<PyHybridBitsetIterator>()?;
     m.add_class::<PyHybridBitset>()?;

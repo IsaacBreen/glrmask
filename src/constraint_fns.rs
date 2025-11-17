@@ -19,7 +19,7 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask4(&self) -> Bitset {
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
         if self.state.is_empty() {
-            return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+            return self.parent.vocab.internal_bv_to_original(&final_mask_internal.into_inner());
         }
 
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
@@ -144,7 +144,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-        self.parent.internal_bv_to_original(&final_mask_internal.into_inner())
+        self.parent.vocab.internal_bv_to_original(&final_mask_internal.into_inner())
     }
 
     #[time_it]
