@@ -2778,7 +2778,22 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn is_active(&self) -> bool { !self.state.is_empty() }
 
-    pub fn is_valid(&self) -> bool { self.is_active() }
+    pub fn is_valid(&self) -> bool {
+        if self.state.contains_key(&self.parent.tokenizer.initial_state_id()) {
+            return true;
+        }
+        for (tid, glr_state) in self.state.iter() {
+            for gtid in self.parent.tokenizer.tokens_accessible_from_state(TokenizerStateID(tid.0)) {
+                let mut glr_state = glr_state.clone();
+                glr_state.step(gtid);
+                if glr_state.is_ok() {
+                    return true;
+                }
+            }
+        }
+        true
+
+    }
 
     pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
         &self.state
