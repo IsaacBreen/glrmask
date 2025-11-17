@@ -1,4 +1,4 @@
-use crate::constraint::{GrammarConstraintState, TerminalAllowanceCheckMode};
+use crate::constraint::{GrammarConstraintState, LLMTokenBV, TerminalAllowanceCheckMode};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
@@ -16,7 +16,7 @@ use crate::datastructures::gss_acc::Acc;
 type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 
 impl<'a> GrammarConstraintState<'a> {
-    pub fn get_mask4(&self) -> Bitset {
+    pub fn get_mask4(&self) -> LLMTokenBV {
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
         if self.state.is_empty() {
             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
