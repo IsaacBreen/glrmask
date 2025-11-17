@@ -1633,19 +1633,19 @@ impl GrammarConstraint {
         internal_bv: &LLMTokenBV,
         internal_to_original: &BTreeMap<usize, LLMTokenBV>,
     ) -> LLMTokenBV {
-        let mut original_bv = HybridBitset::zeros();
+        let mut original_bv = RangeSetBlaze::new();
         if internal_bv.is_all() {
             for bv in internal_to_original.values() {
-                original_bv |= bv;
+                original_bv |= bv.inner.as_ref();
             }
         } else {
             for i in internal_bv.iter() {
                 if let Some(bv) = internal_to_original.get(&i) {
-                    original_bv |= bv;
+                    original_bv |= bv.inner.as_ref();
                 }
             }
         }
-        original_bv
+        HybridBitset::from(original_bv)
     }
 
     fn original_bv_to_internal_with_map(
