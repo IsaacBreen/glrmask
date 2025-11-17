@@ -1843,12 +1843,12 @@ impl GrammarConstraint {
 
         // --- STRATEGY 7: Pre-flattened slices (Strategy A) ---
         let precompute_instant = std::time::Instant::now();
-        let mut data: Vec<usize> = Vec::new();
+        let mut data: Vec<u32> = Vec::new();
         let mut offsets: Vec<usize> = vec![0; self.vocab.internal_max_llm_token + 2];
         for internal_id in 0..=self.vocab.internal_max_llm_token {
             offsets[internal_id] = data.len();
             if let Some(original_bv) = internal_to_original.get(&internal_id) {
-                data.extend(original_bv.iter());
+                data.extend(original_bv.iter().map(|v| v as u32));
             }
         }
         offsets[self.vocab.internal_max_llm_token + 1] = data.len();
@@ -1863,7 +1863,7 @@ impl GrammarConstraint {
             }
         }).sum();
 
-        let mut result_vec: Vec<usize> = Vec::with_capacity(total_len);
+        let mut result_vec: Vec<u32> = Vec::with_capacity(total_len);
         for i in internal_bv.iter() {
             if i <= self.vocab.internal_max_llm_token {
                 let start = offsets[i];
@@ -1872,7 +1872,7 @@ impl GrammarConstraint {
             }
         }
         let elapsed = instant.elapsed();
-        let original_bv_7 = result_vec.into_iter().collect::<RangeSetBlaze<usize>>();
+        let original_bv_7 = result_vec.into_iter().map(|v| v as usize).collect::<RangeSetBlaze<usize>>();
         let is_equal = original_bv_7 == original_bv_rsb;
         println!("[perf] STRATEGY 7 (Flattened Slices):         {:?} (equal: {})", elapsed, is_equal);
 
