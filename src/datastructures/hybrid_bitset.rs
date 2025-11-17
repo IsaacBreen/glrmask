@@ -2,6 +2,7 @@
 
 use crate::datastructures::cache::{self, Acc};
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::datastructures::bitset::Bitset;
 // Added
 use range_set_blaze::RangeSetBlaze;
 // Import RangeSetBlaze
@@ -775,6 +776,18 @@ impl From<&RangeSetBlaze<usize>> for HybridBitset {
         HybridBitset {
             inner: cache::intern_l1(range_set.clone()),
         }
+    }
+}
+
+impl From<&Bitset> for HybridBitset {
+    fn from(bitset: &Bitset) -> Self {
+        HybridBitset::from_iter(bitset.iter_indices())
+    }
+}
+
+impl From<Bitset> for HybridBitset {
+    fn from(bitset: Bitset) -> Self {
+        HybridBitset::from_iter(bitset.iter_indices())
     }
 }
 

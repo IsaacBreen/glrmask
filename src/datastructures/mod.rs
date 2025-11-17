@@ -2,6 +2,7 @@ pub mod charmap;
 pub mod frozenset;
 pub mod u8set;
 pub mod vocab_prefix_tree;
+pub mod bitset;
 pub mod hybrid_bitset;
 pub mod hybrid_l2_bitset;
 pub mod ordered_hash_map;
