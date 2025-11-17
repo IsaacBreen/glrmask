@@ -415,6 +415,9 @@ impl NWA {
         let rust_states_after_simp = rust_dwa.states.len();
 
         // 3. RustFST (determinize_to_dwa_with_rustfst)
+        if self.states.len() > 10000 {
+            println!("WARNING: Trying to determinize with rustfst with more than 10k states.")
+        }
         let rustfst_start = std::time::Instant::now();
         let mut rustfst_dwa = self.determinize_to_dwa_with_rustfst();
         let rustfst_states_before_simp = rustfst_dwa.states.len();
