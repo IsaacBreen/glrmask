@@ -1,5 +1,4 @@
 use crate::constraint::{LLMVocab, StateIDBV};
-use crate::datastructures::gss_acc::Acc;
 use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::{Item, LRMode, LR_MODE};
@@ -19,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use crate::datastructures::gss_acc::Acc;
 
 /// A trait to provide a lazily-evaluated `expect`.
 pub trait ExpectElse<T> {
@@ -120,10 +120,26 @@ impl JSONConvertible for ParseStateEdgeContent {
 pub type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 pub type GSSStats = LeveledGSSStats<ParseStateEdgeContent, Acc>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ParseState {
     pub stack: ParserGSS,
 }
+
+impl Debug for ParseState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ParseState")
+            // .field("stack", &self.stack)
+            .finish()
+    }
+}
+
+impl PartialEq for ParseState {
+    fn eq(&self, other: &Self) -> bool {
+        todo!()
+    }
+}
+
+impl Eq for ParseState {}
 
 impl ParseState {
     pub fn new() -> Self {
@@ -148,6 +164,12 @@ pub struct GLRParser {
     pub substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
     pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
     pub actions: BTreeMap<NonTerminalID, ActionFn>,
+}
+
+impl Display for GLRParser {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
 }
 
 impl JSONConvertible for GLRParser {
@@ -313,6 +335,11 @@ impl GLRParser {
         ParseState::with_stack(gss)
     }
 
+    pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+        let initial_parse_state = self.init_parse_state_with_acc();
+        GLRParserState { parser: self, stack: initial_parse_state.stack }
+    }
+
     pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
         let mut state = self.init_glr_parser(llm_vocab);
         state.parse(input);
@@ -405,11 +432,28 @@ impl GLRParser {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct GLRParserState<'a> {
     pub parser: &'a GLRParser,
     pub stack: ParserGSS,
 }
+
+impl Debug for GLRParserState<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GLRParserState")
+            .field("parser", &self.parser)
+            // .field("stack", &self.stack)
+            .finish()
+    }
+}
+
+impl PartialEq for GLRParserState<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        todo!()
+    }
+}
+
+impl Eq for GLRParserState<'_> {}
 
 impl<'a> GLRParserState<'a> {
     pub fn step(&mut self, token_id: TerminalID) {
@@ -440,5 +484,9 @@ impl<'a> GLRParserState<'a> {
             let ids: Vec<_> = path.into_iter().map(|e| e.state_id.0).collect();
             debug!(3, "Sample path: {:?}", ids);
         }
+    }
+
+    pub fn merge_with(&mut self, other: Self) {
+        todo!()
     }
 }

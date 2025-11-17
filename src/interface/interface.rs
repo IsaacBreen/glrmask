@@ -1202,57 +1202,58 @@ impl<'a> IncrementalParser<'a> {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
-        crate::debug!(3, "Processing input bytes: {:?} with {} active tokenizer states", bytes, self.state.len());
-        let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-        let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a>> = BTreeMap::new();
-
-        for (tokenizer_state_id, glr_state) in std::mem::take(&mut self.state) {
-            queue.insert((0, tokenizer_state_id), glr_state);
-        }
-
-        while let Some(((position, current_tokenizer_state_id), current_glr_state)) = queue.pop_first() {
-            let results: ExecuteResult = self
-                .grammar
-                .tokenizer() // Use accessor
-                .execute_from_state(&bytes[position..], current_tokenizer_state_id);
-
-            crate::debug!(4, "Processing position {} in state {}. Matches: {}", position, current_tokenizer_state_id.0, results.matches.len());
-            for token in results.matches {
-                crate::debug!(4, "Found match for token {:?} ({}) with width {}", token.id, self.grammar.definition.regex_name_to_group_id.get_by_right(&token.id).unwrap_or(&"UNKNOWN_TOKEN_NAME".to_string()), token.width);
-                let grammar_token_id = TerminalID(token.id);
-                let mut next_glr_state = current_glr_state.clone();
-                next_glr_state.step(grammar_token_id);
-
-                if next_glr_state.is_ok() {
-                    if position + token.width == bytes.len() {
-                        let next_tokenizer_state_id = self.grammar.tokenizer().initial_state_id(); // Use accessor
-                        next_states.entry(next_tokenizer_state_id)
-                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                            .or_insert(next_glr_state.clone());
-                    } else {
-                        let next_tokenizer_state_id = self.grammar.tokenizer().initial_state_id(); // Use accessor
-                        queue.entry((position + token.width, next_tokenizer_state_id))
-                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                            .or_insert(next_glr_state);
-                    }
-                }
-            }
-
-            if let Some(end_state_id) = results.end_state {
-                let possible_final_grammar_tokens: BTreeSet<_> = self.grammar.tokenizer().tokens_accessible_from_state(TokenizerStateID(end_state_id)); // Use accessor
-                for possible_final_grammar_token in possible_final_grammar_tokens {
-                    let mut final_glr_state = current_glr_state.clone();
-                    final_glr_state.step(possible_final_grammar_token);
-                    if final_glr_state.is_ok() {
-                        let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-                        next_states.entry(next_tokenizer_state_id)
-                            .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                            .or_insert(current_glr_state.clone());
-                    }
-                }
-            }
-        }
-        self.state = next_states;
+    //     crate::debug!(3, "Processing input bytes: {:?} with {} active tokenizer states", bytes, self.state.len());
+    //     let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+    //     let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a>> = BTreeMap::new();
+    //
+    //     for (tokenizer_state_id, glr_state) in std::mem::take(&mut self.state) {
+    //         queue.insert((0, tokenizer_state_id), glr_state);
+    //     }
+    //
+    //     while let Some(((position, current_tokenizer_state_id), current_glr_state)) = queue.pop_first() {
+    //         let results: ExecuteResult = self
+    //             .grammar
+    //             .tokenizer() // Use accessor
+    //             .execute_from_state(&bytes[position..], current_tokenizer_state_id);
+    //
+    //         crate::debug!(4, "Processing position {} in state {}. Matches: {}", position, current_tokenizer_state_id.0, results.matches.len());
+    //         for token in results.matches {
+    //             crate::debug!(4, "Found match for token {:?} ({}) with width {}", token.id, self.grammar.definition.regex_name_to_group_id.get_by_right(&token.id).unwrap_or(&"UNKNOWN_TOKEN_NAME".to_string()), token.width);
+    //             let grammar_token_id = TerminalID(token.id);
+    //             let mut next_glr_state = current_glr_state.clone();
+    //             next_glr_state.step(grammar_token_id);
+    //
+    //             if next_glr_state.is_ok() {
+    //                 if position + token.width == bytes.len() {
+    //                     let next_tokenizer_state_id = self.grammar.tokenizer().initial_state_id(); // Use accessor
+    //                     next_states.entry(next_tokenizer_state_id)
+    //                         .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+    //                         .or_insert(next_glr_state.clone());
+    //                 } else {
+    //                     let next_tokenizer_state_id = self.grammar.tokenizer().initial_state_id(); // Use accessor
+    //                     queue.entry((position + token.width, next_tokenizer_state_id))
+    //                         .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+    //                         .or_insert(next_glr_state);
+    //                 }
+    //             }
+    //         }
+    //
+    //         if let Some(end_state_id) = results.end_state {
+    //             let possible_final_grammar_tokens: BTreeSet<_> = self.grammar.tokenizer().tokens_accessible_from_state(TokenizerStateID(end_state_id)); // Use accessor
+    //             for possible_final_grammar_token in possible_final_grammar_tokens {
+    //                 let mut final_glr_state = current_glr_state.clone();
+    //                 final_glr_state.step(possible_final_grammar_token);
+    //                 if final_glr_state.is_ok() {
+    //                     let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+    //                     next_states.entry(next_tokenizer_state_id)
+    //                         .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+    //                         .or_insert(current_glr_state.clone());
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     self.state = next_states;
+        todo!()
     }
 
     pub fn is_valid(&self) -> bool {

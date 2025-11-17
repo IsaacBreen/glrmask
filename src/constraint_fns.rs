@@ -1,5 +1,4 @@
 use crate::constraint::{GrammarConstraintState, TerminalAllowanceCheckMode};
-use crate::datastructures::gss_acc::Acc;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::leveled_gss::LeveledGSS;
@@ -11,6 +10,7 @@ use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use crate::datastructures::gss_acc::Acc;
 
 type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 
@@ -175,8 +175,8 @@ impl<'a> GrammarConstraintState<'a> {
             // Prune based on matched terminals
             gss = gss.apply_and_prune(|acc| {
                 for (sid, bv) in &terminals_map {
-                    let allowed = acc.terminals_union.get_l2_bitset(sid.0).unwrap_or(&HybridBitset::max_ones());
-                    if !bv.is_subset(allowed) {
+                    let allowed = acc.terminals_union.get_l2_bitset(sid.0).cloned().unwrap_or(HybridBitset::max_ones());
+                    if !bv.is_subset(&allowed) {
                         return None;
                     }
                 }
@@ -240,7 +240,7 @@ impl<'a> GrammarConstraintState<'a> {
                             let new_offset = offset + match_info.width;
                             let next_tsid = self.parent.tokenizer.initial_state_id();
                             if new_offset == llm_token_bytes.len() {
-                                new_overall_state.entry(next_tsid).and_modify(|s| s.stack = s.stack.merge(&gss)).or_insert_with(|| GLRParserState { parser: self.parent.parser, stack: gss });
+                                new_overall_state.entry(next_tsid).and_modify(|s| s.stack = s.stack.merge(&gss)).or_insert_with(|| GLRParserState { parser: &self.parent.parser, stack: gss });
                             } else {
                                 processing_queue.entry(new_offset).or_default().entry(next_tsid).and_modify(|s| *s = s.merge(&gss)).or_insert(gss);
                             }
@@ -250,7 +250,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                 if let Some(end_state_id) = exec_result.end_state {
                     let final_tsid = TokenizerStateID(end_state_id);
-                    new_overall_state.entry(final_tsid).and_modify(|s| s.stack = s.stack.merge(&gss_at_offset)).or_insert_with(|| GLRParserState { parser: self.parent.parser, stack: gss_at_offset });
+                    new_overall_state.entry(final_tsid).and_modify(|s| s.stack = s.stack.merge(&gss_at_offset)).or_insert_with(|| GLRParserState { parser: &self.parent.parser, stack: gss_at_offset });
                 }
             }
         }

@@ -140,13 +140,6 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
             }
         }
         
-        // Also account for the default reduce action if it exists
-        if row.default_reduce.reduce.is_some() {
-            // This is an optimization, but we can count it as a reduce for stats.
-            // The logic above already counts reduces from the full phase2 map,
-            // so we don't double-count here. We could add a new stat for default reduces if needed.
-        }
-
         all_state_stats.insert(*state_id, current_state_stats);
     }
 

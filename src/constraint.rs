@@ -18,12 +18,6 @@ use crate::{
     constraint_extra::PrecomputeStats,
     constraint_precompute1_utils::{self, Trie1Config},
     datastructures::{
-        gss_leveled_adapter::{
-            disallow_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc,
-            fuse_predecessors_recursive, gather_gss_stats, map_allowed_terminals_tokenizer_states,
-            print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals,
-            reset_llm_tokens, reset_terminals, sample_path, Acc, GSSNode, GSSPrintConfig,
-        },
         hybrid_bitset::HybridBitset,
         hybrid_l2_bitset::HybridL2Bitset,
         leveled_gss::{LeveledGSS, Merge},
@@ -50,6 +44,9 @@ use crate::{
 use profiler_macro::{time_it, timeit};
 use std::collections::BTreeMap as StdMap;
 use std::ops::BitOrAssign;
+use crate::datastructures::gss_acc::Acc;
+use crate::glr::parser::ParseStateEdgeContent;
+use crate::glr::table::StateID;
 // ---------------------------------------------------------------------------
 // Basic aliases
 // ---------------------------------------------------------------------------
@@ -59,6 +56,8 @@ pub type TerminalBV = HybridBitset;
 pub type StateIDBV = HybridBitset;
 /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
 pub type TerminalInfo = HybridL2Bitset;
+
+type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
 
 // ---------------------------------------------------------------------------
 // Terminal allowance mode
@@ -1834,14 +1833,15 @@ impl GrammarConstraint {
         &self,
         nodes: Vec<(usize, Arc<GSSNode>)>,
     ) -> GrammarConstraintState<'_> {
-        let mut state = BTreeMap::new();
-        for (i, node) in nodes.into_iter() {
-            state.insert(
-                TokenizerStateID(i),
-                self.parser.init_glr_parser_from_stack(node),
-            );
-        }
-        GrammarConstraintState { parent: self, state }
+        todo!()
+        // let mut state = BTreeMap::new();
+        // for (i, node) in nodes.into_iter() {
+        //     state.insert(
+        //         TokenizerStateID(i),
+        //         self.parser.init_glr_parser_from_stack(node),
+        //     );
+        // }
+        // GrammarConstraintState { parent: self, state }
     }
 
     pub fn print_gss_nodes(
@@ -1849,17 +1849,17 @@ impl GrammarConstraint {
         roots: &Vec<Arc<GSSNode>>,
         labels: Option<&[String]>,
     ) {
-        let config = GSSPrintConfig {
-            labels,
-            max_edges: 500,
-            original_internal_bimap: None,
-            llm_token_map: Some(&self.llm_vocab.llm_token_map),
-            verbose: false,
-        };
-
-        let (gss_str, _state_ids) =
-            print_gss_forest(roots, &self.parser.terminal_map, &config);
-        println!("{}", gss_str);
+        // let config = GSSPrintConfig {
+        //     labels,
+        //     max_edges: 500,
+        //     original_internal_bimap: None,
+        //     llm_token_map: Some(&self.llm_vocab.llm_token_map),
+        //     verbose: false,
+        // };
+        //
+        // let (gss_str, _state_ids) =
+        //     print_gss_forest(roots, &self.parser.terminal_map, &config);
+        // println!("{}", gss_str);
     }
 }
 
@@ -2553,49 +2553,50 @@ impl<'a> Eq for GrammarConstraintState<'a> {}
 
 impl<'a> Display for GrammarConstraintState<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(
-            f,
-            "GrammarConstraintState ({} active tokenizer states):",
-            self.state.len()
-        )?;
-        if self.state.is_empty() { return Ok(()); }
-
-        let mut gss_roots = Vec::new();
-        let mut tokenizer_state_info = Vec::new();
-
-        for (tokenizer_state_id, glr_state) in &self.state {
-            if !glr_state.active_state.stack.is_empty() {
-                gss_roots.push(glr_state.active_state.stack.clone());
-                tokenizer_state_info.push(format!(
-                    "  - Tokenizer State {:>3}: GSS Root ({} predecessors)",
-                    tokenizer_state_id.0,
-                    glr_state.active_state.stack.num_predecessors()
-                ));
-            } else {
-                tokenizer_state_info.push(format!(
-                    "  - Tokenizer State {:>3}: (Empty GSS)",
-                    tokenizer_state_id.0
-                ));
-            }
-        }
-
-        for info in tokenizer_state_info {
-            writeln!(f, "{}", info)?;
-        }
-
-        if !gss_roots.is_empty() {
-            writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
-            let config = GSSPrintConfig {
-                labels: None,
-                max_edges: 50,
-                original_internal_bimap: None,
-                llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
-                verbose: false,
-            };
-            let (gss_str, _) =
-                print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
-            write!(f, "{}", gss_str)?;
-        }
+        todo!();
+        // writeln!(
+        //     f,
+        //     "GrammarConstraintState ({} active tokenizer states):",
+        //     self.state.len()
+        // )?;
+        // if self.state.is_empty() { return Ok(()); }
+        //
+        // let mut gss_roots = Vec::new();
+        // let mut tokenizer_state_info = Vec::new();
+        //
+        // for (tokenizer_state_id, glr_state) in &self.state {
+        //     if !glr_state.stack.is_empty() {
+        //         gss_roots.push(glr_state.stack.clone());
+        //         tokenizer_state_info.push(format!(
+        //             "  - Tokenizer State {:>3}: GSS Root ({} predecessors)",
+        //             tokenizer_state_id.0,
+        //             glr_state.stack.num_predecessors()
+        //         ));
+        //     } else {
+        //         tokenizer_state_info.push(format!(
+        //             "  - Tokenizer State {:>3}: (Empty GSS)",
+        //             tokenizer_state_id.0
+        //         ));
+        //     }
+        // }
+        //
+        // for info in tokenizer_state_info {
+        //     writeln!(f, "{}", info)?;
+        // }
+        //
+        // if !gss_roots.is_empty() {
+        //     writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
+        //     let config = GSSPrintConfig {
+        //         labels: None,
+        //         max_edges: 50,
+        //         original_internal_bimap: None,
+        //         llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+        //         verbose: false,
+        //     };
+        //     let (gss_str, _) =
+        //         print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+        //     write!(f, "{}", gss_str)?;
+        // }
 
         Ok(())
     }
@@ -2609,7 +2610,7 @@ impl<'a> GrammarConstraintState<'a> {
     {
         let mut memo = M::default();
         for s in self.state.values_mut() {
-            f(&mut s.active_state.stack, &mut memo);
+            f(&mut Arc::new(s.stack.clone()), &mut memo);
         }
     }
 
@@ -2620,7 +2621,7 @@ impl<'a> GrammarConstraintState<'a> {
     {
         let mut memo = M::default();
         for s in self.state.values_mut() {
-            s.active_state.stack = f(&mut s.active_state.stack, &mut memo);
+            s.stack = f(&mut Arc::new(s.stack.clone()), &mut memo).as_ref().clone();
         }
     }
 
@@ -2658,92 +2659,96 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn print_gss_stats(&self) {
-        println!("GrammarConstraintState Stats:");
-        println!("  - Active tokenizer states: {}", self.state.len());
-        if self.state.is_empty() {
-            println!("  - GSS is empty.");
-            return;
-        }
-        let stats = gather_gss_stats(
-            &self
-                .state
-                .values()
-                .map(|s| s.active_state.stack.as_ref())
-                .collect::<Vec<_>>(),
-        );
-        println!("  - GSS Stats: {:#?}", stats);
+        // println!("GrammarConstraintState Stats:");
+        // println!("  - Active tokenizer states: {}", self.state.len());
+        // if self.state.is_empty() {
+        //     println!("  - GSS is empty.");
+        //     return;
+        // }
+        // let stats = gather_gss_stats(
+        //     &self
+        //         .state
+        //         .values()
+        //         .map(|s| s.stack.as_ref())
+        //         .collect::<Vec<_>>(),
+        // );
+        // println!("  - GSS Stats: {:#?}", stats);
+        todo!()
     }
 
     pub fn print_gss(&self) {
-        let roots: Vec<_> = self
-            .state
-            .values()
-            .map(|s| s.active_state.stack.clone())
-            .collect();
-        if roots.is_empty() {
-            println!("GSS is empty.");
-            return;
-        }
-        let labels: Vec<_> = self
-            .state
-            .keys()
-            .map(|k| format!("Tokenizer State {}", k.0))
-            .collect();
-        self.parent.print_gss_nodes(&roots, Some(&labels));
+        // let roots: Vec<_> = self
+        //     .state
+        //     .values()
+        //     .map(|s| s.stack.clone())
+        //     .collect();
+        // if roots.is_empty() {
+        //     println!("GSS is empty.");
+        //     return;
+        // }
+        // let labels: Vec<_> = self
+        //     .state
+        //     .keys()
+        //     .map(|k| format!("Tokenizer State {}", k.0))
+        //     .collect();
+        // self.parent.print_gss_nodes(&roots, Some(&labels));
+        todo!()
     }
 
     pub fn explain_stack(&self) {
-        for (state_id, state) in &self.state {
-            println!("\n--- State {} ---", state_id.0);
-            let mut seen = BTreeSet::new();
-            let num_to_sample = 10;
-            for i in 0..1000 {
-                if let Some(sampled_path_edges) =
-                    sample_path(&[&state.active_state.stack], i)
-                {
-                    let mut sampled_stack: Vec<usize> = sampled_path_edges
-                        .iter()
-                        .map(|edge| edge.state_id.0)
-                        .collect();
-                    sampled_stack.reverse();
-                    if seen.contains(&sampled_stack) {
-                        continue;
-                    }
-                    seen.insert(sampled_stack);
-                    if seen.len() >= num_to_sample {
-                        break;
-                    }
-                };
-            }
-            for sampled_stack in seen {
-                println!("  Sampled stack: {:?}", sampled_stack);
-            }
-            if let Some(sampled_path_edges) =
-                sample_path(&[&state.active_state.stack], 1)
-            {
-                let mut sampled_stack: Vec<_> = sampled_path_edges
-                    .iter()
-                    .map(|edge| edge.state_id)
-                    .collect();
-                sampled_stack.reverse();
-                let explanation =
-                    self.parent.parser.explain_stack(&sampled_stack);
-                for line in explanation.lines() {
-                    println!("      {}", line);
-                }
-            };
-        }
+        todo!()
+        // for (state_id, state) in &self.state {
+        //     println!("\n--- State {} ---", state_id.0);
+        //     let mut seen = BTreeSet::new();
+        //     let num_to_sample = 10;
+        //     for i in 0..1000 {
+        //         if let Some(sampled_path_edges) =
+        //             sample_path(&[&state.stack], i)
+        //         {
+        //             let mut sampled_stack: Vec<usize> = sampled_path_edges
+        //                 .iter()
+        //                 .map(|edge| edge.state_id.0)
+        //                 .collect();
+        //             sampled_stack.reverse();
+        //             if seen.contains(&sampled_stack) {
+        //                 continue;
+        //             }
+        //             seen.insert(sampled_stack);
+        //             if seen.len() >= num_to_sample {
+        //                 break;
+        //             }
+        //         };
+        //     }
+        //     for sampled_stack in seen {
+        //         println!("  Sampled stack: {:?}", sampled_stack);
+        //     }
+        //     if let Some(sampled_path_edges) =
+        //         sample_path(&[&state.stack], 1)
+        //     {
+        //         let mut sampled_stack: Vec<_> = sampled_path_edges
+        //             .iter()
+        //             .map(|edge| edge.state_id)
+        //             .collect();
+        //         sampled_stack.reverse();
+        //         let explanation =
+        //             self.parent.parser.explain_stack(&sampled_stack);
+        //         for line in explanation.lines() {
+        //             println!("      {}", line);
+        //         }
+        //     };
+        // }
     }
 
     pub fn num_unique_nodes(&self) -> usize {
-        gather_gss_stats(
-            &self
-                .state
-                .values()
-                .map(|s| s.active_state.stack.as_ref())
-                .collect::<Vec<_>>(),
-        )
-        .unique_nodes()
+        // gather_gss_stats(
+        //     &self
+        //         .state
+        //         .values()
+        //         .map(|s| s.stack.as_ref())
+        //         .collect::<Vec<_>>(),
+        // )
+        // .unique_nodes()
+        todo!()
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
