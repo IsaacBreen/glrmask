@@ -90,6 +90,22 @@ class BruteForceFastRustModel:
                 if original_tokens:
                     allowed_mask = allowed_mask.union(original_tokens)
 
+
+        allowed_tokens = []
+        for token_id in tqdm(self.id_to_token.keys(), desc="get_mask (bruteforce_rust)"):
+            # Create a temporary state by cloning the current state
+            temp_state = self.constraint_state.clone()
+            # Check if the next token is valid
+            temp_state.commit(token_id)
+            # mask_bv = temp_state.get_mask_bv()
+            # if mask_bv.to_ranges(): # Non-empty mask means the token is valid
+            #     allowed_tokens.append(token_id)
+            if temp_state.is_active():
+                allowed_tokens.append(token_id)
+        allowed_mask2 = RangeSet.from_indices(allowed_tokens)
+
+        assert allowed_mask == allowed_mask2 # THIS IS FAILING.
+
         return allowed_mask
 
     def commit(self, token_id: int):
