@@ -2553,7 +2553,8 @@ impl<'a> Eq for GrammarConstraintState<'a> {}
 
 impl<'a> Display for GrammarConstraintState<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        todo!();
+        writeln!(f, "GrammarConstraintState ({} active tokenizer states):", self.state.len())?;
+        return Ok(());
         // writeln!(
         //     f,
         //     "GrammarConstraintState ({} active tokenizer states):",
@@ -2673,7 +2674,7 @@ impl<'a> GrammarConstraintState<'a> {
         //         .collect::<Vec<_>>(),
         // );
         // println!("  - GSS Stats: {:#?}", stats);
-        todo!()
+        // todo!()
     }
 
     pub fn print_gss(&self) {
@@ -2692,11 +2693,11 @@ impl<'a> GrammarConstraintState<'a> {
         //     .map(|k| format!("Tokenizer State {}", k.0))
         //     .collect();
         // self.parent.print_gss_nodes(&roots, Some(&labels));
-        todo!()
+        // todo!()
     }
 
     pub fn explain_stack(&self) {
-        todo!()
+        // todo!()
         // for (state_id, state) in &self.state {
         //     println!("\n--- State {} ---", state_id.0);
         //     let mut seen = BTreeSet::new();
@@ -2748,7 +2749,8 @@ impl<'a> GrammarConstraintState<'a> {
         //         .collect::<Vec<_>>(),
         // )
         // .unique_nodes()
-        todo!()
+        // todo!()
+        0
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {

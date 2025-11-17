@@ -168,7 +168,9 @@ pub struct GLRParser {
 
 impl Display for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        todo!()
+        writeln!(f, "GLRParser:")?;
+        eprintln!("TODO:");
+        return Ok(());
     }
 }
 
@@ -449,7 +451,7 @@ impl Debug for GLRParserState<'_> {
 
 impl PartialEq for GLRParserState<'_> {
     fn eq(&self, other: &Self) -> bool {
-        todo!()
+        self.stack.to_stacks() == other.stack.to_stacks()
     }
 }
 
@@ -487,6 +489,6 @@ impl<'a> GLRParserState<'a> {
     }
 
     pub fn merge_with(&mut self, other: Self) {
-        todo!()
+        self.stack = self.stack.merge(&other.stack);
     }
 }
