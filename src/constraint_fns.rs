@@ -1,6 +1,5 @@
 use crate::constraint::{GrammarConstraintState, TerminalAllowanceCheckMode};
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
@@ -35,23 +34,21 @@ impl<'a> GrammarConstraintState<'a> {
             let mut gss = glr_state.stack.clone();
             let possible_matches = &self.parent.possible_matches;
             gss = gss.apply_and_prune(|acc| {
-                if acc.terminals_union == HybridL2Bitset::all() {
+                if acc.terminals_union.is_empty() {
                     return Some(acc.clone());
                 }
                 let mut forbidden_llm_tokens = HybridBitset::zeros();
-                let disallowed_terminals_l2 = acc.terminals_union.complement();
-
-                for (range, disallowed_in_range) in disallowed_terminals_l2.range_values() {
-                    if disallowed_in_range.is_empty() { continue; }
-                    let relevant_matches = possible_matches.range(TokenizerStateID(*range.start())..=TokenizerStateID(*range.end()));
-                    for (_, state_matches) in relevant_matches {
+                for (&tokenizer_state_id, disallowed_in_state) in &acc.terminals_union {
+                    if disallowed_in_state.is_empty() { continue; }
+                    if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tokenizer_state_id)) {
                         for (terminal_id, llm_tokens) in state_matches {
-                            if disallowed_in_range.contains(terminal_id.0) {
+                            if disallowed_in_state.contains(terminal_id.0) {
                                 forbidden_llm_tokens |= llm_tokens;
                             }
                         }
                     }
                 }
+
                 if forbidden_llm_tokens.is_empty() {
                     return Some(acc.clone());
                 }
@@ -174,25 +171,22 @@ impl<'a> GrammarConstraintState<'a> {
             let mut gss = glr_state.stack.clone();
             // Prune based on matched terminals
             gss = gss.apply_and_prune(|acc| {
-                for (sid, bv) in &terminals_map {
-                    let allowed = acc.terminals_union.get_l2_bitset(sid.0).cloned().unwrap_or(HybridBitset::max_ones());
-                    if !bv.is_subset(&allowed) {
-                        return None;
+                for (sid, matched_terminals) in &terminals_map {
+                    if let Some(disallowed) = acc.terminals_union.get(&sid.0) {
+                        if matched_terminals.intersects(disallowed) {
+                            return None;
+                        }
                     }
                 }
                 Some(acc.clone())
             });
             // Remap tokenizer states
             gss = gss.apply(|acc| {
-                let mut new_terminals_union = HybridL2Bitset::all();
-                let mut new_map = BTreeMap::new();
+                let mut new_terminals_union = BTreeMap::new();
                 for (old, new) in &state_map {
-                    if let Some(bv) = acc.terminals_union.get_l2_bitset(old.0) {
-                        new_map.entry(new.0).and_modify(|b: &mut HybridBitset| *b |= bv.clone()).or_insert_with(|| bv.clone());
+                    if let Some(bv) = acc.terminals_union.get(&old.0) {
+                        new_terminals_union.entry(new.0).or_default().bitor_assign(bv);
                     }
-                }
-                for (sid, bv) in new_map {
-                    new_terminals_union.insert_l2_bitset(sid, bv);
                 }
                 let mut new_acc = acc.clone();
                 new_acc.terminals_union = new_terminals_union;
@@ -224,14 +218,11 @@ impl<'a> GrammarConstraintState<'a> {
                     if !gss.is_empty() {
                         if let Some(end_state_id) = exec_result.end_state {
                             if self.parent.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id)).contains(&terminal_id) {
-                                let mut disallowed = HybridL2Bitset::new();
-                                let mut bv = HybridBitset::zeros();
-                                bv.insert(match_info.id);
-                                disallowed.insert_l2_bitset(end_state_id, bv);
-                                gss = gss.apply_and_prune(|acc| {
+                                let terminal_to_disallow = match_info.id;
+                                gss = gss.apply(|acc| {
                                     let mut na = acc.clone();
-                                    na.terminals_union -= &disallowed;
-                                    Some(na)
+                                    na.terminals_union.entry(end_state_id).or_default().insert(terminal_to_disallow);
+                                    na
                                 });
                             }
                         }

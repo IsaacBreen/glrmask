@@ -9,7 +9,6 @@ use pyo3::types::{PyDict, PyTuple};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use sep1::datastructures::gss_acc::{Acc as RustAcc, Acc};
 use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
-use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
 use sep1::datastructures::leveled_gss::LeveledGSS;
 use sep1::datastructures::u8set::U8Set;
 use sep1::finite_automata::Regex;
@@ -792,81 +791,6 @@ impl From<PyHybridBitset> for RustHybridBitset {
     }
 }
 
-#[pyclass(name = "HybridL2Bitset")]
-#[derive(Clone)]
-pub struct PyHybridL2Bitset {
-    inner: RustHybridL2Bitset,
-}
-
-#[pymethods]
-impl PyHybridL2Bitset {
-    fn range_values(&self) -> Vec<((usize, usize), PyHybridBitset)> {
-        self.inner
-            .range_values()
-            .map(|(range, bv)| {
-                let py_range = (*range.start(), *range.end());
-                let py_bv = PyHybridBitset { inner: bv.clone() };
-                (py_range, py_bv)
-            })
-            .collect()
-    }
-
-    #[staticmethod]
-    fn all() -> Self {
-        Self {
-            inner: RustHybridL2Bitset::all(),
-        }
-    }
-
-    fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
-        PyHybridL2Bitset {
-            inner: &self.inner | &other.inner,
-        }
-    }
-
-    pub fn complement(&self) -> PyHybridL2Bitset {
-        PyHybridL2Bitset {
-            inner: self.inner.complement(),
-        }
-    }
-
-    fn get_l2_bitset(&self, state_id: usize) -> PyHybridBitset {
-        PyHybridBitset {
-            inner: self.inner.get_l2_bitset(state_id).unwrap().clone(),
-        }
-    }
-
-    fn insert_l2_bitset(&mut self, state_id: usize, bitset: &PyHybridBitset) {
-        self.inner.insert_l2_bitset(state_id, bitset.inner.clone());
-    }
-
-    fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    fn __str__(&self) -> String {
-        format!("{:?}", self.inner)
-    }
-
-    fn __repr__(&self) -> String {
-        format!("HybridL2Bitset({:?})", self.inner)
-    }
-
-    fn __eq__(&self, other: &Self) -> bool {
-        self.inner == other.inner
-    }
-
-    fn __hash__(&self) -> PyResult<isize> {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        Ok(hasher.finish() as isize)
-    }
-}
-
 #[pyclass(name = "GSSNode")]
 #[derive(Clone)]
 pub struct PyGSSNode {
@@ -896,14 +820,17 @@ impl PyGSSNode {
         )
     }
 
-    fn disallowed_terminals(&self) -> PyHybridL2Bitset {
-        PyHybridL2Bitset {
-            inner: self
-                .inner
-                .reduce_acc()
-                .map(|acc| acc.terminals_union.complement())
-                .unwrap_or_else(|| RustHybridL2Bitset::all().complement()),
+    fn disallowed_terminals(&self, py: Python) -> PyResult<PyObject> {
+        let dict = PyDict::new_bound(py);
+        if let Some(acc) = self.inner.reduce_acc() {
+            for (&tokenizer_state_id, bitset) in &acc.terminals_union {
+                dict.set_item(
+                    tokenizer_state_id,
+                    PyHybridBitset { inner: bitset.clone() },
+                )?;
+            }
         }
+        Ok(dict.into())
     }
 
     fn clone_node(&self) -> PyGSSNode {
@@ -919,7 +846,7 @@ impl PyGSSNode {
         self.inner.to_graph_string(false)
     }
 
-    fn flatten(&self) -> Vec<(Vec<usize>, (PyHybridBitset, PyHybridL2Bitset))> {
+    fn flatten<'py>(&self, py: Python<'py>) -> PyResult<Vec<(Vec<usize>, (PyHybridBitset, PyObject))>> {
         let flattened = self.inner.to_stacks();
         flattened
             .into_iter()
@@ -928,10 +855,11 @@ impl PyGSSNode {
                 let py_llm_tokens = PyHybridBitset {
                     inner: acc.llm_tokens_union,
                 };
-                let py_terminals_union = PyHybridL2Bitset {
-                    inner: acc.terminals_union,
-                };
-                (path_ids, (py_llm_tokens, py_terminals_union))
+                let py_terminals_union = PyDict::new_bound(py);
+                for (&sid, bv) in &acc.terminals_union {
+                    py_terminals_union.set_item(sid, PyHybridBitset { inner: bv.clone() })?;
+                }
+                Ok((path_ids, (py_llm_tokens, py_terminals_union.to_object(py))))
             })
             .collect()
     }
@@ -1037,13 +965,10 @@ fn gss_prune_disallowed_terminals(
 
     node.inner = node.inner.apply_and_prune(|acc| {
         for (sid, bv) in &rust_terminals_map {
-            let allowed = acc
-                .terminals_union
-                .get_l2_bitset(sid.0)
-                .cloned()
-                .unwrap_or(RustHybridBitset::max_ones());
-            if !bv.is_subset(&allowed) {
-                return None;
+            if let Some(disallowed) = acc.terminals_union.get(&sid.0) {
+                if bv.intersects(disallowed) {
+                    return None;
+                }
             }
         }
         Some(acc.clone())
@@ -1070,23 +995,15 @@ fn gss_prune_llm_tokens_by_disallowed_terminals(
     }
 
     node.inner = node.inner.apply_and_prune(|acc| {
-        if acc.terminals_union == RustHybridL2Bitset::all() {
+        if acc.terminals_union.is_empty() {
             return Some(acc.clone());
         }
         let mut forbidden_llm_tokens = RustHybridBitset::zeros();
-        let disallowed_terminals_l2 = acc.terminals_union.complement();
-
-        for (range, disallowed_in_range) in disallowed_terminals_l2.range_values() {
-            if disallowed_in_range.is_empty() {
-                continue;
-            }
-            let relevant_matches = rust_possible_matches.range(
-                sep1::tokenizer::TokenizerStateID(*range.start())
-                    ..=sep1::tokenizer::TokenizerStateID(*range.end()),
-            );
-            for (_, state_matches) in relevant_matches {
+        for (&tokenizer_state_id, disallowed_in_state) in &acc.terminals_union {
+            if disallowed_in_state.is_empty() { continue; }
+            if let Some(state_matches) = rust_possible_matches.get(&sep1::tokenizer::TokenizerStateID(tokenizer_state_id)) {
                 for (terminal_id, llm_tokens) in state_matches {
-                    if disallowed_in_range.contains(terminal_id.0) {
+                    if disallowed_in_state.contains(terminal_id.0) {
                         forbidden_llm_tokens |= llm_tokens;
                     }
                 }
@@ -1124,19 +1041,15 @@ fn gss_map_allowed_terminals_tokenizer_states(
     node.inner = node.inner.apply(|acc| {
         let mut new_map = BTreeMap::new();
         for (old, new) in &rust_state_map {
-            if let Some(bv) = acc.terminals_union.get_l2_bitset(old.0) {
+            if let Some(bv) = acc.terminals_union.get(&old.0) {
                 new_map
                     .entry(new.0)
                     .and_modify(|b: &mut RustHybridBitset| *b |= bv.clone())
                     .or_insert_with(|| bv.clone());
             }
         }
-        let mut out = RustHybridL2Bitset::all();
-        for (sid, bv) in new_map {
-            out.insert_l2_bitset(sid, bv);
-        }
         let mut na = acc.clone();
-        na.terminals_union = out;
+        na.terminals_union = new_map;
         na
     });
     Ok(())
@@ -1364,7 +1277,6 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammarConstraintState>()?;
     m.add_class::<PyHybridBitsetIterator>()?;
     m.add_class::<PyHybridBitset>()?;
-    m.add_class::<PyHybridL2Bitset>()?;
     m.add_class::<PyGSSNode>()?;
     m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
     m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
