@@ -152,7 +152,7 @@ impl<'a> GrammarConstraintState<'a> {
         println!("Finalization elapsed: {:?}", instant.elapsed());
 
         let final_mask = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
-        println!("final_mask: {:?}", final_mask);
+        println!("Finalization 2 elapsed: {:?}", instant.elapsed());
         final_mask
     }
 
