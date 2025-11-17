@@ -1155,10 +1155,7 @@ impl PyGrammarConstraintState {
     }
 
     fn get_mask_bv(&mut self) -> PyResult<PyHybridBitset> {
-        let instant = std::time::Instant::now();
         let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-        let elapsed = instant.elapsed();
-        println!("get_mask_bv elapsed: {:?}", elapsed);
         Ok(PyHybridBitset { inner: bitset })
     }
 

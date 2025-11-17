@@ -18,7 +18,6 @@ type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask4(&self) -> HybridBitset {
-        let instant = Instant::now();
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
         if self.state.is_empty() {
             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
@@ -27,8 +26,6 @@ impl<'a> GrammarConstraintState<'a> {
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
         let dwa = &self.parent.precomputed4;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
-
-        println!("Preprocessing elapsed: {:?}", instant.elapsed());
 
         // 1. Seed initial states
         for (&tokenizer_state_id, glr_state) in &self.state {
@@ -84,8 +81,6 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
         }
-
-        println!("Preprocessing elapsed: {:?}", instant.elapsed());
 
         // 2. Main worklist loop
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
@@ -149,11 +144,8 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
         }
-        println!("Finalization elapsed: {:?}", instant.elapsed());
 
-        let final_mask = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
-        println!("Finalization 2 elapsed: {:?}", instant.elapsed());
-        final_mask
+        self.parent.internal_bv_to_original(&final_mask_internal.into_inner())
     }
 
     #[time_it]
