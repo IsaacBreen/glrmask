@@ -1737,6 +1737,60 @@ impl GrammarConstraint {
         }).reduce(RangeSetBlaze::new, |a, b| a | b);
         println!("[perf] STRATEGY 5 (Rayon):                  {:?}", instant.elapsed());
 
+        // STRATEGY 6: Pre-computed Bitset Matrix
+        let max_original_id = self.llm_vocab.max_original_llm_token_id;
+        let original_vocab_size_words = (max_original_id / 64) + 1;
+        let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
+
+        let mut internal_to_original_bitset_matrix: Vec<u64> =
+            vec![0; num_internal_tokens * original_vocab_size_words];
+
+        for (internal_id, original_bv) in internal_to_original.iter() {
+            if *internal_id >= num_internal_tokens {
+                continue;
+            }
+            let row_start_idx = *internal_id * original_vocab_size_words;
+
+            for original_id in original_bv.iter() {
+                if original_id > max_original_id {
+                    continue;
+                }
+                let word_idx = original_id / 64;
+                let bit_idx = original_id % 64;
+                internal_to_original_bitset_matrix[row_start_idx + word_idx] |= 1 << bit_idx;
+            }
+        }
+
+        let instant = std::time::Instant::now();
+        let mut result_bitset_words = vec![0u64; original_vocab_size_words];
+        for internal_id in internal_bv.iter() {
+            if internal_id >= num_internal_tokens {
+                continue;
+            }
+            let row_start_idx = internal_id * original_vocab_size_words;
+            let bitset_slice = &internal_to_original_bitset_matrix
+                [row_start_idx..row_start_idx + original_vocab_size_words];
+
+            for i in 0..original_vocab_size_words {
+                result_bitset_words[i] |= bitset_slice[i];
+            }
+        }
+        // To be fair, we must convert back to the required type.
+        let _original_bv_6 = result_bitset_words
+            .iter()
+            .enumerate()
+            .flat_map(|(word_idx, &word)| {
+                (0..64).filter_map(move |bit_idx| {
+                    if (word >> bit_idx) & 1 == 1 {
+                        Some(word_idx * 64 + bit_idx)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect::<RangeSetBlaze<usize>>();
+        println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?}", instant.elapsed());
+
         HybridBitset::from(original_bv_rsb)
     }
 
