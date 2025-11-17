@@ -1880,9 +1880,10 @@ impl GrammarConstraint {
         let precompute_instant = std::time::Instant::now();
         let max_original_id = self.llm_vocab.max_original_llm_token_id;
         let num_internals = self.vocab.internal_max_llm_token + 1;
+        let unmapped_sentinel = num_internals as u32;
 
         // 1. Build original_to_internal
-        let mut o2i: Vec<u32> = vec![0; max_original_id + 1];
+        let mut o2i: Vec<u32> = vec![unmapped_sentinel; max_original_id + 1];
         for (internal_id, original_bv) in internal_to_original.iter() {
             for original_id in original_bv.iter() {
                 if original_id <= max_original_id {
@@ -1894,7 +1895,9 @@ impl GrammarConstraint {
         // 2. Build counts
         let mut counts = vec![0u32; num_internals];
         for &internal_id in o2i.iter() {
-            counts[internal_id as usize] += 1;
+            if internal_id < unmapped_sentinel {
+                counts[internal_id as usize] += 1;
+            }
         }
 
         // 3. Build start offsets
@@ -1907,15 +1910,15 @@ impl GrammarConstraint {
         start.push(current_pos);
 
         // 4. Build new_to_old map
-        let mut new_to_old = vec![0u32; max_original_id + 1];
+        let mut new_to_old = vec![0u32; current_pos as usize];
         let mut write_pos = start[..num_internals].to_vec();
         for (old_id, &internal_id) in o2i.iter().enumerate() {
-            let i = internal_id as usize;
-            let pos = write_pos[i] as usize;
-            if pos < new_to_old.len() {
+            if internal_id < unmapped_sentinel {
+                let i = internal_id as usize;
+                let pos = write_pos[i] as usize;
                 new_to_old[pos] = old_id as u32;
+                write_pos[i] += 1;
             }
-            write_pos[i] += 1;
         }
         let _precompute_elapsed = precompute_instant.elapsed();
 
@@ -1943,7 +1946,9 @@ impl GrammarConstraint {
         // --- STRATEGY 9: Scan original_to_internal (Dense Bitset) ---
         let precompute_instant = std::time::Instant::now();
         let max_original_id = self.llm_vocab.max_original_llm_token_id;
-        let mut original_to_internal_map: Vec<u32> = vec![0; max_original_id + 1];
+        let num_internals = self.vocab.internal_max_llm_token + 1;
+        let unmapped_sentinel = num_internals as u32;
+        let mut original_to_internal_map: Vec<u32> = vec![unmapped_sentinel; max_original_id + 1];
         for (internal_id, original_bv) in internal_to_original.iter() {
             for original_id in original_bv.iter() {
                 if original_id <= max_original_id {
@@ -1951,7 +1956,7 @@ impl GrammarConstraint {
                 }
             }
         }
-        let mut active_internals = vec![false; self.vocab.internal_max_llm_token + 1];
+        let mut active_internals = vec![false; num_internals];
         for i in internal_bv.iter() {
             if i < active_internals.len() {
                 active_internals[i] = true;
@@ -1964,7 +1969,7 @@ impl GrammarConstraint {
         let mut result_bitset_words = vec![0u64; original_vocab_size_words];
         for original_id in 0..=max_original_id {
             let internal_id = original_to_internal_map[original_id] as usize;
-            if active_internals[internal_id] {
+            if internal_id < num_internals && active_internals[internal_id] {
                 let word_idx = original_id / 64;
                 let bit_idx = original_id % 64;
                 result_bitset_words[word_idx] |= 1 << bit_idx;
@@ -1990,7 +1995,9 @@ impl GrammarConstraint {
         // --- STRATEGY 10: Parallel Scan o2i ---
         let precompute_instant = std::time::Instant::now();
         let max_original_id = self.llm_vocab.max_original_llm_token_id;
-        let mut original_to_internal_map_10: Vec<u32> = vec![0; max_original_id + 1];
+        let num_internals = self.vocab.internal_max_llm_token + 1;
+        let unmapped_sentinel = num_internals as u32;
+        let mut original_to_internal_map_10: Vec<u32> = vec![unmapped_sentinel; max_original_id + 1];
         for (internal_id, original_bv) in internal_to_original.iter() {
             for original_id in original_bv.iter() {
                 if original_id <= max_original_id {
@@ -1998,7 +2005,7 @@ impl GrammarConstraint {
                 }
             }
         }
-        let mut active_internals_10 = vec![false; self.vocab.internal_max_llm_token + 1];
+        let mut active_internals_10 = vec![false; num_internals];
         for i in internal_bv.iter() {
             if i < active_internals_10.len() {
                 active_internals_10[i] = true;
@@ -2023,7 +2030,7 @@ impl GrammarConstraint {
                     }
                     let internal_id =
                         unsafe { *original_to_internal_map_10.get_unchecked(original_id) } as usize;
-                    if unsafe { *active_internals_10.get_unchecked(internal_id) } {
+                    if internal_id < num_internals && unsafe { *active_internals_10.get_unchecked(internal_id) } {
                         current_word |= 1 << bit_idx;
                     }
                 }
