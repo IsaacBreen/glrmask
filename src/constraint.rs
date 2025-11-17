@@ -586,6 +586,10 @@ pub struct GrammarConstraint {
 
     /// Maps original terminal IDs to dummy terminal IDs (if any).
     pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
+
+    /// Precomputed bitset matrix for internal->original token ID conversion.
+    pub(crate) internal_to_original_bitset_matrix: Vec<u64>,
+    pub(crate) original_vocab_size_words: usize,
 }
 
 impl GrammarConstraint {
@@ -620,6 +624,14 @@ impl GrammarConstraint {
         assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
         assert_eq!(self.vocab, other.vocab);
         assert_eq!(self.original_to_dummy_map, other.original_to_dummy_map);
+        assert_eq!(
+            self.internal_to_original_bitset_matrix,
+            other.internal_to_original_bitset_matrix
+        );
+        assert_eq!(
+            self.original_vocab_size_words,
+            other.original_vocab_size_words
+        );
         // precomputed4 still has no PartialEq; skip.
     }
 }
@@ -665,6 +677,14 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert(
             "original_to_dummy_map".to_string(),
             self.original_to_dummy_map.to_json(),
+        );
+        obj.insert(
+            "internal_to_original_bitset_matrix".to_string(),
+            self.internal_to_original_bitset_matrix.to_json(),
+        );
+        obj.insert(
+            "original_vocab_size_words".to_string(),
+            self.original_vocab_size_words.to_json(),
         );
         JSONNode::Object(obj)
     }
@@ -762,6 +782,42 @@ impl JSONConvertible for GrammarConstraint {
                     None => BTreeMap::new(),
                 };
 
+                let (internal_to_original_bitset_matrix, original_vocab_size_words) =
+                    if let (Some(matrix_node), Some(words_node)) = (
+                        obj.remove("internal_to_original_bitset_matrix"),
+                        obj.remove("original_vocab_size_words"),
+                    ) {
+                        (
+                            Vec::<u64>::from_json(matrix_node)?,
+                            usize::from_json(words_node)?,
+                        )
+                    } else {
+                        // Fallback for older versions: recompute it.
+                        let max_original_id = max_original_llm_token_id;
+                        let original_vocab_size_words = (max_original_id / 64) + 1;
+                        let num_internal_tokens = vocab.internal_max_llm_token + 1;
+
+                        let mut internal_to_original_bitset_matrix: Vec<u64> =
+                            vec![0; num_internal_tokens * original_vocab_size_words];
+
+                        for (internal_id, original_bv) in vocab.internal_to_original.iter() {
+                            if *internal_id >= num_internal_tokens {
+                                continue;
+                            }
+                            let row_start_idx = *internal_id * original_vocab_size_words;
+
+                            for original_id in original_bv.iter() {
+                                if original_id > max_original_id {
+                                    continue;
+                                }
+                                let word_idx = original_id / 64;
+                                let bit_idx = original_id % 64;
+                                internal_to_original_bitset_matrix[row_start_idx + word_idx] |= 1 << bit_idx;
+                            }
+                        }
+                        (internal_to_original_bitset_matrix, original_vocab_size_words)
+                    };
+
                 let mut gc = GrammarConstraint {
                     tokenizer,
                     parser,
@@ -780,6 +836,8 @@ impl JSONConvertible for GrammarConstraint {
                     post_commit_allow_check_mode,
                     vocab,
                     original_to_dummy_map,
+                    internal_to_original_bitset_matrix,
+                    original_vocab_size_words,
                 };
                 Ok(gc)
             }
@@ -1241,6 +1299,29 @@ impl GrammarConstraint {
             &trie1_god,
         );
 
+        let max_original_id = llm_vocab.max_original_llm_token_id;
+        let original_vocab_size_words = (max_original_id / 64) + 1;
+        let num_internal_tokens = vocab.internal_max_llm_token + 1;
+
+        let mut internal_to_original_bitset_matrix: Vec<u64> =
+            vec![0; num_internal_tokens * original_vocab_size_words];
+
+        for (internal_id, original_bv) in vocab.internal_to_original.iter() {
+            if *internal_id >= num_internal_tokens {
+                continue;
+            }
+            let row_start_idx = *internal_id * original_vocab_size_words;
+
+            for original_id in original_bv.iter() {
+                if original_id > max_original_id {
+                    continue;
+                }
+                let word_idx = original_id / 64;
+                let bit_idx = original_id % 64;
+                internal_to_original_bitset_matrix[row_start_idx + word_idx] |= 1 << bit_idx;
+            }
+        }
+
         let mut gc = GrammarConstraint {
             tokenizer,
             parser,
@@ -1256,6 +1337,8 @@ impl GrammarConstraint {
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             vocab,
             original_to_dummy_map,
+            internal_to_original_bitset_matrix,
+            original_vocab_size_words,
         };
         gc
     }
@@ -1600,10 +1683,7 @@ impl GrammarConstraint {
 
     /// Convert an internal BV (using `self.vocab`) back to original IDs.
     pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
-        self.internal_bv_to_original_with_map(
-            internal_bv,
-            &self.vocab.internal_to_original,
-        )
+        self.internal_bv_to_original_with_map(internal_bv)
     }
 
 
@@ -1633,159 +1713,30 @@ impl GrammarConstraint {
     fn internal_bv_to_original_with_map(
         &self,
         internal_bv: &LLMTokenBV,
-        internal_to_original: &BTreeMap<usize, LLMTokenBV>,
     ) -> LLMTokenBV {
-        if !internal_to_original.is_empty() {
-            let i2o_num_entries = internal_to_original.len();
-            let i2o_total_ranges: usize = internal_to_original
-                .values()
-                .map(|bv| bv.inner().ranges_len())
-                .sum();
-            let i2o_total_len: usize = internal_to_original.values().map(|bv| bv.len()).sum();
-            let i2o_avg_ranges = i2o_total_ranges as f64 / i2o_num_entries as f64;
-            let i2o_avg_len = i2o_total_len as f64 / i2o_num_entries as f64;
-
-            println!("[perf] internal_bv_to_original_with_map stats:");
-            println!("  - internal_to_original map:");
-            println!("    - Entries: {}", i2o_num_entries);
-            println!("    - Avg ranges per value: {:.2}", i2o_avg_ranges);
-            println!("    - Avg len per value: {:.2}", i2o_avg_len);
-            println!("  - input internal_bv:");
-            println!("    - Total len: {}", internal_bv.len());
-            println!("    - Num ranges: {}", internal_bv.inner().ranges_len());
-        }
-
         let mut internal_bv = internal_bv.clone();
         if internal_bv.is_all() {
             internal_bv = HybridBitset::ones(self.vocab.internal_max_llm_token + 1);
         }
 
-        // STRATEGY 1
-        let instant = std::time::Instant::now();
-        let mut original_bv_rsb = RangeSetBlaze::new();
-        for i in internal_bv.iter() {
-            if let Some(bv) = internal_to_original.get(&i) {
-                original_bv_rsb |= bv.inner.as_ref();
-            }
-        }
-        let elapsed1 = instant.elapsed();
-
-        let output_len = {
-            let count_u128 = original_bv_rsb.len();
-            count_u128.try_into().unwrap_or(usize::MAX)
-        };
-        let output_ranges = original_bv_rsb.ranges_len();
-        println!("  - output original_bv:");
-        println!("    - Total len: {}", output_len);
-        println!("    - Num ranges: {}", output_ranges);
-
-        println!("[perf] STRATEGY 1 (BTree + RangeSetBlaze): {:?}", elapsed1);
-
-        // STRATEGY 2
-        let mut i2o2: HashMap<usize, HashSet<usize>> = HashMap::new();
-        for (i, bv) in internal_to_original {
-            i2o2.insert(*i, bv.inner.iter().collect::<HashSet<_>>());
-        }
-        let instant = std::time::Instant::now();
-        let mut bv2: HashSet<usize> = HashSet::new();
-        for i in internal_bv.iter() {
-            if let Some(bv) = i2o2.get(&i) {
-                bv2.extend(bv.iter().copied());
-            }
-        }
-        let elapsed = instant.elapsed();
-        let bv2_rsb: RangeSetBlaze<usize> = bv2.iter().copied().collect();
-        let is_equal = bv2_rsb == original_bv_rsb;
-        println!("[perf] STRATEGY 2 (BTree + im::HashSet):    {:?} (equal: {})", elapsed, is_equal);
-
-        // STRATEGY 3: HashMap lookup
-        let i2o_hashmap: std::collections::HashMap<_, _> =
-            internal_to_original.iter().map(|(k, v)| (*k, v)).collect();
-        let instant = std::time::Instant::now();
-        let mut original_bv_3 = RangeSetBlaze::new();
-        for i in internal_bv.iter() {
-            if let Some(bv) = i2o_hashmap.get(&i) {
-                original_bv_3 |= bv.inner.as_ref();
-            }
-        }
-        let elapsed = instant.elapsed();
-        let is_equal = original_bv_3 == original_bv_rsb;
-        println!("[perf] STRATEGY 3 (HashMap + RangeSetBlaze): {:?} (equal: {})", elapsed, is_equal);
-
-        // STRATEGY 4: Vec lookup
-        let mut i2o_vec: Vec<Option<LLMTokenBV>> =
-            vec![None; self.vocab.internal_max_llm_token + 1];
-        for (i, bv) in internal_to_original.iter() {
-            if *i < i2o_vec.len() {
-                i2o_vec[*i] = Some(bv.clone());
-            }
-        }
-        let instant = std::time::Instant::now();
-        let mut original_bv_4 = RangeSetBlaze::new();
-        for i in internal_bv.iter() {
-            if let Some(Some(bv)) = i2o_vec.get(i) {
-                original_bv_4 |= bv.inner.as_ref();
-            }
-        }
-        let elapsed = instant.elapsed();
-        let is_equal = original_bv_4 == original_bv_rsb;
-        println!("[perf] STRATEGY 4 (Vec + RangeSetBlaze):     {:?} (equal: {})", elapsed, is_equal);
-
-        // STRATEGY 5: Rayon
-        let instant = std::time::Instant::now();
-        let original_bv_5 = internal_bv.inner.ranges().par_bridge().map(|range| {
-            let mut partial_bv = RangeSetBlaze::new();
-            for i in range {
-                if let Some(bv) = internal_to_original.get(&i) {
-                    partial_bv |= bv.inner.as_ref();
-                }
-            }
-            partial_bv
-        }).reduce(RangeSetBlaze::new, |a, b| a | b);
-        let elapsed = instant.elapsed();
-        let is_equal = original_bv_5 == original_bv_rsb;
-        println!("[perf] STRATEGY 5 (Rayon):                  {:?} (equal: {})", elapsed, is_equal);
-
-        // STRATEGY 6: Pre-computed Bitset Matrix
-        let max_original_id = self.llm_vocab.max_original_llm_token_id;
-        let original_vocab_size_words = (max_original_id / 64) + 1;
+        let original_vocab_size_words = self.original_vocab_size_words;
         let num_internal_tokens = self.vocab.internal_max_llm_token + 1;
 
-        let mut internal_to_original_bitset_matrix: Vec<u64> =
-            vec![0; num_internal_tokens * original_vocab_size_words];
-
-        for (internal_id, original_bv) in internal_to_original.iter() {
-            if *internal_id >= num_internal_tokens {
-                continue;
-            }
-            let row_start_idx = *internal_id * original_vocab_size_words;
-
-            for original_id in original_bv.iter() {
-                if original_id > max_original_id {
-                    continue;
-                }
-                let word_idx = original_id / 64;
-                let bit_idx = original_id % 64;
-                internal_to_original_bitset_matrix[row_start_idx + word_idx] |= 1 << bit_idx;
-            }
-        }
-
-        let instant = std::time::Instant::now();
         let mut result_bitset_words = vec![0u64; original_vocab_size_words];
         for internal_id in internal_bv.iter() {
             if internal_id >= num_internal_tokens {
                 continue;
             }
             let row_start_idx = internal_id * original_vocab_size_words;
-            let bitset_slice = &internal_to_original_bitset_matrix
+            let bitset_slice = &self.internal_to_original_bitset_matrix
                 [row_start_idx..row_start_idx + original_vocab_size_words];
 
             for i in 0..original_vocab_size_words {
                 result_bitset_words[i] |= bitset_slice[i];
             }
         }
-        // To be fair, we must convert back to the required type.
-        let original_bv_6 = result_bitset_words
+
+        let original_bv_rsb = result_bitset_words
             .iter()
             .enumerate()
             .flat_map(|(word_idx, &word)| {
@@ -1798,9 +1749,6 @@ impl GrammarConstraint {
                 })
             })
             .collect::<RangeSetBlaze<usize>>();
-        let elapsed = instant.elapsed();
-        let is_equal = original_bv_6 == original_bv_rsb;
-        println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
 
         HybridBitset::from(original_bv_rsb)
     }
