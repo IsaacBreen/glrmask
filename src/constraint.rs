@@ -47,6 +47,7 @@ use std::collections::BTreeMap as StdMap;
 use std::ops::BitOrAssign;
 use rayon::prelude::*;
 use im::HashSet;
+use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ParseState, ParseStateEdgeContent};
 use crate::glr::table::StateID;
@@ -1703,7 +1704,7 @@ impl GrammarConstraint {
     }
 
     /// Convert an internal BV (using `self.vocab`) back to original IDs.
-    pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
+    pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> Bitset {
         let mut internal_bv = internal_bv.clone();
         if internal_bv.is_all() {
             internal_bv = HybridBitset::ones(self.vocab.internal_max_llm_token + 1);
@@ -1730,21 +1731,7 @@ impl GrammarConstraint {
             }
         }
 
-        let rsb = result_bitset_words
-            .iter()
-            .enumerate()
-            .flat_map(|(word_idx, &word)| {
-                (0..WORD_BITS).filter_map(move |bit_idx| {
-                    if (word >> bit_idx) & 1 == 1 {
-                        Some(word_idx * WORD_BITS + bit_idx)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect::<RangeSetBlaze<usize>>();
-
-        HybridBitset::from(rsb)
+        Bitset::from_iter(result_bitset_words)
     }
 
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
