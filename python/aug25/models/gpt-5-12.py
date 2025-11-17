@@ -11,12 +11,12 @@ from tqdm import tqdm
 class _ArcBundle:
     """
     Compact storage for a set of arcs: parallel arrays for dests and masks.
-    masks[i] is either an ffi.Bitset or None meaning "no restriction".
+    masks[i] is either an ffi.HybridBitset or None meaning "no restriction".
     """
 
     __slots__ = ("dests", "masks", "length")
 
-    def __init__(self, dests: List[int], masks: List[Optional[ffi.Bitset]]):
+    def __init__(self, dests: List[int], masks: List[Optional[ffi.HybridBitset]]):
         self.dests = dests
         self.masks = masks
         self.length = len(dests)
@@ -88,7 +88,7 @@ class Model(GraphProvider):
         self.max_depth: Dict[int, int] = {}
 
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         for uid, node in tqdm(arena.items(), desc="Building GPT-5-12 model"):
             uid_int = int(uid)
@@ -111,8 +111,8 @@ class Model(GraphProvider):
 
             # Aggregate by pop
             # pop -> {
-            #     "sid_map": Dict[int, Dict[int, Optional[ffi.Bitset]]],  # sid -> dest_idx -> llm_bv_or_None
-            #     "eps_map": Dict[int, Optional[ffi.Bitset]],              # dest_idx -> llm_bv_or_None
+            #     "sid_map": Dict[int, Dict[int, Optional[ffi.HybridBitset]]],  # sid -> dest_idx -> llm_bv_or_None
+            #     "eps_map": Dict[int, Optional[ffi.HybridBitset]],              # dest_idx -> llm_bv_or_None
             # }
             pop_acc: Dict[int, Dict[str, dict]] = {}
 
@@ -122,14 +122,14 @@ class Model(GraphProvider):
 
                 llm_bv = bs_from_json(dumps(llm_bv_json))
                 # Convention: None means "no restriction" (all tokens allowed)
-                llm_mask: Optional[ffi.Bitset] = None if llm_bv.is_empty() else llm_bv
+                llm_mask: Optional[ffi.HybridBitset] = None if llm_bv.is_empty() else llm_bv
 
                 entry = pop_acc.get(pop_val)
                 if entry is None:
                     entry = {"sid_map": {}, "eps_map": {}}
                     pop_acc[pop_val] = entry
-                sid_map: Dict[int, Dict[int, Optional[ffi.Bitset]]] = entry["sid_map"]
-                eps_map: Dict[int, Optional[ffi.Bitset]] = entry["eps_map"]
+                sid_map: Dict[int, Dict[int, Optional[ffi.HybridBitset]]] = entry["sid_map"]
+                eps_map: Dict[int, Optional[ffi.HybridBitset]] = entry["eps_map"]
 
                 # For each destination, update its SID constraints
                 for dest_idx, state_bv_json in dest_map:
@@ -175,13 +175,13 @@ class Model(GraphProvider):
             # Convert accumulators into compact runtime structures with bundle deduplication
             groups: List[_PopGroup] = []
             for pop_val, entry in pop_acc.items():
-                sid_map: Dict[int, Dict[int, Optional[ffi.Bitset]]] = entry["sid_map"]
-                eps_map: Dict[int, Optional[ffi.Bitset]] = entry["eps_map"]
+                sid_map: Dict[int, Dict[int, Optional[ffi.HybridBitset]]] = entry["sid_map"]
+                eps_map: Dict[int, Optional[ffi.HybridBitset]] = entry["eps_map"]
 
                 # Epsilon arcs to ArcBundle
                 if eps_map:
                     eps_dests: List[int] = []
-                    eps_masks: List[Optional[ffi.Bitset]] = []
+                    eps_masks: List[Optional[ffi.HybridBitset]] = []
                     for d, bv in eps_map.items():
                         eps_dests.append(int(d))
                         eps_masks.append(bv)
@@ -194,7 +194,7 @@ class Model(GraphProvider):
                 mask_json_cache: Dict[int, str] = {}
                 bundle_cache: Dict[Tuple[Tuple[int, Optional[str]], ...], _ArcBundle] = {}
 
-                def mask_key(b: Optional[ffi.Bitset]) -> Optional[str]:
+                def mask_key(b: Optional[ffi.HybridBitset]) -> Optional[str]:
                     if b is None:
                         return None
                     bid = id(b)
@@ -218,7 +218,7 @@ class Model(GraphProvider):
                     if bundle is None:
                         # Materialize ArcBundle with actual objects
                         dests: List[int] = []
-                        masks: List[Optional[ffi.Bitset]] = []
+                        masks: List[Optional[ffi.HybridBitset]] = []
                         for d, mk in items:
                             dests.append(d)
                             # Rebuild bv by reverse lookup: we have mk (string) but need original object
@@ -298,10 +298,10 @@ class Model(GraphProvider):
         """
 
         t0 = time.time()
-        final_mask = ffi.Bitset.zeros()
+        final_mask = ffi.HybridBitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
 
         todo: Dict[int, Set[int]] = {}          # depth -> set(node_idx)
         depth_heap: List[int] = []              # min-heap of depths (may contain duplicates)
@@ -418,11 +418,11 @@ class Model(GraphProvider):
 
                     # Prepare accumulators for next nodes: dest -> (gss_set, child_llm_mask)
                     next_gss: Dict[int, List[ffi.GSSNode]] = {}
-                    next_mask: Dict[int, ffi.Bitset] = {}
+                    next_mask: Dict[int, ffi.HybridBitset] = {}
 
                     # Cache intersections of llm_mask with edge llm_bv
                     # Key: id(llm_bv) or None; Value: Bitset
-                    inter_cache: Dict[Optional[int], ffi.Bitset] = {}
+                    inter_cache: Dict[Optional[int], ffi.HybridBitset] = {}
                     inter_cache[None] = llm_mask  # None means "no restriction"
 
                     # Process epsilon arcs (no SID filter) first if any

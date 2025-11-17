@@ -911,7 +911,7 @@ class Model(GraphProvider):
         self.debug_logging = os.environ.get("RUST_LOG") == "debug"
 
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         # Normalize arena children bitsets and cache max_depth
         for uid, node in self.arena.items():
@@ -1004,7 +1004,7 @@ class Model(GraphProvider):
 
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         # Convert possible_matches_cache to RangeSet
-        pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
+        pmc_ffi: Dict[int, Dict[int, ffi.HybridBitset]] = constraint.possible_matches()
         pmc_rs: Dict[int, Dict[int, RangeSet]] = {}
         for tsid, inner in pmc_ffi.items():
             mapped: Dict[int, RangeSet] = {}

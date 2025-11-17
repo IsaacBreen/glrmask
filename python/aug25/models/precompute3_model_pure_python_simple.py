@@ -148,7 +148,7 @@ class Model(GraphProvider):
         roots_map = {int(s): int(r) for s, r in roots_map_raw}
         max_depth: Dict[NodeID, int] = {}
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         # Normalize arena children bitsets and cache max_depth
         for uid, node in arena_dict.items():
@@ -299,7 +299,7 @@ class Model(GraphProvider):
         state = {tokenizer_initial_state: initial_gss}
 
         # Convert possible_matches_cache to RangeSet
-        pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
+        pmc_ffi: Dict[int, Dict[int, ffi.HybridBitset]] = constraint.possible_matches()
         pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
         for tsid, inner in pmc_ffi.items():
             mapped: Dict[int, LLMTokenSet] = {}

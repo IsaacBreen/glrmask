@@ -37,9 +37,9 @@ def _install_profiling_hooks():
     global _hooks_installed
     if _hooks_installed:
         return
-    _profile_method(ffi.Bitset, 'union', 'bitset_union')
-    _profile_method(ffi.Bitset, 'intersection', 'bitset_intersection')
-    _profile_method(ffi.Bitset, 'difference', 'bitset_difference')
+    _profile_method(ffi.HybridBitset, 'union', 'bitset_union')
+    _profile_method(ffi.HybridBitset, 'intersection', 'bitset_intersection')
+    _profile_method(ffi.HybridBitset, 'difference', 'bitset_difference')
     _profile_method(ffi.HybridL2Bitset, 'complement', 'hybrid_complement')
     _profile_method(PyAcc, 'merge', 'acc_merge')
     _hooks_installed = True
@@ -51,9 +51,9 @@ class Model(GraphProvider):
         self.arena: Dict[int, dict] = im.arena
         self.roots_map: Dict[int, int] = im.roots_map
         self.max_depth: Dict[int, int] = im.max_depth
-        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.HybridBitset]]] = im.possible_matches_cache
         self.tokenizer_max_state: int = im.tokenizer.max_state()
-        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+        self.all_internal_llm_tokens_bitset: Optional[ffi.HybridBitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, Set[int]] = im.internal_to_original_map
         # Profiling state
         _install_profiling_hooks()
@@ -103,8 +103,8 @@ class Model(GraphProvider):
             'main_loop_intersection_calls': 0,
         }
 
-        all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
-        final_mask: ffi.Bitset = ffi.Bitset.zeros()
+        all_ones: Optional[ffi.HybridBitset] = self.all_internal_llm_tokens_bitset
+        final_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
         values: Dict[int, GSS] = {}
@@ -116,25 +116,25 @@ class Model(GraphProvider):
         max_depth: Dict[int, int] = self.max_depth
         arena: Dict[int, dict] = self.arena
         is_end = self.is_end
-        pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
+        pmc: Dict[int, Dict[int, ffi.HybridBitset]] = self.possible_matches_cache or {}
         max_state: int = self.tokenizer_max_state
 
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute forbidden LLM tokens from disallowed terminals for this GSS
-            forbid: ffi.Bitset = ffi.Bitset.zeros()
+            forbid: ffi.HybridBitset = ffi.HybridBitset.zeros()
             disallowed_l2 = acc.terminals_union.complement()
             for (start, end), bv in disallowed_l2.range_values():
                 if bv.is_empty():
                     continue
                 for tsid in range(start, min(end, max_state) + 1):
-                    pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                    pm: Optional[Dict[int, ffi.HybridBitset]] = pmc.get(tsid)
                     if not pm:
                         continue
                     for terminal_id_str, llm_tokens in pm.items():
                         if bv.contains(int(terminal_id_str)):
                             forbid = forbid.union(llm_tokens)
-            allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
+            allowed_mask: ffi.HybridBitset = all_ones.difference(forbid)  # type: ignore[union-attr]
             return PyAcc(
                 terminals_union=ffi.HybridL2Bitset.all(),  # consume
                 llm_mask=allowed_mask
@@ -275,7 +275,7 @@ class Model(GraphProvider):
         t_main_loop_done = time.perf_counter_ns()
 
         # Convert internal mask back to original IDs
-        original_mask: ffi.Bitset = ffi.Bitset.zeros()
+        original_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 for orig_id in self.internal_to_original_map[i]:

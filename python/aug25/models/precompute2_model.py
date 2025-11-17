@@ -98,8 +98,8 @@ class Model(GraphProvider):
             print("\n--- get_mask START ---")
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
-        final_mask = ffi.Bitset.zeros()
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        final_mask = ffi.HybridBitset.zeros()
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
         stopped: set[int] = set()
         todo: Dict[int, set[int]] = defaultdict(set)
 
@@ -148,7 +148,7 @@ class Model(GraphProvider):
                         print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
-                item: Optional[Tuple[ffi.GSSNode, ffi.Bitset]] = values.pop(node_idx, None)
+                item: Optional[Tuple[ffi.GSSNode, ffi.HybridBitset]] = values.pop(node_idx, None)
                 if item is None:
                     if self.debug_logging:
                         print(f"  - Node {node_idx}: SKIPPING (no value)")
@@ -206,7 +206,7 @@ class Model(GraphProvider):
                     for dest_idx, llm_rs in dests:
                         if self.debug_logging:
                             print(f"      - Dest: idx={dest_idx}, llm_rs={llm_rs.intervals}")
-                        edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
+                        edge_bv = ffi.HybridBitset.from_ranges(llm_rs.intervals)
                         child_llm_mask = llm_mask.intersection(edge_bv)
                         if self.debug_logging:
                             print(f"        - Child mask: {child_llm_mask.to_ranges()}")
@@ -239,7 +239,7 @@ class Model(GraphProvider):
             print("\n--- get_mask END ---")
             print(f"Final mask internal: {final_mask.to_ranges()}")
 
-        original_mask = ffi.Bitset.zeros()
+        original_mask = ffi.HybridBitset.zeros()
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 for orig_id in self.internal_to_original_map[i]:

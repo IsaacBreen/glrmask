@@ -66,7 +66,7 @@ class Model(GraphProvider):
         if vocab:
             model.internal_to_original_map = {int(k): v for k, v in vocab['internal_to_original']}
             internal_max = vocab['internal_max_llm_token']
-            all_internal_tokens_bitset = ffi.Bitset.from_ranges([(0, internal_max)])
+            all_internal_tokens_bitset = ffi.HybridBitset.from_ranges([(0, internal_max)])
         else:
             # Fallback for old format: one-to-one mapping
             i2o_map_one_to_one = constraint.internal_to_original_map()
@@ -118,12 +118,12 @@ class Model(GraphProvider):
         children = self.arena.get(node, {}).get("children") or []
         for (pop, llm_bv_json), dests in children:
             # Convert llm_bv_json to a RangeSet once for membership check
-            bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
+            bv = ffi.HybridBitset.from_json_string(json.dumps(llm_bv_json))
             llm_bv_rs = RangeSet.from_ranges(bv.to_ranges())
 
             if llm_bv_rs.contains(int(token)):
                 for dest_idx, state_bv_json in dests:
-                    state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                    state_bv = ffi.HybridBitset.from_json_string(json.dumps(state_bv_json))
                     if state_bv.is_empty():
                         yield (int(pop), None, int(dest_idx))
                     else:

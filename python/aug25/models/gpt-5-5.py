@@ -11,12 +11,12 @@ import _sep1 as ffi
 class _NodeState:
     # Aggregated state per trie node during get_mask()
     gss_node: ffi.GSSNode
-    mask: ffi.Bitset # set[ffi.GSSNode]
+    mask: ffi.HybridBitset # set[ffi.GSSNode]
     mask_hash: int
     in_queue: bool = False
 
 
-def _bitset_fingerprint(bs: ffi.Bitset) -> int:
+def _bitset_fingerprint(bs: ffi.HybridBitset) -> int:
     # Compute a stable fingerprint for a Bitset by hashing its ranges.
     # This lets us detect whether a union actually changed the mask without relying on internal APIs.
     rngs = bs.to_ranges()
@@ -51,16 +51,16 @@ class Model(GraphProvider):
 
         # Children grouped by pop:
         # node_id -> { pop (int): List[(llm_bv: Bitset, dests: List[(dest_idx: int, state_bv: Bitset)])] }
-        self.children_by_pop: Dict[int, Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]]] = {}
+        self.children_by_pop: Dict[int, Dict[int, List[Tuple[ffi.HybridBitset, List[Tuple[int, ffi.HybridBitset]]]]]] = {}
 
         # Deduplicate Bitset instances during parse
-        bitset_cache: Dict[str, ffi.Bitset] = {}
+        bitset_cache: Dict[str, ffi.HybridBitset] = {}
 
-        def parse_bv(obj) -> ffi.Bitset:
+        def parse_bv(obj) -> ffi.HybridBitset:
             s = json.dumps(obj, separators=(",", ":"))
             bs = bitset_cache.get(s)
             if bs is None:
-                bs = ffi.Bitset.from_json_string(s)
+                bs = ffi.HybridBitset.from_json_string(s)
                 bitset_cache[s] = bs
             return bs
 
@@ -71,14 +71,14 @@ class Model(GraphProvider):
             self.end_flags[uid] = bool(val.get("clean_end", False))
 
             # Collect children by pop
-            pop_map: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = {}
+            pop_map: Dict[int, List[Tuple[ffi.HybridBitset, List[Tuple[int, ffi.HybridBitset]]]]] = {}
             ch = node.get("children") or []
             for edge_key, dest_map in ch:
                 pop_raw, llm_bv_json = edge_key
                 pop = int(pop_raw)
                 llm_bv = parse_bv(llm_bv_json)
 
-                dests: List[Tuple[int, ffi.Bitset]] = []
+                dests: List[Tuple[int, ffi.HybridBitset]] = []
                 for dest_idx_raw, state_bv_json in dest_map:
                     dest_idx = int(dest_idx_raw)
                     state_bv = parse_bv(state_bv_json)
@@ -136,7 +136,7 @@ class Model(GraphProvider):
         t0 = time.time()
         # Final mask to return
         # Final mask to return
-        final_mask = ffi.Bitset.zeros()
+        final_mask = ffi.HybridBitset.zeros()
 
         # Per-node aggregation
         values: Dict[int, _NodeState] = {}
@@ -230,7 +230,7 @@ class Model(GraphProvider):
             for pop, groups in pop_map.items():
                 print(f"    - Edge group: pop={pop}")
                 # Precompute child masks for groups, and track if any group is relevant
-                child_masks: List[ffi.Bitset] = []
+                child_masks: List[ffi.HybridBitset] = []
                 any_relevant = False
                 parent_mask = st.mask
                 for llm_bv, _dests in groups:

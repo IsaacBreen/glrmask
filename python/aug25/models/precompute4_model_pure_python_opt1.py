@@ -249,7 +249,7 @@ class Model(GraphProvider):
     def from_json_string(s: str) -> 'Model':
         Stats.get().reset()
         data = json.loads(s)
-        dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
+        dumps, bs_from_json = json.dumps, ffi.HybridBitset.from_json_string
 
         vocab = data['vocab']
         all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])

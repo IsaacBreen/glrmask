@@ -15,7 +15,7 @@ class PopIndex:
             Mapping: dest_idx -> llm_token_filter
             Where llm_token_filter is:
               - None: means pass-through (no token filter)
-              - ffi.Bitset: a concrete token filter
+              - ffi.HybridBitset: a concrete token filter
     - sid_map: transitions for specific tokenizer states.
             Mapping: sid -> List[(dest_idx, llm_token_filter)]
             Where llm_token_filter is as above.
@@ -23,8 +23,8 @@ class PopIndex:
     __slots__ = ("wild", "sid_map")
 
     def __init__(self):
-        self.wild: Dict[int, Optional[ffi.Bitset]] = {}
-        self.sid_map: Dict[int, List[Tuple[int, Optional[ffi.Bitset]]]] = {}
+        self.wild: Dict[int, Optional[ffi.HybridBitset]] = {}
+        self.sid_map: Dict[int, List[Tuple[int, Optional[ffi.HybridBitset]]]] = {}
 
 
 class Model(GraphProvider):
@@ -54,10 +54,10 @@ class Model(GraphProvider):
         # Core per-node caches
         self.max_depth: Dict[int, int] = {}
         self.end_flags: Dict[int, bool] = {}
-        self.children: Dict[int, List[Tuple[Tuple[int, ffi.Bitset], List[Tuple[int, ffi.Bitset]]]]] = {}
+        self.children: Dict[int, List[Tuple[Tuple[int, ffi.HybridBitset], List[Tuple[int, ffi.HybridBitset]]]]] = {}
         self.pop_index_by_node: Dict[int, Dict[int, PopIndex]] = {}
 
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
         dumps = json.dumps
 
         # Normalize, cache, and build indexes
@@ -71,7 +71,7 @@ class Model(GraphProvider):
             except Exception:
                 self.max_depth[uid_int] = 0
 
-            # Normalize children: convert JSON bitsets into ffi.Bitset
+            # Normalize children: convert JSON bitsets into ffi.HybridBitset
             children_json = node.get("children") or []
             if not children_json:
                 self.children[uid_int] = []
@@ -79,7 +79,7 @@ class Model(GraphProvider):
                 continue
 
             normalized_children: List[
-                Tuple[Tuple[int, ffi.Bitset], List[Tuple[int, ffi.Bitset]]]
+                Tuple[Tuple[int, ffi.HybridBitset], List[Tuple[int, ffi.HybridBitset]]]
             ] = []
 
             for edge_key, dest_map in children_json:
@@ -87,7 +87,7 @@ class Model(GraphProvider):
                 pop_val = int(pop_val)
                 llm_bv = bs_from_json(dumps(llm_bv_json))
 
-                new_dest_map: List[Tuple[int, ffi.Bitset]] = []
+                new_dest_map: List[Tuple[int, ffi.HybridBitset]] = []
                 for dest_idx, state_bv_json in dest_map:
                     dest_idx_int = int(dest_idx)
                     state_bv = bs_from_json(dumps(state_bv_json))
@@ -138,11 +138,11 @@ class Model(GraphProvider):
     # --------------------
 
     @staticmethod
-    def _merge_token_filters(existing: Optional[ffi.Bitset], new_bv: Optional[ffi.Bitset]) -> Optional[ffi.Bitset]:
+    def _merge_token_filters(existing: Optional[ffi.HybridBitset], new_bv: Optional[ffi.HybridBitset]) -> Optional[ffi.HybridBitset]:
         """
         Merge two token filters:
           - None means pass-through (no filter)
-          - ffi.Bitset means concrete filter
+          - ffi.HybridBitset means concrete filter
         Union semantics:
           - None U anything = None
           - Bitset U None = None
@@ -155,7 +155,7 @@ class Model(GraphProvider):
 
     def _build_pop_index(
         self,
-        children: List[Tuple[Tuple[int, ffi.Bitset], List[Tuple[int, ffi.Bitset]]]],
+        children: List[Tuple[Tuple[int, ffi.HybridBitset], List[Tuple[int, ffi.HybridBitset]]]],
     ) -> Dict[int, PopIndex]:
         """
         Build the per-pop dispatch index for a node.
@@ -167,7 +167,7 @@ class Model(GraphProvider):
           - Where tokens are unioned across edges (llm_bv is unioned; llm_bv.is_empty() means pass-through)
         """
         # Group by pop
-        pops: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = defaultdict(list)
+        pops: Dict[int, List[Tuple[ffi.HybridBitset, List[Tuple[int, ffi.HybridBitset]]]]] = defaultdict(list)
         for (pop_val, llm_bv), dests in children:
             pops[int(pop_val)].append((llm_bv, dests))
 
@@ -176,13 +176,13 @@ class Model(GraphProvider):
         for pop_val, groups in pops.items():
             pop_index = PopIndex()
             # Temporary building structures
-            wild_map: Dict[int, Optional[ffi.Bitset]] = {}
+            wild_map: Dict[int, Optional[ffi.HybridBitset]] = {}
             # sid -> (dest -> token_filter)
-            sid_map_temp: Dict[int, Dict[int, Optional[ffi.Bitset]]] = {}
+            sid_map_temp: Dict[int, Dict[int, Optional[ffi.HybridBitset]]] = {}
 
             for llm_bv, dests in groups:
                 # Interpret llm_bv.is_empty() as "no filter" / pass-through
-                llm_filter: Optional[ffi.Bitset] = None if llm_bv.is_empty() else llm_bv
+                llm_filter: Optional[ffi.HybridBitset] = None if llm_bv.is_empty() else llm_bv
 
                 for dest_idx, state_bv in dests:
                     if state_bv.is_empty():
@@ -203,7 +203,7 @@ class Model(GraphProvider):
                                 dmap[dest_idx] = merged
 
             # Freeze sid_map into lists for faster iteration and less overhead
-            sid_map_final: Dict[int, List[Tuple[int, Optional[ffi.Bitset]]]] = {}
+            sid_map_final: Dict[int, List[Tuple[int, Optional[ffi.HybridBitset]]]] = {}
             for sid, dmap in sid_map_temp.items():
                 # Convert dict -> list of (dest_idx, filter), no need to sort
                 sid_map_final[sid] = list(dmap.items())
@@ -230,10 +230,10 @@ class Model(GraphProvider):
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
         t0 = time.time()
-        final_mask = ffi.Bitset.zeros()
+        final_mask = ffi.HybridBitset.zeros()
 
         # Node -> (set(GSSNode), Bitset)
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
 
         stopped: Set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, Set[int]] = {}  # depth -> set(node_idx)
@@ -356,7 +356,7 @@ class Model(GraphProvider):
 
                     # Aggregate: dest -> set(GSSNode), and union of token filters
                     dest_gss_nodes: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
-                    dest_token_filters: Dict[int, Optional[ffi.Bitset]] = {}
+                    dest_token_filters: Dict[int, Optional[ffi.HybridBitset]] = {}
 
                     # Wildcard transitions (apply to all sids)
                     wild = pop_index.wild

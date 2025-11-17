@@ -34,35 +34,35 @@ from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 
 
 # -----------------------
-# Fast in-Python Bitset wrapper (uses Rust ffi.Bitset underneath)
+# Fast in-Python Bitset wrapper (uses Rust ffi.HybridBitset underneath)
 # -----------------------
 
 class FastRangeSet:
     """
-    Thin wrapper around ffi.Bitset with a minimal Pythonic API.
+    Thin wrapper around ffi.HybridBitset with a minimal Pythonic API.
     Designed to be drop-in (enough) compatible with RangeSet used by existing code.
     """
 
     __slots__ = ("_bs",)
 
-    def __init__(self, bs: "ffi.Bitset"):
+    def __init__(self, bs: "ffi.HybridBitset"):
         self._bs = bs
 
     @staticmethod
     def empty(self) -> "FastRangeSet":
         # Rely on from_ranges([]) to create empty bitset
-        return FastRangeSet(ffi.Bitset.from_ranges([]))
+        return FastRangeSet(ffi.HybridBitset.from_ranges([]))
 
     @staticmethod
     def from_ranges(ranges: Iterable[Iterable[int]]) -> "FastRangeSet":
         # Accepts iterable of [start, end]
         lst = [list(pair) for pair in ranges]
-        return FastRangeSet(ffi.Bitset.from_ranges(lst))
+        return FastRangeSet(ffi.HybridBitset.from_ranges(lst))
 
     @staticmethod
     def from_indices(indices: Iterable[int]) -> "FastRangeSet":
         lst = list(indices)
-        return FastRangeSet(ffi.Bitset.from_indices(lst))
+        return FastRangeSet(ffi.HybridBitset.from_indices(lst))
 
     def to_ranges(self) -> List[Tuple[int, int]]:
         # ffi returns list of [start, end]; normalize to tuples
@@ -236,7 +236,7 @@ class Model:
 
         # Normalize arena: convert llm_bv to FastRangeSet; convert state_bv to Python ranges with starts
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         for uid, node in self.arena.items():
             uid_int = int(uid)
@@ -251,7 +251,7 @@ class Model:
             for edge_key, dest_map in children:
                 pop, llm_bv_json = edge_key
                 llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                llm_bv = FastRangeSet(ffi.Bitset.from_ranges(llm_bv_bitset.to_ranges()))
+                llm_bv = FastRangeSet(ffi.HybridBitset.from_ranges(llm_bv_bitset.to_ranges()))
                 new_dest_map = []
                 for dest_idx, state_bv_json in dest_map:
                     state_bv_bitset = bs_from_json(dumps(state_bv_json))
@@ -321,18 +321,18 @@ class Model:
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
 
         # Convert possible_matches_cache to FastRangeSet
-        pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
+        pmc_ffi: Dict[int, Dict[int, ffi.HybridBitset]] = constraint.possible_matches()
         pmc_rs: Dict[int, Dict[int, FastRangeSet]] = {}
         for tsid, inner in pmc_ffi.items():
             mapped: Dict[int, FastRangeSet] = {}
             for term_id, bit in inner.items():
-                mapped[int(term_id)] = FastRangeSet(ffi.Bitset.from_ranges(bit.to_ranges()))
+                mapped[int(term_id)] = FastRangeSet(ffi.HybridBitset.from_ranges(bit.to_ranges()))
             pmc_rs[int(tsid)] = mapped
         model.possible_matches_cache = pmc_rs
 
         model.internal_to_original_map = constraint.internal_to_original_map()
         all_internal = constraint.all_internal_llm_tokens_bitset()
-        model.all_internal_llm_tokens_bitset = FastRangeSet(ffi.Bitset.from_ranges(all_internal.to_ranges()))
+        model.all_internal_llm_tokens_bitset = FastRangeSet(ffi.HybridBitset.from_ranges(all_internal.to_ranges()))
         return model
 
     # -----------------------

@@ -43,7 +43,7 @@ class Model(GraphProvider):
         This is the core of the optimization strategy.
         """
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
         DENSE_THRESHOLD = 256  # Tunable parameter
 
         for uid, node in tqdm(
@@ -77,7 +77,7 @@ class Model(GraphProvider):
                 llm_bv = bs_from_json(llm_bv_json_str)
 
                 # 2. Merge state bitsets for the same destination index
-                merged_dest_map: Dict[int, ffi.Bitset] = {}
+                merged_dest_map: Dict[int, ffi.HybridBitset] = {}
                 for dest_idx, state_bv_json in dest_map_list:
                     dest_idx_int = int(dest_idx)
                     state_bv = bs_from_json(dumps(state_bv_json))
@@ -88,7 +88,7 @@ class Model(GraphProvider):
 
                 # 3. Partition into sparse, dense, and epsilon transitions
                 sid_to_dest_map: Dict[int, List[int]] = {}
-                dense_dests: List[Tuple[int, ffi.Bitset]] = []
+                dense_dests: List[Tuple[int, ffi.HybridBitset]] = []
                 epsilon_dests: List[int] = []
 
                 for dest_idx_int, state_bv in merged_dest_map.items():
@@ -162,8 +162,8 @@ class Model(GraphProvider):
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
         t0 = time.time()
-        final_mask = ffi.Bitset.zeros()
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        final_mask = ffi.HybridBitset.zeros()
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
         stopped: Set[int] = set()
         todo: Dict[int, Set[int]] = {}
         depth_heap: List[int] = []

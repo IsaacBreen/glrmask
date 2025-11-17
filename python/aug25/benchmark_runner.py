@@ -135,7 +135,7 @@ def print_model_statistics(model, model_name: str):
         if children:
             edge_key, _ = children[0]
             # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
-            if isinstance(edge_key[1], ffi.Bitset):
+            if isinstance(edge_key[1], ffi.HybridBitset):
                  is_precompute3 = True
             break
     

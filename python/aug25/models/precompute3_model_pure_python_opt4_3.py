@@ -338,7 +338,7 @@ class Model(GraphProvider):
         roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
         arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
         max_depth: Dict[NodeID, int] = {}
-        dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
+        dumps, bs_from_json = json.dumps, ffi.HybridBitset.from_json_string
 
         loaded_arena: Dict[NodeID, LoadedArenaNode] = {}
         for uid, node_data in arena_dict.items():

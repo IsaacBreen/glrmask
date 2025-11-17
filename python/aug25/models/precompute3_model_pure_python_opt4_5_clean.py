@@ -24,7 +24,7 @@ StateIDSet = RangeSetStates
 TerminalIdSet = RangeSet
 
 # --- Monkey-patch RangeSet to collect stats on union/intersection ---
-# This is to fulfill the request of tracking ffi.Bitset.union and intersection calls.
+# This is to fulfill the request of tracking ffi.HybridBitset.union and intersection calls.
 # Since the code was refactored to use a pure Python RangeSet, we track its methods instead.
 _original_rangeset_union = RangeSet.union
 _original_rangeset_intersection = RangeSet.intersection
@@ -433,7 +433,7 @@ class Model(GraphProvider):
         roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
         arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
         max_depth: Dict[NodeID, int] = {}
-        dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
+        dumps, bs_from_json = json.dumps, ffi.HybridBitset.from_json_string
 
         loaded_arena: Dict[NodeID, LoadedArenaNode] = {}
         for uid, node_data in arena_dict.items():

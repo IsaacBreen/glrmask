@@ -44,7 +44,7 @@ class _Dest:
 class _Group:
     __slots__ = ("llm_rs", "llm_bv", "dests")
 
-    def __init__(self, llm_rs: RangeSet, llm_bv: Optional[ffi.Bitset], dests: List[_Dest]):
+    def __init__(self, llm_rs: RangeSet, llm_bv: Optional[ffi.HybridBitset], dests: List[_Dest]):
         self.llm_rs = llm_rs
         self.llm_bv = llm_bv
         self.dests = dests      # type: List[_Dest]
@@ -64,7 +64,7 @@ class Model(GraphProvider):
 
     Key optimizations:
     - Precompiles and deduplicates edges per node by (pop, llm_range_set).
-    - Prebuilds ffi.Bitset for each unique LLM token RangeSet to avoid per-step constructions.
+    - Prebuilds ffi.HybridBitset for each unique LLM token RangeSet to avoid per-step constructions.
     - Groups transitions by 'pop' and calls gss_popn_collect once per pop per node expansion.
     - Filters popped parents to dest's state intervals via bisect on a single sorted sid list.
     - Priority-queue scheduler with de-duplication; avoids min() over dict of buckets.
@@ -131,7 +131,7 @@ class Model(GraphProvider):
                 for llm_key, gdata in groups_dict.items():
                     llm_rs: RangeSet = gdata["llm_rs"]
                     intervals = llm_rs.intervals or []
-                    llm_bv = ffi.Bitset.from_ranges(intervals) if intervals else None
+                    llm_bv = ffi.HybridBitset.from_ranges(intervals) if intervals else None
 
                     # dests: keep in the order they were encountered
                     dests: List[_Dest] = gdata["dests"]
@@ -212,7 +212,7 @@ class Model(GraphProvider):
         node_pop_map = self.node_pop_map
         is_end_node = self.is_end_node
 
-        Bitset = ffi.Bitset
+        Bitset = ffi.HybridBitset
         zeros = Bitset.zeros
         gss_merge_many = ffi.gss_merge_many_with_depth
         gss_popn_collect = ffi.gss_popn_collect
@@ -220,7 +220,7 @@ class Model(GraphProvider):
         final_mask = zeros()
 
         # Aggregated value per trie node waiting to be processed
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
         # Nodes that decided to stop (agg.is_ok() == False)
         stopped: set[int] = set()
 
@@ -327,7 +327,7 @@ class Model(GraphProvider):
                 for group in pop_entry.groups:
                     if self.debug_logging:
                         print(f"    - Edge: llm_bv={'None' if group.llm_bv is None else group.llm_bv.to_ranges()}")
-                    llm_bv = group.llm_bv  # Optional[ffi.Bitset]
+                    llm_bv = group.llm_bv  # Optional[ffi.HybridBitset]
                     child_llm_mask = llm_mask if llm_bv is None else llm_mask.intersection(llm_bv)
                     if self.debug_logging:
                         print(f"      - Child mask: {child_llm_mask.to_ranges()}")
@@ -394,7 +394,7 @@ class Model(GraphProvider):
             print("\n--- get_mask END ---")
             print(f"Final mask internal: {final_mask.to_ranges()}")
 
-        original_mask = ffi.Bitset.zeros()
+        original_mask = ffi.HybridBitset.zeros()
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 for orig_id in self.internal_to_original_map[i]:

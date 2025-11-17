@@ -58,7 +58,7 @@ class Model(_Model):
         base_model = _Model.from_json_string(s)
         data = json.loads(s)
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         # --- Load precompute0 trie ---
         roots_map0_raw = data["precomputed"]

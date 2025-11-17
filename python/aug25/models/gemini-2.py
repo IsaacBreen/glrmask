@@ -37,7 +37,7 @@ class Model(GraphProvider):
 
         # 1. Initial normalization of arena from JSON and max_depth caching
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         nodes_to_process = list(self.arena.items())
         for uid, node in tqdm(
@@ -53,7 +53,7 @@ class Model(GraphProvider):
                 node["children"] = {}
                 continue
 
-            # Convert JSON bitsets to ffi.Bitset instances
+            # Convert JSON bitsets to ffi.HybridBitset instances
             normalized_children = []
             for edge_key, dest_map in children:
                 pop, llm_bv_json = edge_key
@@ -66,7 +66,7 @@ class Model(GraphProvider):
 
             # 2. Parallel Edge Merging
             # Merge state_bvs for identical (pop, llm_bv, dest)
-            merged_edges = defaultdict(ffi.Bitset.zeros)
+            merged_edges = defaultdict(ffi.HybridBitset.zeros)
             for (pop, llm_bv), dests in normalized_children:
                 for dest, state_bv in dests:
                     key = (pop, llm_bv, dest)
@@ -78,7 +78,7 @@ class Model(GraphProvider):
                 grouped_by_pop_llm[(pop, llm_bv)].append((dest, state_bv))
 
             # Merge llm_bvs for identical (pop, dests)
-            merged_by_dests = defaultdict(ffi.Bitset.zeros)
+            merged_by_dests = defaultdict(ffi.HybridBitset.zeros)
             for (pop, llm_bv), dests in grouped_by_pop_llm.items():
                 dests.sort()
                 dests_key = tuple((d, s.to_json_string()) for d, s in dests)
@@ -153,8 +153,8 @@ class Model(GraphProvider):
         print("\n--- get_mask START ---")
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
-        final_mask = ffi.Bitset.zeros()
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        final_mask = ffi.HybridBitset.zeros()
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
         todo: Dict[int, set[int]] = defaultdict(set)
         depth_heap: List[int] = []
 

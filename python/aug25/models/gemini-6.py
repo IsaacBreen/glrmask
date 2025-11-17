@@ -19,23 +19,23 @@ class Model(GraphProvider):
         self.arena: Dict[int, dict] = im.arena
         self.roots_map: Dict[int, int] = im.roots_map
         self.max_depth: Dict[int, int] = im.max_depth
-        self.possible_matches_cache: Optional[Dict[int, Dict[str, ffi.Bitset]]] = im.possible_matches_cache
+        self.possible_matches_cache: Optional[Dict[int, Dict[str, ffi.HybridBitset]]] = im.possible_matches_cache
         self.tokenizer_max_state: int = im.tokenizer.max_state()
-        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+        self.all_internal_llm_tokens_bitset: Optional[ffi.HybridBitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
 
         # Precomputation to accelerate `get_mask`.
         # We group terminals by the LLM token bitset they map to.
-        self.forbid_precomputation: Dict[int, List[Tuple[ffi.Bitset, ffi.Bitset]]] = {}
+        self.forbid_precomputation: Dict[int, List[Tuple[ffi.HybridBitset, ffi.HybridBitset]]] = {}
         if self.possible_matches_cache:
             for tsid, pm in self.possible_matches_cache.items():
                 # pm: Dict[terminal_id_str, llm_bitset]
-                # Since ffi.Bitset is not hashable, we use its string representation as a temporary key.
-                inverted_map: Dict[str, Tuple[ffi.Bitset, ffi.Bitset]] = {}
+                # Since ffi.HybridBitset is not hashable, we use its string representation as a temporary key.
+                inverted_map: Dict[str, Tuple[ffi.HybridBitset, ffi.HybridBitset]] = {}
                 for terminal_id_str, llm_bs in pm.items():
                     llm_bs_str = llm_bs.to_json_string()
                     if llm_bs_str not in inverted_map:
-                        inverted_map[llm_bs_str] = (llm_bs, ffi.Bitset.zeros())
+                        inverted_map[llm_bs_str] = (llm_bs, ffi.HybridBitset.zeros())
                     # Add the terminal to the bitset for this group.
                     inverted_map[llm_bs_str][1].insert(int(terminal_id_str))
                 
@@ -58,10 +58,10 @@ class Model(GraphProvider):
     @profile
     def get_mask(self) -> RangeSet:
         state_map: Dict[int, GSS] = self.state
-        all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
-        final_mask: ffi.Bitset = ffi.Bitset.zeros()
+        all_ones: Optional[ffi.HybridBitset] = self.all_internal_llm_tokens_bitset
+        final_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
 
-        values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[GSS, ffi.HybridBitset]] = {}
         stopped: Set[int] = set()
         todo: Dict[int, Set[int]] = {}
         depth_heap: List[int] = []
@@ -110,13 +110,13 @@ class Model(GraphProvider):
             for node in nodes:
                 if node in stopped:
                     continue
-                item: Optional[Tuple[GSS, ffi.Bitset]] = values.pop(node, None)
+                item: Optional[Tuple[GSS, ffi.HybridBitset]] = values.pop(node, None)
                 if item is None:
                     continue
                 gss_node, llm_mask = item
 
                 if is_end(node):
-                    forbid: ffi.Bitset = ffi.Bitset.zeros()
+                    forbid: ffi.HybridBitset = ffi.HybridBitset.zeros()
                     for (start, end), bv in disallowed_terminals(gss_node).range_values():
                         if bv.is_empty():
                             continue
@@ -128,7 +128,7 @@ class Model(GraphProvider):
                                 if not bv.intersection(term_bs).is_empty():
                                     forbid = forbid.union(llm_bs)
                     
-                    allowed: ffi.Bitset = llm_mask.difference(forbid)
+                    allowed: ffi.HybridBitset = llm_mask.difference(forbid)
                     if not allowed.is_empty():
                         final_mask = final_mask.union(allowed)
 
@@ -146,7 +146,7 @@ class Model(GraphProvider):
                         else:
                             continue
                         child_gss: GSS = GSS.merge_many(matched)
-                        child_mask: ffi.Bitset = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
+                        child_mask: ffi.HybridBitset = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
                         d: int = int(dest_idx)
                         if d in values:
                             g0, m0 = values[d]
@@ -155,7 +155,7 @@ class Model(GraphProvider):
                             values[d] = (child_gss, child_mask)
                         enqueue(max_depth[d], d)
 
-        original_mask: ffi.Bitset = ffi.Bitset.zeros()
+        original_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 original_mask.insert(self.internal_to_original_map[i])

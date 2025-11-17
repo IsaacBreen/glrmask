@@ -48,16 +48,16 @@ class Model(GraphProvider):
         self.arena: Dict[int, dict] = im.arena
         self.roots_map: Dict[int, int] = im.roots_map
         self.max_depth: Dict[int, int] = im.max_depth
-        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.HybridBitset]]] = im.possible_matches_cache
         self.tokenizer_max_state: int = im.tokenizer.max_state()
-        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+        self.all_internal_llm_tokens_bitset: Optional[ffi.HybridBitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
 
         # Preprocess possible_matches_cache into fast structures:
-        # - _pmc_map_by_state[tsid]: dict[int -> ffi.Bitset] where key is terminal_id (int)
-        # - _pmc_items_by_state[tsid]: list[(terminal_id (int), ffi.Bitset)] for fast iteration
-        self._pmc_map_by_state: Dict[int, Dict[int, ffi.Bitset]] = {}
-        self._pmc_items_by_state: Dict[int, List[Tuple[int, ffi.Bitset]]] = {}
+        # - _pmc_map_by_state[tsid]: dict[int -> ffi.HybridBitset] where key is terminal_id (int)
+        # - _pmc_items_by_state[tsid]: list[(terminal_id (int), ffi.HybridBitset)] for fast iteration
+        self._pmc_map_by_state: Dict[int, Dict[int, ffi.HybridBitset]] = {}
+        self._pmc_items_by_state: Dict[int, List[Tuple[int, ffi.HybridBitset]]] = {}
         if self.possible_matches_cache:
             for tsid_k, mapping in self.possible_matches_cache.items():
                 tsid = int(tsid_k)
@@ -65,8 +65,8 @@ class Model(GraphProvider):
                     self._pmc_map_by_state[tsid] = {}
                     self._pmc_items_by_state[tsid] = []
                     continue
-                m: Dict[int, ffi.Bitset] = {}
-                items: List[Tuple[int, ffi.Bitset]] = []
+                m: Dict[int, ffi.HybridBitset] = {}
+                items: List[Tuple[int, ffi.HybridBitset]] = []
                 for term_k, llm_bs in mapping.items():
                     # Keys in pmc may be str or int; normalize to int once here
                     try:
@@ -80,11 +80,11 @@ class Model(GraphProvider):
                 self._pmc_items_by_state[tsid] = items
 
         # Cache for: (tsid, terminals_bitset_json) -> union LLM tokens bitset at that state over that terminal-set
-        self._union_by_tsid_termset_key: Dict[Tuple[int, str], ffi.Bitset] = {}
+        self._union_by_tsid_termset_key: Dict[Tuple[int, str], ffi.HybridBitset] = {}
         # Cache for: terminals_bitset_json -> list[int] (indices of terminals). Built on demand.
         self._termset_indices_cache: Dict[str, List[int]] = {}
         # Cache for: HybridL2Bitset (terminals_union) -> global union LLM tokens (across all tsid) for that acceptance
-        self._acc_allowed_llm_cache: Dict[ffi.HybridL2Bitset, ffi.Bitset] = {}
+        self._acc_allowed_llm_cache: Dict[ffi.HybridL2Bitset, ffi.HybridBitset] = {}
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -102,7 +102,7 @@ class Model(GraphProvider):
 
     # -------------- Internal helpers for fast "allowed" computation --------------
 
-    def _get_termset_indices(self, termset: ffi.Bitset) -> List[int]:
+    def _get_termset_indices(self, termset: ffi.HybridBitset) -> List[int]:
         """
         Returns all terminal ids set in 'termset' as a list, using a cache keyed by JSON string.
         Only computed if needed (adaptive).
@@ -115,14 +115,14 @@ class Model(GraphProvider):
         self._termset_indices_cache[key] = idxs
         return idxs
 
-    def _union_for_tsid_and_termset(self, tsid: int, termset: ffi.Bitset) -> ffi.Bitset:
+    def _union_for_tsid_and_termset(self, tsid: int, termset: ffi.HybridBitset) -> ffi.HybridBitset:
         """
         For a specific tokenizer state (tsid) and a terminal-set Bitset, return the union of LLM tokens
         across all terminals in that set at that state. Uses adaptive strategy and caches the result.
         """
         items = self._pmc_items_by_state.get(tsid)
         if not items:
-            return ffi.Bitset.zeros()
+            return ffi.HybridBitset.zeros()
 
         key = (tsid, termset.to_json_string())
         cached = self._union_by_tsid_termset_key.get(key)
@@ -130,7 +130,7 @@ class Model(GraphProvider):
             return cached
 
         pm = self._pmc_map_by_state[tsid]
-        res = ffi.Bitset.zeros()
+        res = ffi.HybridBitset.zeros()
 
         # Adaptive strategy: choose whether to iterate allowed terminals or pmc keys
         try:
@@ -157,7 +157,7 @@ class Model(GraphProvider):
         self._union_by_tsid_termset_key[key] = res
         return res
 
-    def _allowed_llm_for_acceptance(self, terminals_union: ffi.HybridL2Bitset) -> ffi.Bitset:
+    def _allowed_llm_for_acceptance(self, terminals_union: ffi.HybridL2Bitset) -> ffi.HybridBitset:
         """
         Compute the union of allowed LLM tokens across all tokenizer states described in 'terminals_union'.
         Cached per terminals_union (HybridL2Bitset implements __hash__/__eq__).
@@ -166,7 +166,7 @@ class Model(GraphProvider):
         if cached is not None:
             return cached
 
-        res = ffi.Bitset.zeros()
+        res = ffi.HybridBitset.zeros()
         max_state = self.tokenizer_max_state
 
         for (start, end), termset in terminals_union.range_values():
@@ -198,14 +198,14 @@ class Model(GraphProvider):
           substantially less expensive end-node token aggregation.
         """
         state_map: Dict[int, GSS] = self.state
-        all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+        all_ones: Optional[ffi.HybridBitset] = self.all_internal_llm_tokens_bitset
         if all_ones is None:
             # Fallback: if for some reason it's None, assume empty (no allowed tokens).
-            all_ones = ffi.Bitset.zeros()
+            all_ones = ffi.HybridBitset.zeros()
 
-        final_mask: ffi.Bitset = ffi.Bitset.zeros()
+        final_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
 
-        values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[GSS, ffi.HybridBitset]] = {}
         stopped: Set[int] = set()
         todo: Dict[int, Set[int]] = {}
         depth_heap: List[int] = []
@@ -280,7 +280,7 @@ class Model(GraphProvider):
                     popped: GSS = gss_node.popn(pop)
 
                     # Compute the LLM-mask contribution for this transition once
-                    child_mask_base: ffi.Bitset = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
+                    child_mask_base: ffi.HybridBitset = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
                     if child_mask_base.is_empty():
                         # Intersection kills the path; skip all dests for this (pop, llm_bv)
                         continue
@@ -310,7 +310,7 @@ class Model(GraphProvider):
                         enqueue(int(max_depth[d]), d)
 
         # Convert internal-token mask back to original tokenizer ids
-        original_mask: ffi.Bitset = ffi.Bitset.zeros()
+        original_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
         for i in final_mask.to_indices():
             orig = self.internal_to_original_map.get(int(i))
             if orig is not None:

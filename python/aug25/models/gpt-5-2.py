@@ -13,7 +13,7 @@ class Model(GraphProvider):
 
     Design:
     - Input is the "precompute3" JSON graph (most detailed). We normalize up-front:
-      * Convert all token/state JSON bitsets into ffi.Bitset once.
+      * Convert all token/state JSON bitsets into ffi.HybridBitset once.
       * For each trie node, group children by `pop` value into compact groups:
           group = (pop, epsilon_edges, state_edges)
           - epsilon_edges: list[(dest_idx, llm_bv)] where the state filter is empty (i.e., no state constraint)
@@ -48,14 +48,14 @@ class Model(GraphProvider):
             self.max_depth[uid] = int((node_raw or {}).get("max_depth", 0) or 0)
 
             children = (node_raw or {}).get("children") or []
-            groups_by_pop: Dict[int, Tuple[List[Tuple[int, ffi.Bitset]], List[Tuple[int, ffi.Bitset, ffi.Bitset]]]] = {}
+            groups_by_pop: Dict[int, Tuple[List[Tuple[int, ffi.HybridBitset]], List[Tuple[int, ffi.HybridBitset, ffi.HybridBitset]]]] = {}
 
             # Consume precompute3 children: [((pop, llm_bv_json), [(dest_idx, state_bv_json), ...]), ...]
             for edge_key, dest_map in children:
                 pop_raw, llm_bv_json = edge_key
                 pop = int(pop_raw)
-                # Convert token bitset JSON -> ffi.Bitset once
-                llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
+                # Convert token bitset JSON -> ffi.HybridBitset once
+                llm_bv = ffi.HybridBitset.from_json_string(json.dumps(llm_bv_json))
 
                 eps_list, state_list = groups_by_pop.get(pop, (None, None))
                 if eps_list is None:
@@ -63,10 +63,10 @@ class Model(GraphProvider):
                     state_list = []
                     groups_by_pop[pop] = (eps_list, state_list)
 
-                # Convert state_bv_json to ffi.Bitset once and bucket
+                # Convert state_bv_json to ffi.HybridBitset once and bucket
                 for dest_idx_raw, state_bv_json in dest_map:
                     dest_idx = int(dest_idx_raw)
-                    state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                    state_bv = ffi.HybridBitset.from_json_string(json.dumps(state_bv_json))
                     if state_bv.is_empty():
                         # No parser-state constraint (epsilon on GSS stack)
                         eps_list.append((dest_idx, llm_bv))
@@ -74,7 +74,7 @@ class Model(GraphProvider):
                         state_list.append((dest_idx, state_bv, llm_bv))
 
             # Finalize groups list
-            groups: List[Tuple[int, List[Tuple[int, ffi.Bitset]], List[Tuple[int, ffi.Bitset, ffi.Bitset]]]] = []
+            groups: List[Tuple[int, List[Tuple[int, ffi.HybridBitset]], List[Tuple[int, ffi.HybridBitset, ffi.HybridBitset]]]] = []
             for pop, (eps_list, state_list) in groups_by_pop.items():
                 groups.append((pop, eps_list, state_list))
 
@@ -134,10 +134,10 @@ class Model(GraphProvider):
         # Local aliases for speed
         gss_merge_many = ffi.gss_merge_many_with_depth
         gss_popn_collect = ffi.gss_popn_collect
-        Bitset = ffi.Bitset
+        Bitset = ffi.HybridBitset
 
         final_mask = Bitset.zeros()
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
         stopped: set[int] = set()
         todo: Dict[int, set[int]] = defaultdict(set)
 

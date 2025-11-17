@@ -40,14 +40,14 @@ class Model(GraphProvider):
         self.arena: Dict[int, dict] = im.arena
         self.roots_map: Dict[int, int] = im.roots_map
         self.max_depth: Dict[int, int] = im.max_depth
-        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.HybridBitset]]] = im.possible_matches_cache
         self.tokenizer_max_state: int = im.tokenizer.max_state()
-        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+        self.all_internal_llm_tokens_bitset: Optional[ffi.HybridBitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
 
         # Preindex possible_matches_cache by terminal id for fast range queries.
         # Structure: terminal_id -> (tsid_list_sorted, bitset_list_aligned)
-        self._pmc_by_terminal: Dict[int, Tuple[List[int], List[ffi.Bitset]]] = self._build_pmc_by_terminal_index(
+        self._pmc_by_terminal: Dict[int, Tuple[List[int], List[ffi.HybridBitset]]] = self._build_pmc_by_terminal_index(
             self.possible_matches_cache
         )
 
@@ -67,18 +67,18 @@ class Model(GraphProvider):
 
     def _build_pmc_by_terminal_index(
         self,
-        pmc: Optional[Dict[int, Dict[int, ffi.Bitset]]],
-    ) -> Dict[int, Tuple[List[int], List[ffi.Bitset]]]:
+        pmc: Optional[Dict[int, Dict[int, ffi.HybridBitset]]],
+    ) -> Dict[int, Tuple[List[int], List[ffi.HybridBitset]]]:
         """
         Build an index: for each terminal_id, store sorted (tsid, bitset) pairs.
         This allows fast union of bitsets over a tsid interval for a fixed terminal.
         """
-        index: Dict[int, Tuple[List[int], List[ffi.Bitset]]] = {}
+        index: Dict[int, Tuple[List[int], List[ffi.HybridBitset]]] = {}
         if not pmc:
             return index
 
         # Collect unsorted lists first
-        temp: Dict[int, List[Tuple[int, ffi.Bitset]]] = {}
+        temp: Dict[int, List[Tuple[int, ffi.HybridBitset]]] = {}
         for tsid, term_map in pmc.items():
             if not term_map:
                 continue
@@ -95,7 +95,7 @@ class Model(GraphProvider):
         for terminal_id, pairs in temp.items():
             pairs.sort(key=lambda x: x[0])
             tsids: List[int] = [p[0] for p in pairs]
-            bitsets: List[ffi.Bitset] = [p[1] for p in pairs]
+            bitsets: List[ffi.HybridBitset] = [p[1] for p in pairs]
             index[terminal_id] = (tsids, bitsets)
 
         return index
@@ -104,8 +104,8 @@ class Model(GraphProvider):
         self,
         start: int,
         end: int,
-        terminals_bv: ffi.Bitset,
-    ) -> ffi.Bitset:
+        terminals_bv: ffi.HybridBitset,
+    ) -> ffi.HybridBitset:
         """
         Efficiently compute the union of LLM token bitsets for a given tsid interval [start, end]
         and a set of disallowed terminals (terminals_bv).
@@ -115,9 +115,9 @@ class Model(GraphProvider):
         and only those within [start, end] are included using bisect to slice.
         """
         if terminals_bv.is_empty():
-            return ffi.Bitset.zeros()
+            return ffi.HybridBitset.zeros()
 
-        result: ffi.Bitset = ffi.Bitset.zeros()
+        result: ffi.HybridBitset = ffi.HybridBitset.zeros()
         pmc_by_terminal = self._pmc_by_terminal
 
         # Iterate terminals in the bitset; expected to be relatively sparse
@@ -142,14 +142,14 @@ class Model(GraphProvider):
     @profile
     def get_mask(self) -> RangeSet:
         state_map: Dict[int, GSS] = self.state
-        all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+        all_ones: Optional[ffi.HybridBitset] = self.all_internal_llm_tokens_bitset
         if all_ones is None:
             # Fallback: if not provided, treat as empty (no tokens allowed).
-            all_ones = ffi.Bitset.zeros()
+            all_ones = ffi.HybridBitset.zeros()
 
-        final_mask: ffi.Bitset = ffi.Bitset.zeros()
+        final_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
 
-        values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[GSS, ffi.HybridBitset]] = {}
         stopped: Set[int] = set()
         todo: Dict[int, Set[int]] = {}
         depth_heap: List[int] = []
@@ -205,7 +205,7 @@ class Model(GraphProvider):
                 if node in stopped:
                     continue
 
-                item: Optional[Tuple[GSS, ffi.Bitset]] = values.pop(node, None)
+                item: Optional[Tuple[GSS, ffi.HybridBitset]] = values.pop(node, None)
                 if item is None:
                     continue
                 gss_node, llm_mask = item
@@ -213,7 +213,7 @@ class Model(GraphProvider):
                 # Process acceptance at end nodes
                 if is_end(node):
                     # Compute forbidden LLM tokens by scanning disallowed terminals more efficiently.
-                    forbid: ffi.Bitset = ffi.Bitset.zeros()
+                    forbid: ffi.HybridBitset = ffi.HybridBitset.zeros()
                     if pmc_by_terminal:
                         disallowed = disallowed_terminals(gss_node)
                         for (start, end), terminals_bv in disallowed.range_values():
@@ -232,7 +232,7 @@ class Model(GraphProvider):
                                 forbid = forbid.union(forbid_range)
 
                     # Compute allowed tokens and update final mask
-                    allowed: ffi.Bitset = llm_mask.difference(forbid)
+                    allowed: ffi.HybridBitset = llm_mask.difference(forbid)
                     if not allowed.is_empty():
                         final_mask = final_mask.union(allowed)
 
@@ -265,7 +265,7 @@ class Model(GraphProvider):
                             continue
 
                         child_gss: GSS = GSS.merge_many(matched)
-                        child_mask: ffi.Bitset = llm_mask if llm_bv_empty else llm_mask.intersection(llm_bv)
+                        child_mask: ffi.HybridBitset = llm_mask if llm_bv_empty else llm_mask.intersection(llm_bv)
 
                         d: int = int(dest_idx)
                         prev = values.get(d)
@@ -278,7 +278,7 @@ class Model(GraphProvider):
                         enqueue(max_depth[d], d)
 
         # Convert internal-token mask back to original tokenizer ids
-        original_mask: ffi.Bitset = ffi.Bitset.zeros()
+        original_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
         internal_to_original = self.internal_to_original_map
         for i in final_mask.to_indices():
             j = internal_to_original.get(i)

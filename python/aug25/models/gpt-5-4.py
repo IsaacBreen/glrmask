@@ -15,14 +15,14 @@ class _BitsetInterner:
     __slots__ = ("_map",)
 
     def __init__(self) -> None:
-        self._map: Dict[str, ffi.Bitset] = {}
+        self._map: Dict[str, ffi.HybridBitset] = {}
 
-    def load(self, json_obj) -> ffi.Bitset:
+    def load(self, json_obj) -> ffi.HybridBitset:
         # Serialize using stable formatting to maximize cache hits.
         key = json.dumps(json_obj, sort_keys=True, separators=(",", ":"))
         bs = self._map.get(key)
         if bs is None:
-            bs = ffi.Bitset.from_json_string(key)
+            bs = ffi.HybridBitset.from_json_string(key)
             self._map[key] = bs
         return bs
 
@@ -59,7 +59,7 @@ class Model(GraphProvider):
         #   "pops": {
         #       pop: [
         #           {
-        #               "llm_bv": ffi.Bitset,
+        #               "llm_bv": ffi.HybridBitset,
         #               "groups": { id(state_bv): (state_bv, [dest_idx, ...]), ... }
         #           },
         #           ...
@@ -83,7 +83,7 @@ class Model(GraphProvider):
             #   edge_key = (pop, llm_bv_json)
             #   dest_map = list of [dest_idx, state_bv_json]
             #
-            # We convert llm_bv_json and state_bv_json to interned ffi.Bitset,
+            # We convert llm_bv_json and state_bv_json to interned ffi.HybridBitset,
             # and group destinations that share the same state_bv (by id) for each edge.
             children: Iterable = node.get("children") or []
             for edge_key, dest_map in children:
@@ -92,7 +92,7 @@ class Model(GraphProvider):
                 llm_bv = interner.load(llm_bv_json)
 
                 # Group dests for this (pop, llm_bv) edge by state_bv identity
-                groups: Dict[int, Tuple[ffi.Bitset, List[int]]] = {}
+                groups: Dict[int, Tuple[ffi.HybridBitset, List[int]]] = {}
                 for dest_idx_raw, state_bv_json in dest_map:
                     dest_idx = int(dest_idx_raw)
                     state_bv = interner.load(state_bv_json)
@@ -164,12 +164,12 @@ class Model(GraphProvider):
 
     # --------- Bitset helpers ---------
     @staticmethod
-    def _bv_union(a: ffi.Bitset, b: ffi.Bitset) -> ffi.Bitset:
+    def _bv_union(a: ffi.HybridBitset, b: ffi.HybridBitset) -> ffi.HybridBitset:
         # Returns a new bitset (a ∪ b)
         return a.union(b)
 
     @staticmethod
-    def _bv_intersect(a: ffi.Bitset, b: ffi.Bitset) -> ffi.Bitset:
+    def _bv_intersect(a: ffi.HybridBitset, b: ffi.HybridBitset) -> ffi.HybridBitset:
         # Prefer "intersection" name; fallback to "intersect" if necessary.
         if hasattr(a, "intersection"):
             return a.intersection(b)
@@ -177,11 +177,11 @@ class Model(GraphProvider):
             return a.intersect(b)
         # Last resort (should not happen): filter via ranges (slow).
         # This fallback is rarely exercised and only present for safety.
-        out = ffi.Bitset.zeros()
+        out = ffi.HybridBitset.zeros()
         for start, end in a.to_ranges():
             for sid in range(start, end):
                 if b.contains(sid):
-                    out = out.union(ffi.Bitset.from_json_string(json.dumps({"ranges": [[sid, sid + 1]]})))
+                    out = out.union(ffi.HybridBitset.from_json_string(json.dumps({"ranges": [[sid, sid + 1]]})))
         return out
 
     # --------- Core routine ---------
@@ -200,10 +200,10 @@ class Model(GraphProvider):
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
         t0 = time.time()
-        final_mask = ffi.Bitset.zeros()
+        final_mask = ffi.HybridBitset.zeros()
 
         # values[node_idx] = (aggregated_gss, allowed_bv)
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
 
         # Nodes that determined to stop (no need to revisit)
         stopped: set[int] = set()
@@ -250,7 +250,7 @@ class Model(GraphProvider):
                     print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
-                agg: Optional[Tuple[ffi.GSSNode, ffi.Bitset]] = values.pop(node_idx, None)
+                agg: Optional[Tuple[ffi.GSSNode, ffi.HybridBitset]] = values.pop(node_idx, None)
                 if agg is None:
                     print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue

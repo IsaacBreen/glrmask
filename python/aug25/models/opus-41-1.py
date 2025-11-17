@@ -46,11 +46,11 @@ class Model(GraphProvider):
                 processed_children = []
                 for edge_key, dest_map in ch:
                     pop, llm_bv_json = edge_key
-                    llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
+                    llm_bv = ffi.HybridBitset.from_json_string(json.dumps(llm_bv_json))
 
                     processed_dests = []
                     for dest_idx, state_bv_json in dest_map:
-                        state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                        state_bv = ffi.HybridBitset.from_json_string(json.dumps(state_bv_json))
                         dest_idx_mapped = self.node_id_to_idx[int(dest_idx)]
                         processed_dests.append((dest_idx_mapped, state_bv))
 
@@ -121,7 +121,7 @@ class Model(GraphProvider):
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
         t0 = time.time()
-        final_mask = ffi.Bitset.zeros()
+        final_mask = ffi.HybridBitset.zeros()
 
         # Use arrays instead of dicts where possible
         num_nodes = len(self.node_id_to_idx)

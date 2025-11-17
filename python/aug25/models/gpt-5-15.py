@@ -34,7 +34,7 @@ class Model(GraphProvider):
         self.roots_map: Dict[int, int] = im.roots_map
         self.max_depth: Dict[int, int] = im.max_depth
         self.tokenizer_max_state: int = im.tokenizer.max_state()
-        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+        self.all_internal_llm_tokens_bitset: Optional[ffi.HybridBitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
 
         # Precompute fast "end" check
@@ -45,12 +45,12 @@ class Model(GraphProvider):
 
         # Precompute a compact, grouped representation of children edges per node.
         # For each node: list of groups (pop, llm_bv, [state_bv_1..k], [[dest_idx...]..k])
-        self._children_index: Dict[int, List[Tuple[int, ffi.Bitset, List[ffi.Bitset], List[List[int]]]]] = {}
+        self._children_index: Dict[int, List[Tuple[int, ffi.HybridBitset, List[ffi.HybridBitset], List[List[int]]]]] = {}
         for nid, data in self.arena.items():
             groups = []
             for (pop, llm_bv), dests in (data.get("children") or []):
                 # Group all dests with identical state_bv so we filter only once per unique state_bv.
-                by_state: Dict[int, Tuple[ffi.Bitset, List[int]]] = {}
+                by_state: Dict[int, Tuple[ffi.HybridBitset, List[int]]] = {}
                 for dest_idx, state_bv in dests:
                     key = id(state_bv)
                     entry = by_state.get(key)
@@ -59,7 +59,7 @@ class Model(GraphProvider):
                     else:
                         entry[1].append(int(dest_idx))
                 # Unpack into parallel lists for quick iteration
-                state_bv_list: List[ffi.Bitset] = []
+                state_bv_list: List[ffi.HybridBitset] = []
                 dest_lists: List[List[int]] = []
                 for state_bv, dlist in by_state.values():
                     state_bv_list.append(state_bv)
@@ -68,16 +68,16 @@ class Model(GraphProvider):
             self._children_index[int(nid)] = groups
 
         # Prepare pmc (possible_matches_cache) and speed-ups for forbid computations
-        self._pmc: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+        self._pmc: Optional[Dict[int, Dict[int, ffi.HybridBitset]]] = None
         self._pmc_state_ids_sorted: List[int] = []
-        self._all_tokens_union: Optional[ffi.Bitset] = None
+        self._all_tokens_union: Optional[ffi.HybridBitset] = None
 
-        pmc_src: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+        pmc_src: Optional[Dict[int, Dict[int, ffi.HybridBitset]]] = im.possible_matches_cache
         if pmc_src is not None:
             # Normalize keys to int once to avoid int() hot-path conversions.
-            pmc_int: Dict[int, Dict[int, ffi.Bitset]] = {}
+            pmc_int: Dict[int, Dict[int, ffi.HybridBitset]] = {}
             for tsid, mapping in pmc_src.items():
-                m2: Dict[int, ffi.Bitset] = {}
+                m2: Dict[int, ffi.HybridBitset] = {}
                 for k, v in mapping.items():
                     if isinstance(k, int):
                         m2[k] = v
@@ -90,14 +90,14 @@ class Model(GraphProvider):
             self._pmc = pmc_int
             self._pmc_state_ids_sorted = sorted(pmc_int.keys())
             # Precompute union across all tokens in pmc for quick handling of "all" disallow sets
-            acc = ffi.Bitset.zeros()
+            acc = ffi.HybridBitset.zeros()
             for mapping in pmc_int.values():
                 for llm_tokens in mapping.values():
                     acc = acc.union(llm_tokens)
             self._all_tokens_union = acc
 
         # Forbid cache: HybridL2Bitset (disallowed terminals) -> Bitset of forbidden LLM tokens
-        self._forbid_cache: Dict[ffi.HybridL2Bitset, ffi.Bitset] = {}
+        self._forbid_cache: Dict[ffi.HybridL2Bitset, ffi.HybridBitset] = {}
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -113,7 +113,7 @@ class Model(GraphProvider):
     def _is_end(self, node: int) -> bool:
         return node in self._end_nodes
 
-    def _compute_forbid_llm_tokens(self, disallowed: ffi.HybridL2Bitset) -> ffi.Bitset:
+    def _compute_forbid_llm_tokens(self, disallowed: ffi.HybridL2Bitset) -> ffi.HybridBitset:
         """
         Compute and cache the union of LLM tokens that are forbidden by the given HybridL2Bitset
         (which encodes disallowed terminals across tokenizer state ranges).
@@ -124,7 +124,7 @@ class Model(GraphProvider):
 
         # If pmc is unavailable, nothing to forbid
         if self._pmc is None or not self._pmc_state_ids_sorted:
-            result = ffi.Bitset.zeros()
+            result = ffi.HybridBitset.zeros()
             self._forbid_cache[disallowed] = result
             return result
 
@@ -146,7 +146,7 @@ class Model(GraphProvider):
                 pass
 
         max_state = self.tokenizer_max_state
-        result = ffi.Bitset.zeros()
+        result = ffi.HybridBitset.zeros()
 
         # Only iterate pmc states that fall into each range instead of scanning the full numeric range.
         pmc_states = self._pmc_state_ids_sorted
@@ -180,15 +180,15 @@ class Model(GraphProvider):
     @profile
     def get_mask(self) -> RangeSet:
         state_map: Dict[int, GSS] = self.state
-        all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+        all_ones: Optional[ffi.HybridBitset] = self.all_internal_llm_tokens_bitset
         if all_ones is None:
             # Fallback: allow everything by default if not provided (conservative superset)
-            all_ones = ffi.Bitset.zeros()  # safest default; caller may override upstream
+            all_ones = ffi.HybridBitset.zeros()  # safest default; caller may override upstream
 
-        final_mask: ffi.Bitset = ffi.Bitset.zeros()
+        final_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
 
         # values[node_id] = (GSS aggregate, current llm_mask)
-        values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[GSS, ffi.HybridBitset]] = {}
         stopped: Set[int] = set()
         todo: Dict[int, Set[int]] = {}
         depth_heap: List[int] = []
@@ -238,7 +238,7 @@ class Model(GraphProvider):
             for node in nodes:
                 if node in stopped:
                     continue
-                item: Optional[Tuple[GSS, ffi.Bitset]] = values.pop(node, None)
+                item: Optional[Tuple[GSS, ffi.HybridBitset]] = values.pop(node, None)
                 if item is None:
                     continue
 
@@ -247,8 +247,8 @@ class Model(GraphProvider):
                 # Handle end nodes: compute allowed llm tokens = current_mask - forbid(disallowed_terminals)
                 if is_end(node):
                     disallowed = disallowed_terminals(gss_node)
-                    forbid: ffi.Bitset = self._compute_forbid_llm_tokens(disallowed)
-                    allowed: ffi.Bitset = llm_mask.difference(forbid)
+                    forbid: ffi.HybridBitset = self._compute_forbid_llm_tokens(disallowed)
+                    allowed: ffi.HybridBitset = llm_mask.difference(forbid)
                     if not allowed.is_empty():
                         final_mask = final_mask.union(allowed)
 
@@ -258,7 +258,7 @@ class Model(GraphProvider):
                     continue
 
                 # Local aggregation to reduce repeated merges on global dict
-                pending_updates: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
+                pending_updates: Dict[int, Tuple[GSS, ffi.HybridBitset]] = {}
 
                 # For pop reuse within this node
                 popped_by_pop: Dict[int, GSS] = {}
@@ -276,7 +276,7 @@ class Model(GraphProvider):
 
                     # Apply LLM constraint early; if intersection empty, skip entire group
                     if llm_bv.is_empty():
-                        child_mask_base: ffi.Bitset = llm_mask
+                        child_mask_base: ffi.HybridBitset = llm_mask
                     else:
                         child_mask_base = llm_mask.intersection(llm_bv)
                         if child_mask_base.is_empty():
@@ -346,5 +346,5 @@ class Model(GraphProvider):
         if not original_indices:
             return RangeSet.from_ranges([])
 
-        original_mask: ffi.Bitset = ffi.Bitset.from_indices(original_indices)
+        original_mask: ffi.HybridBitset = ffi.HybridBitset.from_indices(original_indices)
         return RangeSet.from_ranges(original_mask.to_ranges())

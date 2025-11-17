@@ -48,7 +48,7 @@ class Model(GraphProvider):
         # Pre-normalize bitsets and group children by 'pop' to minimize pop-collect calls
         # Node schema stored:
         #   node["end"] -> bool
-        #   node["children_by_pop"] -> Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]]
+        #   node["children_by_pop"] -> Dict[int, List[Tuple[ffi.HybridBitset, List[Tuple[int, ffi.HybridBitset]]]]]
         #       i.e., pop -> list of (llm_bv, [(dest_idx, state_bv), ...])
         # The original node["children"] remains compatible for iter_edges.
         t0 = time.time()
@@ -67,17 +67,17 @@ class Model(GraphProvider):
             # Children normalization
             ch = node.get("children") or []
             normalized_children = []
-            children_by_pop: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = defaultdict(list)
+            children_by_pop: Dict[int, List[Tuple[ffi.HybridBitset, List[Tuple[int, ffi.HybridBitset]]]]] = defaultdict(list)
 
             for edge_key, dest_map in ch:
                 pop, llm_bv_json = edge_key
                 pop = int(pop)
-                llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
+                llm_bv = ffi.HybridBitset.from_json_string(json.dumps(llm_bv_json))
 
-                new_dests: List[Tuple[int, ffi.Bitset]] = []
+                new_dests: List[Tuple[int, ffi.HybridBitset]] = []
                 for dest_idx, state_bv_json in dest_map:
                     dest_idx = int(dest_idx)
-                    state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                    state_bv = ffi.HybridBitset.from_json_string(json.dumps(state_bv_json))
                     new_dests.append((dest_idx, state_bv))
 
                 # Store normalized edge for compat
@@ -139,7 +139,7 @@ class Model(GraphProvider):
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
         # Aliases to avoid repeated global lookups
-        Bitset = ffi.Bitset
+        Bitset = ffi.HybridBitset
         gss_merge_many_with_depth = ffi.gss_merge_many_with_depth
         gss_popn_collect = ffi.gss_popn_collect
 
@@ -147,7 +147,7 @@ class Model(GraphProvider):
         final_mask = Bitset.zeros()
 
         # values: pending aggregate per trie node index
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
         # nodes that decided to stop (agg.is_ok() == False)
         stopped: set[int] = set()
 
@@ -243,7 +243,7 @@ class Model(GraphProvider):
                     continue
 
                 node = self.arena.get(node_idx, {})
-                children_by_pop: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = \
+                children_by_pop: Dict[int, List[Tuple[ffi.HybridBitset, List[Tuple[int, ffi.HybridBitset]]]]] = \
                     node.get("children_by_pop") or {}
 
                 if not children_by_pop:

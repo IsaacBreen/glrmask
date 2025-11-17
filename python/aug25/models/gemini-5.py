@@ -18,8 +18,8 @@ class _PopGroup:
 
     def __init__(
         self,
-        sid_to_arcs: Dict[int, List[Tuple[int, Optional[ffi.Bitset]]]],
-        eps_arcs: List[Tuple[int, Optional[ffi.Bitset]]],
+        sid_to_arcs: Dict[int, List[Tuple[int, Optional[ffi.HybridBitset]]]],
+        eps_arcs: List[Tuple[int, Optional[ffi.HybridBitset]]],
     ):
         # Maps a tokenizer state ID (sid) to a list of possible transitions.
         # Each arc is (destination_node_index, llm_bitset_or_None).
@@ -77,7 +77,7 @@ class Model(GraphProvider):
         self.max_depth: Dict[int, int] = {} # For the scheduler
 
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         # Preprocess the entire arena into our optimized format.
         for uid, node_def in tqdm(
@@ -97,7 +97,7 @@ class Model(GraphProvider):
             # --- Step 1: Aggregate all transitions by pop count ---
             # This intermediate structure helps merge LLM bitsets for identical
             # (pop, sid, dest) or (pop, epsilon, dest) transitions.
-            pop_aggregator = defaultdict(lambda: {"sid_map": defaultdict(lambda: defaultdict(ffi.Bitset.zeros)), "eps_map": defaultdict(ffi.Bitset.zeros)})
+            pop_aggregator = defaultdict(lambda: {"sid_map": defaultdict(lambda: defaultdict(ffi.HybridBitset.zeros)), "eps_map": defaultdict(ffi.HybridBitset.zeros)})
 
             for edge_key, dest_map in children:
                 pop, llm_bv_json = edge_key
@@ -183,9 +183,9 @@ class Model(GraphProvider):
         print("\n--- get_mask START ---")
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
-        final_mask = ffi.Bitset.zeros()
+        final_mask = ffi.HybridBitset.zeros()
         # {node_idx: ({gss_parents}, llm_mask)}
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
         # {depth: {node_idx, ...}}
         todo: Dict[int, Set[int]] = defaultdict(set)
         # min-heap of depths to visit
@@ -263,10 +263,10 @@ class Model(GraphProvider):
                         continue
 
                     next_gss: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
-                    next_mask: Dict[int, ffi.Bitset] = defaultdict(ffi.Bitset.zeros)
+                    next_mask: Dict[int, ffi.HybridBitset] = defaultdict(ffi.HybridBitset.zeros)
                     
                     # Cache for llm_mask.intersection(llm_bv) results
-                    inter_cache: Dict[Optional[int], ffi.Bitset] = {None: llm_mask}
+                    inter_cache: Dict[Optional[int], ffi.HybridBitset] = {None: llm_mask}
 
                     # Process epsilon transitions (not dependent on SID)
                     if group.eps_arcs:

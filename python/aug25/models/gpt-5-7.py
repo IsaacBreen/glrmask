@@ -29,8 +29,8 @@ class Model(GraphProvider):
     # Entry type for fast pop index:
     # For a given node and pop, for a specific tokenizer state (sid),
     # the value is a list of (dest_idx, llm_bv_or_none) where:
-    #   - llm_bv_or_none is ffi.Bitset if constrained, or None if unconstrained.
-    _StateEntries = Dict[int, List[Tuple[int, Optional[ffi.Bitset]]]]
+    #   - llm_bv_or_none is ffi.HybridBitset if constrained, or None if unconstrained.
+    _StateEntries = Dict[int, List[Tuple[int, Optional[ffi.HybridBitset]]]]
 
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict], max_state_id: int):
         # Map tokenizer state -> trie root node
@@ -42,7 +42,7 @@ class Model(GraphProvider):
 
         # children normalized as in precompute3_model, plus build pop-index for fast lookup
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         # node_id -> (pop -> state -> list[(dest_idx, bv or None)])
         self._pop_index: Dict[int, Dict[int, Model._StateEntries]] = {}
@@ -164,12 +164,12 @@ class Model(GraphProvider):
         print("\n--- get_mask START ---")
 
         state_to_gss = self.constraint_state.get_state_map()
-        Bitset = ffi.Bitset
+        Bitset = ffi.HybridBitset
 
-        final_mask: ffi.Bitset = Bitset.zeros()
+        final_mask: ffi.HybridBitset = Bitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -290,7 +290,7 @@ class Model(GraphProvider):
                     # dest_idx -> (parents_list, any_unconstrained, union_llm_bv or None if none seen yet)
                     dest_parents: Dict[int, List] = {}
                     dest_any_unconstrained: Dict[int, bool] = {}
-                    dest_llm_union: Dict[int, ffi.Bitset] = {}
+                    dest_llm_union: Dict[int, ffi.HybridBitset] = {}
 
                     for sid_val, parents in sid_to_parents.items():
                         entries = state_to_entries.get(sid_val)

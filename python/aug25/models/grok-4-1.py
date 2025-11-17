@@ -20,9 +20,9 @@ class Model(GraphProvider):
         self.arena: Dict[int, dict] = im.arena
         self.roots_map: Dict[int, int] = im.roots_map
         self.max_depth: Dict[int, int] = im.max_depth
-        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.HybridBitset]]] = im.possible_matches_cache
         self.tokenizer_max_state: int = im.tokenizer.max_state()
-        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+        self.all_internal_llm_tokens_bitset: Optional[ffi.HybridBitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
 
         self.adj: Dict[int, List[int]] = defaultdict(list)
@@ -63,11 +63,11 @@ class Model(GraphProvider):
     @profile
     def get_mask(self) -> RangeSet:
         state_map: Dict[int, GSS] = self.state
-        all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
-        final_mask: ffi.Bitset = ffi.Bitset.zeros()
+        all_ones: Optional[ffi.HybridBitset] = self.all_internal_llm_tokens_bitset
+        final_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
 
         accum_gss: Dict[int, GSS] = {}
-        accum_mask: Dict[int, ffi.Bitset] = {}
+        accum_mask: Dict[int, ffi.HybridBitset] = {}
 
         for sid, gss in state_map.items():
             r: Optional[int] = self.roots_map.get(int(sid))
@@ -81,7 +81,7 @@ class Model(GraphProvider):
                 accum_mask[r] = all_ones
 
         is_end = self.is_end
-        pmc: Optional[Dict[int, Dict[int, ffi.Bitset]]] = self.possible_matches_cache
+        pmc: Optional[Dict[int, Dict[int, ffi.HybridBitset]]] = self.possible_matches_cache
         max_state: int = self.tokenizer_max_state
         arena: Dict[int, dict] = self.arena
 
@@ -98,18 +98,18 @@ class Model(GraphProvider):
             gss_node = accum_gss[node]
 
             if is_end(node):
-                forbid: ffi.Bitset = ffi.Bitset.zeros()
+                forbid: ffi.HybridBitset = ffi.HybridBitset.zeros()
                 for (start, end), bv in disallowed_terminals(gss_node).range_values():
                     if bv.is_empty():
                         continue
                     for tsid in range(start, min(end, max_state) + 1):
-                        pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                        pm: Optional[Dict[int, ffi.HybridBitset]] = pmc.get(tsid)
                         if not pm:
                             continue
                         for terminal_id_str, llm_tokens in pm.items():
                             if bv.contains(int(terminal_id_str)):
                                 forbid = forbid.union(llm_tokens)
-                allowed: ffi.Bitset = llm_mask.difference(forbid)
+                allowed: ffi.HybridBitset = llm_mask.difference(forbid)
                 if not allowed.is_empty():
                     final_mask = final_mask.union(allowed)
 
@@ -122,7 +122,7 @@ class Model(GraphProvider):
                     if not matched:
                         continue
                     child_gss: GSS = GSS.merge_many(matched)
-                    child_mask: ffi.Bitset = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
+                    child_mask: ffi.HybridBitset = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
                     if child_mask.is_empty():
                         continue
                     d: int = int(dest_idx)
@@ -133,7 +133,7 @@ class Model(GraphProvider):
                         accum_gss[d] = child_gss
                         accum_mask[d] = child_mask
 
-        original_mask: ffi.Bitset = ffi.Bitset.zeros()
+        original_mask: ffi.HybridBitset = ffi.HybridBitset.zeros()
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 original_mask.insert(self.internal_to_original_map[i])

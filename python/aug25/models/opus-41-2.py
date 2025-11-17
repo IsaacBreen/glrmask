@@ -20,9 +20,9 @@ class Model(GraphProvider):
         self.arena: Dict[int, dict] = im.arena
         self.roots_map: Dict[int, int] = im.roots_map
         self.max_depth: Dict[int, int] = im.max_depth
-        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.HybridBitset]]] = im.possible_matches_cache
         self.tokenizer_max_state: int = im.tokenizer.max_state()
-        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+        self.all_internal_llm_tokens_bitset: Optional[ffi.HybridBitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
 
         # Precompute graph structure for faster traversal
@@ -64,7 +64,7 @@ class Model(GraphProvider):
     @profile
     def get_mask(self) -> RangeSet:
         state_map: Dict[int, GSS] = self.state
-        all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+        all_ones: Optional[ffi.HybridBitset] = self.all_internal_llm_tokens_bitset
 
         # Accumulate incoming states for each node
         incoming_states = defaultdict(list)  # node -> [(gss, mask)]
@@ -85,7 +85,7 @@ class Model(GraphProvider):
             if node not in remaining_in_degree or remaining_in_degree[node] == 0:
                 queue.append(node)
 
-        final_mask = ffi.Bitset.zeros()
+        final_mask = ffi.HybridBitset.zeros()
         pmc = self.possible_matches_cache
         max_state = self.tokenizer_max_state
 
@@ -95,7 +95,7 @@ class Model(GraphProvider):
             if acc is None:
                 return llm_mask
 
-            forbid = ffi.Bitset.zeros()
+            forbid = ffi.HybridBitset.zeros()
             disallowed = acc.terminals_union.complement()
 
             for (start, end), bv in disallowed.range_values():
@@ -129,7 +129,7 @@ class Model(GraphProvider):
             else:
                 gss_list = [s[0] for s in states]
                 merged_gss = GSS.merge_many(gss_list)
-                merged_mask = ffi.Bitset.zeros()
+                merged_mask = ffi.HybridBitset.zeros()
                 for _, mask in states:
                     merged_mask = merged_mask.union(mask)
 
@@ -183,7 +183,7 @@ class Model(GraphProvider):
                     queue.append(dest)
 
         # Convert to original mask
-        original_mask = ffi.Bitset.zeros()
+        original_mask = ffi.HybridBitset.zeros()
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 original_mask.insert(self.internal_to_original_map[i])

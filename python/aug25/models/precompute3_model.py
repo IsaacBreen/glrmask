@@ -15,7 +15,7 @@ from python.gss_tester.implementations.reference_impl import ReferenceGSS as GSS
 
 @dataclass(frozen=True, eq=False)
 class PyAcc:
-    llm_mask: ffi.Bitset
+    llm_mask: ffi.HybridBitset
     terminals: ffi.HybridL2Bitset
 
     def merge(self, other: 'PyAcc') -> 'PyAcc':
@@ -28,7 +28,7 @@ class PyAcc:
 class Model(GraphProvider):
     """
     Precomputed trie model (third-generation).
-    Normalizes input arena by converting JSON bitsets into ffi.Bitset instances
+    Normalizes input arena by converting JSON bitsets into ffi.HybridBitset instances
     and provides graph traversal and mask computation interfaces.
     """
 
@@ -41,12 +41,12 @@ class Model(GraphProvider):
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
         self.internal_to_original_map: Dict[int, List[int]] = {}
-        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.HybridBitset]]] = None
         self.debug_logging = os.environ.get("RUST_LOG") == "debug"
 
         # Normalize arena children bitsets and cache max_depth
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         for uid, node in tqdm(
             self.arena.items(),
@@ -153,7 +153,7 @@ class Model(GraphProvider):
 
         # t0 = time.time()
 
-        final_mask = ffi.Bitset.zeros()
+        final_mask = ffi.HybridBitset.zeros()
 
         # node_idx -> GSSNode
         values: Dict[int, ffi.GSSNode] = {}
@@ -353,7 +353,7 @@ class Model(GraphProvider):
         if self.debug_logging:
             print("final internal mask:", final_mask.to_ranges())
 
-        # original_mask = ffi.Bitset.zeros()
+        # original_mask = ffi.HybridBitset.zeros()
         original_mask = set()
         for i in final_mask.to_indices():
             original_mask.update(self.internal_to_original_map[i])

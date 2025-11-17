@@ -13,7 +13,7 @@ import _sep1 as ffi  # the compiled module
 class Edge:
     """A more structured way to hold pre-processed edge information."""
     pop: int
-    llm_mask: ffi.Bitset
+    llm_mask: ffi.HybridBitset
     llm_rs: RangeSet  # Kept for iter_edges validation
     destinations: List[Tuple[int, List[Tuple[int, int]]]]  # (dest_idx, state_bv)
 
@@ -26,7 +26,7 @@ class Model(GraphProvider):
 
     1.  **Data Pre-computation**: During initialization, the arena data is converted into more
         efficient structures. `is_end` checks become O(1) set lookups. Edge information is
-        stored in dataclasses, and `ffi.Bitset` masks for LLM tokens are created upfront,
+        stored in dataclasses, and `ffi.HybridBitset` masks for LLM tokens are created upfront,
         avoiding repeated computation in `get_mask`.
 
     2.  **Efficient Scheduler**: The `get_mask` method employs a min-heap (`heapq`) to manage
@@ -65,7 +65,7 @@ class Model(GraphProvider):
             for edge_key, dest_map in original_children:
                 pop, llm_bv_json = edge_key
                 llm_rs = RangeSet.from_ranges(llm_bv_json)
-                llm_mask = ffi.Bitset.from_ranges(llm_rs.intervals)
+                llm_mask = ffi.HybridBitset.from_ranges(llm_rs.intervals)
 
                 destinations = []
                 for dest_idx, state_bv in dest_map:
@@ -121,8 +121,8 @@ class Model(GraphProvider):
         print("\n--- get_mask START ---")
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
-        final_mask = ffi.Bitset.zeros()
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        final_mask = ffi.HybridBitset.zeros()
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
         stopped: set[int] = set()
 
         # Efficient scheduler using a min-heap for depths and a dict for nodes.

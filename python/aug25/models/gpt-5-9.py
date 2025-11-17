@@ -23,8 +23,8 @@ class _PopGroup:
     def __init__(
         self,
         pop: int,
-        sid_to_arcs: Dict[int, List[Tuple[int, Optional[ffi.Bitset]]]],
-        eps_arcs: List[Tuple[int, Optional[ffi.Bitset]]],
+        sid_to_arcs: Dict[int, List[Tuple[int, Optional[ffi.HybridBitset]]]],
+        eps_arcs: List[Tuple[int, Optional[ffi.HybridBitset]]],
     ):
         self.pop = int(pop)
         self.sid_to_arcs = sid_to_arcs
@@ -64,7 +64,7 @@ class Model(GraphProvider):
         self.max_depth: Dict[int, int] = {}
 
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         for uid, node in tqdm(arena.items()):
             uid_int = int(uid)
@@ -87,8 +87,8 @@ class Model(GraphProvider):
 
             # Aggregate by pop
             # pop -> {
-            #     "sid_map": Dict[int, Dict[int, Optional[ffi.Bitset]]],  # sid -> dest_idx -> llm_bv_or_None
-            #     "eps_map": Dict[int, Optional[ffi.Bitset]],              # dest_idx -> llm_bv_or_None
+            #     "sid_map": Dict[int, Dict[int, Optional[ffi.HybridBitset]]],  # sid -> dest_idx -> llm_bv_or_None
+            #     "eps_map": Dict[int, Optional[ffi.HybridBitset]],              # dest_idx -> llm_bv_or_None
             # }
             pop_acc: Dict[int, Dict[str, dict]] = {}
 
@@ -98,14 +98,14 @@ class Model(GraphProvider):
 
                 llm_bv = bs_from_json(dumps(llm_bv_json))
                 # Convention: None means "no restriction" (all tokens allowed)
-                llm_mask: Optional[ffi.Bitset] = None if llm_bv.is_empty() else llm_bv
+                llm_mask: Optional[ffi.HybridBitset] = None if llm_bv.is_empty() else llm_bv
 
                 entry = pop_acc.get(pop_val)
                 if entry is None:
                     entry = {"sid_map": {}, "eps_map": {}}
                     pop_acc[pop_val] = entry
-                sid_map: Dict[int, Dict[int, Optional[ffi.Bitset]]] = entry["sid_map"]
-                eps_map: Dict[int, Optional[ffi.Bitset]] = entry["eps_map"]
+                sid_map: Dict[int, Dict[int, Optional[ffi.HybridBitset]]] = entry["sid_map"]
+                eps_map: Dict[int, Optional[ffi.HybridBitset]] = entry["eps_map"]
 
                 # For each destination, update its SID constraints
                 for dest_idx, state_bv_json in dest_map:
@@ -152,11 +152,11 @@ class Model(GraphProvider):
             # Convert accumulators into compact runtime structures
             groups: Dict[int, _PopGroup] = {}
             for pop_val, entry in pop_acc.items():
-                sid_map: Dict[int, Dict[int, Optional[ffi.Bitset]]] = entry["sid_map"]
-                eps_map: Dict[int, Optional[ffi.Bitset]] = entry["eps_map"]
+                sid_map: Dict[int, Dict[int, Optional[ffi.HybridBitset]]] = entry["sid_map"]
+                eps_map: Dict[int, Optional[ffi.HybridBitset]] = entry["eps_map"]
 
                 # Convert sid_map values to lists for fast iteration
-                sid_to_arcs: Dict[int, List[Tuple[int, Optional[ffi.Bitset]]]] = {}
+                sid_to_arcs: Dict[int, List[Tuple[int, Optional[ffi.HybridBitset]]]] = {}
                 for sid_val, dest_map in sid_map.items():
                     # dest_map: dest_idx -> llm_bv_or_None
                     # Convert to list of (dest_idx, llm_bv_or_None)
@@ -165,7 +165,7 @@ class Model(GraphProvider):
                     sid_to_arcs[int(sid_val)] = arcs_list
 
                 # Epsilon arcs to list
-                eps_arcs: List[Tuple[int, Optional[ffi.Bitset]]] = [(d, bv) for d, bv in eps_map.items()]
+                eps_arcs: List[Tuple[int, Optional[ffi.HybridBitset]]] = [(d, bv) for d, bv in eps_map.items()]
 
                 groups[int(pop_val)] = _PopGroup(pop=int(pop_val), sid_to_arcs=sid_to_arcs, eps_arcs=eps_arcs)
 
@@ -226,10 +226,10 @@ class Model(GraphProvider):
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
         t0 = time.time()
-        final_mask = ffi.Bitset.zeros()
+        final_mask = ffi.HybridBitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
 
         stopped: Set[int] = set()               # nodes that stopped (no gss parents)
         todo: Dict[int, Set[int]] = {}          # depth -> set(node_idx)
@@ -358,11 +358,11 @@ class Model(GraphProvider):
 
                     # Prepare accumulators for next nodes: dest -> (gss_set, child_llm_mask)
                     next_gss: Dict[int, List[ffi.GSSNode]] = {}
-                    next_mask: Dict[int, ffi.Bitset] = {}
+                    next_mask: Dict[int, ffi.HybridBitset] = {}
 
                     # Cache intersections of llm_mask with edge llm_bv
                     # Key: id(llm_bv) or None; Value: Bitset
-                    inter_cache: Dict[Optional[int], ffi.Bitset] = {}
+                    inter_cache: Dict[Optional[int], ffi.HybridBitset] = {}
                     inter_cache[None] = llm_mask  # None means "no restriction"
 
                     # Process epsilon arcs (no SID filter)

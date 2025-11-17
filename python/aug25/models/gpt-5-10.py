@@ -35,13 +35,13 @@ class Model(GraphProvider):
         self._is_end: Dict[int, bool] = {}
 
         # Node -> pop -> list[(llm_bv, [(dest_idx, state_bv), ...])]
-        # All bitsets are ffi.Bitset; children are merged (same pop,llm_bv,dest merged).
-        self.by_pop: Dict[int, Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]]] = {}
+        # All bitsets are ffi.HybridBitset; children are merged (same pop,llm_bv,dest merged).
+        self.by_pop: Dict[int, Dict[int, List[Tuple[ffi.HybridBitset, List[Tuple[int, ffi.HybridBitset]]]]]] = {}
 
         # Normalize arena: merge edges with identical (pop, llm_bv, dest)
         # Use a per-node bitset cache to deduplicate bitset instances from JSON strings.
         dumps = json.dumps
-        bs_from_json = ffi.Bitset.from_json_string
+        bs_from_json = ffi.HybridBitset.from_json_string
 
         for uid, node in tqdm(
             arena.items(),
@@ -67,10 +67,10 @@ class Model(GraphProvider):
                 continue
 
             # Build pop -> llm_key -> (llm_bv, dest_idx -> state_bv union)
-            pop_groups: Dict[int, Dict[str, Tuple[ffi.Bitset, Dict[int, ffi.Bitset]]]] = {}
-            bitset_cache: Dict[str, ffi.Bitset] = {}
+            pop_groups: Dict[int, Dict[str, Tuple[ffi.HybridBitset, Dict[int, ffi.HybridBitset]]]] = {}
+            bitset_cache: Dict[str, ffi.HybridBitset] = {}
 
-            def get_bitset_from_json_string(sjson: str) -> ffi.Bitset:
+            def get_bitset_from_json_string(sjson: str) -> ffi.HybridBitset:
                 b = bitset_cache.get(sjson)
                 if b is None:
                     b = bs_from_json(sjson)
@@ -109,9 +109,9 @@ class Model(GraphProvider):
                         dest_accum[dest_idx] = existing.union(state_bv)
 
             # Convert to final by_pop structure with lists
-            node_by_pop: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = {}
+            node_by_pop: Dict[int, List[Tuple[ffi.HybridBitset, List[Tuple[int, ffi.HybridBitset]]]]] = {}
             for pop, llm_groups in pop_groups.items():
-                groups_list: List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]] = []
+                groups_list: List[Tuple[ffi.HybridBitset, List[Tuple[int, ffi.HybridBitset]]]] = []
                 for llm_key, (llm_bv, dest_accum) in llm_groups.items():
                     # Convert dict to list for each group
                     dest_list = [(int(d), sbv) for d, sbv in dest_accum.items()]
@@ -176,10 +176,10 @@ class Model(GraphProvider):
         state_to_gss = self.constraint_state.filtered_state_gss_map()
 
         t0 = time.time()
-        final_mask = ffi.Bitset.zeros()
+        final_mask = ffi.HybridBitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.HybridBitset]] = {}
 
         stopped: Set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, Set[int]] = {}  # depth -> set(node_idx)
@@ -317,7 +317,7 @@ class Model(GraphProvider):
                     nsids = len(sorted_sids)
 
                     # Utility: iterate sids within a Bitset's ranges efficiently against sorted_sids
-                    def sids_in_statebv(state_bv: ffi.Bitset) -> Iterable[int]:
+                    def sids_in_statebv(state_bv: ffi.HybridBitset) -> Iterable[int]:
                         # Merge-scan using bisect to skip to each range's start
                         idx = 0
                         for start, end in state_bv.to_ranges():
