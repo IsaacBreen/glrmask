@@ -213,7 +213,7 @@ def run_benchmark(args, run_index: int = 0):
     # 2. Extract vocabulary for tokenizer
     constraint_json = json.loads(constraint_json_str)
     # The vocabulary maps token strings to integer IDs. We need ID -> token bytes.
-    llm_token_map: tuple[list[int], int] = constraint_json['llm_vocab']['llm_token_map']
+    llm_token_map: tuple[list[int], int] = constraint_json['vocab']['llm_token_map']
     id_to_token: dict[int, bytes] = {}
     for token_bytes, token_id in llm_token_map:
         id_to_token[token_id] = bytes(token_bytes)

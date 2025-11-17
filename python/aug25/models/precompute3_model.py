@@ -98,7 +98,7 @@ class Model(GraphProvider):
         if model.debug_logging:
             print(model.constraint.dump_precomputed3())
         model.constraint_state = ffi.GrammarConstraintState(model.constraint)
-        model.id_to_token = {v: bytes(k) for k, v in data['llm_vocab']['llm_token_map']}
+        model.id_to_token = {v: bytes(k) for k, v in data['vocab']['llm_token_map']}
         model.possible_matches_cache = model.constraint.possible_matches()
         if model.debug_logging:
             print("model.possible_matches_cache", model.possible_matches_cache)

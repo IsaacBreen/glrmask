@@ -36,7 +36,7 @@ def load_constraint_text(path: Path) -> str:
 
 def build_id_to_token(constraint_json_str: str) -> dict[int, bytes]:
     constraint_json = json.loads(constraint_json_str)
-    llm_token_map = constraint_json['llm_vocab']['llm_token_map']
+    llm_token_map = constraint_json['vocab']['llm_token_map']
     id_to_token: dict[int, bytes] = {}
     for token_bytes, token_id in llm_token_map:
         id_to_token[token_id] = bytes(token_bytes)

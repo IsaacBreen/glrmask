@@ -196,7 +196,7 @@ class BruteForceModel(GraphProvider):
         constraint = ffi.GrammarConstraint.from_json_string(s)
         vocab = data['precompute3_vocab']
         all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
-        id_to_token = {v: bytes(k) for k, v in data['llm_vocab']['llm_token_map']}
+        id_to_token = {v: bytes(k) for k, v in data['vocab']['llm_token_map']}
         internal_to_original_map = {int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()}
 
         original_to_dummy_map_json = data.get('original_to_dummy_map', [])

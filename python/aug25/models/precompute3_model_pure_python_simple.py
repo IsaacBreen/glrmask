@@ -140,7 +140,7 @@ class Model(GraphProvider):
         arena_dict = {int(k): v for k, v in arena_values}
 
         # Load these early for graph dumping and general use
-        id_to_token = {v: bytes(k) for k, v in data['llm_vocab']['llm_token_map']}
+        id_to_token = {v: bytes(k) for k, v in data['vocab']['llm_token_map']}
         constraint = ffi.GrammarConstraint.from_json_string(s)
         tokenizer = constraint.tokenizer()
         tokenizer_max_state = tokenizer.max_state()
