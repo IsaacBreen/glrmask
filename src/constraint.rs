@@ -44,6 +44,7 @@ use crate::{
 use profiler_macro::{time_it, timeit};
 use std::collections::BTreeMap as StdMap;
 use std::ops::BitOrAssign;
+use im::HashSet;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ParseState, ParseStateEdgeContent};
 use crate::glr::table::StateID;
@@ -1633,18 +1634,38 @@ impl GrammarConstraint {
         internal_bv: &LLMTokenBV,
         internal_to_original: &BTreeMap<usize, LLMTokenBV>,
     ) -> LLMTokenBV {
-        let mut original_bv = RangeSetBlaze::new();
+        let mut internal_bv = internal_bv.clone();
         if internal_bv.is_all() {
-            for bv in internal_to_original.values() {
+            internal_bv = HybridBitset::ones(self.vocab.internal_max_llm_token + 1);
+        }
+
+        // STRATEGY 1
+        let mut instant = std::time::Instant::now();
+        let mut original_bv = RangeSetBlaze::new();
+        for i in internal_bv.iter() {
+            if let Some(bv) = internal_to_original.get(&i) {
                 original_bv |= bv.inner.as_ref();
             }
-        } else {
-            for i in internal_bv.iter() {
-                if let Some(bv) = internal_to_original.get(&i) {
-                    original_bv |= bv.inner.as_ref();
-                }
+        }
+        println!("STRATEGY 1: {:?}", instant.elapsed());
+
+        // STRATEGY 2
+        let mut i2o2 = BTreeMap::new();
+        for (i, bv) in internal_to_original {
+            i2o2.insert(i, bv.inner.iter().collect::<HashSet<_>>());
+        }
+        instant = std::time::Instant::now();
+        let mut bv2 = HashSet::new();
+        for i in internal_bv.iter() {
+            if let Some(bv) = i2o2.get(&i) {
+                bv2.extend(bv);
             }
         }
+        instant = std::time::Instant::now();
+        println!("STRATEGY 2: {:?}", instant.elapsed());
+
+        todo!();
+
         HybridBitset::from(original_bv)
     }
 
