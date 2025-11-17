@@ -15,7 +15,9 @@ class BruteForceFastRustModel:
                  constraint_state: ffi.GrammarConstraintState,
                  internal_to_original_map: Dict[int, RangeSet],
                  internal_to_representative_map: Dict[int, int],
-                 internal_max_llm_token: int):
+                 internal_max_llm_token: int,
+                 id_to_token: Dict[int, bytes],
+                 ):
         self.constraint = constraint
         self.constraint_state = constraint_state
         self.internal_to_original_map = internal_to_original_map
@@ -24,6 +26,7 @@ class BruteForceFastRustModel:
         # For compatibility with statistics printer
         self.arena: Dict = {}
         self.roots_map: Dict = {}
+        self.id_to_token = id_to_token
 
     @staticmethod
     def from_json_string(s: str) -> "BruteForceFastRustModel":
@@ -31,6 +34,7 @@ class BruteForceFastRustModel:
         constraint_state = ffi.GrammarConstraintState(constraint)
         
         data = json.loads(s)
+        id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         vocab = data['vocab']
 
         internal_to_original_map = {
@@ -49,7 +53,8 @@ class BruteForceFastRustModel:
             constraint_state,
             internal_to_original_map,
             internal_to_representative_map,
-            internal_max_llm_token
+            internal_max_llm_token,
+            id_to_token,
         )
 
     def get_mask(self) -> RangeSet:
@@ -61,7 +66,7 @@ class BruteForceFastRustModel:
 
         originals = set()
         for _, originals_ in self.internal_to_original_map.items():
-            originals |= originals_
+            originals |= set(originals_)
         assert set(self.id_to_token.keys()) == originals
         
         for internal_token_id in tqdm(range(self.internal_max_llm_token), desc="get_mask (bruteforce_fast_rust)"):
