@@ -70,7 +70,7 @@ class BruteForceFastRustModel:
         assert set(self.id_to_token.keys()) == originals
 
         assert self.internal_max_llm_token == max(self.internal_to_representative_map.keys())
-        for internal_token_id in tqdm(range(self.internal_max_llm_token), desc="get_mask (bruteforce_fast_rust)"):
+        for internal_token_id in tqdm(range(self.internal_max_llm_token + 1), desc="get_mask (bruteforce_fast_rust)"):
             representative_token_id = self.internal_to_representative_map[internal_token_id]
 
             # Create a temporary state by cloning the current state
