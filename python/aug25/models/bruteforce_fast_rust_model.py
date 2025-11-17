@@ -2,12 +2,13 @@ from typing import Dict, List
 import json
 import _sep1 as ffi
 from ..common_interface import RangeSet
+from tqdm import tqdm
 
 class BruteForceFastRustModel:
     """
     A model that wraps the Rust-native `GrammarConstraintState` but uses a
-    brute-force get_mask implementation. It checks each *internal* token individually
-    by cloning the current state for efficiency.
+    brute-force get_mask implementation. It checks each *internal* token
+    individually by replaying the commit history for efficiency.
     """
     def __init__(self,
                  constraint: ffi.GrammarConstraint,
@@ -20,6 +21,7 @@ class BruteForceFastRustModel:
         self.internal_to_original_map = internal_to_original_map
         self.internal_to_representative_map = internal_to_representative_map
         self.internal_max_llm_token = internal_max_llm_token
+        self.committed_tokens: List[int] = []
         # For compatibility with statistics printer
         self.arena: Dict = {}
         self.roots_map: Dict = {}
@@ -63,8 +65,11 @@ class BruteForceFastRustModel:
             if representative_token_id is None:
                 continue
 
-            # Create a temporary state by cloning the current state
-            temp_state = self.constraint_state.clone()
+            # Create a temporary state by replaying history
+            temp_state = ffi.GrammarConstraintState(self.constraint)
+            for committed_token in self.committed_tokens:
+                temp_state.commit(committed_token)
+            
             # Check if the next token is valid
             temp_state.commit(representative_token_id)
             
@@ -78,6 +83,7 @@ class BruteForceFastRustModel:
     def commit(self, token_id: int):
         """Commits a token to the underlying Rust state and records it."""
         self.constraint_state.commit(token_id)
+        self.committed_tokens.append(token_id)
 
     def is_end(self, node: int) -> bool:
         # Dummy implementation, not used.
