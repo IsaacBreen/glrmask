@@ -1693,7 +1693,10 @@ impl GrammarConstraint {
                 bv2.extend(bv.iter().copied());
             }
         }
-        println!("[perf] STRATEGY 2 (BTree + im::HashSet):    {:?}", instant.elapsed());
+        let elapsed = instant.elapsed();
+        let bv2_rsb: RangeSetBlaze<usize> = bv2.iter().copied().collect();
+        let is_equal = bv2_rsb == original_bv_rsb;
+        println!("[perf] STRATEGY 2 (BTree + im::HashSet):    {:?} (equal: {})", elapsed, is_equal);
 
         // STRATEGY 3: HashMap lookup
         let i2o_hashmap: std::collections::HashMap<_, _> =
@@ -1705,7 +1708,9 @@ impl GrammarConstraint {
                 original_bv_3 |= bv.inner.as_ref();
             }
         }
-        println!("[perf] STRATEGY 3 (HashMap + RangeSetBlaze): {:?}", instant.elapsed());
+        let elapsed = instant.elapsed();
+        let is_equal = original_bv_3 == original_bv_rsb;
+        println!("[perf] STRATEGY 3 (HashMap + RangeSetBlaze): {:?} (equal: {})", elapsed, is_equal);
 
         // STRATEGY 4: Vec lookup
         let mut i2o_vec: Vec<Option<LLMTokenBV>> =
@@ -1722,11 +1727,13 @@ impl GrammarConstraint {
                 original_bv_4 |= bv.inner.as_ref();
             }
         }
-        println!("[perf] STRATEGY 4 (Vec + RangeSetBlaze):     {:?}", instant.elapsed());
+        let elapsed = instant.elapsed();
+        let is_equal = original_bv_4 == original_bv_rsb;
+        println!("[perf] STRATEGY 4 (Vec + RangeSetBlaze):     {:?} (equal: {})", elapsed, is_equal);
 
         // STRATEGY 5: Rayon
         let instant = std::time::Instant::now();
-        let _original_bv_5 = internal_bv.inner.ranges().par_bridge().map(|range| {
+        let original_bv_5 = internal_bv.inner.ranges().par_bridge().map(|range| {
             let mut partial_bv = RangeSetBlaze::new();
             for i in range {
                 if let Some(bv) = internal_to_original.get(&i) {
@@ -1735,7 +1742,9 @@ impl GrammarConstraint {
             }
             partial_bv
         }).reduce(RangeSetBlaze::new, |a, b| a | b);
-        println!("[perf] STRATEGY 5 (Rayon):                  {:?}", instant.elapsed());
+        let elapsed = instant.elapsed();
+        let is_equal = original_bv_5 == original_bv_rsb;
+        println!("[perf] STRATEGY 5 (Rayon):                  {:?} (equal: {})", elapsed, is_equal);
 
         // STRATEGY 6: Pre-computed Bitset Matrix
         let max_original_id = self.llm_vocab.max_original_llm_token_id;
@@ -1776,7 +1785,7 @@ impl GrammarConstraint {
             }
         }
         // To be fair, we must convert back to the required type.
-        let _original_bv_6 = result_bitset_words
+        let original_bv_6 = result_bitset_words
             .iter()
             .enumerate()
             .flat_map(|(word_idx, &word)| {
@@ -1789,7 +1798,9 @@ impl GrammarConstraint {
                 })
             })
             .collect::<RangeSetBlaze<usize>>();
-        println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?}", instant.elapsed());
+        let elapsed = instant.elapsed();
+        let is_equal = original_bv_6 == original_bv_rsb;
+        println!("[perf] STRATEGY 6 (Bitset Matrix):          {:?} (equal: {})", elapsed, is_equal);
 
         HybridBitset::from(original_bv_rsb)
     }
