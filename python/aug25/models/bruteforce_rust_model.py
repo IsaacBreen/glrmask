@@ -7,14 +7,13 @@ from tqdm import tqdm
 class BruteForceRustModel:
     """
     A model that wraps the Rust-native `GrammarConstraintState` but uses a
-    brute-force get_mask implementation. It checks each token individually by
-    replaying the commit history.
+    brute-force get_mask implementation. It checks each token individually by cloning
+    the current state.
     """
     def __init__(self, constraint: ffi.GrammarConstraint, constraint_state: ffi.GrammarConstraintState, id_to_token: Dict[int, bytes]):
         self.constraint = constraint
         self.constraint_state = constraint_state
         self.id_to_token = id_to_token
-        self.committed_tokens: List[int] = []
         # For compatibility with statistics printer
         self.arena: Dict = {}
         self.roots_map: Dict = {}
@@ -37,11 +36,8 @@ class BruteForceRustModel:
         allowed_tokens = []
         
         for token_id in tqdm(self.id_to_token.keys(), desc="get_mask (bruteforce_rust)"):
-            # Create a temporary state by replaying history
-            temp_state = ffi.GrammarConstraintState(self.constraint)
-            for committed_token in self.committed_tokens:
-                temp_state.commit(committed_token)
-            
+            # Create a temporary state by cloning the current state
+            temp_state = self.constraint_state.clone()
             # Check if the next token is valid
             temp_state.commit(token_id)
             # mask_bv = temp_state.get_mask_bv()
@@ -55,7 +51,6 @@ class BruteForceRustModel:
     def commit(self, token_id: int):
         """Commits a token to the underlying Rust state and records it."""
         self.constraint_state.commit(token_id)
-        self.committed_tokens.append(token_id)
 
     def is_end(self, node: int) -> bool:
         # Dummy implementation, not used.
