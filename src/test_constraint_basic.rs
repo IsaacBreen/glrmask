@@ -928,8 +928,8 @@ fn test_precompute_x_eq() {
     let equals_tid = *grammar_token_map.get_by_left(&regex_name("EQUALS")).unwrap();
 
     // Get the LLM token IDs
-    let x_llm_id = constraint.internal_bv_to_original(&LLMTokenBV::from_item(llm_token_map.get_by_left(b"x".as_ref()).unwrap().0));
-    let space_equals_llm_id = constraint.internal_bv_to_original(&LLMTokenBV::from_item(llm_token_map.get_by_left(b" =".as_ref()).unwrap().0));
+    let x_llm_id: HybridBitset = constraint.internal_bv_to_original(&LLMTokenBV::from_item(llm_token_map.get_by_left(b"x".as_ref()).unwrap().0)).into();
+    let space_equals_llm_id: HybridBitset = constraint.internal_bv_to_original(&LLMTokenBV::from_item(llm_token_map.get_by_left(b" =".as_ref()).unwrap().0)).into();
 
     // 1. Verify the edge for 'X'
     let x_dests = root_node.get(&Some(x_tid)).expect("No edge for terminal 'X'");

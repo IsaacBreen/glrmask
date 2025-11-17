@@ -1329,8 +1329,7 @@ impl PyGrammarConstraintState {
     }
 
     fn get_mask_bv(&self) -> PyResult<PyBitset> {
-        let hybrid_bitset = self.inner.with_inner(|state| state.get_mask4());
-        let bitset = RustBitset::from(&hybrid_bitset);
+        let bitset = self.inner.with_inner(|state| state.get_mask4());
         Ok(PyBitset { inner: bitset })
     }
 

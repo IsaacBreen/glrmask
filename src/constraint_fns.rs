@@ -10,12 +10,13 @@ use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::BitOrAssign;
+use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 
 type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 
 impl<'a> GrammarConstraintState<'a> {
-    pub fn get_mask4(&self) -> HybridBitset {
+    pub fn get_mask4(&self) -> Bitset {
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
         if self.state.is_empty() {
             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
