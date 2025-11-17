@@ -590,7 +590,7 @@ pub struct GrammarConstraint {
     pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
 
     /// Precomputed sparse bitset matrix for internal->original token ID mapping.
-    pub(crate) internal_to_original_sparse_matrix: Vec<Vec<(u16, usize)>>,
+    pub(crate) internal_to_original_sparse_matrix: Vec<Vec<(u16, u64)>>,
 }
 
 impl GrammarConstraint {
@@ -777,7 +777,7 @@ impl JSONConvertible for GrammarConstraint {
 
                 let internal_to_original_sparse_matrix =
                     match obj.remove("internal_to_original_sparse_matrix") {
-                        Some(n) => Vec::<Vec<(u16, usize)>>::from_json(n)?,
+                        Some(n) => Vec::<Vec<(u16, u64)>>::from_json(n)?,
                         None => {
                             // For backward compatibility, compute it if missing.
                             Self::build_internal_to_original_sparse_matrix(
@@ -1670,8 +1670,8 @@ impl GrammarConstraint {
         internal_to_original: &BTreeMap<usize, LLMTokenBV>,
         max_original_llm_token_id: usize,
         internal_max_llm_token: usize,
-    ) -> Vec<Vec<(u16, usize)>> {
-        type Word = usize;
+    ) -> Vec<Vec<(u16, u64)>> {
+        type Word = u64;
         const WORD_BITS: usize = 64;
 
         let num_internal_tokens = internal_max_llm_token + 1;
@@ -1710,7 +1710,7 @@ impl GrammarConstraint {
             internal_bv = HybridBitset::ones(self.vocab.internal_max_llm_token + 1);
         }
 
-        type Word = usize;
+        type Word = u64;
         const WORD_BITS: usize = 64;
 
         let max_original_id = self.llm_vocab.max_original_llm_token_id;
@@ -1731,7 +1731,7 @@ impl GrammarConstraint {
             }
         }
 
-        Bitset::from_iter(result_bitset_words)
+        Bitset::from_words_vec(result_bitset_words)
     }
 
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {

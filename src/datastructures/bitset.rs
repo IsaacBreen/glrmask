@@ -122,6 +122,12 @@ impl Bitset {
                 })
             })
     }
+
+    pub fn from_words_vec(words: Vec<u64>) -> Self {
+        Bitset {
+            words,
+        }
+    }
 }
 
 impl FromIterator<usize> for Bitset {
