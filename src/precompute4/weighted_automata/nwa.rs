@@ -444,14 +444,16 @@ impl NWA {
         let t2_marker = if t2 == best_t { "*" } else { " " };
         let t3_marker = if t3 == best_t { "*" } else { " " };
 
-        crate::debug!(
-            4,
-            "[Determinize NWA({})] Internal: t={:.2?}{}, s={}->{}{}| Rust: t={:.2?}{}, s={}->{}{}| RustFST: t={:.2?}{}, s={}->{}{}",
-            initial_states,
-            t1, t1_marker, internal_states_before_simp, s1, s1_marker,
-            t2, t2_marker, rust_states_before_simp, s2, s2_marker,
-            t3, t3_marker, rustfst_states_before_simp, s3, s3_marker
-        );
+        if t1 + t2 + t3 > std::time::Duration::from_secs(1) {
+            crate::debug!(
+                4,
+                "[Determinize NWA({})] Internal: t={:.2?}{}, s={}->{}{}| Rust: t={:.2?}{}, s={}->{}{}| RustFST: t={:.2?}{}, s={}->{}{}",
+                initial_states,
+                t1, t1_marker, internal_states_before_simp, s1, s1_marker,
+                t2, t2_marker, rust_states_before_simp, s2, s2_marker,
+                t3, t3_marker, rustfst_states_before_simp, s3, s3_marker
+            );
+        }
 
         internal_dwa
     }
