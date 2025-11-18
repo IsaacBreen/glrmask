@@ -736,12 +736,13 @@ impl NFAState {
 
 impl ExprGroups {
     pub fn build(self) -> Regex {
-        println!("Building NFA...");
+        crate::debug!(2, "Building NFA...");
         let mut nfa = self.build_nfa();
-        println!("Converting NFA to DFA...");
+        crate::debug!(2, "Converting NFA to DFA...");
         let mut dfa = nfa.to_dfa();
-        println!("Minimizing DFA...");
+        crate::debug!(2, "Minimizing DFA...");
         dfa.minimize();
+        crate::debug!(2, "Done!");
         Regex { dfa }
     }
 
