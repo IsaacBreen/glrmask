@@ -492,6 +492,40 @@ impl<'a, T> VacantEntry<'a, T> {
     }
 }
 
+pub struct TrieMapIterRef<'a, T> {
+    iter: std::iter::Enumerate<std::slice::Iter<'a, Option<Box<T>>>>,
+}
+
+impl<'a, T> Iterator for TrieMapIterRef<'a, T> {
+    type Item = (u8, &'a T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((i, opt)) = self.iter.next() {
+            if let Some(ref boxed) = opt {
+                return Some((i as u8, boxed.as_ref()));
+            }
+        }
+        None
+    }
+}
+
+pub struct TrieMapIterMut<'a, T> {
+    iter: std::iter::Enumerate<std::slice::IterMut<'a, Option<Box<T>>>>,
+}
+
+impl<'a, T> Iterator for TrieMapIterMut<'a, T> {
+    type Item = (u8, &'a mut T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((i, opt)) = self.iter.next() {
+            if let Some(ref mut boxed) = opt {
+                return Some((i as u8, boxed.as_mut()));
+            }
+        }
+        None
+    }
+}
+
 impl<T> IntoIterator for TrieMap<T> {
     type Item = (u8, T);
     type IntoIter = std::vec::IntoIter<Self::Item>; // Corrected
@@ -505,19 +539,23 @@ impl<T> IntoIterator for TrieMap<T> {
 
 impl<'a, T> IntoIterator for &'a TrieMap<T> {
     type Item = (u8, &'a T);
-    type IntoIter = std::vec::IntoIter<Self::Item>; // Corrected
+    type IntoIter = TrieMapIterRef<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.iter().collect::<Vec<_>>().into_iter()
+        TrieMapIterRef {
+            iter: self.data.iter().enumerate(),
+        }
     }
 }
 
 impl<'a, T> IntoIterator for &'a mut TrieMap<T> {
     type Item = (u8, &'a mut T);
-    type IntoIter = std::vec::IntoIter<Self::Item>; // Corrected
+    type IntoIter = TrieMapIterMut<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.iter_mut().collect::<Vec<_>>().into_iter()
+        TrieMapIterMut {
+            iter: self.data.iter_mut().enumerate(),
+        }
     }
 }
 
