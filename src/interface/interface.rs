@@ -766,6 +766,7 @@ impl GrammarDefinition {
         let it = grammar_exprs.iter();
         #[cfg(not(rustrover))]
         let it = tqdm!(grammar_exprs.iter(), disable = !PROGRESS_BAR_ENABLED, leave=false, desc = "Converting grammar expressions to productions");
+        let mut anon_regex_expr_to_group_id = BiBTreeMap::new();
         for (name, expr) in it {
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = name; // Base name for generated sub-rules/terminals
@@ -777,8 +778,7 @@ impl GrammarDefinition {
                         lhs_name_str,
                         &mut literal_to_group_id,
                         &nonterminal_names_from_rules,
-                        &mut regex_name_to_group_id,
-                        &mut BTreeMap::new(), // Placeholder, anon literals not supported here yet
+                        &mut regex_name_to_group_id, &mut anon_regex_expr_to_group_id,
                         &mut next_terminal_group_id,
                         &mut per_base_counters,
                         &mut all_names,
@@ -793,8 +793,7 @@ impl GrammarDefinition {
                     lhs_name_str,
                     &mut literal_to_group_id,
                     &nonterminal_names_from_rules,
-                    &mut regex_name_to_group_id,
-                    &mut BTreeMap::new(), // Placeholder, anon literals not supported here yet
+                    &mut regex_name_to_group_id, &mut anon_regex_expr_to_group_id,
                     &mut next_terminal_group_id,
                     &mut per_base_counters,
                     &mut all_names,
@@ -803,6 +802,10 @@ impl GrammarDefinition {
                 productions.push(Production { lhs, rhs: rhs_symbols });
                 productions.extend(new_productions_for_rhs); // Extend with productions from processing the rhs
             }
+        }
+
+        for (expr, group_id) in anon_regex_expr_to_group_id {
+            group_id_to_expr.insert(group_id, expr);
         }
 
         #[derive(Copy, Clone, PartialEq)]
@@ -1950,29 +1953,19 @@ mod tests {
         //     }).collect::<Vec<_>>().join(" "));
         // }
 
-
-        // Dynamically find the names of the relevant terminals
-        let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
-        let term_eps_expr = RegexExpr::Epsilon;
-        let term_z_expr = eat_u8(b'z');
         use crate::glr::grammar::regex_name;
-        let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
-            .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
-        let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
-            .unwrap_or_else(|| panic!("Could not find name for sometimes-null terminal group ID: {}", term_x_opt_gid))
-            .clone();
+        
+        let name_term_x_opt = "X_OPT".to_string();
+        let _term_x_opt_gid = *grammar_def.regex_name_to_group_id.get_by_left(&name_term_x_opt)
+            .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal name: {}", name_term_x_opt));
 
-        let term_eps_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_eps_expr)
-            .unwrap_or_else(|| panic!("Could not find group ID for always-null terminal expression: {:?}", term_eps_expr));
-        let name_term_eps = grammar_def.regex_name_to_group_id.get_by_right(term_eps_gid)
-            .unwrap_or_else(|| panic!("Could not find name for always-null terminal group ID: {}", term_eps_gid))
-            .clone();
+        let name_term_eps = "EPS".to_string();
+        let _term_eps_gid = *grammar_def.regex_name_to_group_id.get_by_left(&name_term_eps)
+            .unwrap_or_else(|| panic!("Could not find group ID for always-null terminal name: {}", name_term_eps));
 
-        let term_z_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_z_expr)
-            .unwrap_or_else(|| panic!("Could not find group ID for never-null terminal expression: {:?}", term_z_expr));
-        let name_term_z = grammar_def.regex_name_to_group_id.get_by_right(term_z_gid)
-            .unwrap_or_else(|| panic!("Could not find name for never-null terminal group ID: {}", term_z_gid))
-            .clone();
+        let name_term_z = "Z".to_string();
+        let _term_z_gid = *grammar_def.regex_name_to_group_id.get_by_left(&name_term_z)
+            .unwrap_or_else(|| panic!("Could not find group ID for never-null terminal name: {}", name_term_z));
 
         // Find the generated non-terminal for the optional version of name_term_x_opt
         // This NT should have two productions: NT -> name_term_x_opt and NT -> epsilon
