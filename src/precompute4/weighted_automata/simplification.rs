@@ -8,6 +8,8 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use rustfst::algorithms::{minimize_with_config, MinimizeConfig};
 
+const MAX_OPTIMIZE_ITERATIONS: usize = 20;
+
 #[derive(Clone, Debug)]
 struct Partition {
     class_of: Vec<usize>,
@@ -191,8 +193,16 @@ impl DWA {
         for (i, &ordering) in DWA_PASS_ORDERINGS.iter().enumerate() {
             let mut dwa = initial_clone.clone();
             let start_time = std::time::Instant::now();
+            let mut iterations = 0;
+            let mut timed_out = false;
 
             loop {
+                if iterations >= MAX_OPTIMIZE_ITERATIONS {
+                    timed_out = true;
+                    break;
+                }
+                iterations += 1;
+
                 let mut changed_in_iteration = false;
                 for &pass in ordering {
                     let changed = match pass {
@@ -212,9 +222,10 @@ impl DWA {
             let final_states = dwa.states.len();
 
             let ordering_str = format!("{:?}", ordering);
-            crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
+            let timeout_str = if timed_out { " (TIMED OUT)" } else { "" };
+            crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
 
-            if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+            if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
                 final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
             }) {
                 best_result = Some((dwa, elapsed, final_states));
@@ -780,8 +791,16 @@ impl NWA {
         for (i, &ordering) in NWA_PASS_ORDERINGS.iter().enumerate() {
             let mut nwa = initial_clone.clone();
             let start_time = std::time::Instant::now();
+            let mut iterations = 0;
+            let mut timed_out = false;
 
             loop {
+                if iterations >= MAX_OPTIMIZE_ITERATIONS {
+                    timed_out = true;
+                    break;
+                }
+                iterations += 1;
+
                 let mut changed_in_iteration = false;
                 for &pass in ordering {
                     let changed = match pass {
@@ -802,9 +821,10 @@ impl NWA {
             let final_states = nwa.states.len();
 
             let ordering_str = format!("{:?}", ordering);
-            crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
+            let timeout_str = if timed_out { " (TIMED OUT)" } else { "" };
+            crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
 
-            if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+            if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
                 final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
             }) {
                 best_result = Some((nwa, elapsed, final_states));
