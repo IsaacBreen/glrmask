@@ -226,12 +226,11 @@ pub fn precompute4(
                     continue;
                 }
 
+                let mut left_dwa = specialize_dwa(&super_dwa, &effective_terminal_map, &bit_to_term);
                 println!("Specializing DWA (took {:?})", now_step.elapsed());
                 now_step = Instant::now();
-                let mut left_dwa = specialize_dwa(&super_dwa, &effective_terminal_map, &bit_to_term);
-                println!("Simplifying DWA (took {:?})", now_step.elapsed());
-                now_step = Instant::now();
                 left_dwa.simplify();
+                println!("Simplifying DWA (took {:?})", now_step.elapsed());
                 let left_nwa = NWA::from_dwa(&left_dwa);
 
                 let mut states = states_arena.borrow_mut();
@@ -242,20 +241,20 @@ pub fn precompute4(
 
                 let left_body = NWABody { start_state: left_body_start };
 
+                let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
                 println!("Concatenating components (took {:?})", now_step.elapsed());
                 now_step = Instant::now();
-                let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
 
                 if !new_states_filter.is_empty() {
+                    apply_cancellations(&mut states, &new_states_filter);
                     println!("Applying cancellations (took {:?})", now_step.elapsed());
                     now_step = Instant::now();
-                    apply_cancellations(&mut states, &new_states_filter);
+                    apply_finality_fixpoint(&mut states, &new_states_filter);
                     println!("Propagating finality (took {:?})", now_step.elapsed());
                     now_step = Instant::now();
-                    apply_finality_fixpoint(&mut states, &new_states_filter);
+                    remove_negative_transitions(&mut states, &new_states_filter);
                     println!("Removing negative transitions (took {:?})", now_step.elapsed());
                     now_step = Instant::now();
-                    remove_negative_transitions(&mut states, &new_states_filter);
                     println!("Done (took {:?})", now_step.elapsed());
                     now_step = Instant::now();
                 }
