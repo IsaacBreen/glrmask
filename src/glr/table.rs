@@ -69,12 +69,14 @@ struct Stage5Row {
     shifts: BTreeMap<Terminal, StateID>,
     gotos: BTreeMap<NonTerminal, StateID>,
     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+    default_reduces: BTreeSet<ProductionID>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Stage6Row {
     pub(crate) shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
     pub(crate) gotos: BTreeMap<NonTerminal, StateID>,
+    pub(crate) default_reduces: BTreeSet<ProductionID>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -304,12 +306,14 @@ impl JSONConvertible for Reduce {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage7Row {
     pub shifts_and_reduces_full: ShiftsAndReducesFull,
+    pub default_action: Option<Stage7ShiftsAndReducesLookaheadValue>,
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub shifts_and_reduces_full: ShiftsAndReducesFull,
+    pub default_action: Option<Stage7ShiftsAndReducesLookaheadValue>,
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
@@ -320,6 +324,7 @@ impl JSONConvertible for Row {
             "shifts_and_reduces_full".to_string(),
             self.shifts_and_reduces_full.to_json(),
         );
+        obj.insert("default_action".to_string(), self.default_action.to_json());
         obj.insert("gotos".to_string(), self.gotos.to_json());
         JSONNode::Object(obj)
     }
@@ -331,6 +336,9 @@ impl JSONConvertible for Row {
                         "Missing field shifts_and_reduces_full for Row".to_string()
                     })?,
                 )?,
+                default_action: obj.remove("default_action").map_or(Ok(None), |node| {
+                    Option::<Stage7ShiftsAndReducesLookaheadValue>::from_json(node)
+                })?,
                 gotos: BTreeMap::<NonTerminalID, Goto>::from_json(
                     obj.remove("gotos")
                         .ok_or_else(|| "Missing field gotos for Row".to_string())?,
@@ -574,13 +582,9 @@ fn stage_4(stage_3_table: Stage3Table) -> Stage4Result {
     stage_4_table
 }
 
-fn stage_5(
-    stage_4_table: Stage4Table,
-    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-) -> Stage5Result {
+fn stage_5(stage_4_table: Stage4Table) -> Stage5Result {
     let mut stage_5_table = BTreeMap::new();
 
-    let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
     for (state_id, row) in stage_4_table {
         let Stage4Row {
             shifts,
@@ -588,19 +592,20 @@ fn stage_5(
             reduces,
         } = row;
         let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
+        let mut default_reduces = BTreeSet::new();
         for (opt_term, prod_ids) in reduces {
             if let Some(term) = opt_term {
                 new_reduces.entry(term).or_default().extend(prod_ids.into_iter());
             } else {
-                for terminal in &all_terminals {
-                    new_reduces
-                        .entry(terminal.clone())
-                        .or_default()
-                        .extend(prod_ids.iter().cloned());
-                }
+                default_reduces.extend(prod_ids.iter().cloned());
             }
         }
-        stage_5_table.insert(state_id, Stage5Row { shifts, gotos, reduces: new_reduces });
+        stage_5_table.insert(
+            state_id,
+            Stage5Row {
+                shifts, gotos, reduces: new_reduces, default_reduces
+            },
+        );
     }
     stage_5_table
 }
@@ -622,7 +627,14 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
                 },
             );
         }
-        stage_6_table.insert(state_id, Stage6Row { shifts_and_reduces, gotos: row.gotos });
+        stage_6_table.insert(
+            state_id,
+            Stage6Row {
+                shifts_and_reduces,
+                gotos: row.gotos,
+                default_reduces: row.default_reduces,
+            },
+        );
     }
     stage_6_table
 }
@@ -670,6 +682,28 @@ fn stage_7(
             shifts_and_reduces_full.insert(terminal_id, final_action);
         }
 
+        let mut default_reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> =
+            BTreeMap::new();
+        for &production_id in &row.default_reduces {
+            let production = &productions[production_id.0];
+            let len = production.rhs.len();
+            let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+            default_reduces
+                .entry(len)
+                .or_default()
+                .entry(nonterminal_id)
+                .or_default()
+                .insert(production_id);
+        }
+
+        let default_action = if default_reduces.is_empty() {
+            None
+        } else {
+            let mut action = Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: default_reduces };
+            action.simplify();
+            Some(action)
+        };
+
         let mut gotos = BTreeMap::new();
         for (nonterminal, next_state_id) in row.gotos {
             let non_terminal_id = *non_terminal_map
@@ -682,7 +716,11 @@ fn stage_7(
             gotos.insert(non_terminal_id, goto);
         }
 
-        stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces_full, gotos });
+        stage_7_table.insert(state_id, Stage7Row {
+            shifts_and_reduces_full,
+            default_action,
+            gotos,
+        });
     }
 
     let initial_item = Item {
@@ -736,12 +774,14 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
     for (state_id, row) in stage_7_table {
         let Stage7Row {
             shifts_and_reduces_full,
+            default_action,
             gotos,
         } = row;
         stage_8_table.insert(
             state_id,
             Row {
                 shifts_and_reduces_full,
+                default_action,
                 gotos,
             },
         );
@@ -858,7 +898,7 @@ pub fn generate_glr_parser_with_maps(
     crate::debug!(2, "Stage 4");
     let stage_4_table = stage_4(stage_3_table);
     crate::debug!(2, "Stage 5");
-    let stage_5_table = stage_5(stage_4_table, &terminal_map);
+    let stage_5_table = stage_5(stage_4_table);
     crate::debug!(2, "Stage 6");
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(2, "Stage 7");
