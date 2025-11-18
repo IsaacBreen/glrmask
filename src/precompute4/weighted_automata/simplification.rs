@@ -156,17 +156,7 @@ impl DWA {
                     std::cmp::Ordering::Greater => ">",
                 };
 
-                crate::debug!(
-                    4,
-                    "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]",
-                    initial_states,
-                    internal_time,
-                    internal_states,
-                    rustfst_time,
-                    rustfst_states,
-                    state_cmp,
-                    time_cmp
-                );
+                crate::debug!(4, "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
             }
 
             *self = internal;
@@ -198,12 +188,7 @@ impl DWA {
         crate::debug!(6, "[DWA::simplify] After prune_unreachable (2): {}", self.stats());
         changed |= self.prune_dead_ends();
         crate::debug!(6, "[DWA::simplify] After prune_dead_ends (2): {}", self.stats());
-        crate::debug!(
-            6,
-            "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}",
-            changed,
-            self.stats()
-        );
+        crate::debug!(6, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
         changed
     }
 
@@ -685,17 +670,7 @@ impl NWA {
                     std::cmp::Ordering::Greater => ">",
                 };
 
-                crate::debug!(
-                    4,
-                    "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]",
-                    initial_states,
-                    internal_time,
-                    internal_states,
-                    rustfst_time,
-                    rustfst_states,
-                    state_cmp,
-                    time_cmp
-                );
+                crate::debug!(4, "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
             }
 
             *self = internal;
@@ -743,12 +718,7 @@ impl NWA {
 
         changed |= self.prune_dead_ends();
         crate::debug!(6, "[NWA::simplify] After prune_dead_ends (2): {}", self.stats());
-        crate::debug!(
-            6,
-            "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}",
-            changed,
-            self.stats()
-        );
+        crate::debug!(6, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
         changed
     }
 
