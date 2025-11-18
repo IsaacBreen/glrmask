@@ -576,11 +576,11 @@ fn stage_4(stage_3_table: Stage3Table) -> Stage4Result {
 
 fn stage_5(
     stage_4_table: Stage4Table,
-    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+    terminal_map: &BTreeMap<Terminal, TerminalID>,
 ) -> Stage5Result {
     let mut stage_5_table = BTreeMap::new();
 
-    let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
+    let all_terminals: BTreeSet<Terminal> = terminal_map.keys().cloned().collect();
     for (state_id, row) in stage_4_table {
         let Stage4Row {
             shifts,
@@ -631,7 +631,7 @@ fn stage_7(
     stage_6_table: Stage6Table,
     item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
     productions: &[Production],
-    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+    terminal_map: &BTreeMap<Terminal, TerminalID>,
     non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
 ) -> (Stage7Table, StateID, StateID) {
     let start_production_id = 0;
@@ -641,9 +641,9 @@ fn stage_7(
         let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
 
         for (terminal, action) in &row.shifts_and_reduces {
-            let terminal_id = *terminal_map
-                .get_by_left(terminal)
-                .expect_else(|| format!("Terminal {} not found in terminal map. Terminals: {:?}", terminal, terminal_map.left_values()));
+            let terminal_id = *terminal_map.get(terminal).expect_else(|| {
+                format!("Terminal {} not found in terminal map. Terminals: {:?}", terminal, terminal_map.keys())
+            });
             let maybe_shift: Option<StateID> = action.shift;
 
             let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> =
@@ -809,7 +809,7 @@ pub fn stage_10(table: &Table) -> BTreeMap<NonTerminalID, BTreeMap<StateID, Stat
 #[time_it]
 pub fn generate_glr_parser_with_maps(
     productions: &[Production],
-    terminal_map: BiBTreeMap<Terminal, TerminalID>,
+    terminal_map: BTreeMap<Terminal, TerminalID>,
     mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     actions: BTreeMap<NonTerminal, ActionFn>,
     ignore_terminal_id: Option<TerminalID>,
@@ -907,7 +907,7 @@ pub fn generate_glr_parser(
 
 pub fn generate_glr_parser_with_terminal_map(
     productions: &[Production],
-    terminal_map: BiBTreeMap<Terminal, TerminalID>,
+    terminal_map: BTreeMap<Terminal, TerminalID>,
     ignore_terminal_id: Option<TerminalID>,
 ) -> crate::glr::parser::GLRParser {
     let non_terminal_map = assign_non_terminal_ids(productions);
@@ -920,13 +920,13 @@ pub fn generate_glr_parser_with_terminal_map(
     )
 }
 
-pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
-    let mut terminal_map = BiBTreeMap::new();
+pub fn assign_terminal_ids(productions: &[Production]) -> BTreeMap<Terminal, TerminalID> {
+    let mut terminal_map = BTreeMap::new();
     let mut next_terminal_id = 0;
     for p in productions {
         for symbol in &p.rhs {
             if let Symbol::Terminal(t) = symbol {
-                if !terminal_map.contains_left(t) {
+                if !terminal_map.contains_key(t) {
                     terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
                     next_terminal_id += 1;
                 }

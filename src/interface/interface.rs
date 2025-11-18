@@ -136,15 +136,15 @@ pub struct GrammarDefinition {
     pub productions: Vec<Production>,
     pub start_production_id: usize, // Index into productions
     pub literal_to_group_id: BiBTreeMap<Vec<u8>, usize>,
-    pub regex_name_to_group_id: BiBTreeMap<String, usize>,
+    pub regex_name_to_group_id: BTreeMap<String, usize>,
     pub regex_expr_to_group_id: BiBTreeMap<Expr, usize>,
     pub ignore_terminal_id: Option<TerminalID>,
     pub external_name_to_group_id: BiBTreeMap<String, usize>,
 }
 
 impl GrammarDefinition {
-    pub fn terminal_to_group_id(&self) -> BiBTreeMap<Terminal, usize> {
-        let mut terminal_to_group_id = BiBTreeMap::new();
+    pub fn terminal_to_group_id(&self) -> BTreeMap<Terminal, usize> {
+        let mut terminal_to_group_id = BTreeMap::new();
         for (name, group_id) in &self.regex_name_to_group_id {
             let terminal = Terminal::RegexName(name.clone());
             terminal_to_group_id.insert(terminal, *group_id);
@@ -225,7 +225,7 @@ impl JSONConvertible for GrammarDefinition {
                     .unwrap_or_default();
 
                 let mut new_literal_to_group_id = BiBTreeMap::new();
-                let mut new_regex_name_to_group_id = BiBTreeMap::new();
+                let mut new_regex_name_to_group_id = BTreeMap::new();
                 let mut new_regex_expr_to_group_id = BiBTreeMap::new();
 
                 let regex_terminals_node = obj.remove("regex_terminals")
@@ -365,7 +365,7 @@ impl GrammarDefinition {
         if let Some(group_id) = self.external_name_to_group_id.get_by_left(name) {
             return *group_id;
         }
-        if self.regex_name_to_group_id.contains_left(name) {
+        if self.regex_name_to_group_id.contains_key(name) {
             panic!("External terminal name '{}' conflicts with an existing terminal in the grammar.", name);
         }
 
@@ -727,13 +727,13 @@ impl GrammarDefinition {
         }
 
         let mut literal_to_group_id: BiBTreeMap<Vec<u8>, usize> = BiBTreeMap::new();
-        let mut regex_name_to_group_id: BiBTreeMap<String, usize> = BiBTreeMap::new();
+        let mut regex_name_to_group_id: BTreeMap<String, usize> = BTreeMap::new();
         let mut regex_expr_to_group_id = BiBTreeMap::new();
         let mut next_terminal_group_id = 0;
 
         // Process predefined terminals
         for (name, expr) in regex_exprs {
-            if regex_name_to_group_id.contains_left(&name) {
+            if regex_name_to_group_id.contains_key(&name) {
                 return Err(format!("Duplicate terminal name defined: {}", name));
             }
             if let Some(group_id) = regex_expr_to_group_id.get_by_left(&expr) {
@@ -747,7 +747,7 @@ impl GrammarDefinition {
         }
 
         let mut all_names: HashSet<String> = grammar_exprs.iter().map(|(name, _)| name.clone()).collect();
-        all_names.extend(regex_name_to_group_id.left_values().cloned());
+        all_names.extend(regex_name_to_group_id.keys().cloned());
         let mut per_base_counters: HashMap<String, usize> = HashMap::new();
         let mut memo: BTreeMap<GrammarExpr, NonTerminal> = BTreeMap::new();
 
@@ -1039,7 +1039,7 @@ impl GrammarDefinition {
         // println!("{}", grammar_def);
 
         if let Some(ignore_name) = &ebnf.ignore_symbol_name {
-            let group_id = grammar_def.regex_name_to_group_id.get_by_left(ignore_name)
+            let group_id = grammar_def.regex_name_to_group_id.get(ignore_name)
                 .ok_or_else(|| format!("Ignore symbol '{}' is not a defined terminal in the grammar.", ignore_name))?;
             grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
         }
@@ -1131,7 +1131,10 @@ impl CompiledGrammar {
         let tokenizer = tokenizer_expr_groups_obj.build();
 
         debug!(2, "Building GLR parser from definition");
-        let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::RegexName(name.clone()), TerminalID(*group_id))).collect();
+        let mut terminal_map: BTreeMap<Terminal, TerminalID> = BTreeMap::new();
+        for (name, group_id) in &definition.regex_name_to_group_id {
+            terminal_map.insert(Terminal::RegexName(name.clone()), TerminalID(*group_id));
+        }
         for (val_bytes, group_id) in &definition.literal_to_group_id {
             terminal_map.insert(Terminal::Literal(val_bytes.clone()), TerminalID(*group_id));
         }
@@ -1465,15 +1468,15 @@ mod tests {
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
 
-        let mut regex_name_to_group_id = BiBTreeMap::new();
-        regex_name_to_group_id.insert(regex_name(&"ignore"), 0);
-        regex_name_to_group_id.insert(regex_name(&"digit"), 1);
-        regex_name_to_group_id.insert(regex_name(&"alph_lower"), 2);
-        regex_name_to_group_id.insert(regex_name(&"alph_upper"), 3);
-        regex_name_to_group_id.insert(regex_name(&"underscore"), 4);
-        regex_name_to_group_id.insert(regex_name(&"name_start"), 5);
-        regex_name_to_group_id.insert(regex_name(&"name_middle"), 6);
-        regex_name_to_group_id.insert(regex_name(&"name"), 7);
+        let mut regex_name_to_group_id = BTreeMap::new();
+        regex_name_to_group_id.insert("ignore".to_string(), 0);
+        regex_name_to_group_id.insert("digit".to_string(), 1);
+        regex_name_to_group_id.insert("alph_lower".to_string(), 2);
+        regex_name_to_group_id.insert("alph_upper".to_string(), 3);
+        regex_name_to_group_id.insert("underscore".to_string(), 4);
+        regex_name_to_group_id.insert("name_start".to_string(), 5);
+        regex_name_to_group_id.insert("name_middle".to_string(), 6);
+        regex_name_to_group_id.insert("name".to_string(), 7);
 
         // This test was originally for GrammarConstraint::precompute, which is internal.
         // We can't directly test precompute without a full GrammarConstraint.
