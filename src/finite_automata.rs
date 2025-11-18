@@ -1,18 +1,21 @@
-use crate::datastructures::charmap::TrieMap;
+use crate::datastructures::char_transitions::CharTransitions;
 use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::{Debug, Display, Formatter};
 use std::collections::BTreeMap as StdMap;
 use std::collections::HashMap;
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
 pub type GroupID = usize;
 
 #[derive(Debug, Clone)]
 pub struct NFAState {
-    transitions: TrieMap<Vec<usize>>,
+    /// Non-epsilon transitions: list of (input byte, target state).
+    /// There may be multiple entries with the same input byte (non-determinism).
+    transitions: Vec<(u8, usize)>,
+    /// Epsilon transitions: target states reachable without consuming input.
     epsilon_transitions: Vec<usize>,
     finalizers: BTreeSet<GroupID>,
     non_greedy_finalizers: BTreeSet<GroupID>,
@@ -22,7 +25,19 @@ pub struct NFAState {
 impl JSONConvertible for NFAState {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("transitions".to_string(), self.transitions.to_json());
+
+        // Serialize transitions as a map from u8 to Vec<usize>,
+        // matching the previous TrieMap<Vec<usize>> representation.
+        let mut transitions_map: StdMap<String, JSONNode> = StdMap::new();
+        let mut grouped: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+        for &(byte, target) in &self.transitions {
+            grouped.entry(byte).or_default().push(target);
+        }
+        for (byte, targets) in grouped {
+            transitions_map.insert(byte.to_string(), targets.to_json());
+        }
+        obj.insert("transitions".to_string(), JSONNode::Object(transitions_map));
+
         obj.insert(
             "epsilon_transitions".to_string(),
             self.epsilon_transitions.to_json(),
@@ -34,13 +49,40 @@ impl JSONConvertible for NFAState {
         );
         JSONNode::Object(obj)
     }
+
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let transitions = obj
+                // Deserialize transitions from the old JSON format:
+                // { "<u8>": [usize, usize, ...], ... }
+                let transitions_node = obj
                     .remove("transitions")
-                    .ok_or_else(|| "Missing field transitions for NFAState".to_string())
-                    .and_then(|n| TrieMap::<Vec<usize>>::from_json(n))?;
+                    .ok_or_else(|| "Missing field transitions for NFAState".to_string())?;
+
+                let mut transitions: Vec<(u8, usize)> = Vec::new();
+                match transitions_node {
+                    JSONNode::Object(map) => {
+                        for (key_str, val_node) in map {
+                            let byte = key_str.parse::<u8>().map_err(|e| {
+                                format!(
+                                    "Invalid u8 key in NFAState transitions: {}, err: {}",
+                                    key_str, e
+                                )
+                            })?;
+                            let targets = Vec::<usize>::from_json(val_node)?;
+                            for target in targets {
+                                transitions.push((byte, target));
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "NFAState 'transitions' field must be a JSON object, got {:?}",
+                            other
+                        ))
+                    }
+                }
+
                 let epsilon_transitions = obj
                     .remove("epsilon_transitions")
                     .ok_or_else(|| "Missing field epsilon_transitions for NFAState".to_string())
@@ -104,7 +146,7 @@ impl JSONConvertible for NFA {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DFAState {
-    pub transitions: TrieMap<usize>,
+    pub transitions: CharTransitions<usize>,
     pub finalizers: BTreeSet<GroupID>,
     pub possible_future_group_ids: BTreeSet<GroupID>,
     pub group_id_to_u8set: BTreeMap<GroupID, U8Set>,
@@ -132,7 +174,7 @@ impl JSONConvertible for DFAState {
                 let transitions = obj
                     .remove("transitions")
                     .ok_or_else(|| "Missing field transitions for DFAState".to_string())
-                    .and_then(|n| TrieMap::<usize>::from_json(n))?;
+                    .and_then(|n| CharTransitions::<usize>::from_json(n))?;
                 let finalizers = obj
                     .remove("finalizers")
                     .ok_or_else(|| "Missing field finalizers for DFAState".to_string())
@@ -319,13 +361,6 @@ pub struct RegexState<'a> {
 impl<'a> JSONConvertible for RegexState<'a> {
     fn to_json(&self) -> JSONNode {
         todo!("RegexState serialization is complex due to lifetime and reference.")
-        // Potentially serialize only non-reference fields if useful for debugging.
-        // let mut obj = StdMap::new();
-        // obj.insert("position".to_string(), self.position.to_json());
-        // obj.insert("current_state".to_string(), self.current_state.to_json());
-        // obj.insert("matches".to_string(), self.matches.to_json());
-        // obj.insert("done".to_string(), self.done.to_json());
-        // JSONNode::Object(obj)
     }
     fn from_json(_node: JSONNode) -> Result<Self, String> {
         Err("RegexState deserialization is not supported due to lifetime and reference.".to_string())
@@ -653,11 +688,11 @@ impl Display for NFA {
         for (state_index, state) in self.states.iter().enumerate() {
             f.write_str(&format!("State {}:\n", state_index))?;
 
-            for (transition_u8, next_states) in &state.transitions {
+            for &(transition_u8, next_state) in &state.transitions {
                 f.write_str(&format!(
-                    "  - '{}': {:?}\n",
-                    transition_u8 as char, next_states
-                ))?; // Display u8 as char
+                    "  - '{}': {}\n",
+                    transition_u8 as char, next_state
+                ))?;
             }
 
             for next_state in &state.epsilon_transitions {
@@ -691,7 +726,7 @@ impl Display for DFA {
                 f.write_str(&format!(
                     "  - {} ({:?}): {}\n",
                     transition_u8, transition_u8 as char, next_state
-                ))?; // Display u8 as char
+                ))?;
             }
 
             if !state.finalizers.is_empty() {
@@ -726,7 +761,7 @@ impl Display for Regex {
 impl NFAState {
     pub fn new() -> NFAState {
         NFAState {
-            transitions: TrieMap::new(),
+            transitions: Vec::new(),
             epsilon_transitions: Vec::new(),
             finalizers: BTreeSet::new(),
             non_greedy_finalizers: BTreeSet::new(),
@@ -737,7 +772,7 @@ impl NFAState {
 impl ExprGroups {
     pub fn build(self) -> Regex {
         crate::debug!(2, "Building NFA...");
-        let mut nfa = self.build_nfa();
+        let nfa = self.build_nfa();
         crate::debug!(2, "Converting NFA to DFA...");
         let mut dfa = nfa.to_dfa();
         crate::debug!(2, "Minimizing DFA...");
@@ -851,8 +886,8 @@ impl Expr {
                 }
             },
             Expr::Choice(exprs) => {
-                // New start state for choice
-                let choice_end_state = nfa.add_state(); // New end state for choice
+                // New end state for choice
+                let choice_end_state = nfa.add_state();
 
                 for expr in exprs {
                     // Process the expr and get its end state
@@ -889,15 +924,46 @@ impl NFA {
     }
 
     pub fn add_transition(&mut self, from: usize, on_u8: u8, to: usize) {
-        self.states[from]
-            .transitions
-            .entry(on_u8)
-            .or_insert_with(Vec::new)
-            .push(to);
+        self.states[from].transitions.push((on_u8, to));
     }
 
     pub fn add_epsilon_transition(&mut self, from: usize, to: usize) {
         self.states[from].epsilon_transitions.push(to);
+    }
+
+    /// Epsilon-closure of a set of NFA states.
+    fn epsilon_closure_set<I>(&self, states: I) -> BTreeSet<usize>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        let mut closure = BTreeSet::new();
+        let mut stack = Vec::new();
+
+        for s in states {
+            if closure.insert(s) {
+                stack.push(s);
+            }
+        }
+
+        while let Some(state) = stack.pop() {
+            for &next in &self.states[state].epsilon_transitions {
+                if closure.insert(next) {
+                    stack.push(next);
+                }
+            }
+        }
+
+        closure
+    }
+
+    fn epsilon_closure(&self, state: usize) -> BTreeSet<usize> {
+        self.epsilon_closure_set(std::iter::once(state))
+    }
+
+    fn compute_epsilon_closures(&self) -> Vec<BTreeSet<usize>> {
+        (0..self.states.len())
+            .map(|state| self.epsilon_closure(state))
+            .collect()
     }
 
     pub fn to_dfa(self) -> DFA {
@@ -905,57 +971,55 @@ impl NFA {
         let mut dfa_state_map: BTreeMap<FrozenSet<usize>, usize> = BTreeMap::new();
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
-        let mut epsilon_closures = self.compute_epsilon_closures();
-
-        // Compute the epsilon closure of the NFA start state and use it as the DFA start state
-        let start_closure = epsilon_closures[self.start_state].clone();
+        // Compute epsilon-closure of the NFA start state and use it as the DFA start state.
+        let start_closure = self.epsilon_closure_set(std::iter::once(self.start_state));
         let start_state_set = FrozenSet::from_iter(start_closure.iter().cloned());
         worklist.push(start_state_set.clone());
         dfa_state_map.insert(start_state_set.clone(), 0);
 
-        // Initialize the first DFA state
-        let closure = epsilon_closures[self.start_state].clone();
+        // Initialize the first DFA state.
         let mut finalizers = BTreeSet::new();
         let mut non_greedy_finalizers = BTreeSet::new();
-        for &state in &closure {
+        for &state in start_state_set.iter() {
             finalizers.extend(self.states[state].finalizers.iter().cloned());
             non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
         }
 
         dfa_states.push(DFAState {
-            transitions: TrieMap::new(),
+            transitions: CharTransitions::new(),
             finalizers,
             possible_future_group_ids: BTreeSet::new(), // Will be computed later
             group_id_to_u8set: BTreeMap::new(),         // Will be computed later
         });
 
         while let Some(current_set) = worklist.pop() {
-            let current_dfa_state = *dfa_state_map.get(&current_set).unwrap();
+            let current_dfa_state = *dfa_state_map
+                .get(&current_set)
+                .expect("DFA state set not found in map");
             let mut transition_map: BTreeMap<u8, BTreeSet<usize>> = BTreeMap::new();
 
-            // For each state in the current DFA state, look at the NFA transitions
+            // For each NFA state in the current DFA state, collect outgoing transitions.
             for &state in current_set.iter() {
-                for (input, next_states) in &self.states[state].transitions {
-                    for &next_state in next_states {
-                        transition_map
-                            .entry(input)
-                            .or_insert_with(BTreeSet::new)
-                            .insert(next_state);
-                    }
+                for &(input, next_state) in &self.states[state].transitions {
+                    transition_map
+                        .entry(input)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(next_state);
                 }
             }
 
-            // For each transition, compute the epsilon closure of the resulting state set
+            // For each input symbol, compute the epsilon-closure of the resulting state set.
             for (&input_u8, next_states) in &transition_map {
-                let mut closure = BTreeSet::new();
-                for &next_state in next_states {
-                    closure.extend(&epsilon_closures[next_state]);
+                if next_states.is_empty() {
+                    continue;
                 }
+
+                // epsilon-closure(move(S, input_u8))
+                let closure = self.epsilon_closure_set(next_states.iter().cloned());
                 let frozen_closure = FrozenSet::from_iter(closure.iter().cloned());
 
-                // If this set of states is new, add it as a new DFA state
-                let next_dfa_state = if let Some(&existing_state) =
-                    dfa_state_map.get(&frozen_closure)
+                // If this set of states is new, add it as a new DFA state.
+                let next_dfa_state = if let Some(&existing_state) = dfa_state_map.get(&frozen_closure)
                 {
                     existing_state
                 } else {
@@ -966,14 +1030,14 @@ impl NFA {
                     // Compute finalizers for the new DFA state
                     let mut new_finalizers = BTreeSet::new();
                     let mut new_non_greedy_finalizers = BTreeSet::new();
-                    for &state in closure.iter() {
+                    for &state in frozen_closure.iter() {
                         new_finalizers.extend(self.states[state].finalizers.iter().cloned());
                         new_non_greedy_finalizers
                             .extend(self.states[state].non_greedy_finalizers.iter().cloned());
                     }
 
                     dfa_states.push(DFAState {
-                        transitions: TrieMap::new(),
+                        transitions: CharTransitions::new(),
                         finalizers: new_finalizers,
                         possible_future_group_ids: BTreeSet::new(), // Will be computed later
                         group_id_to_u8set: BTreeMap::new(), // Will be computed later
@@ -1004,25 +1068,6 @@ impl NFA {
         dfa.compute_group_id_to_u8set();
 
         dfa
-    }
-
-    fn epsilon_closure(&self, state: usize) -> BTreeSet<usize> {
-        let mut closure = BTreeSet::new();
-        let mut stack = vec![state];
-
-        while let Some(state) = stack.pop() {
-            if closure.insert(state) {
-                stack.extend(&self.states[state].epsilon_transitions);
-            }
-        }
-
-        closure
-    }
-
-    fn compute_epsilon_closures(&self) -> Vec<BTreeSet<usize>> {
-        (0..self.states.len())
-            .map(|state| self.epsilon_closure(state))
-            .collect()
     }
 }
 
@@ -1137,6 +1182,15 @@ impl DFA {
 
     fn minimize(&mut self) {
         if self.states.is_empty() {
+            return;
+        }
+
+        // DFA minimization via partition refinement is roughly O(n^2 * |Σ|).
+        // For very large DFAs (e.g. tens of millions of states from huge literal
+        // strings), running it is infeasible and would exhaust memory. In that
+        // regime, skipping minimization is a semantics-preserving optimization.
+        const MAX_MINIMIZATION_STATES: usize = 100_000;
+        if self.states.len() > MAX_MINIMIZATION_STATES {
             return;
         }
 
@@ -2422,19 +2476,7 @@ mod group_id_to_u8set_tests {
         let mut regex_state = regex.init();
         regex_state.execute(b"a");
 
-        // Now, current_state should be one of the states after 'a' (say, state 1 and 2)
-        // For simplicity, assuming DFA has merged states, but depending on implementation, adjust accordingly
-
-        // Let's assume state 1 and 2 are separate for "ab" and "ac"
-
-        // Verify that in both resulting states, possible_future_group_ids contain their respective groups
-        // Here, it's likely that the DFA has merged states if they share the same possible_future_group_ids
-        // For this test, we'll assume separate states
-
-        // Since the DFA construction merges states with identical possible_future_group_ids, in this case:
-        // - After 'a', possible_future_group_ids should still include {0,1} because both 'ab' and 'ac' can follow.
-
-        // Verify possible_future_group_ids
+        // Now, current_state should be one of the states after 'a'
         assert_eq!(
             regex.dfa.states[regex_state.current_state].possible_future_group_ids,
             BTreeSet::from([0, 1])
@@ -2668,7 +2710,7 @@ mod group_u8set_tests {
 
         // State 0: Start state
         dfa.states.push(DFAState {
-            transitions: TrieMap::new(),
+            transitions: CharTransitions::new(),
             finalizers: BTreeSet::new(),
             possible_future_group_ids: BTreeSet::new(), // Will be computed
             group_id_to_u8set: BTreeMap::new(),         // Will be computed
@@ -2676,7 +2718,7 @@ mod group_u8set_tests {
 
         // State 1: After reading 'a'
         dfa.states.push(DFAState {
-            transitions: TrieMap::new(),
+            transitions: CharTransitions::new(),
             finalizers: BTreeSet::new(),
             possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
@@ -2684,7 +2726,7 @@ mod group_u8set_tests {
 
         // State 2: Accepting state for group 0 ("ab")
         dfa.states.push(DFAState {
-            transitions: TrieMap::new(),
+            transitions: CharTransitions::new(),
             finalizers: BTreeSet::from([0]),
             possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
@@ -2692,7 +2734,7 @@ mod group_u8set_tests {
 
         // State 3: Accepting state for group 1 ("ac")
         dfa.states.push(DFAState {
-            transitions: TrieMap::new(),
+            transitions: CharTransitions::new(),
             finalizers: BTreeSet::from([1]),
             possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
@@ -2912,7 +2954,6 @@ mod test_python {
 
         let expr_groups = groups(token_groups);
         let regex = expr_groups.build();
-        // dbg!(ex); // Uncomment for debugging DFA structure
 
         let mut state = regex.init();
         state.execute(b"hello");

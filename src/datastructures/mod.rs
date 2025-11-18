@@ -1,4 +1,5 @@
 pub mod charmap;
+pub mod char_transitions;
 pub mod frozenset;
 pub mod u8set;
 pub mod vocab_prefix_tree;

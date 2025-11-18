@@ -1,37 +1,49 @@
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeSet;
-/// A frozen set implementation in Rust, similar to Python's frozenset.
+
+/// A frozen set implementation in Rust, similar to Python's `frozenset`,
+/// backed by a sorted, deduplicated boxed slice. This is much more compact
+/// than a full `BTreeSet` while preserving set semantics.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FrozenSet<T: Eq + Ord> {
-    inner: BTreeSet<T>,
+    inner: Box<[T]>,
 }
 
 impl<T: Eq + Ord + JSONConvertible> JSONConvertible for FrozenSet<T> {
     fn to_json(&self) -> JSONNode {
-        self.inner.to_json() // Delegate to BTreeSet<T>'s implementation
+        // Preserve the previous JSON format by round-tripping through BTreeSet.
+        let tmp: BTreeSet<T> = self.inner.iter().cloned().collect();
+        tmp.to_json()
     }
+
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        BTreeSet::<T>::from_json(node).map(|inner_set| FrozenSet { inner: inner_set })
+        BTreeSet::<T>::from_json(node).map(FrozenSet::from)
     }
 }
 
-
 impl<T: Eq + Ord> FrozenSet<T> {
-    /// Creates a new empty FrozenSet.
+    /// Creates a new empty `FrozenSet`.
     pub fn new() -> Self {
-        let inner = BTreeSet::new();
-        FrozenSet { inner }
+        FrozenSet {
+            inner: Box::new([]),
+        }
     }
 
-    /// Constructs a FrozenSet from an iterator.
+    /// Constructs a `FrozenSet` from an iterator.
+    ///
+    /// The resulting set is sorted and deduplicated.
     pub fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let inner = BTreeSet::from_iter(iter);
-        FrozenSet { inner }
+        let mut vec: Vec<T> = iter.into_iter().collect();
+        vec.sort();
+        vec.dedup();
+        FrozenSet {
+            inner: vec.into_boxed_slice(),
+        }
     }
 
     /// Checks if the set contains a value.
     pub fn contains(&self, value: &T) -> bool {
-        self.inner.contains(value)
+        self.inner.binary_search(value).is_ok()
     }
 
     /// Returns the number of elements in the set.
@@ -42,6 +54,20 @@ impl<T: Eq + Ord> FrozenSet<T> {
     /// Returns true if the set is empty.
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
+    }
+
+    /// Returns an iterator over the elements of the set.
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter {
+            inner: self.inner.iter(),
+        }
+    }
+
+    /// Returns an owning iterator over the elements of the set.
+    pub fn into_iter(self) -> IntoIter<T> {
+        IntoIter {
+            inner: self.inner.into_vec().into_iter(),
+        }
     }
 }
 
@@ -56,41 +82,41 @@ where
 
 impl<T: Eq + Ord> FromIterator<T> for FrozenSet<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self::from_iter(iter) // Calls the inherent method
+        FrozenSet::from_iter(iter)
     }
 }
 
 impl<T: Eq + Ord> From<BTreeSet<T>> for FrozenSet<T> {
     fn from(inner: BTreeSet<T>) -> Self {
-        FrozenSet { inner }
+        FrozenSet::from_iter(inner)
     }
 }
 
-/// Extension trait for BTreeSet to allow conversion into a FrozenSet.
+/// Extension trait for `BTreeSet` to allow conversion into a `FrozenSet`.
 pub trait FreezeBTreeSet<T: Eq + Ord> {
     fn freeze(self) -> FrozenSet<T>;
 }
 
 impl<T: Eq + Ord> FreezeBTreeSet<T> for BTreeSet<T> {
     fn freeze(self) -> FrozenSet<T> {
-        FrozenSet::from_iter(self)
+        FrozenSet::from(self)
     }
 }
 
-/// Unfreeze a FrozenSet into a BTreeSet.
+/// Unfreeze a `FrozenSet` into a `BTreeSet`.
 pub trait UnfreezeBTreeSet<T: Eq + Ord> {
     fn unfreeze(self) -> BTreeSet<T>;
 }
 
 impl<T: Eq + Ord> UnfreezeBTreeSet<T> for FrozenSet<T> {
     fn unfreeze(self) -> BTreeSet<T> {
-        self.inner
+        self.inner.into_vec().into_iter().collect()
     }
 }
 
 /// An iterator over the elements of a `FrozenSet`.
 pub struct Iter<'a, T: 'a> {
-    inner: std::collections::btree_set::Iter<'a, T>,
+    inner: std::slice::Iter<'a, T>,
 }
 
 impl<'a, T> Iterator for Iter<'a, T> {
@@ -106,15 +132,13 @@ impl<'a, T: Eq + Ord> IntoIterator for &'a FrozenSet<T> {
     type IntoIter = Iter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        Iter {
-            inner: self.inner.iter(),
-        }
+        self.iter()
     }
 }
 
-/// An iterator over the elements of a `FrozenSet`.
+/// An owning iterator over the elements of a `FrozenSet`.
 pub struct IntoIter<T> {
-    inner: std::collections::btree_set::IntoIter<T>,
+    inner: std::vec::IntoIter<T>,
 }
 
 impl<T> Iterator for IntoIter<T> {
@@ -130,30 +154,14 @@ impl<T: Eq + Ord> IntoIterator for FrozenSet<T> {
     type IntoIter = IntoIter<T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        IntoIter {
-            inner: self.inner.into_iter(),
-        }
+        self.into_iter()
     }
 }
-
-impl<T: Eq + Ord> FrozenSet<T> {
-    pub fn iter(&self) -> Iter<T> {
-        Iter {
-            inner: self.inner.iter(),
-        }
-    }
-
-    pub fn into_iter(self) -> IntoIter<T> {
-        IntoIter {
-            inner: self.inner.into_iter(),
-        }
-    }
-}
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_serialization::JSONConvertible;
 
     #[test]
     fn test_empty_set() {
@@ -197,5 +205,12 @@ mod tests {
             assert!(fs.contains(&i));
         }
     }
-}
 
+    #[test]
+    fn test_json_roundtrip() {
+        let fs = FrozenSet::from_iter(vec![3, 1, 2]);
+        let json = fs.to_json();
+        let fs2 = FrozenSet::<i32>::from_json(json).unwrap();
+        assert_eq!(fs, fs2);
+    }
+}
