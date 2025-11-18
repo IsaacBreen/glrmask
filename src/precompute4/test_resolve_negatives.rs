@@ -294,7 +294,8 @@ fn test_resolve_negatives_from_large_nwa_log() {
         "DWA did not accept [0, 422] with expected weight after resolving negatives."
     );
     let mut nwa2 = NWA::from_dwa(&d);
-    resolve_negative_codes_in_nwa(&mut nwa2, &(0..nwa.states.len()).collect());
+    let num_states = nwa2.states.len();
+    resolve_negative_codes_in_nwa(&mut nwa2, &(0..num_states).collect());
     apply_finality_fixpoint(&mut nwa2);
     remove_negative_transitions(&mut nwa2);
     println!("After negative resolution (from DWA):\n{}", nwa2);
