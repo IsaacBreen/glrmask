@@ -738,7 +738,11 @@ impl NFAState {
 
 impl ExprGroups {
     pub fn build(self) -> Regex {
-        let mut dfa = self.build_nfa().to_dfa();
+        println!("Building NFA...");
+        let mut nfa = self.build_nfa();
+        println!("Converting NFA to DFA...");
+        let mut dfa = nfa.to_dfa();
+        println!("Minimizing DFA...");
         dfa.minimize();
         Regex { dfa }
     }
