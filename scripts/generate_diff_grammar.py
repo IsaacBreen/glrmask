@@ -23,7 +23,7 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     grammar_parts = []
 
     # --- 1. Preamble and Top-Level Rules ---
-    grammar_parts.append("#![(ignore(IGNORE))]")
+    grammar_parts.append("#![ignore(IGNORE)]")
     grammar_parts.append("")
     grammar_parts.append("diff ::= ( HUNK_HEADER s0 )? EOF;")
     grammar_parts.append("EOF  ::= '<|EOF|>';")
