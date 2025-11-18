@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::time::Instant;
 
@@ -12,7 +12,7 @@ use crate::json_serialization::JSONConvertible;
 use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
 use crate::precompute4::template_nwa::{build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas};
-use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStates, Weight};
+use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight};
 use crate::r#macro::is_debug_level_enabled;
 use crate::glr::table::TerminalID;
 use crate::tokenizer::TokenizerStateID;
@@ -229,7 +229,18 @@ pub fn precompute4(
                 let left_nwa = NWA::from_dwa(&left_dwa);
 
                 let mut states = states_arena.borrow_mut();
-                let (left_body_start, _) = states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
+                let (left_body_start, remap) =
+                    states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
+
+                let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
+                if !new_states_filter.is_empty() {
+                    let mut temp_nwa = NWA { states: states.clone(), body: NWABody::default() };
+                    apply_cancellations(&mut temp_nwa, &new_states_filter);
+                    apply_finality_fixpoint(&mut temp_nwa, &new_states_filter);
+                    remove_negative_transitions(&mut temp_nwa, &new_states_filter);
+                    *states = temp_nwa.states;
+                }
+
                 let left_body = NWABody { start_state: left_body_start };
 
                 let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
@@ -285,22 +296,6 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     combined_nwa.simplify_rustfst();
     crate::debug!(4, "Initial simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
 
-    // crate::debug!(4, "Determinizing combined NWA before negative code resolution...");
-    // combined_nwa.determinize_inplace();
-    // crate::debug!(
-    //     4,
-    //     "Pre-resolution determinization took: {:?}. NWA now has {} states.",
-    //     now.elapsed(),
-    //     combined_nwa.states.len()
-    // );
-    crate::debug!(4, "Starting negative code resolution...");
-    let num_states = combined_nwa.states.len();
-    apply_cancellations(&mut combined_nwa, &(0..num_states).collect());
-    crate::debug!(4, "Applied cancellations.");
-    apply_finality_fixpoint(&mut combined_nwa, &(0..num_states).collect());
-    crate::debug!(4, "Applied finality fixpoint.");
-    remove_negative_transitions(&mut combined_nwa, &(0..num_states).collect());
-    crate::debug!(4, "Removed negative transitions.");
     combined_nwa.simplify_rustfst();
     crate::debug!(
         4,
