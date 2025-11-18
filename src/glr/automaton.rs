@@ -198,45 +198,59 @@ pub fn compute_first_sets_for_nonterminals(
     nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     crate::debug!(3, "Computing first sets for non-terminals");
+    use bimap::BiBTreeMap;
+    use std::collections::HashSet;
 
-    let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
-
-    // Initialize FIRST sets for all non-terminals to avoid missing entries.
+    // 1. Assign integer IDs to non-terminals for performance.
+    let mut nt_map = BiBTreeMap::new();
+    let mut all_nts = Vec::new();
     for p in productions {
-        first_sets.entry(p.lhs.clone()).or_default();
-        for s in &p.rhs {
-            if let Symbol::NonTerminal(nt) = s {
-                first_sets.entry(nt.clone()).or_default();
+        for nt in p
+            .lhs
+            .iter()
+            .chain(p.rhs.iter().filter_map(|s| match s {
+                Symbol::NonTerminal(nt) => Some(nt),
+                _ => None,
+            }))
+        {
+            if !nt_map.contains_left(nt) {
+                let id = all_nts.len();
+                nt_map.insert(nt.clone(), id);
+                all_nts.push(nt.clone());
             }
         }
     }
+    let num_nts = all_nts.len();
+    let nullable_ids: HashSet<usize> = nullable_nonterminals
+        .iter()
+        .filter_map(|nt| nt_map.get_by_left(nt).copied())
+        .collect();
 
-    // Dependency graph: for each non-terminal X on the RHS, record which
-    // LHS non-terminals depend on FIRST(X).
-    let mut deps: BTreeMap<NonTerminal, Vec<NonTerminal>> = BTreeMap::new();
+    // 2. Use Vecs indexed by ID for data structures.
+    let mut first_sets_by_id: Vec<HashSet<Terminal>> = vec![HashSet::new(); num_nts];
+    let mut deps_by_id: Vec<Vec<usize>> = vec![Vec::new(); num_nts];
+    let mut worklist: VecDeque<(usize, Terminal)> = VecDeque::new();
 
-    // Seed FIRST sets with leading terminals and build dependencies.
+    // 3. Build dependency graph and seed worklist with direct terminals.
     for p in productions {
-        let lhs = &p.lhs;
-        let rhs = &p.rhs;
+        let lhs_id = *nt_map.get_by_left(&p.lhs).unwrap();
         let mut prefix_nullable = true;
 
-        for sym in rhs {
+        for sym in &p.rhs {
+            if !prefix_nullable {
+                break;
+            }
             match sym {
                 Symbol::Terminal(t) => {
-                    if prefix_nullable {
-                        first_sets.entry(lhs.clone()).or_default().insert(t.clone());
+                    if first_sets_by_id[lhs_id].insert(t.clone()) {
+                        worklist.push_back((lhs_id, t.clone()));
                     }
-                    // A terminal is never nullable; no later symbols can
-                    // contribute to FIRST(lhs).
-                    break;
+                    prefix_nullable = false;
                 }
                 Symbol::NonTerminal(nt) => {
-                    if !prefix_nullable {
-                        break;
-                    }
-                    deps.entry(nt.clone()).or_default().push(lhs.clone());
-                    if !nullable_nonterminals.contains(nt) {
+                    let nt_id = *nt_map.get_by_left(nt).unwrap();
+                    deps_by_id[nt_id].push(lhs_id);
+                    if !nullable_ids.contains(&nt_id) {
                         prefix_nullable = false;
                     }
                 }
@@ -244,38 +258,24 @@ pub fn compute_first_sets_for_nonterminals(
         }
     }
 
-    // Propagate FIRST sets along the dependency graph using a worklist.
-    let mut worklist: VecDeque<NonTerminal> = VecDeque::new();
-    let mut in_queue: BTreeSet<NonTerminal> = BTreeSet::new();
-
-    for (nt, set) in &first_sets {
-        if !set.is_empty() {
-            worklist.push_back(nt.clone());
-            in_queue.insert(nt.clone());
-        }
-    }
-
-    while let Some(nt) = worklist.pop_front() {
-        in_queue.remove(&nt);
-        let src_first = match first_sets.get(&nt) {
-            Some(s) => s.clone(),
-            None => continue,
-        };
-
-        if let Some(targets) = deps.get(&nt) {
-            for lhs in targets {
-                let dest = first_sets.entry(lhs.clone()).or_default();
-                let old_len = dest.len();
-                dest.extend(src_first.iter().cloned());
-                if dest.len() != old_len && !in_queue.contains(lhs) {
-                    worklist.push_back(lhs.clone());
-                    in_queue.insert(lhs.clone());
-                }
+    // 4. Propagate terminals along the dependency graph.
+    while let Some((nt_id, terminal)) = worklist.pop_front() {
+        for &dependent_lhs_id in &deps_by_id[nt_id] {
+            if first_sets_by_id[dependent_lhs_id].insert(terminal.clone()) {
+                worklist.push_back((dependent_lhs_id, terminal.clone()));
             }
         }
     }
 
-    first_sets
+    // 5. Convert back to the required BTreeMap format for deterministic output.
+    all_nts
+        .into_iter()
+        .map(|nt| {
+            let id = *nt_map.get_by_left(&nt).unwrap();
+            let set = first_sets_by_id[id].iter().cloned().collect();
+            (nt, set)
+        })
+        .collect()
 }
 
 pub fn compute_follow_sets_for_nonterminals(
