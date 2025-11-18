@@ -41,7 +41,7 @@ struct Args {
     precompute0_only: bool,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     if !args.precompute0_only && args.output.is_none() {
@@ -108,4 +108,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("Error: {}", err);
+        std::process::exit(1);
+    }
 }
