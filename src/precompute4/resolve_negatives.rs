@@ -27,7 +27,7 @@ fn progress_step(pb: &Option<ProgressBar>, step: u64, msg: &str) {
     }
 }
 
-pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
+pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
     let pb = make_progress_bar(
         3,
         "{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] \
@@ -35,7 +35,7 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     );
 
     progress_step(&pb, 1, "Compute cancellations");
-    apply_cancellations(nwa);
+    apply_cancellations(nwa, &(0..nwa.states.len()).collect());
 
     progress_step(&pb, 2, "Propagate finality");
     apply_finality_fixpoint(nwa);
@@ -49,8 +49,8 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     }
 }
 
-pub fn apply_cancellations(nwa: &mut NWA) {
-    let epsilons_to_add = compute_cancellations(&nwa.states, &(0..nwa.states.len()).collect());
+pub fn apply_cancellations(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
+    let epsilons_to_add = compute_cancellations(&nwa.states, source_states_filter);
     crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
     for (from, to, w) in epsilons_to_add {
         nwa.states.add_epsilon(from, to, w);
@@ -95,7 +95,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
 
     progress_step(&pb, 2, "Resolve negatives in NWA");
-    resolve_negative_codes_in_nwa(&mut nwa);
+    resolve_negative_codes_in_nwa(&mut nwa, &(0..nwa.states.len()).collect());
     crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
     crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
 

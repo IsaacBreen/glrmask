@@ -294,7 +294,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     //     combined_nwa.states.len()
     // );
     crate::debug!(4, "Starting negative code resolution...");
-    apply_cancellations(&mut combined_nwa);
+    apply_cancellations(&mut combined_nwa, &(0..combined_nwa.states.len()).collect());
     crate::debug!(4, "Applied cancellations.");
     apply_finality_fixpoint(&mut combined_nwa);
     crate::debug!(4, "Applied finality fixpoint.");
