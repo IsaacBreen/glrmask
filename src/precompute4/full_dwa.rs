@@ -226,7 +226,6 @@ pub fn precompute4(
                 }
 
                 let mut left_dwa = specialize_dwa(&super_dwa, &effective_terminal_map, &bit_to_term);
-                now_step = Instant::now();
                 left_dwa.simplify();
                 let left_nwa = NWA::from_dwa(&left_dwa);
 
@@ -239,20 +238,14 @@ pub fn precompute4(
                 let left_body = NWABody { start_state: left_body_start };
 
                 let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
-                now_step = Instant::now();
 
                 if !new_states_filter.is_empty() {
                     apply_cancellations(&mut states, &new_states_filter);
-                    now_step = Instant::now();
                     apply_finality_fixpoint(&mut states, &new_states_filter);
-                    now_step = Instant::now();
                     remove_negative_transitions(&mut states, &new_states_filter);
-                    now_step = Instant::now();
-                    now_step = Instant::now();
                 }
 
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
-                now_step = Instant::now();
             }
 
             crate::debug!(
