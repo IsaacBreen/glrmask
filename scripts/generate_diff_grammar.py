@@ -27,7 +27,7 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     grammar_parts.append("")
 
     # --- 2. 's' Rules (Start of a context block) ---
-    grammar_parts.append("# 's' rules: Allow starting a context block at a given line or skipping.")
+    grammar_parts.append("// 's' rules: Allow starting a context block at a given line or skipping.")
     for i in range(num_lines):
         grammar_parts.append(f"s{i} ::= l{i} | s{i+1};")
 
@@ -35,7 +35,7 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     grammar_parts.append("")
 
     # --- 3. 'l' Rules (Continuation of a context block) ---
-    grammar_parts.append("# 'l' rules: Match a specific context line and continue or start a new hunk.")
+    grammar_parts.append("// 'l' rules: Match a specific context line and continue or start a new hunk.")
     for i in range(num_lines):
         if i < num_lines - 1:
             continuation = f"( l{i+1} | PLUS_LINE* HUNK_HEADER s{i+1} )?"
@@ -46,7 +46,7 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     grammar_parts.append("")
 
     # --- 4. Terminal Definitions ---
-    grammar_parts.append("# --- TERMINALS ---")
+    grammar_parts.append("// --- TERMINALS ---")
 
     # Use raw strings (r"...") to prevent Python from interpreting \n and \r.
     grammar_parts.append(r"HUNK_HEADER ::= '@@' [^\n\r]* NEWLINE;")
@@ -62,7 +62,8 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     grammar_parts.append(r"IGNORE ::= ( [ \t]+ | '//'[^\n\r]* | '/*'( [^*] | '*'[^/] )*'*/' )+ ;")
     grammar_parts.append("")
 
-    grammar_parts.append("# Context-line terminals (one for each line in the source file)")
+    # Context-line terminals (one for each line in the source file)
+    grammar_parts.append("// Context-line terminals (one for each line in the source file)")
     for i, line in enumerate(lines):
         content = line.rstrip('\r\n')
 
