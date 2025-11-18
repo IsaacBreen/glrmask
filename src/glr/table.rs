@@ -732,6 +732,8 @@ pub fn generate_glr_parser_with_maps(
     actions: BTreeMap<NonTerminal, ActionFn>,
     ignore_terminal_id: Option<TerminalID>,
 ) -> GLRParser {
+    crate::debug!(2, "Number of productions: {}", productions.len());
+
     assert!(
         matches!(LR_MODE, LRMode::LALR | LRMode::LR0),
         "Only LALR and LR0 modes are supported by the table builder"
@@ -763,7 +765,7 @@ pub fn generate_glr_parser_with_maps(
         }
     }
 
-    crate::debug!(2, "Number of products: {}", productions.len());
+    crate::debug!(2, "Number of productions: {}", productions.len());
 
     crate::debug!(2, "Stage 1");
     let stage_1_table = stage_1(&productions);
