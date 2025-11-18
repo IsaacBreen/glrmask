@@ -95,7 +95,8 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
 
     progress_step(&pb, 2, "Resolve negatives in NWA");
-    resolve_negative_codes_in_nwa(&mut nwa, &(0..nwa.states.len()).collect());
+    let num_states = nwa.states.len();
+    resolve_negative_codes_in_nwa(&mut nwa, &(0..num_states).collect());
     crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
     crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
 

@@ -299,7 +299,8 @@ fn test_resolve_negatives_from_large_nwa_log() {
     remove_negative_transitions(&mut nwa2);
     println!("After negative resolution (from DWA):\n{}", nwa2);
 
-    resolve_negative_codes_in_nwa(&mut nwa, &(0..nwa.states.len()).collect());
+    let num_states = nwa.states.len();
+    resolve_negative_codes_in_nwa(&mut nwa, &(0..num_states).collect());
     apply_finality_fixpoint(&mut nwa);
     remove_negative_transitions(&mut nwa);
     println!("After negative resolution (from NWA):\n{}", nwa);
