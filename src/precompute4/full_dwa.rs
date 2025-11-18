@@ -62,7 +62,7 @@ pub fn precompute4(
     let mut term_to_bit: BTreeMap<Option<TerminalID>, usize> = BTreeMap::new();
     let mut bit_to_term: Vec<Option<TerminalID>> = Vec::new();
 
-    let mut all_terminals: Vec<Option<TerminalID>> = parser.terminals().map(Some).collect();
+    let mut all_terminals: Vec<Option<TerminalID>> = parser.terminal_map.right_values().cloned().map(Some).collect();
     if parser.ignore_terminal_id.is_some() {
         // Don't add None if there is no ignore terminal
         all_terminals.push(None);
@@ -396,7 +396,7 @@ fn specialize_dwa(
         if let Some(sw) = state.state_weight.take() {
             let new_sw = weight_cache.entry(sw).or_insert_with_key(|old_weight| {
                 let mut new_weight = Weight::zeros();
-                for bit in old_weight.iter_ones() {
+                for bit in old_weight.iter_up_to(bit_to_term.len()) {
                     if let Some(term_opt) = bit_to_term.get(bit) {
                         if let Some(bundle_weight) = bundle.get(term_opt) {
                             new_weight |= bundle_weight;
@@ -413,7 +413,7 @@ fn specialize_dwa(
         if let Some(fw) = state.final_weight.take() {
             let new_fw = weight_cache.entry(fw).or_insert_with_key(|old_weight| {
                 let mut new_weight = Weight::zeros();
-                for bit in old_weight.iter_ones() {
+                for bit in old_weight.iter_up_to(bit_to_term.len()) {
                     if let Some(term_opt) = bit_to_term.get(bit) {
                         if let Some(bundle_weight) = bundle.get(term_opt) {
                             new_weight |= bundle_weight;
@@ -430,7 +430,7 @@ fn specialize_dwa(
         for tw in state.trans_weights.values_mut() {
             let new_tw = weight_cache.entry(tw.clone()).or_insert_with_key(|old_weight| {
                 let mut new_weight = Weight::zeros();
-                for bit in old_weight.iter_ones() {
+                for bit in old_weight.iter_up_to(bit_to_term.len()) {
                     if let Some(term_opt) = bit_to_term.get(bit) {
                         if let Some(bundle_weight) = bundle.get(term_opt) {
                             new_weight |= bundle_weight;
