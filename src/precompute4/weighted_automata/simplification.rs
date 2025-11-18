@@ -124,6 +124,46 @@ struct DwaStateBuilder {
     trans: BTreeMap<i16, (StateID, Weight)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DwaPass {
+    PruneUnreachable,
+    PruneDeadEnds,
+    PushWeights,
+    MinimizeStates,
+}
+
+const DWA_PASS_ORDERINGS: &[(&str, &[DwaPass])] = &[
+    (
+        "default-loop",
+        &[
+            DwaPass::PruneUnreachable,
+            DwaPass::PruneDeadEnds,
+            DwaPass::PushWeights,
+            DwaPass::MinimizeStates,
+            DwaPass::PruneUnreachable,
+            DwaPass::PruneDeadEnds,
+        ],
+    ),
+    (
+        "simple-loop",
+        &[
+            DwaPass::PruneUnreachable,
+            DwaPass::PruneDeadEnds,
+            DwaPass::PushWeights,
+            DwaPass::MinimizeStates,
+        ],
+    ),
+    (
+        "min-first-loop",
+        &[
+            DwaPass::MinimizeStates,
+            DwaPass::PruneUnreachable,
+            DwaPass::PruneDeadEnds,
+            DwaPass::PushWeights,
+        ],
+    ),
+];
+
 impl DWA {
     pub fn simplify(&mut self) {
         if self.states.len() == 0 {
@@ -132,11 +172,32 @@ impl DWA {
 
         if BENCHMARK_DEBUG {
             let initial_states = self.states.len();
-            let mut internal = self.clone();
-            let internal_start = std::time::Instant::now();
-            internal.simplify_internal();
-            let internal_time = internal_start.elapsed();
-            let internal_states = internal.states.len();
+
+            let mut best_internal_dwa = self.clone();
+            let mut best_internal_time = std::time::Duration::MAX;
+            let mut best_internal_states = initial_states;
+            let mut best_ordering_name = "";
+
+            for (name, ordering) in DWA_PASS_ORDERINGS {
+                let mut test_dwa = self.clone();
+                let start = std::time::Instant::now();
+                test_dwa.simplify_with_ordering(ordering);
+                let elapsed = start.elapsed();
+                let final_states = test_dwa.states.len();
+                crate::debug!(4, "[DWA Simplify({})] Ordering '{}': t={:.2?}, s={}", initial_states, name, elapsed, final_states);
+
+                if elapsed < best_internal_time {
+                    best_internal_time = elapsed;
+                    best_internal_states = final_states;
+                    best_internal_dwa = test_dwa;
+                    best_ordering_name = name;
+                }
+            }
+            crate::debug!(4, "[DWA Simplify({})] Best ordering was '{}'", initial_states, best_ordering_name);
+
+            let internal = best_internal_dwa;
+            let internal_time = best_internal_time;
+            let internal_states = best_internal_states;
 
             let mut rustfst = self.clone();
             let rustfst_start = std::time::Instant::now();
@@ -144,20 +205,18 @@ impl DWA {
             let rustfst_time = rustfst_start.elapsed();
             let rustfst_states = rustfst.states.len();
 
-            if internal_time + rustfst_time > std::time::Duration::from_secs(1) {
-                let state_cmp = match internal_states.cmp(&rustfst_states) {
-                    std::cmp::Ordering::Less => "<",
-                    std::cmp::Ordering::Equal => "=",
-                    std::cmp::Ordering::Greater => ">",
-                };
-                let time_cmp = match internal_time.cmp(&rustfst_time) {
-                    std::cmp::Ordering::Less => "<",
-                    std::cmp::Ordering::Equal => "=",
-                    std::cmp::Ordering::Greater => ">",
-                };
+            let state_cmp = match internal_states.cmp(&rustfst_states) {
+                std::cmp::Ordering::Less => "<",
+                std::cmp::Ordering::Equal => "=",
+                std::cmp::Ordering::Greater => ">",
+            };
+            let time_cmp = match internal_time.cmp(&rustfst_time) {
+                std::cmp::Ordering::Less => "<",
+                std::cmp::Ordering::Equal => "=",
+                std::cmp::Ordering::Greater => ">",
+            };
 
-                crate::debug!(4, "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
-            }
+            crate::debug!(4, "[DWA Simplify({})] Internal (best of {}): t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, DWA_PASS_ORDERINGS.len(), internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
 
             *self = internal;
         } else {
@@ -171,6 +230,27 @@ impl DWA {
         minimize_with_config(&mut fst, min_config).unwrap();
         *self = DWA::from_rustfst(&fst);
         true
+    }
+
+    fn simplify_with_ordering(&mut self, passes: &[DwaPass]) -> bool {
+        let mut total_changed = false;
+        loop {
+            let mut changed_in_iteration = false;
+            for &pass in passes {
+                let changed = match pass {
+                    DwaPass::PruneUnreachable => self.prune_unreachable(),
+                    DwaPass::PruneDeadEnds => self.prune_dead_ends(),
+                    DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
+                    DwaPass::MinimizeStates => self.minimize_states(),
+                };
+                changed_in_iteration |= changed;
+            }
+            if !changed_in_iteration {
+                break;
+            }
+            total_changed = true;
+        }
+        total_changed
     }
 
     fn simplify_internal(&mut self) -> bool {
@@ -651,6 +731,50 @@ struct NwaStateBuilder {
     trans: BTreeMap<i16, BTreeMap<NWAStateID, Weight>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NwaPass {
+    PruneUnreachable,
+    PushFinalWeights,
+    CompressTransitions,
+    PruneDeadEnds,
+    MinimizeStates,
+}
+
+const NWA_PASS_ORDERINGS: &[(&str, &[NwaPass])] = &[
+    (
+        "default-loop",
+        &[
+            NwaPass::PruneUnreachable,
+            NwaPass::PushFinalWeights,
+            NwaPass::CompressTransitions,
+            NwaPass::PruneDeadEnds,
+            NwaPass::MinimizeStates,
+            NwaPass::PruneUnreachable,
+            NwaPass::PruneDeadEnds,
+        ],
+    ),
+    (
+        "simple-loop",
+        &[
+            NwaPass::PruneUnreachable,
+            NwaPass::PushFinalWeights,
+            NwaPass::CompressTransitions,
+            NwaPass::PruneDeadEnds,
+            NwaPass::MinimizeStates,
+        ],
+    ),
+    (
+        "min-first-loop",
+        &[
+            NwaPass::MinimizeStates,
+            NwaPass::PruneUnreachable,
+            NwaPass::PruneDeadEnds,
+            NwaPass::PushFinalWeights,
+            NwaPass::CompressTransitions,
+        ],
+    ),
+];
+
 impl NWA {
     pub fn simplify(&mut self) {
         if self.states.len() == 0 {
@@ -659,11 +783,32 @@ impl NWA {
 
         if BENCHMARK_DEBUG {
             let initial_states = self.states.len();
-            let mut internal = self.clone();
-            let internal_start = std::time::Instant::now();
-            internal.simplify_internal();
-            let internal_time = internal_start.elapsed();
-            let internal_states = internal.states.len();
+
+            let mut best_internal_nwa = self.clone();
+            let mut best_internal_time = std::time::Duration::MAX;
+            let mut best_internal_states = initial_states;
+            let mut best_ordering_name = "";
+
+            for (name, ordering) in NWA_PASS_ORDERINGS {
+                let mut test_nwa = self.clone();
+                let start = std::time::Instant::now();
+                test_nwa.simplify_with_ordering(ordering);
+                let elapsed = start.elapsed();
+                let final_states = test_nwa.states.len();
+                crate::debug!(4, "[NWA Simplify({})] Ordering '{}': t={:.2?}, s={}", initial_states, name, elapsed, final_states);
+
+                if elapsed < best_internal_time {
+                    best_internal_time = elapsed;
+                    best_internal_states = final_states;
+                    best_internal_nwa = test_nwa;
+                    best_ordering_name = name;
+                }
+            }
+            crate::debug!(4, "[NWA Simplify({})] Best ordering was '{}'", initial_states, best_ordering_name);
+
+            let internal = best_internal_nwa;
+            let internal_time = best_internal_time;
+            let internal_states = best_internal_states;
 
             let mut rustfst = self.clone();
             let rustfst_start = std::time::Instant::now();
@@ -671,20 +816,18 @@ impl NWA {
             let rustfst_time = rustfst_start.elapsed();
             let rustfst_states = rustfst.states.len();
 
-            if internal_time + rustfst_time > std::time::Duration::from_secs(1) {
-                let state_cmp = match internal_states.cmp(&rustfst_states) {
-                    std::cmp::Ordering::Less => "<",
-                    std::cmp::Ordering::Equal => "=",
-                    std::cmp::Ordering::Greater => ">",
-                };
-                let time_cmp = match internal_time.cmp(&rustfst_time) {
-                    std::cmp::Ordering::Less => "<",
-                    std::cmp::Ordering::Equal => "=",
-                    std::cmp::Ordering::Greater => ">",
-                };
+            let state_cmp = match internal_states.cmp(&rustfst_states) {
+                std::cmp::Ordering::Less => "<",
+                std::cmp::Ordering::Equal => "=",
+                std::cmp::Ordering::Greater => ">",
+            };
+            let time_cmp = match internal_time.cmp(&rustfst_time) {
+                std::cmp::Ordering::Less => "<",
+                std::cmp::Ordering::Equal => "=",
+                std::cmp::Ordering::Greater => ">",
+            };
 
-                crate::debug!(4, "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
-            }
+            crate::debug!(4, "[NWA Simplify({})] Internal (best of {}): t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, NWA_PASS_ORDERINGS.len(), internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
 
             *self = internal;
         } else {
@@ -698,6 +841,28 @@ impl NWA {
         minimize_with_config(&mut fst, min_config).unwrap();
         *self = NWA::from_rustfst(&fst);
         true
+    }
+
+    fn simplify_with_ordering(&mut self, passes: &[NwaPass]) -> bool {
+        let mut total_changed = false;
+        loop {
+            let mut changed_in_iteration = false;
+            for &pass in passes {
+                let changed = match pass {
+                    NwaPass::PruneUnreachable => self.prune_unreachable(),
+                    NwaPass::PushFinalWeights => self.push_final_weights_along_epsilons(),
+                    NwaPass::CompressTransitions => self.compress_transitions(),
+                    NwaPass::PruneDeadEnds => self.prune_dead_ends(),
+                    NwaPass::MinimizeStates => self.minimize_nwa_states(),
+                };
+                changed_in_iteration |= changed;
+            }
+            if !changed_in_iteration {
+                break;
+            }
+            total_changed = true;
+        }
+        total_changed
     }
 
     pub fn simplify_internal(&mut self) -> bool {
@@ -721,17 +886,12 @@ impl NWA {
         changed |= self.prune_dead_ends();
         crate::debug!(4, "[NWA::simplify] After prune_dead_ends (1) ({:.2?}): {}", start.elapsed(), self.stats());
 
-        let n = self.states.len();
-        if n > 1 {
-            let start_minimize = std::time::Instant::now();
-            let partition = minimize_nwa_partition(&self.states);
-            if partition.num_classes() < n {
-                crate::debug!(4, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
-                self.rebuild_from_partition(partition);
-                changed = true;
-                crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start_minimize.elapsed(), self.stats());
-            }
+        start = std::time::Instant::now();
+        let minimized = self.minimize_nwa_states();
+        if minimized {
+            crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start.elapsed(), self.stats());
         }
+        changed |= minimized;
 
         start = std::time::Instant::now();
         changed |= self.prune_unreachable();
@@ -742,6 +902,20 @@ impl NWA {
         crate::debug!(4, "[NWA::simplify] After prune_dead_ends (2) ({:.2?}): {}", start.elapsed(), self.stats());
         crate::debug!(4, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
         changed
+    }
+
+    fn minimize_nwa_states(&mut self) -> bool {
+        let n = self.states.len();
+        if n <= 1 {
+            return false;
+        }
+        let partition = minimize_nwa_partition(&self.states);
+        if partition.num_classes() >= n {
+            return false;
+        }
+        crate::debug!(4, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
+        self.rebuild_from_partition(partition);
+        true
     }
 
     /// Canonicalize NWA transitions by merging parallel transitions:
