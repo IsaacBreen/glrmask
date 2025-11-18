@@ -574,7 +574,7 @@ class Model(GraphProvider):
                                 self._merge_into_queue(queue, final_gss, target_id)
 
         stats.start('get_mask.teardown.final_conversion')
-        original_bitset = self.vocab.internal_bv_to_original(final_mask.inner)
+        original_bitset = self.vocab.internal_bv_to_original(final_mask)
         original_indices = RangeSetOut.from_indices(original_bitset.to_indices())
         stats.stop('get_mask.teardown.final_conversion')
         stats.stop('get_mask')
