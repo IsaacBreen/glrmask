@@ -239,12 +239,9 @@ pub fn precompute4(
                 let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
 
                 if !new_states_filter.is_empty() {
-                    let mut temp_states = states.clone();
-                    let n = temp_states.len();
-                    apply_cancellations(&mut temp_states, &(0..n).collect());
-                    apply_finality_fixpoint(&mut temp_states, &(0..n).collect());
-                    remove_negative_transitions(&mut temp_states, &(0..n).collect());
-                    *states = temp_states;
+                    apply_cancellations(&mut states, &new_states_filter);
+                    apply_finality_fixpoint(&mut states, &new_states_filter);
+                    remove_negative_transitions(&mut states, &new_states_filter);
                 }
 
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
