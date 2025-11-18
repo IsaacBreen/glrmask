@@ -1104,6 +1104,16 @@ local_system:
               right: &NWABody,
               eps_weight: &Weight,
           ) -> NWABody {
+              let new_left = states.copy_subgraph_in_place_and_return_body(*left);
+              Self::_concatenate_components(states, &new_left, right, eps_weight)
+          }
+
+          pub fn _concatenate_components(
+              states: &mut NWAStates,
+              left: &NWABody,
+              right: &NWABody,
+              eps_weight: &Weight,
+          ) -> NWABody {
               if STOCHASTIC_DEBUG {
                   let nwa1 = NWA { states: states.clone(), body: left.clone() };
                   let nwa2 = NWA { states: states.clone(), body: right.clone() };
@@ -1118,8 +1128,7 @@ local_system:
                   let result_dwa = concat_nwa.determinize_to_dwa();
                   DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
               }
-              let new_left = states.copy_subgraph_in_place_and_return_body(*left);
-              Self::internal_concatenate_components(states, &new_left, right, eps_weight)
+              Self::internal_concatenate_components(states, &left, right, eps_weight)
           }
 
           pub fn determinize_components(states: &NWAStates, body: &NWABody) -> DWA {
@@ -1190,9 +1199,6 @@ local_system:
       pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
           let final_fix = compute_finality_fixpoint(&nwa.states, source_states_filter);
           for &sid in source_states_filter {
-              if sid >= nwa.states.len() || final_fix[sid].is_empty() {
-                  continue;
-              }
               let st = &mut nwa.states.0[sid];
               if let Some(fw) = &mut st.final_weight {
                   *fw |= &final_fix[sid];
@@ -1203,11 +1209,8 @@ local_system:
       }
 
       pub fn remove_negative_transitions(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
-          for (stid, st) in nwa.states.0.iter_mut().enumerate() {
-              if !source_states_filter.contains(&stid) {
-                  continue;
-              }
-              st.transitions.retain(|&label, _| !is_negative_symbol(label));
+          for &sid in source_states_filter {
+              nwa.states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
           }
       }
 
@@ -1421,7 +1424,7 @@ local_system:
       }
     src/precompute4/full_dwa.rs: |
       use std::cell::RefCell;
-      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::env;
       use std::time::Instant;
 
@@ -1434,7 +1437,7 @@ local_system:
       use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
       use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
       use crate::precompute4::template_nwa::{build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas};
-      use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStates, Weight};
+      use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight};
       use crate::r#macro::is_debug_level_enabled;
       use crate::glr::table::TerminalID;
       use crate::tokenizer::TokenizerStateID;
@@ -1651,10 +1654,24 @@ local_system:
                       let left_nwa = NWA::from_dwa(&left_dwa);
 
                       let mut states = states_arena.borrow_mut();
-                      let (left_body_start, _) = states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
+                      let (left_body_start, remap) =
+                          states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
+
+                      let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
+
                       let left_body = NWABody { start_state: left_body_start };
 
-                      let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+                      let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+
+                      if !new_states_filter.is_empty() {
+                          let mut temp_nwa = NWA { states: states.clone(), body: composed_body.clone() };
+                          let n = temp_nwa.states.len();
+                          apply_cancellations(&mut temp_nwa, &(0..n).collect());
+                          apply_finality_fixpoint(&mut temp_nwa, &(0..n).collect());
+                          remove_negative_transitions(&mut temp_nwa, &(0..n).collect());
+                          *states = temp_nwa.states;
+                      }
+
                       nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
                   }
 
@@ -1707,22 +1724,6 @@ local_system:
           combined_nwa.simplify_rustfst();
           crate::debug!(4, "Initial simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
 
-          // crate::debug!(4, "Determinizing combined NWA before negative code resolution...");
-          // combined_nwa.determinize_inplace();
-          // crate::debug!(
-          //     4,
-          //     "Pre-resolution determinization took: {:?}. NWA now has {} states.",
-          //     now.elapsed(),
-          //     combined_nwa.states.len()
-          // );
-          crate::debug!(4, "Starting negative code resolution...");
-          let num_states = combined_nwa.states.len();
-          apply_cancellations(&mut combined_nwa, &(0..num_states).collect());
-          crate::debug!(4, "Applied cancellations.");
-          apply_finality_fixpoint(&mut combined_nwa, &(0..num_states).collect());
-          crate::debug!(4, "Applied finality fixpoint.");
-          remove_negative_transitions(&mut combined_nwa, &(0..num_states).collect());
-          crate::debug!(4, "Removed negative transitions.");
           combined_nwa.simplify_rustfst();
           crate::debug!(
               4,
@@ -2959,6 +2960,16 @@ local_system:
               right: &NWABody,
               eps_weight: &Weight,
           ) -> NWABody {
+              let new_left = states.copy_subgraph_in_place_and_return_body(*left);
+              Self::_concatenate_components(states, &new_left, right, eps_weight)
+          }
+
+          pub fn _concatenate_components(
+              states: &mut NWAStates,
+              left: &NWABody,
+              right: &NWABody,
+              eps_weight: &Weight,
+          ) -> NWABody {
               if STOCHASTIC_DEBUG {
                   let nwa1 = NWA { states: states.clone(), body: left.clone() };
                   let nwa2 = NWA { states: states.clone(), body: right.clone() };
@@ -2973,8 +2984,7 @@ local_system:
                   let result_dwa = concat_nwa.determinize_to_dwa();
                   DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
               }
-              let new_left = states.copy_subgraph_in_place_and_return_body(*left);
-              Self::internal_concatenate_components(states, &new_left, right, eps_weight)
+              Self::internal_concatenate_components(states, &left, right, eps_weight)
           }
 
           pub fn determinize_components(states: &NWAStates, body: &NWABody) -> DWA {
@@ -3020,13 +3030,13 @@ local_system:
           );
 
           progress_step(&pb, 1, "Compute cancellations");
-          apply_cancellations(nwa, &(0..nwa.states.len()).collect());
+          apply_cancellations(&mut nwa.states, &(0..nwa.states.len()).collect());
 
           progress_step(&pb, 2, "Propagate finality");
-          apply_finality_fixpoint(nwa, &(0..nwa.states.len()).collect());
+          apply_finality_fixpoint(&mut nwa.states, &(0..nwa.states.len()).collect());
 
           progress_step(&pb, 3, "Apply changes & remove negatives");
-          remove_negative_transitions(nwa, &(0..nwa.states.len()).collect());
+          remove_negative_transitions(&mut nwa.states, &(0..nwa.states.len()).collect());
           crate::debug!(4, "Applied changes to NWA.");
 
           if let Some(p) = &pb {
@@ -3034,21 +3044,18 @@ local_system:
           }
       }
 
-      pub fn apply_cancellations(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
-          let epsilons_to_add = compute_cancellations(&nwa.states, source_states_filter);
+      pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+          let epsilons_to_add = compute_cancellations(states, source_states_filter);
           crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
           for (from, to, w) in epsilons_to_add {
-              nwa.states.add_epsilon(from, to, w);
+              states.add_epsilon(from, to, w);
           }
       }
 
-      pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
-          let final_fix = compute_finality_fixpoint(&nwa.states, source_states_filter);
+      pub fn apply_finality_fixpoint(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+          let final_fix = compute_finality_fixpoint(states, source_states_filter);
           for &sid in source_states_filter {
-              if sid >= nwa.states.len() || final_fix[sid].is_empty() {
-                  continue;
-              }
-              let st = &mut nwa.states.0[sid];
+              let st = &mut states.0[sid];
               if let Some(fw) = &mut st.final_weight {
                   *fw |= &final_fix[sid];
               } else {
@@ -3057,12 +3064,9 @@ local_system:
           }
       }
 
-      pub fn remove_negative_transitions(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
-          for (stid, st) in nwa.states.0.iter_mut().enumerate() {
-              if !source_states_filter.contains(&stid) {
-                  continue;
-              }
-              st.transitions.retain(|&label, _| !is_negative_symbol(label));
+      pub fn remove_negative_transitions(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+          for &sid in source_states_filter {
+              states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
           }
       }
 
@@ -3510,17 +3514,20 @@ local_system:
                           states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
 
                       let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
-                      if !new_states_filter.is_empty() {
-                          let mut temp_nwa = NWA { states: states.clone(), body: NWABody::default() };
-                          apply_cancellations(&mut temp_nwa, &new_states_filter);
-                          apply_finality_fixpoint(&mut temp_nwa, &new_states_filter);
-                          remove_negative_transitions(&mut temp_nwa, &new_states_filter);
-                          *states = temp_nwa.states;
-                      }
 
                       let left_body = NWABody { start_state: left_body_start };
 
-                      let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+                      let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+
+                      if !new_states_filter.is_empty() {
+                          let mut temp_states = states.clone();
+                          let n = temp_states.len();
+                          apply_cancellations(&mut temp_states, &(0..n).collect());
+                          apply_finality_fixpoint(&mut temp_states, &(0..n).collect());
+                          remove_negative_transitions(&mut temp_states, &(0..n).collect());
+                          *states = temp_states;
+                      }
+
                       nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
                   }
 
@@ -3725,7 +3732,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -4871,6 +4878,16 @@ messages:
               right: &NWABody,
               eps_weight: &Weight,
           ) -> NWABody {
+              let new_left = states.copy_subgraph_in_place_and_return_body(*left);
+              Self::_concatenate_components(states, &new_left, right, eps_weight)
+          }
+
+          pub fn _concatenate_components(
+              states: &mut NWAStates,
+              left: &NWABody,
+              right: &NWABody,
+              eps_weight: &Weight,
+          ) -> NWABody {
               if STOCHASTIC_DEBUG {
                   let nwa1 = NWA { states: states.clone(), body: left.clone() };
                   let nwa2 = NWA { states: states.clone(), body: right.clone() };
@@ -4885,8 +4902,7 @@ messages:
                   let result_dwa = concat_nwa.determinize_to_dwa();
                   DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
               }
-              let new_left = states.copy_subgraph_in_place_and_return_body(*left);
-              Self::internal_concatenate_components(states, &new_left, right, eps_weight)
+              Self::internal_concatenate_components(states, &left, right, eps_weight)
           }
 
           pub fn determinize_components(states: &NWAStates, body: &NWABody) -> DWA {
@@ -4962,9 +4978,6 @@ messages:
       pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
           let final_fix = compute_finality_fixpoint(&nwa.states, source_states_filter);
           for &sid in source_states_filter {
-              if sid >= nwa.states.len() || final_fix[sid].is_empty() {
-                  continue;
-              }
               let st = &mut nwa.states.0[sid];
               if let Some(fw) = &mut st.final_weight {
                   *fw |= &final_fix[sid];
@@ -4975,11 +4988,8 @@ messages:
       }
 
       pub fn remove_negative_transitions(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
-          for (stid, st) in nwa.states.0.iter_mut().enumerate() {
-              if !source_states_filter.contains(&stid) {
-                  continue;
-              }
-              st.transitions.retain(|&label, _| !is_negative_symbol(label));
+          for &sid in source_states_filter {
+              nwa.states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
           }
       }
 
@@ -5198,7 +5208,7 @@ messages:
   - user: |-
       ```rust "src/precompute4/full_dwa.rs"
       use std::cell::RefCell;
-      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::env;
       use std::time::Instant;
 
@@ -5211,7 +5221,7 @@ messages:
       use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
       use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
       use crate::precompute4::template_nwa::{build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas};
-      use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStates, Weight};
+      use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight};
       use crate::r#macro::is_debug_level_enabled;
       use crate::glr::table::TerminalID;
       use crate::tokenizer::TokenizerStateID;
@@ -5428,10 +5438,24 @@ messages:
                       let left_nwa = NWA::from_dwa(&left_dwa);
 
                       let mut states = states_arena.borrow_mut();
-                      let (left_body_start, _) = states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
+                      let (left_body_start, remap) =
+                          states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
+
+                      let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
+
                       let left_body = NWABody { start_state: left_body_start };
 
-                      let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+                      let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+
+                      if !new_states_filter.is_empty() {
+                          let mut temp_nwa = NWA { states: states.clone(), body: composed_body.clone() };
+                          let n = temp_nwa.states.len();
+                          apply_cancellations(&mut temp_nwa, &(0..n).collect());
+                          apply_finality_fixpoint(&mut temp_nwa, &(0..n).collect());
+                          remove_negative_transitions(&mut temp_nwa, &(0..n).collect());
+                          *states = temp_nwa.states;
+                      }
+
                       nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
                   }
 
@@ -5484,22 +5508,6 @@ messages:
           combined_nwa.simplify_rustfst();
           crate::debug!(4, "Initial simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
 
-          // crate::debug!(4, "Determinizing combined NWA before negative code resolution...");
-          // combined_nwa.determinize_inplace();
-          // crate::debug!(
-          //     4,
-          //     "Pre-resolution determinization took: {:?}. NWA now has {} states.",
-          //     now.elapsed(),
-          //     combined_nwa.states.len()
-          // );
-          crate::debug!(4, "Starting negative code resolution...");
-          let num_states = combined_nwa.states.len();
-          apply_cancellations(&mut combined_nwa, &(0..num_states).collect());
-          crate::debug!(4, "Applied cancellations.");
-          apply_finality_fixpoint(&mut combined_nwa, &(0..num_states).collect());
-          crate::debug!(4, "Applied finality fixpoint.");
-          remove_negative_transitions(&mut combined_nwa, &(0..num_states).collect());
-          crate::debug!(4, "Removed negative transitions.");
           combined_nwa.simplify_rustfst();
           crate::debug!(
               4,
@@ -5645,14 +5653,8 @@ messages:
       ```
     metadata:
       filename: src/precompute4/full_dwa.rs
-  - user: Right now, we do negative resolution at the very end. But there's no reason
-      we can't do it throughout the special map while building the full automata.
-      Modify the special map process fn to do this. It should pass as source state
-      filter the set of *new* states added to the NWA, those corresponding to the
-      specialized template DWA. This is important. We don't want to do compute proportional
-      to the entire NWA including the RHS. This'd be exponentially expensive. The
-      compute should only be proportional basically to the size of the new specialized
-      template DWA being added on the left.
+  - user: Make it so `apply_cancellations`, `apply_finality_fixpoint`, and `remove_negative_transitions`
+      all take `&mut NWAStates` rather than `&NWA`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5672,165 +5674,144 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to modify your code, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to refactor the functions, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **File: `src/precompute4/full_dwa.rs`**
+      #### 1. File: `src/precompute4/resolve_negatives.rs`
 
-          a.  **Add necessary imports:**
-          At the top of the file, update the `use` statements to include `HashSet` and `NWAStateID`.
+      I will update the signatures and bodies of `apply_cancellations`, `apply_finality_fixpoint`, and `remove_negative_transitions` to operate on `&mut NWAStates` instead of `&mut NWA`. I will also update the call sites within `resolve_negative_codes_in_nwa`.
 
-          -   Modify the line `use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};` to:
-              ```rust
-              use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-              ```
-          -   Modify the line `use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStates, Weight};` to:
-              ```rust
-              use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight};
-              ```
+      -   In `resolve_negative_codes_in_nwa`:
+          -   Change `apply_cancellations(nwa, ...)` to `apply_cancellations(&mut nwa.states, ...)`.
+          -   Change `apply_finality_fixpoint(nwa, ...)` to `apply_finality_fixpoint(&mut nwa.states, ...)`.
+          -   Change `remove_negative_transitions(nwa, ...)` to `remove_negative_transitions(&mut nwa.states, ...)`.
+      -   For `apply_cancellations`:
+          -   Change the function signature from `pub fn apply_cancellations(nwa: &mut NWA, ...)` to `pub fn apply_cancellations(states: &mut NWAStates, ...)`.
+          -   In the body, replace `nwa.states` with `states`.
+      -   For `apply_finality_fixpoint`:
+          -   Change the function signature from `pub fn apply_finality_fixpoint(nwa: &mut NWA, ...)` to `pub fn apply_finality_fixpoint(states: &mut NWAStates, ...)`.
+          -   In the body, replace `nwa.states` with `states`.
+      -   For `remove_negative_transitions`:
+          -   Change the function signature from `pub fn remove_negative_transitions(nwa: &mut NWA, ...)` to `pub fn remove_negative_transitions(states: &mut NWAStates, ...)`.
+          -   In the body, replace `nwa.states` with `states`.
 
-          b.  **Move negative resolution logic into the trie traversal:**
-          Inside the `precompute4` function, locate the `Trie::special_map_grouped` call. In its `process` closure (the final argument), you'll modify the logic where the `left_nwa` is composed with the `right_body`.
+      #### 2. File: `src/precompute4/full_dwa.rs`
 
-          -   Find this code block:
-              ```rust
-              let mut states = states_arena.borrow_mut();
-              let (left_body_start, _) = states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
-              let left_body = NWABody { start_state: left_body_start };
+      I will update the call site for the negative resolution functions inside the `process` closure of `Trie::special_map_grouped`.
 
-              let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
-              nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
-              ```
-
-          -   Replace it with the following code. This change captures the newly created states from `copy_subgraph_from`, and then immediately runs the negative resolution functions on them.
-              ```rust
-              let mut states = states_arena.borrow_mut();
-              let (left_body_start, remap) =
-                  states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
-
-              let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
-              if !new_states_filter.is_empty() {
-                  let mut temp_nwa = NWA { states: states.clone(), body: NWABody::default() };
-                  apply_cancellations(&mut temp_nwa, &new_states_filter);
-                  apply_finality_fixpoint(&mut temp_nwa, &new_states_filter);
-                  remove_negative_transitions(&mut temp_nwa, &new_states_filter);
-                  *states = temp_nwa.states;
-              }
-
-              let left_body = NWABody { start_state: left_body_start };
-
-              let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
-              nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
-              ```
-
-          c.  **Remove the final negative resolution step:**
-          Now that resolution is done incrementally, you can remove the final, monolithic step.
-
-          -   In the `resolve_negatives_and_optimize_and_determinize` function, delete the entire block related to negative code resolution:
-              ```rust
-              // crate::debug!(4, "Determinizing combined NWA before negative code resolution...");
-              // combined_nwa.determinize_inplace();
-              // crate::debug!(
-              //     4,
-              //     "Pre-resolution determinization took: {:?}. NWA now has {} states.",
-              //     now.elapsed(),
-              //     combined_nwa.states.len()
-              // );
-              crate::debug!(4, "Starting negative code resolution...");
-              let num_states = combined_nwa.states.len();
-              apply_cancellations(&mut combined_nwa, &(0..num_states).collect());
-              crate::debug!(4, "Applied cancellations.");
-              apply_finality_fixpoint(&mut combined_nwa, &(0..num_states).collect());
-              crate::debug!(4, "Applied finality fixpoint.");
-              remove_negative_transitions(&mut combined_nwa, &(0..num_states).collect());
-              crate::debug!(4, "Removed negative transitions.");
-              ```
+      -   Instead of creating a temporary `NWA` instance, you will now:
+          1.  Clone the `states` to get a mutable `NWAStates` variable (e.g., `temp_states`).
+          2.  Call `apply_cancellations`, `apply_finality_fixpoint`, and `remove_negative_transitions` with a mutable reference to `temp_states`.
+          3.  Assign the modified `temp_states` back to `*states`.
 
       ### Git Diffs
 
-      Here is the git diff for the changes.
+      Here are the git diffs to apply these changes.
 
       ```diff
+      diff --git a/src/precompute4/full_dwa.rs b/src/precompute4/full_dwa.rs
       --- a/src/precompute4/full_dwa.rs
       +++ b/src/precompute4/full_dwa.rs
-      @@ -1,5 +1,5 @@
-       use std::cell::RefCell;
-      -use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-      +use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-       use std::env;
-       use std::time::Instant;
+      @@ -239,12 +239,12 @@
+                       let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
        
-      @@ -11,7 +11,7 @@
-       use crate::json_serialization::JSONConvertible;
-       use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
-       use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
-       use crate::precompute4::template_nwa::{build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas};
-      -use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStates, Weight};
-      +use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight};
-       use crate::r#macro::is_debug_level_enabled;
-       use crate::glr::table::TerminalID;
-       use crate::tokenizer::TokenizerStateID;
-      @@ -251,10 +251,22 @@
-                       left_dwa.simplify();
-                       let left_nwa = NWA::from_dwa(&left_dwa);
+                       if !new_states_filter.is_empty() {
+      -                    let mut temp_nwa = NWA { states: states.clone(), body: composed_body.clone() };
+      -                    let n = temp_nwa.states.len();
+      -                    apply_cancellations(&mut temp_nwa, &(0..n).collect());
+      -                    apply_finality_fixpoint(&mut temp_nwa, &(0..n).collect());
+      -                    remove_negative_transitions(&mut temp_nwa, &(0..n).collect());
+      -                    *states = temp_nwa.states;
+      +                    let mut temp_states = states.clone();
+      +                    let n = temp_states.len();
+      +                    apply_cancellations(&mut temp_states, &(0..n).collect());
+      +                    apply_finality_fixpoint(&mut temp_states, &(0..n).collect());
+      +                    remove_negative_transitions(&mut temp_states, &(0..n).collect());
+      +                    *states = temp_states;
+                       }
        
-                       let mut states = states_arena.borrow_mut();
-      -                let (left_body_start, _) = states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
-      +                let (left_body_start, remap) =
-      +                    states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
-      +
-      +                let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
-      +                if !new_states_filter.is_empty() {
-      +                    let mut temp_nwa = NWA { states: states.clone(), body: NWABody::default() };
-      +                    apply_cancellations(&mut temp_nwa, &new_states_filter);
-      +                    apply_finality_fixpoint(&mut temp_nwa, &new_states_filter);
-      +                    remove_negative_transitions(&mut temp_nwa, &new_states_filter);
-      +                    *states = temp_nwa.states;
-      +                }
-      +
-                       let left_body = NWABody { start_state: left_body_start };
-       
-                       let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
                        nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
-                   }
+
+      ```
+
+      ```diff
+      diff --git a/src/precompute4/resolve_negatives.rs b/src/precompute4/resolve_negatives.rs
+      --- a/src/precompute4/resolve_negatives.rs
+      +++ b/src/precompute4/resolve_negatives.rs
+      @@ -31,39 +31,39 @@
+           );
        
-      @@ -311,25 +323,6 @@
-           combined_nwa.simplify_rustfst();
-           crate::debug!(4, "Initial simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+           progress_step(&pb, 1, "Compute cancellations");
+      -    apply_cancellations(nwa, &(0..nwa.states.len()).collect());
+      +    apply_cancellations(&mut nwa.states, &(0..nwa.states.len()).collect());
        
-      -    // crate::debug!(4, "Determinizing combined NWA before negative code resolution...");
-      -    // combined_nwa.determinize_inplace();
-      -    // crate::debug!(
-      -    //     4,
-      -    //     "Pre-resolution determinization took: {:?}. NWA now has {} states.",
-      -    //     now.elapsed(),
-      -    //     combined_nwa.states.len()
-      -    // );
-      -    crate::debug!(4, "Starting negative code resolution...");
-      -    let num_states = combined_nwa.states.len();
-      -    apply_cancellations(&mut combined_nwa, &(0..num_states).collect());
-      -    crate::debug!(4, "Applied cancellations.");
-      -    apply_finality_fixpoint(&mut combined_nwa, &(0..num_states).collect());
-      -    crate::debug!(4, "Applied finality fixpoint.");
-      -    remove_negative_transitions(&mut combined_nwa, &(0..num_states).collect());
-      -    crate::debug!(4, "Removed negative transitions.");
-           combined_nwa.simplify_rustfst();
-           crate::debug!(
-               4,
+           progress_step(&pb, 2, "Propagate finality");
+      -    apply_finality_fixpoint(nwa, &(0..nwa.states.len()).collect());
+      +    apply_finality_fixpoint(&mut nwa.states, &(0..nwa.states.len()).collect());
+       
+           progress_step(&pb, 3, "Apply changes & remove negatives");
+      -    remove_negative_transitions(nwa, &(0..nwa.states.len()).collect());
+      +    remove_negative_transitions(&mut nwa.states, &(0..nwa.states.len()).collect());
+           crate::debug!(4, "Applied changes to NWA.");
+       
+           if let Some(p) = &pb {
+               p.finish_with_message("Done");
+           }
+       }
+       
+      -pub fn apply_cancellations(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
+      -    let epsilons_to_add = compute_cancellations(&nwa.states, source_states_filter);
+      +pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+      +    let epsilons_to_add = compute_cancellations(states, source_states_filter);
+           crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
+           for (from, to, w) in epsilons_to_add {
+      -        nwa.states.add_epsilon(from, to, w);
+      +        states.add_epsilon(from, to, w);
+           }
+       }
+       
+      -pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
+      -    let final_fix = compute_finality_fixpoint(&nwa.states, source_states_filter);
+      +pub fn apply_finality_fixpoint(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+      +    let final_fix = compute_finality_fixpoint(states, source_states_filter);
+           for &sid in source_states_filter {
+      -        let st = &mut nwa.states.0[sid];
+      +        let st = &mut states.0[sid];
+               if let Some(fw) = &mut st.final_weight {
+                   *fw |= &final_fix[sid];
+               } else {
+                   st.final_weight = Some(final_fix[sid].clone());
+               }
+           }
+       }
+       
+      -pub fn remove_negative_transitions(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
+      +pub fn remove_negative_transitions(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+           for &sid in source_states_filter {
+      -        nwa.states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
+      +        states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
+           }
+       }
+       
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/precompute4/full_dwa.rs
       Applying patch to 'src/precompute4/full_dwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/full_dwa.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/precompute4/resolve_negatives.rs
+      Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
     metadata:
-  - user: 'Changes committed with message: "Move negative code resolution to be incremental
-      during trie specialization in full_dwa"'
+  - user: 'Changes committed with message: "Refactor: Update negative resolution functions
+      to operate directly on &mut NWAStates"'
     metadata:
 ...

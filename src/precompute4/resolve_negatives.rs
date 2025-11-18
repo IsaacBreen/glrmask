@@ -35,13 +35,13 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     );
 
     progress_step(&pb, 1, "Compute cancellations");
-    apply_cancellations(nwa, &(0..nwa.states.len()).collect());
+    apply_cancellations(&mut nwa.states, &(0..nwa.states.len()).collect());
 
     progress_step(&pb, 2, "Propagate finality");
-    apply_finality_fixpoint(nwa, &(0..nwa.states.len()).collect());
+    apply_finality_fixpoint(&mut nwa.states, &(0..nwa.states.len()).collect());
 
     progress_step(&pb, 3, "Apply changes & remove negatives");
-    remove_negative_transitions(nwa, &(0..nwa.states.len()).collect());
+    remove_negative_transitions(&mut nwa.states, &(0..nwa.states.len()).collect());
     crate::debug!(4, "Applied changes to NWA.");
 
     if let Some(p) = &pb {
@@ -49,18 +49,18 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     }
 }
 
-pub fn apply_cancellations(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
-    let epsilons_to_add = compute_cancellations(&nwa.states, source_states_filter);
+pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+    let epsilons_to_add = compute_cancellations(states, source_states_filter);
     crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
     for (from, to, w) in epsilons_to_add {
-        nwa.states.add_epsilon(from, to, w);
+        states.add_epsilon(from, to, w);
     }
 }
 
-pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
-    let final_fix = compute_finality_fixpoint(&nwa.states, source_states_filter);
+pub fn apply_finality_fixpoint(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+    let final_fix = compute_finality_fixpoint(states, source_states_filter);
     for &sid in source_states_filter {
-        let st = &mut nwa.states.0[sid];
+        let st = &mut states.0[sid];
         if let Some(fw) = &mut st.final_weight {
             *fw |= &final_fix[sid];
         } else {
@@ -69,9 +69,9 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWA
     }
 }
 
-pub fn remove_negative_transitions(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
+pub fn remove_negative_transitions(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
     for &sid in source_states_filter {
-        nwa.states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
+        states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
     }
 }
 
