@@ -189,6 +189,7 @@ impl DWA {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
             let mut timed_out = false;
+            let mut last_changing_passes: Vec<DwaPass> = Vec::new();
 
             loop {
                 if iterations >= MAX_OPTIMIZE_ITERATIONS {
@@ -198,6 +199,7 @@ impl DWA {
                 iterations += 1;
 
                 let mut changed_in_iteration = false;
+                let mut current_changing_passes: Vec<DwaPass> = Vec::new();
                 for &pass in ordering {
                     let changed = match pass {
                         DwaPass::PruneUnreachable => dwa.prune_unreachable(),
@@ -205,10 +207,16 @@ impl DWA {
                         DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
                         DwaPass::Minimize => dwa.minimize_states(),
                     };
+                    if changed {
+                        current_changing_passes.push(pass);
+                    }
                     changed_in_iteration |= changed;
                 }
                 if !changed_in_iteration {
+                    last_changing_passes.clear();
                     break;
+                } else {
+                    last_changing_passes = current_changing_passes;
                 }
             }
 
@@ -216,7 +224,11 @@ impl DWA {
             let final_states = dwa.states.len();
 
             let ordering_str = format!("{:?}", ordering);
-            let timeout_str = if timed_out { " (TIMED OUT)" } else { "" };
+            let timeout_str = if timed_out {
+                format!(" (TIMED OUT, changing: {:?})", last_changing_passes)
+            } else {
+                "".to_string()
+            };
             crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
 
             if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
@@ -787,6 +799,7 @@ impl NWA {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
             let mut timed_out = false;
+            let mut last_changing_passes: Vec<NwaPass> = Vec::new();
 
             loop {
                 if iterations >= MAX_OPTIMIZE_ITERATIONS {
@@ -796,6 +809,7 @@ impl NWA {
                 iterations += 1;
 
                 let mut changed_in_iteration = false;
+                let mut current_changing_passes: Vec<NwaPass> = Vec::new();
                 for &pass in ordering {
                     let changed = match pass {
                         NwaPass::PruneUnreachable => nwa.prune_unreachable(),
@@ -804,10 +818,16 @@ impl NWA {
                         NwaPass::CompressTransitions => nwa.compress_transitions(),
                         NwaPass::Minimize => nwa.minimize_states(),
                     };
+                    if changed {
+                        current_changing_passes.push(pass);
+                    }
                     changed_in_iteration |= changed;
                 }
                 if !changed_in_iteration {
+                    last_changing_passes.clear();
                     break;
+                } else {
+                    last_changing_passes = current_changing_passes;
                 }
             }
 
@@ -815,7 +835,11 @@ impl NWA {
             let final_states = nwa.states.len();
 
             let ordering_str = format!("{:?}", ordering);
-            let timeout_str = if timed_out { " (TIMED OUT)" } else { "" };
+            let timeout_str = if timed_out {
+                format!(" (TIMED OUT, changing: {:?})", last_changing_passes)
+            } else {
+                "".to_string()
+            };
             crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
 
             if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {

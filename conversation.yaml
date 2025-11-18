@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - src/precompute4/weighted_automata/simplification.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/precompute4/weighted_automata/simplification.rs: |
@@ -131,29 +131,13 @@ local_system:
           trans: BTreeMap<i16, (StateID, Weight)>,
       }
 
-      #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-      enum DwaPass {
-          PruneUnreachable,
-          PruneDeadEnds,
-          PushWeights,
-          Minimize,
-      }
-
-      const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
-          &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::Minimize],
-          &[DwaPass::Minimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
-          &[DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::Minimize],
-      ];
-
       impl DWA {
           pub fn simplify(&mut self) {
               if self.states.len() == 0 {
                   return;
               }
 
-              if OPTIMIZE_DEBUG {
-                  self.run_optimization_experiment();
-              } else if BENCHMARK_DEBUG {
+              if BENCHMARK_DEBUG {
                   let initial_states = self.states.len();
                   let mut internal = self.clone();
                   let internal_start = std::time::Instant::now();
@@ -185,51 +169,6 @@ local_system:
                   *self = internal;
               } else {
                   self.simplify_internal();
-              }
-          }
-
-          fn run_optimization_experiment(&mut self) {
-              let initial_clone = self.clone();
-              let initial_states = self.states.len();
-              crate::debug!(4, "[DWA Optimize] Starting experiment with {} states.", initial_states);
-
-              let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;
-
-              for (i, &ordering) in DWA_PASS_ORDERINGS.iter().enumerate() {
-                  let mut dwa = initial_clone.clone();
-                  let start_time = std::time::Instant::now();
-
-                  loop {
-                      let mut changed_in_iteration = false;
-                      for &pass in ordering {
-                          let changed = match pass {
-                              DwaPass::PruneUnreachable => dwa.prune_unreachable(),
-                              DwaPass::PruneDeadEnds => dwa.prune_dead_ends(),
-                              DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
-                              DwaPass::Minimize => dwa.minimize_states(),
-                          };
-                          changed_in_iteration |= changed;
-                      }
-                      if !changed_in_iteration {
-                          break;
-                      }
-                  }
-
-                  let elapsed = start_time.elapsed();
-                  let final_states = dwa.states.len();
-
-                  let ordering_str = format!("{:?}", ordering);
-                  crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
-
-                  if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
-                      final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
-                  }) {
-                      best_result = Some((dwa, elapsed, final_states));
-                  }
-              }
-
-              if let Some((best_dwa, _, _)) = best_result {
-                  *self = best_dwa;
               }
           }
 
@@ -719,30 +658,13 @@ local_system:
           trans: BTreeMap<i16, BTreeMap<NWAStateID, Weight>>,
       }
 
-      #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-      enum NwaPass {
-          PruneUnreachable,
-          PruneDeadEnds,
-          PushFinalWeights,
-          CompressTransitions,
-          Minimize,
-      }
-
-      const NWA_PASS_ORDERINGS: &[&[NwaPass]] = &[
-          &[NwaPass::PruneUnreachable, NwaPass::PushFinalWeights, NwaPass::CompressTransitions, NwaPass::PruneDeadEnds, NwaPass::Minimize],
-          &[NwaPass::Minimize, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::PushFinalWeights, NwaPass::CompressTransitions],
-          &[NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::Minimize],
-      ];
-
       impl NWA {
           pub fn simplify(&mut self) {
               if self.states.len() == 0 {
                   return;
               }
 
-              if OPTIMIZE_DEBUG {
-                  self.run_optimization_experiment();
-              } else if BENCHMARK_DEBUG {
+              if BENCHMARK_DEBUG {
                   let initial_states = self.states.len();
                   let mut internal = self.clone();
                   let internal_start = std::time::Instant::now();
@@ -777,52 +699,6 @@ local_system:
               }
           }
 
-          fn run_optimization_experiment(&mut self) {
-              let initial_clone = self.clone();
-              let initial_states = self.states.len();
-              crate::debug!(4, "[NWA Optimize] Starting experiment with {} states.", initial_states);
-
-              let mut best_result: Option<(NWA, std::time::Duration, usize)> = None;
-
-              for (i, &ordering) in NWA_PASS_ORDERINGS.iter().enumerate() {
-                  let mut nwa = initial_clone.clone();
-                  let start_time = std::time::Instant::now();
-
-                  loop {
-                      let mut changed_in_iteration = false;
-                      for &pass in ordering {
-                          let changed = match pass {
-                              NwaPass::PruneUnreachable => nwa.prune_unreachable(),
-                              NwaPass::PruneDeadEnds => nwa.prune_dead_ends(),
-                              NwaPass::PushFinalWeights => nwa.push_final_weights_along_epsilons(),
-                              NwaPass::CompressTransitions => nwa.compress_transitions(),
-                              NwaPass::Minimize => nwa.minimize_states(),
-                          };
-                          changed_in_iteration |= changed;
-                      }
-                      if !changed_in_iteration {
-                          break;
-                      }
-                  }
-
-                  let elapsed = start_time.elapsed();
-                  let final_states = nwa.states.len();
-
-                  let ordering_str = format!("{:?}", ordering);
-                  crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
-
-                  if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
-                      final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
-                  }) {
-                      best_result = Some((nwa, elapsed, final_states));
-                  }
-              }
-
-              if let Some((best_nwa, _, _)) = best_result {
-                  *self = best_nwa;
-              }
-          }
-
           pub fn simplify_with_rustfst(&mut self) -> bool {
               let min_config = MinimizeConfig::default().with_allow_nondet(true);
               let mut fst = self.to_rustfst();
@@ -852,9 +728,17 @@ local_system:
               changed |= self.prune_dead_ends();
               crate::debug!(4, "[NWA::simplify] After prune_dead_ends (1) ({:.2?}): {}", start.elapsed(), self.stats());
 
-              start = std::time::Instant::now();
-              changed |= self.minimize_states();
-              crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start.elapsed(), self.stats());
+              let n = self.states.len();
+              if n > 1 {
+                  let start_minimize = std::time::Instant::now();
+                  let partition = minimize_nwa_partition(&self.states);
+                  if partition.num_classes() < n {
+                      crate::debug!(4, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
+                      self.rebuild_from_partition(partition);
+                      changed = true;
+                      crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start_minimize.elapsed(), self.stats());
+                  }
+              }
 
               start = std::time::Instant::now();
               changed |= self.prune_unreachable();
@@ -865,19 +749,6 @@ local_system:
               crate::debug!(4, "[NWA::simplify] After prune_dead_ends (2) ({:.2?}): {}", start.elapsed(), self.stats());
               crate::debug!(4, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
               changed
-          }
-
-          fn minimize_states(&mut self) -> bool {
-              let n = self.states.len();
-              if n <= 1 {
-                  return false;
-              }
-              let partition = minimize_nwa_partition(&self.states);
-              if partition.num_classes() >= n {
-                  return false;
-              }
-              self.rebuild_from_partition(partition);
-              true
           }
 
           /// Canonicalize NWA transitions by merging parallel transitions:
@@ -1478,6 +1349,7 @@ local_system:
                   let start_time = std::time::Instant::now();
                   let mut iterations = 0;
                   let mut timed_out = false;
+                  let mut last_changing_passes: Vec<DwaPass> = Vec::new();
 
                   loop {
                       if iterations >= MAX_OPTIMIZE_ITERATIONS {
@@ -1487,6 +1359,7 @@ local_system:
                       iterations += 1;
 
                       let mut changed_in_iteration = false;
+                      let mut current_changing_passes: Vec<DwaPass> = Vec::new();
                       for &pass in ordering {
                           let changed = match pass {
                               DwaPass::PruneUnreachable => dwa.prune_unreachable(),
@@ -1494,10 +1367,16 @@ local_system:
                               DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
                               DwaPass::Minimize => dwa.minimize_states(),
                           };
+                          if changed {
+                              current_changing_passes.push(pass);
+                          }
                           changed_in_iteration |= changed;
                       }
                       if !changed_in_iteration {
+                          last_changing_passes.clear();
                           break;
+                      } else {
+                          last_changing_passes = current_changing_passes;
                       }
                   }
 
@@ -1505,7 +1384,11 @@ local_system:
                   let final_states = dwa.states.len();
 
                   let ordering_str = format!("{:?}", ordering);
-                  let timeout_str = if timed_out { " (TIMED OUT)" } else { "" };
+                  let timeout_str = if timed_out {
+                      format!(" (TIMED OUT, changing: {:?})", last_changing_passes)
+                  } else {
+                      "".to_string()
+                  };
                   crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
 
                   if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
@@ -2076,6 +1959,7 @@ local_system:
                   let start_time = std::time::Instant::now();
                   let mut iterations = 0;
                   let mut timed_out = false;
+                  let mut last_changing_passes: Vec<NwaPass> = Vec::new();
 
                   loop {
                       if iterations >= MAX_OPTIMIZE_ITERATIONS {
@@ -2085,6 +1969,7 @@ local_system:
                       iterations += 1;
 
                       let mut changed_in_iteration = false;
+                      let mut current_changing_passes: Vec<NwaPass> = Vec::new();
                       for &pass in ordering {
                           let changed = match pass {
                               NwaPass::PruneUnreachable => nwa.prune_unreachable(),
@@ -2093,10 +1978,16 @@ local_system:
                               NwaPass::CompressTransitions => nwa.compress_transitions(),
                               NwaPass::Minimize => nwa.minimize_states(),
                           };
+                          if changed {
+                              current_changing_passes.push(pass);
+                          }
                           changed_in_iteration |= changed;
                       }
                       if !changed_in_iteration {
+                          last_changing_passes.clear();
                           break;
+                      } else {
+                          last_changing_passes = current_changing_passes;
                       }
                   }
 
@@ -2104,7 +1995,11 @@ local_system:
                   let final_states = nwa.states.len();
 
                   let ordering_str = format!("{:?}", ordering);
-                  let timeout_str = if timed_out { " (TIMED OUT)" } else { "" };
+                  let timeout_str = if timed_out {
+                      format!(" (TIMED OUT, changing: {:?})", last_changing_passes)
+                  } else {
+                      "".to_string()
+                  };
                   crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
 
                   if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
@@ -2592,7 +2487,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -2751,29 +2646,13 @@ messages:
           trans: BTreeMap<i16, (StateID, Weight)>,
       }
 
-      #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-      enum DwaPass {
-          PruneUnreachable,
-          PruneDeadEnds,
-          PushWeights,
-          Minimize,
-      }
-
-      const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
-          &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::Minimize],
-          &[DwaPass::Minimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
-          &[DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::Minimize],
-      ];
-
       impl DWA {
           pub fn simplify(&mut self) {
               if self.states.len() == 0 {
                   return;
               }
 
-              if OPTIMIZE_DEBUG {
-                  self.run_optimization_experiment();
-              } else if BENCHMARK_DEBUG {
+              if BENCHMARK_DEBUG {
                   let initial_states = self.states.len();
                   let mut internal = self.clone();
                   let internal_start = std::time::Instant::now();
@@ -2805,51 +2684,6 @@ messages:
                   *self = internal;
               } else {
                   self.simplify_internal();
-              }
-          }
-
-          fn run_optimization_experiment(&mut self) {
-              let initial_clone = self.clone();
-              let initial_states = self.states.len();
-              crate::debug!(4, "[DWA Optimize] Starting experiment with {} states.", initial_states);
-
-              let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;
-
-              for (i, &ordering) in DWA_PASS_ORDERINGS.iter().enumerate() {
-                  let mut dwa = initial_clone.clone();
-                  let start_time = std::time::Instant::now();
-
-                  loop {
-                      let mut changed_in_iteration = false;
-                      for &pass in ordering {
-                          let changed = match pass {
-                              DwaPass::PruneUnreachable => dwa.prune_unreachable(),
-                              DwaPass::PruneDeadEnds => dwa.prune_dead_ends(),
-                              DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
-                              DwaPass::Minimize => dwa.minimize_states(),
-                          };
-                          changed_in_iteration |= changed;
-                      }
-                      if !changed_in_iteration {
-                          break;
-                      }
-                  }
-
-                  let elapsed = start_time.elapsed();
-                  let final_states = dwa.states.len();
-
-                  let ordering_str = format!("{:?}", ordering);
-                  crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
-
-                  if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
-                      final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
-                  }) {
-                      best_result = Some((dwa, elapsed, final_states));
-                  }
-              }
-
-              if let Some((best_dwa, _, _)) = best_result {
-                  *self = best_dwa;
               }
           }
 
@@ -3339,30 +3173,13 @@ messages:
           trans: BTreeMap<i16, BTreeMap<NWAStateID, Weight>>,
       }
 
-      #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-      enum NwaPass {
-          PruneUnreachable,
-          PruneDeadEnds,
-          PushFinalWeights,
-          CompressTransitions,
-          Minimize,
-      }
-
-      const NWA_PASS_ORDERINGS: &[&[NwaPass]] = &[
-          &[NwaPass::PruneUnreachable, NwaPass::PushFinalWeights, NwaPass::CompressTransitions, NwaPass::PruneDeadEnds, NwaPass::Minimize],
-          &[NwaPass::Minimize, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::PushFinalWeights, NwaPass::CompressTransitions],
-          &[NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::Minimize],
-      ];
-
       impl NWA {
           pub fn simplify(&mut self) {
               if self.states.len() == 0 {
                   return;
               }
 
-              if OPTIMIZE_DEBUG {
-                  self.run_optimization_experiment();
-              } else if BENCHMARK_DEBUG {
+              if BENCHMARK_DEBUG {
                   let initial_states = self.states.len();
                   let mut internal = self.clone();
                   let internal_start = std::time::Instant::now();
@@ -3397,52 +3214,6 @@ messages:
               }
           }
 
-          fn run_optimization_experiment(&mut self) {
-              let initial_clone = self.clone();
-              let initial_states = self.states.len();
-              crate::debug!(4, "[NWA Optimize] Starting experiment with {} states.", initial_states);
-
-              let mut best_result: Option<(NWA, std::time::Duration, usize)> = None;
-
-              for (i, &ordering) in NWA_PASS_ORDERINGS.iter().enumerate() {
-                  let mut nwa = initial_clone.clone();
-                  let start_time = std::time::Instant::now();
-
-                  loop {
-                      let mut changed_in_iteration = false;
-                      for &pass in ordering {
-                          let changed = match pass {
-                              NwaPass::PruneUnreachable => nwa.prune_unreachable(),
-                              NwaPass::PruneDeadEnds => nwa.prune_dead_ends(),
-                              NwaPass::PushFinalWeights => nwa.push_final_weights_along_epsilons(),
-                              NwaPass::CompressTransitions => nwa.compress_transitions(),
-                              NwaPass::Minimize => nwa.minimize_states(),
-                          };
-                          changed_in_iteration |= changed;
-                      }
-                      if !changed_in_iteration {
-                          break;
-                      }
-                  }
-
-                  let elapsed = start_time.elapsed();
-                  let final_states = nwa.states.len();
-
-                  let ordering_str = format!("{:?}", ordering);
-                  crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
-
-                  if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
-                      final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
-                  }) {
-                      best_result = Some((nwa, elapsed, final_states));
-                  }
-              }
-
-              if let Some((best_nwa, _, _)) = best_result {
-                  *self = best_nwa;
-              }
-          }
-
           pub fn simplify_with_rustfst(&mut self) -> bool {
               let min_config = MinimizeConfig::default().with_allow_nondet(true);
               let mut fst = self.to_rustfst();
@@ -3472,9 +3243,17 @@ messages:
               changed |= self.prune_dead_ends();
               crate::debug!(4, "[NWA::simplify] After prune_dead_ends (1) ({:.2?}): {}", start.elapsed(), self.stats());
 
-              start = std::time::Instant::now();
-              changed |= self.minimize_states();
-              crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start.elapsed(), self.stats());
+              let n = self.states.len();
+              if n > 1 {
+                  let start_minimize = std::time::Instant::now();
+                  let partition = minimize_nwa_partition(&self.states);
+                  if partition.num_classes() < n {
+                      crate::debug!(4, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
+                      self.rebuild_from_partition(partition);
+                      changed = true;
+                      crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start_minimize.elapsed(), self.stats());
+                  }
+              }
 
               start = std::time::Instant::now();
               changed |= self.prune_unreachable();
@@ -3485,19 +3264,6 @@ messages:
               crate::debug!(4, "[NWA::simplify] After prune_dead_ends (2) ({:.2?}): {}", start.elapsed(), self.stats());
               crate::debug!(4, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
               changed
-          }
-
-          fn minimize_states(&mut self) -> bool {
-              let n = self.states.len();
-              if n <= 1 {
-                  return false;
-              }
-              let partition = minimize_nwa_partition(&self.states);
-              if partition.num_classes() >= n {
-                  return false;
-              }
-              self.rebuild_from_partition(partition);
-              true
           }
 
           /// Canonicalize NWA transitions by merging parallel transitions:
@@ -3910,8 +3676,13 @@ messages:
     metadata:
       filename: src/precompute4/weighted_automata/simplification.rs
   - user: |-
-      How can we make `DWA::minimize_states` and `NWA::minimize_states` much faster but no less effective? I want really fast performance but also really minimal automata.
-      Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your output.
+      I want to experiment with how the *order* in which we run optimizations affects performance, both in terms of total time and also in terms of the size of the resulting DWA/NWA. But mainly time.
+      Set up a kind of 'framework' for testing pass order. I'll read the results from the console output.
+      Basically, each time e.g. `NWA::simplify` is called it should simplify MANY different times, one time for each candidate ordering.
+      Make some way of specifying candidate orderings ourselves.
+      It should print the results for each ordering.
+      Each ordering should be run like a simplification ordinarily would, i.e. keeping on going until nothing changes for an iteration.
+      I've already added a `OPTIMIZE_DEBUG` flag for this. Note that this behaviour is separate from the `BENCHMARK_DEBUG` which is about comparing our simplification code to rustfst's. It should not be intermingled with it. 
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3931,757 +3702,246 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are two parts, as requested:
+      Of course. Here are the step-by-step instructions to set up a framework for testing different optimization pass orderings, followed by the corresponding git diff.
 
-      1. Step‑by‑step instructions with mathematical reasoning and proofs.
-      2. A `git diff` patch implementing the changes (one diff block for `simplification.rs`).
+      ### Step-by-step Instructions
 
-      ---
+      I will modify `src/precompute4/weighted_automata/simplification.rs` to introduce an optimization framework that is enabled by the `OPTIMIZE_DEBUG` flag. This framework will test various sequences of simplification passes for both `DWA` and `NWA`, report on their performance, and use the best-performing sequence.
 
-      ## 1. Step‑by‑step instructions and mathematical reasoning
+      1.  **File: `src/precompute4/weighted_automata/simplification.rs`**
 
-      ### 1.1. High‑level goal
+          *   **DWA Optimization Framework:**
+              *   Just before `impl DWA`, I will add a new enum `DwaPass` to represent the different simplification passes available for a `DWA`.
+              *   I will also add a constant `DWA_PASS_ORDERINGS`, which is a list of different sequences of these passes to be tested.
+              *   The `DWA::simplify` method will be updated. It will now first check for the `OPTIMIZE_DEBUG` flag. If true, it will execute the new optimization experiment. Otherwise, it will proceed with the existing `BENCHMARK_DEBUG` or standard simplification logic.
+              *   A new private method, `DWA::run_optimization_experiment`, will be added. This function iterates through the defined pass orderings. For each ordering, it repeatedly applies the sequence of passes to a copy of the automaton until no further changes occur (a fixed point). It measures the execution time and the final number of states, printing these results. Finally, it updates the automaton (`self`) to the state that resulted from the best ordering (fewest states, then shortest time).
 
-      We want `DWA::minimize_states` and `NWA::minimize_states` to:
+          *   **NWA Optimization Framework:**
+              *   Similarly, before `impl NWA`, I will add an `NwaPass` enum and an `NWA_PASS_ORDERINGS` constant to define optimization passes and test sequences for `NWA`.
+              *   I will refactor the state minimization logic from `NWA::simplify_internal` into a new helper method, `NWA::minimize_states`, for better code structure and reusability within the optimization framework.
+              *   The `NWA::simplify` method will be updated, mirroring the changes to `DWA::simplify`, to prioritize the optimization experiment when `OPTIMIZE_DEBUG` is enabled.
+              *   The `NWA::simplify_internal` method will be updated to use the new `minimize_states` helper.
+              *   A new private method, `NWA::run_optimization_experiment`, will be added to perform the same kind of pass-ordering experiment for `NWA`s as described for `DWA`s.
 
-      * Run significantly faster (better asymptotic and/or constant factors),
-      * Without changing which states are merged (so the resulting automata are still minimal in the same sense as before).
+      ### Git Diff
 
-      Both `minimize_states` methods are thin wrappers:
-
-      ```rust
-      fn minimize_states(&mut self) -> bool {
-          let n = self.states.len();
-          if n <= 1 {
-              return false;
-          }
-          let partition = minimize_dwa_partition(&self.states);
-          if partition.num_classes() >= n {
-              return false;
-          }
-          self.rebuild_from_partition(partition);
-          true
-      }
-      ```
-
-      and similarly for NWA. So all the "real" work is done in:
-
-      * `minimize_dwa_partition` using `DwaStateSignature::from_state`,
-      * `minimize_nwa_partition` using `NwaStateSignature::from_state`.
-
-      We will speed up these signature computations.
-
-      ---
-
-      ### 1.2. Mathematical semantics in brief
-
-      #### 1.2.1. Weight semantics (bitset semiring)
-
-      `Weight` behaves as a bitset with:
-
-      * Addition: `|` (bitwise OR),
-      * Multiplication: `&` (bitwise AND),
-      * Zero: `Weight::zeros()` (empty bitset),
-      * One: `Weight::all()` (all bits set).
-
-      For a path, the path weight is the bitwise AND (`&`) of the weights along the path, and the weight of all paths is the OR (`|`) over them. Hence:
-
-      * If a transition or final weight is empty, it contributes no bits to any path.
-      * If the weight is `all`, it does not restrict bits.
-
-      Semantically, you can think of each bit position `i` as defining an ordinary boolean automaton: the bit `i` is present in the weight of a word `w` if there exists **some** accepting path where every transition and final on that path has bit `i` set.
-
-      #### 1.2.2. DWA semantics
-
-      For a deterministic weighted automaton (DWA), each state `s` induces a function:
-
-      \[
-      L_s: \Sigma^* \to \text{Weight}.
-      \]
-
-      Informally:
-
-      * For the empty word:  
-        \(L_s(\varepsilon) = \text{final\_weight}(s)\) (or `zeros` if `None`).
-      * For a word \(aw\) (letter `a` then suffix `w`):
-
-        If there is a transition `s -(a,w_s(a))-> t`, then:
-
-        \[
-        L_s(a w) = w_s(a) \,\&\, L_t(w),
-        \]
-
-        otherwise `L_s(aw) = Weight::zeros()`.
-
-      Two DWA states `p` and `q` are **language equivalent** if:
-
-      \[
-      \forall u \in \Sigma^*.\ L_p(u) = L_q(u).
-      \]
-
-      Determinism ensures at most one outgoing edge per (state, label).
-
-      #### 1.2.3. NWA semantics
-
-      For a nondeterministic weighted automaton (NWA), with epsilons and possibly multiple transitions per label, the semantics is:
-
-      * \(L_s(\varepsilon) = \text{final\_weight}(s)\).
-      * Epsilon transitions can be taken without consuming input.
-      * For a word \(aw\),
-
-        \[
-        L_s(a w) = \bigvee_{(s \xrightarrow{a,w'} t)} (w' \,\&\, L_t(w)) \ \vee\ (\text{contributions via epsilons}).
-        \]
-
-      Multiple transitions sum via `|` and compose with successors via `&`.
-
-      ---
-
-      ### 1.3. What the current minimization is doing
-
-      Both `minimize_dwa_partition` and `minimize_nwa_partition` implement an iterative partition refinement:
-
-      1. Start with all states in a single class (partition 1).
-      2. Given a partition `P_k` (mapping each state to a class index), define a **signature** for each state based on:
-         * Its final weight,
-         * For each symbol and each destination class, the **aggregated** weight of all transitions to that class.
-      3. Group states with identical signatures into new classes, producing a refined partition `P_{k+1}`.
-      4. Repeat until `P_{k+1} = P_k`.
-
-      This is a standard "color refinement" / Myhill‑Nerode style algorithm adapted to weighted automata:
-
-      * The aggregation by `(label, dest_class)` is crucial: it matches the semantic equation
-
-        \[
-        L_s(a v) = \bigvee_{C} \left( W_s(a,C) \,\&\, L_C(v) \right),
-        \]
-
-        where \(W_s(a,C)\) is the union of weights of all transitions from `s` with label `a` to states in class `C`.
-
-      * At each step, the partition represents a right‑invariant equivalence relation consistent with the behaviour up to some "depth" in the automaton.
-
-      When the partition stabilizes, we get the coarsest right‑invariant equivalence compatible with final weights and transitions. In the deterministic case (DWA) this is exactly Myhill–Nerode equivalence (and we get a minimal deterministic automaton). In the nondeterministic weighted case (NWA) it's the natural weighted generalization used by Mohri‑style minimization.
-
-      **Key Point:** Changing how signatures are computed is only safe if it does **not** change the partition sequence, i.e., for every iteration, for every partition `P`, the "old" signature and the "new" signature lead to the same equivalence classes.
-
-      ---
-
-      ### 1.4. Hypothesis and improvements for DWA
-
-      #### 1.4.1. Observed inefficiency
-
-      In `DwaStateSignature::from_state` we have:
-
-      * A `BTreeMap<(i16, usize), Weight>` used to aggregate transitions by `(label, dest_class)`.
-      * A traversal of this `BTreeMap` into a `Vec<DwaTransitionSig>`.
-      * A `sort_by` on the vec that uses the label, dest_class, and *also* a hash of the weight.
-
-      This costs, for each state:
-
-      * \(O(\deg(s) \log \deg(s))\) time due to the `BTreeMap` insertions plus an extra `O(\deg(s) \log \deg(s))` from sorting.
-      * A fair amount of allocation and hashing.
-
-      However, **DWA is deterministic**:
-
-      > For each state `s` and label `a`, there is at most one outgoing transition `s -(a,w)-> t`.
-
-      This is evident from the type:
-
-      ```rust
-      struct DWAState {
-          transitions: BTreeMap<i16, StateID>,
-          trans_weights: BTreeMap<i16, Weight>,
-          ...
-      }
-      ```
-
-      `BTreeMap<i16, StateID>` guarantees at most one destination per label.
-
-      Therefore, for each state and label:
-
-      * There can be **at most one** `(label, dest_class)` pair.
-      * The aggregation `"sum all weights for this (label, dest_class)"` is trivial: we never have multiple transitions to aggregate.
-
-      So the expensive aggregation is **pure overhead** in the deterministic case.
-
-      #### 1.4.2. Hypothesis DWA‑H1
-
-      For deterministic DWA states, replacing the aggregated signature
-
-      * "map `(label, dest_class)` → union weight"
-
-      with the simpler signature:
-
-      * "vector of `DwaTransitionSig { label, dest_class, weight }` for each `label`"
-
-      produces **exactly** the same equivalence relation for every partition.
-
-      More concretely:
-
-      * For any partition `P` (represented by `classes: &[usize]`), for any state `s`, the old signature and the new signature agree in the sense:
-
-        > For all states `s` and `t`,  
-        > `old_signature_P(s) == old_signature_P(t)` iff `new_signature_P(s) == new_signature_P(t)`.
-
-      If this holds for every iteration, the whole partition refinement sequence is unchanged, and the final partition is identical: **we get the same minimal DWA as before**, but with much cheaper signatures.
-
-      #### 1.4.3. Proof of Hypothesis DWA‑H1
-
-      Let’s denote:
-
-      * Old signature function: `Sig_old(P, s)`
-      * New signature function: `Sig_new(P, s)`
-
-      Fix an arbitrary partition `P` and state `s`.
-
-      Let’s write:
-
-      * `D_out(s)` = set of all deterministic transitions from `s`:
-
-        \[
-        D_{\text{out}}(s) = \{ (a, \delta(s,a), w_s(a)) \mid s \xrightarrow{a, w_s(a)} \delta(s,a) \}.
-        \]
-
-      Because the automaton is deterministic, for any `a` there is at most one such triple.
-
-      Old signature:
-
-      * `Sig_old(P, s).outgoing` is constructed by:
-        * For each `(a, t, w)` in `D_out(s)`:
-          * Let `C = classes[t]`.
-          * Add contribution to `agg[(a, C)]` via `agg[(a,C)] |= w`.
-        * Convert the resulting `agg` map into a sorted vector of triples `((a, C), W(a,C))` where `W(a,C)` is the union of all `w` for those transitions.
-
-      But because for each `(s, a)` there is **at most one** transition `(a, t, w)`, for any fixed `s` and label `a`:
-
-      * There is at most one `t` and at most one `w`.
-      * Hence for each key `(a, classes[t])`, `agg[(a, classes[t])]` is either:
-        * Not present (no transition on `a`), or
-        * Equal to exactly `w` (a single transition).
-
-      So in fact, for DWA:
-
-      \[
-      \forall s,\forall a,\forall C\;: \#\{ (a,t,w)\in D_{\text{out}}(s) \mid classes[t]=C \} \le 1.
-      \]
-
-      Therefore, in the deterministic case, `agg` is simply the direct mapping:
-
-      \[
-      \text{keys}(agg) = \{ (a, classes[t]) \mid (a,t,w)\in D_{\text{out}}(s)\},
-      \]
-      \[
-      agg[(a, classes[t])] = w_s(a).
-      \]
-
-      So we can define a simpler mapping:
-
-      * `Sig_new(P, s).outgoing` is the vector:
-
-        \[
-        \bigl[(a, classes[t], w_s(a)) \mid (a,t,w_s(a)) \in D_{\text{out}}(s)\bigr],
-        \]
-
-        iterated in sorted order over `a` (which is exactly how iterating `st.transitions` behaves).
-
-      It follows immediately:
-
-      * There is a one‑to‑one correspondence between entries in `Sig_old(P, s).outgoing` and entries in `Sig_new(P, s).outgoing`. They have exactly the same triples `(label, dest_class, weight)`.
-
-      Hence, for any s:
-
-      \[
-      Sig_{\text{old}}(P,s) = Sig_{\text{new}}(P,s)
-      \]
-
-      as data, up to the small difference that the old implementation also sorted by a hash of `weight` as a tie‑breaker, but here there are no keys sharing the same `(label,dest_class)` key, so there are no ties to break.
-
-      Now for any two states `s` and `t`:
-
-      \[
-      Sig_{\text{old}}(P,s) = Sig_{\text{old}}(P,t) \quad\Leftrightarrow\quad Sig_{\text{new}}(P,s) = Sig_{\text{new}}(P,t).
-      \]
-
-      Therefore, the partition refinement induced by `Sig_old` is identical to that induced by `Sig_new`. Every iteration produces the same `class_of` array. Thus:
-
-      * `minimize_dwa_partition`’s result is unchanged.
-      * Consequently `DWA::minimize_states` merges **exactly** the same states.
-
-      #### 1.4.4. Complexity improvement for DWA
-
-      Per iteration, the old implementation does, per state:
-
-      * \(O(\deg(s) \log \deg(s))\) tree inserts into `agg`,
-      * plus \(O(\deg(s) \log \deg(s))\) for sorting the outgoing signatures.
-
-      The new implementation:
-
-      * Iterates directly over `st.transitions` (a `BTreeMap`, but we only *read* it),
-      * For each entry, does a constant‑time lookup in `classes[dest]` and `st.trans_weights` and pushes into a `Vec`.
-
-      So per state:
-
-      * `O(\deg(s))` time to build the outgoing signature.
-      * No extra log‑factor overhead.
-
-      Over the whole automaton in one iteration:
-
-      * Old: \(O(M \log D)\) where \(M\) is the number of transitions and \(D\) a typical out‑degree.
-      * New: \(O(M)\).
-
-      Overall, minimization becomes \(O(kM)\) instead of \(O(kM \log D)\), where \(k` is the number of refinement rounds (typically small). This can be a **large constant‑factor and asymptotic improvement** for large automata.
-
-      ---
-
-      ### 1.5. Hypothesis and improvements for NWA
-
-      For NWA we must be more careful:
-
-      * The automaton is **nondeterministic**, `st.transitions` is a `BTreeMap<i16, Vec<(NWAStateID, Weight)>>`; there may be multiple transitions out of a state with the same label and different destinations/weights.
-      * Aggregation by `(label, dest_class)` is semantically **essential** because language semantics depend only on the union of all weights to each equivalence class, not on how that union is distributed among individual states within the same class.
-
-      So we **keep** the aggregation logic:
-
-      ```rust
-      let mut temp: BTreeMap<(ArcLabel, usize), Weight> = BTreeMap::new();
-      ...
-      temp.entry((label, classes[dest]))
-          .and_modify(|acc| *acc |= w)
-          .or_insert(w.clone());
-      ```
-
-      But after that, the code does:
-
-      ```rust
-      let mut outgoing = Vec::with_capacity(temp.len());
-      for ((label, dest_class), weight) in temp {
-          ...
-          outgoing.push(NwaTransitionSig { label, dest_class, weight });
-      }
-
-      outgoing.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-      ```
-
-      This sorting is redundant:
-
-      * `temp` is a `BTreeMap` keyed by `(ArcLabel, usize)`; iteration over it yields entries in strictly increasing key order.
-      * `ArcLabel`’s derived `Ord` orders variants first by variant (`Eps` < `Label(_)`), then, for `Label(i16)`, by the numeric `i16`.
-      * The `sort_key` used in the sort is:
-
-        ```rust
-        fn sort_key(&self) -> (u8, i16, usize, u64) {
-            let label_tag = match self.label {
-                ArcLabel::Eps => 0,
-                ArcLabel::Label(_) => 1,
-            };
-            let label_val = match self.label {
-                ArcLabel::Eps => 0,
-                ArcLabel::Label(v) => v,
-            };
-            let w_hash = hash_value(&self.weight);
-            (label_tag, label_val, self.dest_class, w_hash)
-        }
-        ```
-
-        The BTreeMap’s key ordering corresponds to the `(label_tag, label_val, dest_class)` prefix; the extra `w_hash` component is only for tie‑breaking when multiple items have identical label and dest_class.
-
-      * But by construction, `temp` has **at most one** entry per `(ArcLabel, dest_class)` key; all transitions with that label and destination class have been aggregated into a single `Weight`. So there are no such ties.
-
-      Therefore, iterating over `temp` directly already yields a **canonical order**:
-
-      * States with the same aggregated mapping `(label,dest_class) → weight` will produce identical sequences `outgoing` without any additional sort.
-
-      So we can safely remove the `outgoing.sort_by(...)` in `NwaStateSignature::from_state`.
-
-      #### 1.5.1. Hypothesis NWA‑H1
-
-      Replacing:
-
-      * "Append to `outgoing` in `BTreeMap` iteration order, then sort by `sort_key`"
-
-      by:
-
-      * "Append to `outgoing` exactly in `BTreeMap` iteration order, no explicit sort"
-
-      produces the **same equivalence** on signatures.
-
-      Proof sketch:
-
-      * Let `K` be the set of keys `(ArcLabel, usize)` present in `temp`.
-      * Let us denote `temp_ordered = [(k_1, w_1), ..., (k_m,w_m)]` as the sequence produced by iterating `temp` (this is sorted by `k_i`, i.e., `(ArcLabel, dest_class)`).
-      * For different states `s` and `t`:
-
-        * They have equal `temp` maps iff they have the same key set `K` with the same value for each key.
-        * If their `temp` maps are equal, then `temp_ordered` is identical for both.
-        * Thus their `outgoing` vecs (constructed before any sort) are identical.
-
-      * Sorting `outgoing` by `sort_key` is a pure permutation that depends only on the contents of `outgoing`. If all states with equal `temp` produce the same `outgoing` before sorting, they clearly remain equal after sorting. Conversely, if two states differ in their `temp`, they will differ in their `outgoing` vec even without sorting.
-
-      Thus:
-
-      \[
-      \forall P,\forall s,t.\ Sig_{\text{old}}(P,s) = Sig_{\text{old}}(P,t) \iff Sig_{\text{new}}(P,s) = Sig_{\text{new}}(P,t),
-      \]
-
-      where `Sig_old` sorts, `Sig_new` does not. The partition refinement is unchanged, and so is the resulting minimal NWA.
-
-      #### 1.5.2. Complexity improvement for NWA
-
-      For each state, the old code:
-
-      * Constructs `temp` in \(O(d \log d)\) time where `d` is the number of outgoing transitions, then
-      * Performs a full `sort_by` on `outgoing` in \(O(|K| \log |K|)\) time, where `|K| ≤ d`.
-
-      The new code:
-
-      * Still builds `temp` (the semantically necessary part),
-      * But omits the sorting step.
-
-      So:
-
-      * We save an `O(|K|\log |K|)` per state, which is a substantial constant factor for states with many outgoing edges.
-      * As with DWA, we keep **exactly** the same minimal states.
-
-      ---
-
-      ### 1.6. Concrete step‑by‑step code edits
-
-      Now we describe the exact edits to apply to `src/precompute4/weighted_automata/simplification.rs`.
-
-      #### 1.6.1. Edit `DwaStateSignature::from_state`
-
-      1. Open `src/precompute4/weighted_automata/simplification.rs`.
-      2. Locate the implementation of `DwaStateSignature::from_state`:
-
-         ```rust
-         impl DwaStateSignature {
-             fn from_state(state_id: StateID, states: &DWAStates, classes: &[usize]) -> Self {
-                 let st = &states[state_id];
-
-                 // Aggregate transitions by (label, dest_class), summing (unioning) their weights.
-                 // This is semantically justified since in the bitset semiring we have:
-                 //   (w1 & x) | (w2 & x) = (w1 | w2) & x
-                 // so multiple parallel transitions to the same equivalence class under the same
-                 // label are equivalent to a single transition whose weight is the union.
-                 let mut agg: BTreeMap<(i16, usize), Weight> = BTreeMap::new();
-                 for (&label, &dest) in &st.transitions {
-                     let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
-                     if w.is_empty() {
-                         continue;
-                     }
-                     let dest_class = classes[dest];
-                     let key = (label, dest_class);
-                     agg.entry(key)
-                         .and_modify(|acc| *acc |= &w)
-                         .or_insert(w);
-                 }
-
-                 let mut outgoing = Vec::with_capacity(agg.len());
-                 for ((label, dest_class), weight) in agg {
-                     if !weight.is_empty() {
-                         outgoing.push(DwaTransitionSig { label, dest_class, weight });
-                     }
-                 }
-                 outgoing.sort_by(|a, b| {
-                     a.label
-                         .cmp(&b.label)
-                         .then_with(|| a.dest_class.cmp(&b.dest_class))
-                         .then_with(|| hash_value(&a.weight).cmp(&hash_value(&b.weight)))
-                 });
-                 DwaStateSignature {
-                     final_weight: st.final_weight.clone(),
-                     outgoing,
-                 }
-             }
-         }
-         ```
-
-      3. Replace the entire body of `from_state` with a simpler deterministic version:
-
-         * Remove the `agg` `BTreeMap` and the `outgoing.sort_by` call.
-         * Iterate directly over `st.transitions` (which is already ordered by label).
-         * Use `classes[dest]` and `st.trans_weights` to produce a vector of `DwaTransitionSig`.
-
-         The new version should be:
-
-         ```rust
-         impl DwaStateSignature {
-             fn from_state(state_id: StateID, states: &DWAStates, classes: &[usize]) -> Self {
-                 let st = &states[state_id];
-
-                 // For a DWA, there is at most one transition per (state, label).
-                 // This means we never have to aggregate multiple transitions with the
-                 // same (label, dest_class): each label contributes at most one
-                 // (label, dest_class, weight) triple to the signature.
-                 let mut outgoing = Vec::with_capacity(st.transitions.len());
-                 for (&label, &dest) in &st.transitions {
-                     let w = st
-                         .trans_weights
-                         .get(&label)
-                         .cloned()
-                         .unwrap_or_else(Weight::all);
-                     if w.is_empty() {
-                         continue;
-                     }
-                     let dest_class = classes[dest];
-                     outgoing.push(DwaTransitionSig {
-                         label,
-                         dest_class,
-                         weight: w,
-                     });
-                 }
-
-                 // Iteration over the BTreeMap `transitions` yields labels in a
-                 // canonical sorted order, so `outgoing` is canonical without any
-                 // additional sorting.
-                 DwaStateSignature {
-                     final_weight: st.final_weight.clone(),
-                     outgoing,
-                 }
-             }
-         }
-         ```
-
-      This change is mathematically safe (by the determinism argument above) and removes the `BTreeMap` aggregation and the expensive sort.
-
-      #### 1.6.2. Edit `NwaStateSignature::from_state`
-
-      1. In the same file, locate `NwaStateSignature::from_state`:
-
-         ```rust
-         impl NwaStateSignature {
-             fn from_state(state_id: NWAStateID, states: &NWAStates, classes: &[usize]) -> Self {
-                 let st = &states[state_id];
-                 // Aggregate transitions by (label, dest_class), summing (unioning) their weights.
-                 // This matches the semantic equation:
-                 //   L_s(a v) = ⋁_C ( W_s(a, C) & L_C(v) )
-                 // where W_s(a, C) is the union of weights of all transitions s -a,w-> t with t in class C.
-                 // Using aggregated weights per (label, dest_class) gives a right-invariant equivalence
-                 // that is exactly language-preserving for the bitset-weight semantics.
-                 let mut temp: BTreeMap<(ArcLabel, usize), Weight> = BTreeMap::new();
-
-                 // Epsilon transitions
-                 for &(dest, ref w) in &st.epsilons {
-                     if w.is_empty() {
-                         continue;
-                     }
-                     let key = (ArcLabel::Eps, classes[dest]);
-                     temp.entry(key)
-                         .and_modify(|acc| *acc |= w)
-                         .or_insert(w.clone());
-                 }
-
-                 // Labeled transitions
-                 for (&lbl, targets) in &st.transitions {
-                     let label = ArcLabel::Label(lbl);
-                     for &(dest, ref w) in targets {
-                         if w.is_empty() {
-                             continue;
-                         }
-                         let key = (label, classes[dest]);
-                         temp.entry(key)
-                             .and_modify(|acc| *acc |= w)
-                             .or_insert(w.clone());
-                     }
-                 }
-
-                 let mut outgoing = Vec::with_capacity(temp.len());
-                 for ((label, dest_class), weight) in temp {
-                     if !weight.is_empty() {
-                         outgoing.push(NwaTransitionSig {
-                             label,
-                             dest_class,
-                             weight,
-                         });
-                     }
-                 }
-
-                 outgoing.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-
-                 NwaStateSignature {
-                     final_weight: st.final_weight.clone(),
-                     outgoing,
-                 }
-             }
-         }
-         ```
-
-      2. Remove the `outgoing.sort_by` call and add a comment noting that `temp`’s iteration order is already canonical. The new version should be:
-
-         ```rust
-         impl NwaStateSignature {
-             fn from_state(state_id: NWAStateID, states: &NWAStates, classes: &[usize]) -> Self {
-                 let st = &states[state_id];
-                 // Aggregate transitions by (label, dest_class), summing (unioning) their weights.
-                 // This matches the semantic equation:
-                 //   L_s(a v) = ⋁_C ( W_s(a, C) & L_C(v) )
-                 // where W_s(a, C) is the union of weights of all transitions s -a,w-> t with t in class C.
-                 // Using aggregated weights per (label, dest_class) gives a right-invariant equivalence
-                 // that is exactly language-preserving for the bitset-weight semantics.
-                 let mut temp: BTreeMap<(ArcLabel, usize), Weight> = BTreeMap::new();
-
-                 // Epsilon transitions
-                 for &(dest, ref w) in &st.epsilons {
-                     if w.is_empty() {
-                         continue;
-                     }
-                     let key = (ArcLabel::Eps, classes[dest]);
-                     temp.entry(key)
-                         .and_modify(|acc| *acc |= w)
-                         .or_insert(w.clone());
-                 }
-
-                 // Labeled transitions
-                 for (&lbl, targets) in &st.transitions {
-                     let label = ArcLabel::Label(lbl);
-                     for &(dest, ref w) in targets {
-                         if w.is_empty() {
-                             continue;
-                         }
-                         let key = (label, classes[dest]);
-                         temp.entry(key)
-                             .and_modify(|acc| *acc |= w)
-                             .or_insert(w.clone());
-                     }
-                 }
-
-                 let mut outgoing = Vec::with_capacity(temp.len());
-                 for ((label, dest_class), weight) in temp {
-                     if !weight.is_empty() {
-                         outgoing.push(NwaTransitionSig {
-                             label,
-                             dest_class,
-                             weight,
-                         });
-                     }
-                 }
-
-                 // The `temp` BTreeMap is keyed by `(ArcLabel, dest_class)` and is
-                 // iterated in sorted key order, so `outgoing` is already in a
-                 // canonical order. No extra sorting is needed.
-                 NwaStateSignature {
-                     final_weight: st.final_weight.clone(),
-                     outgoing,
-                 }
-             }
-         }
-         ```
-
-      This preserves the semantics of the signatures but avoids an unnecessary `O(d log d)` sort per state, providing a noticeable speedup for NWA minimization.
-
-      ---
-
-      ## 2. Git diff patch
-
-      Below is the unified diff for `src/precompute4/weighted_automata/simplification.rs` implementing the changes described above.
+      Here is the git diff with the described changes.
 
       ```diff
       diff --git a/src/precompute4/weighted_automata/simplification.rs b/src/precompute4/weighted_automata/simplification.rs
+      index 03683f2..168853a 100644
       --- a/src/precompute4/weighted_automata/simplification.rs
       +++ b/src/precompute4/weighted_automata/simplification.rs
-      @@ -31,35 +31,31 @@
-       struct DwaStateSignature {
-           final_weight: Option<Weight>,
-           outgoing: Vec<DwaTransitionSig>,
+      @@ -142,12 +142,34 @@
+           trans: BTreeMap<i16, (StateID, Weight)>,
        }
        
-       impl DwaStateSignature {
-           fn from_state(state_id: StateID, states: &DWAStates, classes: &[usize]) -> Self {
-               let st = &states[state_id];
-       
-      -        // Aggregate transitions by (label, dest_class), summing (unioning) their weights.
-      -        // This is semantically justified since in the bitset semiring we have:
-      -        //   (w1 & x) | (w2 & x) = (w1 | w2) & x
-      -        // so multiple parallel transitions to the same equivalence class under the same
-      -        // label are equivalent to a single transition whose weight is the union.
-      -        let mut agg: BTreeMap<(i16, usize), Weight> = BTreeMap::new();
-      -        for (&label, &dest) in &st.transitions {
-      -            let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
-      -            if w.is_empty() {
-      -                continue;
-      -            }
-      -            let dest_class = classes[dest];
-      -            let key = (label, dest_class);
-      -            agg.entry(key)
-      -                .and_modify(|acc| *acc |= &w)
-      -                .or_insert(w);
-      -        }
-      -
-      -        let mut outgoing = Vec::with_capacity(agg.len());
-      -        for ((label, dest_class), weight) in agg {
-      -            if !weight.is_empty() {
-      -                outgoing.push(DwaTransitionSig { label, dest_class, weight });
-      -            }
-      -        }
-      -        outgoing.sort_by(|a, b| {
-      -            a.label
-      -                .cmp(&b.label)
-      -                .then_with(|| a.dest_class.cmp(&b.dest_class))
-      -                .then_with(|| hash_value(&a.weight).cmp(&hash_value(&b.weight)))
-      -        });
-      +        // For a DWA, there is at most one transition per (state, label).
-      +        // This means we never have to aggregate multiple transitions with the
-      +        // same (label, dest_class): each label contributes at most one
-      +        // (label, dest_class, weight) triple to the signature.
-      +        let mut outgoing = Vec::with_capacity(st.transitions.len());
-      +        for (&label, &dest) in &st.transitions {
-      +            let w = st
-      +                .trans_weights
-      +                .get(&label)
-      +                .cloned()
-      +                .unwrap_or_else(Weight::all);
-      +            if w.is_empty() {
-      +                continue;
-      +            }
-      +            let dest_class = classes[dest];
-      +            outgoing.push(DwaTransitionSig {
-      +                label,
-      +                dest_class,
-      +                weight: w,
-      +            });
-      +        }
-      +        // Iteration over the BTreeMap `transitions` yields labels in a
-      +        // canonical sorted order, so `outgoing` is canonical without any
-      +        // additional sorting.
-               DwaStateSignature {
-                   final_weight: st.final_weight.clone(),
-                   outgoing,
-      @@ -362,7 +358,7 @@
-       struct NwaStateSignature {
-           final_weight: Option<Weight>,
-           outgoing: Vec<NwaTransitionSig>,
-       }
-       
-       impl NwaStateSignature {
-      @@ -401,17 +397,16 @@
-                       temp.entry(key)
-                           .and_modify(|acc| *acc |= w)
-                           .or_insert(w.clone());
-                   }
+      +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+      +enum DwaPass {
+      +    PruneUnreachable,
+      +    PruneDeadEnds,
+      +    PushWeights,
+      +    Minimize,
+      +}
+      +
+      +const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
+      +    &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::Minimize],
+      +    &[DwaPass::Minimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
+      +    &[DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::Minimize],
+      +];
+      +
+       impl DWA {
+           pub fn simplify(&mut self) {
+               if self.states.len() == 0 {
+                   return;
                }
        
-               let mut outgoing = Vec::with_capacity(temp.len());
-               for ((label, dest_class), weight) in temp {
-                   if !weight.is_empty() {
-                       outgoing.push(NwaTransitionSig {
-                           label,
-                           dest_class,
-                           weight,
-                       });
-                   }
-               }
-      -
-      -        outgoing.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-      -
-      +        // The `temp` BTreeMap is keyed by `(ArcLabel, dest_class)` and is
-      +        // iterated in sorted key order, so `outgoing` is already in a
-      +        // canonical order. No extra sorting is needed.
-               NwaStateSignature {
-                   final_weight: st.final_weight.clone(),
-                   outgoing,
+      -        if BENCHMARK_DEBUG {
+      +        if OPTIMIZE_DEBUG {
+      +            self.run_optimization_experiment();
+      +        } else if BENCHMARK_DEBUG {
+                   let initial_states = self.states.len();
+                   let mut internal = self.clone();
+                   let internal_start = std::time::Instant::now();
+      @@ -180,6 +202,48 @@
                }
            }
+       
+      +    fn run_optimization_experiment(&mut self) {
+      +        let initial_clone = self.clone();
+      +        let initial_states = self.states.len();
+      +        crate::debug!(4, "[DWA Optimize] Starting experiment with {} states.", initial_states);
+      +
+      +        let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;
+      +
+      +        for (i, &ordering) in DWA_PASS_ORDERINGS.iter().enumerate() {
+      +            let mut dwa = initial_clone.clone();
+      +            let start_time = std::time::Instant::now();
+      +
+      +            loop {
+      +                let mut changed_in_iteration = false;
+      +                for &pass in ordering {
+      +                    let changed = match pass {
+      +                        DwaPass::PruneUnreachable => dwa.prune_unreachable(),
+      +                        DwaPass::PruneDeadEnds => dwa.prune_dead_ends(),
+      +                        DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
+      +                        DwaPass::Minimize => dwa.minimize_states(),
+      +                    };
+      +                    changed_in_iteration |= changed;
+      +                }
+      +                if !changed_in_iteration {
+      +                    break;
+      +                }
+      +            }
+      +
+      +            let elapsed = start_time.elapsed();
+      +            let final_states = dwa.states.len();
+      +
+      +            let ordering_str = format!("{:?}", ordering);
+      +            crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
+      +
+      +            if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+      +                final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
+      +            }) {
+      +                best_result = Some((dwa, elapsed, final_states));
+      +            }
+      +        }
+      +
+      +        if let Some((best_dwa, _, _)) = best_result {
+      +            *self = best_dwa;
+      +        }
+      +    }
+      +
+           fn simplify_with_rustfst(&mut self) -> bool {
+               let min_config = MinimizeConfig::default();
+               let mut fst = self.to_rustfst();
+      @@ -582,12 +646,36 @@
+           trans: BTreeMap<i16, BTreeMap<NWAStateID, Weight>>,
        }
+       
+      +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+      +enum NwaPass {
+      +    PruneUnreachable,
+      +    PruneDeadEnds,
+      +    PushFinalWeights,
+      +    CompressTransitions,
+      +    Minimize,
+      +}
+      +
+      +const NWA_PASS_ORDERINGS: &[&[NwaPass]] = &[
+      +    &[NwaPass::PruneUnreachable, NwaPass::PushFinalWeights, NwaPass::CompressTransitions, NwaPass::PruneDeadEnds, NwaPass::Minimize],
+      +    &[NwaPass::Minimize, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::PushFinalWeights, NwaPass::CompressTransitions],
+      +    &[NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::Minimize],
+      +];
+      +
+       impl NWA {
+           pub fn simplify(&mut self) {
+               if self.states.len() == 0 {
+                   return;
+               }
+       
+      -        if BENCHMARK_DEBUG {
+      +        if OPTIMIZE_DEBUG {
+      +            self.run_optimization_experiment();
+      +        } else if BENCHMARK_DEBUG {
+                   let initial_states = self.states.len();
+                   let mut internal = self.clone();
+                   let internal_start = std::time::Instant::now();
+      @@ -622,6 +710,48 @@
+               }
+           }
+       
+      +    fn run_optimization_experiment(&mut self) {
+      +        let initial_clone = self.clone();
+      +        let initial_states = self.states.len();
+      +        crate::debug!(4, "[NWA Optimize] Starting experiment with {} states.", initial_states);
+      +
+      +        let mut best_result: Option<(NWA, std::time::Duration, usize)> = None;
+      +
+      +        for (i, &ordering) in NWA_PASS_ORDERINGS.iter().enumerate() {
+      +            let mut nwa = initial_clone.clone();
+      +            let start_time = std::time::Instant::now();
+      +
+      +            loop {
+      +                let mut changed_in_iteration = false;
+      +                for &pass in ordering {
+      +                    let changed = match pass {
+      +                        NwaPass::PruneUnreachable => nwa.prune_unreachable(),
+      +                        NwaPass::PruneDeadEnds => nwa.prune_dead_ends(),
+      +                        NwaPass::PushFinalWeights => nwa.push_final_weights_along_epsilons(),
+      +                        NwaPass::CompressTransitions => nwa.compress_transitions(),
+      +                        NwaPass::Minimize => nwa.minimize_states(),
+      +                    };
+      +                    changed_in_iteration |= changed;
+      +                }
+      +                if !changed_in_iteration {
+      +                    break;
+      +                }
+      +            }
+      +
+      +            let elapsed = start_time.elapsed();
+      +            let final_states = nwa.states.len();
+      +
+      +            let ordering_str = format!("{:?}", ordering);
+      +            crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
+      +
+      +            if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+      +                final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
+      +            }) {
+      +                best_result = Some((nwa, elapsed, final_states));
+      +            }
+      +        }
+      +
+      +        if let Some((best_nwa, _, _)) = best_result {
+      +            *self = best_nwa;
+      +        }
+      +    }
+      +
+           pub fn simplify_with_rustfst(&mut self) -> bool {
+               let min_config = MinimizeConfig::default().with_allow_nondet(true);
+               let mut fst = self.to_rustfst();
+      @@ -651,17 +781,9 @@
+               changed |= self.prune_dead_ends();
+               crate::debug!(4, "[NWA::simplify] After prune_dead_ends (1) ({:.2?}): {}", start.elapsed(), self.stats());
+       
+      -        let n = self.states.len();
+      -        if n > 1 {
+      -            let start_minimize = std::time::Instant::now();
+      -            let partition = minimize_nwa_partition(&self.states);
+      -            if partition.num_classes() < n {
+      -                crate::debug!(4, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
+      -                self.rebuild_from_partition(partition);
+      -                changed = true;
+      -                crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start_minimize.elapsed(), self.stats());
+      -            }
+      -        }
+      +        start = std::time::Instant::now();
+      +        changed |= self.minimize_states();
+      +        crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start.elapsed(), self.stats());
+       
+               start = std::time::Instant::now();
+               changed |= self.prune_unreachable();
+      @@ -674,6 +796,19 @@
+               changed
+           }
+       
+      +    fn minimize_states(&mut self) -> bool {
+      +        let n = self.states.len();
+      +        if n <= 1 {
+      +            return false;
+      +        }
+      +        let partition = minimize_nwa_partition(&self.states);
+      +        if partition.num_classes() >= n {
+      +            return false;
+      +        }
+      +        self.rebuild_from_partition(partition);
+      +        true
+      +    }
+      +
+           /// Canonicalize NWA transitions by merging parallel transitions:
+           ///  - For each state and epsilon edge, merge multiple (to, w) by unioning weights per `to`.
+           ///  - For each state, label, and destination, merge multiple (label, to, w) by unioning weights.
+
       ```
     metadata:
   - user: |
@@ -4693,8 +3953,300 @@ messages:
       Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
     metadata:
-  - user: 'Changes committed with message: "Perf: Optimize DWA/NWA state signature
-      computation by removing redundant aggregation/sorting and adding max iteration
-      checks"'
+  - user: 'Changes committed with message: "Add optimization pass ordering experiment
+      framework for DWA and NWA when OPTIMIZE_DEBUG is enabled"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Make it so that if a certain number of iterations is exceeded, it's abandoned.
+      Report whether this happened when printing results.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to add an iteration limit to your optimization framework, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      I will modify `src/precompute4/weighted_automata/simplification.rs` to prevent the optimization experiments from running indefinitely.
+
+      1.  **File: `src/precompute4/weighted_automata/simplification.rs`**
+
+          *   First, I'll add a new constant, `MAX_OPTIMIZE_ITERATIONS`, near the top of the file. This will serve as the iteration limit for the simplification loops. A value of `20` should be a safe upper bound.
+
+          *   Next, in the `DWA::run_optimization_experiment` method:
+              *   I will introduce an `iterations` counter and a `timed_out` boolean flag for each ordering test.
+              *   The inner `loop` will be updated to break and set `timed_out = true` if the `iterations` counter exceeds `MAX_OPTIMIZE_ITERATIONS`.
+              *   The debug output will be modified to report if an ordering timed out.
+              *   The logic for selecting the best result will be updated to disqualify any ordering that timed out.
+
+          *   Finally, I will apply the exact same changes to the `NWA::run_optimization_experiment` method to ensure it also benefits from the iteration limit.
+
+      ### Git Diff
+
+      Here is the git diff with the described changes.
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/simplification.rs b/src/precompute4/weighted_automata/simplification.rs
+      index 168853a..5781604 100644
+      --- a/src/precompute4/weighted_automata/simplification.rs
+      +++ b/src/precompute4/weighted_automata/simplification.rs
+      @@ -7,6 +7,8 @@
+       use std::collections::hash_map::DefaultHasher;
+       use rustfst::algorithms::{minimize_with_config, MinimizeConfig};
+       
+      +const MAX_OPTIMIZE_ITERATIONS: usize = 20;
+      +
+       #[derive(Clone, Debug)]
+       struct Partition {
+           class_of: Vec<usize>,
+      @@ -183,11 +185,20 @@
+               for (i, &ordering) in DWA_PASS_ORDERINGS.iter().enumerate() {
+                   let mut dwa = initial_clone.clone();
+                   let start_time = std::time::Instant::now();
+      +            let mut iterations = 0;
+      +            let mut timed_out = false;
+       
+                   loop {
+      +                if iterations >= MAX_OPTIMIZE_ITERATIONS {
+      +                    timed_out = true;
+      +                    break;
+      +                }
+      +                iterations += 1;
+      +
+                       let mut changed_in_iteration = false;
+                       for &pass in ordering {
+                           let changed = match pass {
+                               DwaPass::PruneUnreachable => dwa.prune_unreachable(),
+      @@ -206,11 +217,12 @@
+                   let final_states = dwa.states.len();
+       
+                   let ordering_str = format!("{:?}", ordering);
+      -            crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
+      -
+      -            if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+      +            let timeout_str = if timed_out { " (TIMED OUT)" } else { "" };
+      +            crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
+      +
+      +            if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+                       final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
+                   }) {
+                       best_result = Some((dwa, elapsed, final_states));
+                   }
+               }
+       
+               if let Some((best_dwa, _, _)) = best_result {
+                   *self = best_dwa;
+               }
+           }
+       
+           fn simplify_with_rustfst(&mut self) -> bool {
+               let min_config = MinimizeConfig::default();
+               let mut fst = self.to_rustfst();
+      @@ -720,11 +732,20 @@
+               for (i, &ordering) in NWA_PASS_ORDERINGS.iter().enumerate() {
+                   let mut nwa = initial_clone.clone();
+                   let start_time = std::time::Instant::now();
+      +            let mut iterations = 0;
+      +            let mut timed_out = false;
+       
+                   loop {
+      +                if iterations >= MAX_OPTIMIZE_ITERATIONS {
+      +                    timed_out = true;
+      +                    break;
+      +                }
+      +                iterations += 1;
+      +
+                       let mut changed_in_iteration = false;
+                       for &pass in ordering {
+                           let changed = match pass {
+                               NwaPass::PruneUnreachable => nwa.prune_unreachable(),
+                               NwaPass::PruneDeadEnds => nwa.prune_dead_ends(),
+                               NwaPass::PushFinalWeights => nwa.push_final_weights_along_epsilons(),
+      @@ -742,11 +763,12 @@
+                   let final_states = nwa.states.len();
+       
+                   let ordering_str = format!("{:?}", ordering);
+      -            crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
+      -
+      -            if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+      +            let timeout_str = if timed_out { " (TIMED OUT)" } else { "" };
+      +            crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
+      +
+      +            if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+                       final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
+                   }) {
+                       best_result = Some((nwa, elapsed, final_states));
+                   }
+               }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/simplification.rs
+      Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
+    metadata:
+  - user: 'Changes committed with message: "Add iteration limit to DWA/NWA optimization
+      experiments and report timeouts"'
+    metadata:
+  - user: |-
+      Diff of src/precompute4/weighted_automata/simplification.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Also report in such cases *which* passes continued to change the NWA/DWA.
+      This is useful. It lets us know where to focus.
+    metadata:
+  - assistant: |-
+      Of course. Reporting which passes are still causing changes when a timeout occurs is a great idea for diagnostics. Here are the step-by-step instructions and the corresponding git diff to implement this.
+
+      ### Step-by-step Instructions
+
+      I will modify `src/precompute4/weighted_automata/simplification.rs` to track and report the active passes upon timeout for both `DWA` and `NWA` optimization experiments.
+
+      1.  **File: `src/precompute4/weighted_automata/simplification.rs`**
+
+          *   **DWA Experiment Enhancement:**
+              *   In the `DWA::run_optimization_experiment` method, I will introduce a new variable, `last_changing_passes`, before the main simplification `loop`. This vector will store the passes that made changes in the most recent iteration.
+              *   Inside the `loop`, another vector, `current_changing_passes`, will be used to track changes for the current iteration.
+              *   For each pass that is run, if it returns `true` (indicating it changed the automaton), the pass will be added to `current_changing_passes`.
+              *   At the end of each iteration, if any changes occurred, `last_changing_passes` will be updated with the contents of `current_changing_passes`. If the automaton has stabilized (no changes), `last_changing_passes` will be cleared.
+              *   Finally, the debug message for a timeout will be updated to include the list of passes that were still active in the last iteration before the timeout.
+
+          *   **NWA Experiment Enhancement:**
+              *   I will apply the exact same logic to the `NWA::run_optimization_experiment` method. It will also track `last_changing_passes` and `current_changing_passes` (of type `NwaPass`) and report them in the timeout message.
+
+      This will give you valuable insight into which optimization passes are failing to converge in complex cases.
+
+      ### Git Diff
+
+      Here is the git diff with the described changes.
+
+      ```diff
+      diff --git a/src/precompute4/weighted_automata/simplification.rs b/src/precompute4/weighted_automata/simplification.rs
+      index 5781604..1500d4c 100644
+      --- a/src/precompute4/weighted_automata/simplification.rs
+      +++ b/src/precompute4/weighted_automata/simplification.rs
+      @@ -188,21 +188,31 @@
+                   let mut dwa = initial_clone.clone();
+                   let start_time = std::time::Instant::now();
+                   let mut iterations = 0;
+                   let mut timed_out = false;
+      +            let mut last_changing_passes: Vec<DwaPass> = Vec::new();
+       
+                   loop {
+                       if iterations >= MAX_OPTIMIZE_ITERATIONS {
+                           timed_out = true;
+                           break;
+                       }
+                       iterations += 1;
+       
+                       let mut changed_in_iteration = false;
+      +                let mut current_changing_passes: Vec<DwaPass> = Vec::new();
+                       for &pass in ordering {
+                           let changed = match pass {
+                               DwaPass::PruneUnreachable => dwa.prune_unreachable(),
+                               DwaPass::PruneDeadEnds => dwa.prune_dead_ends(),
+                               DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
+                               DwaPass::Minimize => dwa.minimize_states(),
+                           };
+      +                    if changed {
+      +                        current_changing_passes.push(pass);
+      +                    }
+                           changed_in_iteration |= changed;
+                       }
+                       if !changed_in_iteration {
+      +                    last_changing_passes.clear();
+                           break;
+      +                } else {
+      +                    last_changing_passes = current_changing_passes;
+                       }
+                   }
+       
+      @@ -210,7 +220,11 @@
+                   let final_states = dwa.states.len();
+       
+                   let ordering_str = format!("{:?}", ordering);
+      -            let timeout_str = if timed_out { " (TIMED OUT)" } else { "" };
+      +            let timeout_str = if timed_out {
+      +                format!(" (TIMED OUT, changing: {:?})", last_changing_passes)
+      +            } else {
+      +                "".to_string()
+      +            };
+                   crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
+       
+                   if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+      @@ -737,24 +751,34 @@
+                   let mut nwa = initial_clone.clone();
+                   let start_time = std::time::Instant::now();
+                   let mut iterations = 0;
+                   let mut timed_out = false;
+      +            let mut last_changing_passes: Vec<NwaPass> = Vec::new();
+       
+                   loop {
+                       if iterations >= MAX_OPTIMIZE_ITERATIONS {
+                           timed_out = true;
+                           break;
+                       }
+                       iterations += 1;
+       
+                       let mut changed_in_iteration = false;
+      +                let mut current_changing_passes: Vec<NwaPass> = Vec::new();
+                       for &pass in ordering {
+                           let changed = match pass {
+                               NwaPass::PruneUnreachable => nwa.prune_unreachable(),
+                               NwaPass::PruneDeadEnds => nwa.prune_dead_ends(),
+                               NwaPass::PushFinalWeights => nwa.push_final_weights_along_epsilons(),
+                               NwaPass::CompressTransitions => nwa.compress_transitions(),
+                               NwaPass::Minimize => nwa.minimize_states(),
+                           };
+      +                    if changed {
+      +                        current_changing_passes.push(pass);
+      +                    }
+                           changed_in_iteration |= changed;
+                       }
+                       if !changed_in_iteration {
+      +                    last_changing_passes.clear();
+                           break;
+      +                } else {
+      +                    last_changing_passes = current_changing_passes;
+                       }
+                   }
+       
+      @@ -762,7 +786,11 @@
+                   let final_states = nwa.states.len();
+       
+                   let ordering_str = format!("{:?}", ordering);
+      -            let timeout_str = if timed_out { " (TIMED OUT)" } else { "" };
+      +            let timeout_str = if timed_out {
+      +                format!(" (TIMED OUT, changing: {:?})", last_changing_passes)
+      +            } else {
+      +                "".to_string()
+      +            };
+                   crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
+       
+                   if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/precompute4/weighted_automata/simplification.rs
+      Applying patch to 'src/precompute4/weighted_automata/simplification.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/weighted_automata/simplification.rs.
+    metadata:
+  - user: 'Changes committed with message: "Report active passes on timeout in DWA/NWA
+      optimization experiments for better diagnostics"'
     metadata:
 ...
