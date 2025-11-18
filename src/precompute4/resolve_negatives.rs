@@ -73,11 +73,8 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWA
 }
 
 pub fn remove_negative_transitions(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
-    for (stid, st) in nwa.states.0.iter_mut().enumerate() {
-        if !source_states_filter.contains(&stid) {
-            continue;
-        }
-        st.transitions.retain(|&label, _| !is_negative_symbol(label));
+    for &sid in source_states_filter {
+        nwa.states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
     }
 }
 
