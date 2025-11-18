@@ -2,7 +2,7 @@ use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 type Code = i16;
@@ -50,7 +50,7 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
 }
 
 pub fn apply_cancellations(nwa: &mut NWA) {
-    let epsilons_to_add = compute_cancellations(&nwa.states);
+    let epsilons_to_add = compute_cancellations(&nwa.states, &(0..nwa.states.len()).collect());
     crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
     for (from, to, w) in epsilons_to_add {
         nwa.states.add_epsilon(from, to, w);
@@ -113,7 +113,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
 }
 
-fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Weight)> {
+fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
     let n = states.len();
 
     let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
@@ -234,6 +234,7 @@ fn compute_cancellations(states: &NWAStates) -> Vec<(NWAStateID, NWAStateID, Wei
             result.push((from, to, w));
         }
     }
+    result.retain(|(from, _, _)| source_states_filter.contains(from));
     result
 }
 
