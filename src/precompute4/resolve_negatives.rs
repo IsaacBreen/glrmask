@@ -57,8 +57,8 @@ pub fn apply_cancellations(nwa: &mut NWA, source_states_filter: &HashSet<NWAStat
     }
 }
 
-pub fn apply_finality_fixpoint(nwa: &mut NWA) {
-    let final_fix = compute_finality_fixpoint(&nwa.states);
+pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
+    let final_fix = compute_finality_fixpoint(&nwa.states, source_states_filter);
     for sid in 0..nwa.states.len() {
         if final_fix[sid].is_empty() {
             continue;
@@ -72,7 +72,7 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
     }
 }
 
-pub fn remove_negative_transitions(nwa: &mut NWA) {
+pub fn remove_negative_transitions(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
     for st in &mut nwa.states.0 {
         st.transitions.retain(|&label, _| !is_negative_symbol(label));
     }
@@ -238,8 +238,7 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
     result
 }
 
-fn compute_finality_fixpoint(states: &NWAStates) -> Vec<Weight> {
-    let n = states.len();
+fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
     let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
     let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
 
