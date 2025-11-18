@@ -31,6 +31,15 @@ struct EbnfToken {
     span: Span,
 }
 
+impl From<ParseError> for String {
+    fn from(e: ParseError) -> Self {
+        format!(
+            "Parse error at byte range {}-{}: {}",
+            e.span.start, e.span.end, e.message
+        )
+    }
+}
+
 fn get_token_regex() -> &'static Regex {
     static TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
     TOKEN_REGEX.get_or_init(|| {
@@ -113,6 +122,7 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
     Ok(tokens)
 }
 
+#[derive(Debug)]
 pub(super) struct EbnfParseResult {
     pub grammar_rules: Vec<(String, GrammarExpr)>,
     pub ignore_symbol_name: Option<String>,
