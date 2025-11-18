@@ -76,30 +76,43 @@ struct EbnfToken {
     span: Span,
 }
 
-impl From<ParseError> for String {
-    fn from(e: ParseError) -> Self {
-        let mut out = format!(
-            "Parse error at line {}, column {} (byte range {}-{}): {}\n",
-            e.line, e.column, e.span.start, e.span.end, e.message
-        );
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Human-friendly summary line
+        writeln!(f, "error: EBNF parse error: {}", self.message)?;
 
-        if !e.line_text.is_empty() {
-            out.push_str("  -->\n");
-            out.push_str("   | ");
-            out.push_str(&e.line_text);
-            out.push('\n');
-            out.push_str("   | ");
-            let prefix: String = e
+        // Location line
+        write!(
+            f,
+            " --> line {}, column {} (byte range {}-{})",
+            self.line, self.column, self.span.start, self.span.end
+        )?;
+
+        // If we captured the offending line, show it with a caret marker.
+        if !self.line_text.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "  |")?;
+            writeln!(f, "  | {}", self.line_text)?;
+            write!(f, "  | ")?;
+            let prefix: String = self
                 .line_text
                 .chars()
-                .take(e.column.saturating_sub(1))
+                .take(self.column.saturating_sub(1))
                 .map(|c| if c == '\t' { '\t' } else { ' ' })
                 .collect();
-            out.push_str(&prefix);
-            out.push('^');
+            write!(f, "{}", prefix)?;
+            write!(f, "^")?;
         }
 
-        out
+        Ok(())
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+impl From<ParseError> for String {
+    fn from(e: ParseError) -> Self {
+        e.to_string()
     }
 }
 
@@ -176,10 +189,24 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
                 span: Span { start: m.start(), end: m.end() },
             });
         } else if let Some(e) = cap.name("error") {
-            let mut message = format!("Unknown token: {}", e.as_str());
-            if e.as_str() == ":" && source[e.start()..].starts_with("::=") {
-                message.push_str(" (did you mean '::=' for a rule definition?)");
+            let err_text = e.as_str();
+            let mut message = format!("Unknown token: {}", err_text);
+
+            if err_text == ":" {
+                let rest = &source[e.start()..];
+                if rest.starts_with("::=") {
+                    message.push_str(" (did you mean '::=' for a rule definition?)");
+                } else if rest.starts_with(":=") {
+                    message.push_str(
+                        " (rule definitions use '::='; did you mean '::=' instead of ':='?)",
+                    );
+                } else {
+                    message.push_str(
+                        " (':' is not a valid standalone token; rule definitions must use '::=')",
+                    );
+                }
             }
+
             return Err(ParseError::new(
                 source,
                 Span { start: e.start(), end: e.end() },

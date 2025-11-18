@@ -1036,6 +1036,7 @@ impl GrammarDefinition {
         let content = fs::read_to_string(path)
             .map_err(|e| format!("Failed to read EBNF file '{}': {}", path, e))?;
         Self::from_ebnf(&content)
+            .map_err(|e| format!("Failed to parse EBNF file '{}':\n{}", path, e))
     }
 
 
