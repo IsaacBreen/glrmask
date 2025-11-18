@@ -1,5 +1,6 @@
 import os
 import re
+import argparse
 
 def generate_diff_grammar(source_path: str, grammar_path: str):
     """
@@ -81,7 +82,31 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
         print(f"Error writing grammar file: {e}")
 
 
+def main():
+    """Command-line interface to generate the diff grammar."""
+    parser = argparse.ArgumentParser(
+        description="Generates an EBNF grammar that validates a 'git diff'-like format for a specific source file."
+    )
+    parser.add_argument(
+        "source_path",
+        help="The path to the input file to base the grammar on."
+    )
+    parser.add_argument(
+        "-o", "--output",
+        dest="grammar_path",
+        help="The path where the generated .ebnf grammar will be saved. "
+             "If not provided, it defaults to the source file's path with an '.ebnf' extension."
+    )
+    args = parser.parse_args()
+
+    source_path = args.source_path
+    grammar_path = args.grammar_path
+
+    if not grammar_path:
+        grammar_path = os.path.splitext(source_path)[0] + ".ebnf"
+
+    generate_diff_grammar(source_path, grammar_path)
+
+
 if __name__ == "__main__":
-    this_script_path = os.path.abspath(__file__)
-    output_grammar_path = os.path.splitext(this_script_path)[0] + ".ebnf"
-    generate_diff_grammar(this_script_path, output_grammar_path)
+    main()
