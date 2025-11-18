@@ -280,8 +280,11 @@ impl DWA {
             DwaPass::PushWeights,
             DwaPass::PruneUnreachable,
         ];
+        let mut last_changing_passes: Vec<DwaPass> = vec![];
+        let mut converged = false;
 
         for _ in 0..MAX_OPTIMIZE_ITERATIONS {
+            let mut current_changing_passes = vec![];
             let mut changed_in_iteration = false;
             for &pass in ordering {
                 let pass_changed = match pass {
@@ -290,13 +293,25 @@ impl DWA {
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::Minimize => self.minimize_states(),
                 };
+                if pass_changed {
+                    current_changing_passes.push(pass);
+                }
                 changed_in_iteration |= pass_changed;
             }
 
             total_changed |= changed_in_iteration;
             if !changed_in_iteration {
+                converged = true;
                 break;
             }
+            last_changing_passes = current_changing_passes;
+        }
+
+        if !converged {
+            eprintln!(
+                "DWA simplification did not converge after {} iterations. Still changing: {:?}",
+                MAX_OPTIMIZE_ITERATIONS, last_changing_passes
+            );
         }
 
         crate::debug!(6, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
@@ -899,8 +914,11 @@ impl NWA {
             NwaPass::PruneUnreachable,
             NwaPass::PruneDeadEnds,
         ];
+        let mut last_changing_passes: Vec<NwaPass> = vec![];
+        let mut converged = false;
 
         for _ in 0..MAX_OPTIMIZE_ITERATIONS {
+            let mut current_changing_passes = vec![];
             let mut changed_in_iteration = false;
             for &pass in ordering {
                 let pass_changed = match pass {
@@ -910,13 +928,25 @@ impl NWA {
                     NwaPass::CompressTransitions => self.compress_transitions(),
                     NwaPass::Minimize => self.minimize_states(),
                 };
+                if pass_changed {
+                    current_changing_passes.push(pass);
+                }
                 changed_in_iteration |= pass_changed;
             }
 
             total_changed |= changed_in_iteration;
             if !changed_in_iteration {
+                converged = true;
                 break;
             }
+            last_changing_passes = current_changing_passes;
+        }
+
+        if !converged {
+            eprintln!(
+                "NWA simplification did not converge after {} iterations. Still changing: {:?}",
+                MAX_OPTIMIZE_ITERATIONS, last_changing_passes
+            );
         }
 
         crate::debug!(6, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
