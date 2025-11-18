@@ -174,21 +174,34 @@ impl DWA {
     }
 
     fn simplify_internal(&mut self) -> bool {
-        crate::debug!(6, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         let mut changed = false;
+        let mut start;
+
+        start = std::time::Instant::now();
         changed |= self.prune_unreachable();
-        crate::debug!(6, "[DWA::simplify] After prune_unreachable (1): {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After prune_unreachable (1) ({:.2?}): {}", start.elapsed(), self.stats());
+
+        start = std::time::Instant::now();
         changed |= self.prune_dead_ends();
-        crate::debug!(6, "[DWA::simplify] After prune_dead_ends (1): {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After prune_dead_ends (1) ({:.2?}): {}", start.elapsed(), self.stats());
+
+        start = std::time::Instant::now();
         changed |= self.push_weights_into_transitions_and_finals();
-        crate::debug!(6, "[DWA::simplify] After pushing weights: {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After pushing weights ({:.2?}): {}", start.elapsed(), self.stats());
+
+        start = std::time::Instant::now();
         changed |= self.minimize_states();
-        crate::debug!(6, "[DWA::simplify] After minimizing: {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After minimizing ({:.2?}): {}", start.elapsed(), self.stats());
+
+        start = std::time::Instant::now();
         changed |= self.prune_unreachable();
-        crate::debug!(6, "[DWA::simplify] After prune_unreachable (2): {}", self.stats());
+        crate::debug!(4, "[DWA::simplify] After prune_unreachable (2) ({:.2?}): {}", start.elapsed(), self.stats());
+
+        start = std::time::Instant::now();
         changed |= self.prune_dead_ends();
-        crate::debug!(6, "[DWA::simplify] After prune_dead_ends (2): {}", self.stats());
-        crate::debug!(6, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
+        crate::debug!(4, "[DWA::simplify] After prune_dead_ends (2) ({:.2?}): {}", start.elapsed(), self.stats());
+        crate::debug!(4, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
         changed
     }
 
@@ -688,37 +701,46 @@ impl NWA {
     }
 
     pub fn simplify_internal(&mut self) -> bool {
-        crate::debug!(6, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         let mut changed = false;
+        let mut start;
+
+        start = std::time::Instant::now();
         changed |= self.prune_unreachable();
-        crate::debug!(6, "[NWA::simplify] After prune_unreachable (1): {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] After prune_unreachable (1) ({:.2?}): {}", start.elapsed(), self.stats());
 
+        start = std::time::Instant::now();
         changed |= self.push_final_weights_along_epsilons();
-        crate::debug!(6, "[NWA::simplify] After pushing final weights along epsilons: {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] After pushing final weights along epsilons ({:.2?}): {}", start.elapsed(), self.stats());
 
+        start = std::time::Instant::now();
         changed |= self.compress_transitions();
-        crate::debug!(6, "[NWA::simplify] After compress_transitions: {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] After compress_transitions ({:.2?}): {}", start.elapsed(), self.stats());
 
+        start = std::time::Instant::now();
         changed |= self.prune_dead_ends();
-        crate::debug!(6, "[NWA::simplify] After prune_dead_ends (1): {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] After prune_dead_ends (1) ({:.2?}): {}", start.elapsed(), self.stats());
 
         let n = self.states.len();
         if n > 1 {
+            let start_minimize = std::time::Instant::now();
             let partition = minimize_nwa_partition(&self.states);
             if partition.num_classes() < n {
-                crate::debug!(6, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
+                crate::debug!(4, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
                 self.rebuild_from_partition(partition);
                 changed = true;
-                crate::debug!(6, "[NWA::simplify] After minimizing: {}", self.stats());
+                crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start_minimize.elapsed(), self.stats());
             }
         }
 
+        start = std::time::Instant::now();
         changed |= self.prune_unreachable();
-        crate::debug!(6, "[NWA::simplify] After prune_unreachable (2): {}", self.stats());
+        crate::debug!(4, "[NWA::simplify] After prune_unreachable (2) ({:.2?}): {}", start.elapsed(), self.stats());
 
+        start = std::time::Instant::now();
         changed |= self.prune_dead_ends();
-        crate::debug!(6, "[NWA::simplify] After prune_dead_ends (2): {}", self.stats());
-        crate::debug!(6, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
+        crate::debug!(4, "[NWA::simplify] After prune_dead_ends (2) ({:.2?}): {}", start.elapsed(), self.stats());
+        crate::debug!(4, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
         changed
     }
 
