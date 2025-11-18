@@ -574,7 +574,7 @@ class Model(GraphProvider):
                                 self._merge_into_queue(queue, final_gss, target_id)
 
         stats.start('get_mask.teardown.final_conversion')
-        original_bitset = self.vocab.internal_bv_to_original(final_mask)
+        original_bitset = self.vocab.internal_bv_to_original(final_mask._bitset)
         original_indices = RangeSetOut.from_indices(original_bitset.to_indices())
         stats.stop('get_mask.teardown.final_conversion')
         stats.stop('get_mask')
@@ -583,6 +583,12 @@ class Model(GraphProvider):
             Stats.get().report(sort_by='alpha')
 
         return original_indices
+
+    def reset(self):
+        """Resets the model state to its initial condition."""
+        initial_acc = PyAcc({}, self.all_internal_llm_tokens_bitset)
+        initial_gss = GSS.from_stacks([([], initial_acc)]).push(self.parser_table.start_state_id)
+        self.state = {self.tokenizer_initial_state: initial_gss}
 
     def finalize(self):
         print("\n--- Final Stats Report from Model ---")

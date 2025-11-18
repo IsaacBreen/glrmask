@@ -48,6 +48,10 @@ class BruteForceRustModel:
 
         return RangeSet.from_indices(allowed_tokens)
 
+    def reset(self):
+        """Resets the model state to its initial condition."""
+        self.constraint_state = ffi.GrammarConstraintState(self.constraint)
+
     def commit(self, token_id: int):
         """Commits a token to the underlying Rust state and records it."""
         self.constraint_state.commit(token_id)

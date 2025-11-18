@@ -247,7 +247,7 @@ class BruteForceModel(GraphProvider):
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(self.parser_table.start_state_id)
         return {self.tokenizer_initial_state: initial_gss}
 
-    def reset_state(self) -> None:
+    def reset(self) -> None:
         self.state = self.make_initial_state()
 
     def clone_sharing_structure(self) -> "BruteForceModel":

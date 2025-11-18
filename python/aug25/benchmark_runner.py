@@ -197,46 +197,10 @@ def print_model_statistics(model, model_name: str):
         print_dist("State Bitset sizes", state_rs_sizes)
     print("-" * 20)
 
-def run_benchmark(args, run_index: int = 0):
+def run_benchmark(args, model, tokens_with_pos, load_time, run_index: int = 0):
     """Main benchmark logic (single model; no baseline/reference in-process)."""
-    print("--- Setting up benchmark environment ---")
-
-    # 1. Load pre-compiled GrammarConstraint
-    print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
-    p = str(args.constraint_file)
-    if p.endswith('.gz'):
-        with gzip.open(p, 'rt', encoding='utf-8') as f:
-            constraint_json_str = f.read()
-    else:
-        constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
-
-    # 2. Extract vocabulary for tokenizer
-    constraint_json = json.loads(constraint_json_str)
-    # The vocabulary maps token strings to integer IDs. We need ID -> token bytes.
-    llm_token_map: tuple[list[int], int] = constraint_json['llm_vocab']['llm_token_map']
-    id_to_token: dict[int, bytes] = {}
-    for token_bytes, token_id in llm_token_map:
-        id_to_token[token_id] = bytes(token_bytes)
-
-    # 3. Load model
-    print(f"Loading model from: {args.model}")
-    ModelClass = load_model_class(args.model)
-    
-    t_start_load = time.perf_counter()
-    model = ModelClass.from_json_string(constraint_json_str)
-    load_time = time.perf_counter() - t_start_load
-    print(f"Model loaded in {load_time:.4f} seconds.")
-
-    if args.print_stats:
-        print_model_statistics(model, args.model.name)
-
-    # 4. Tokenize input code
-    print(f"Loading and tokenizing code from: {args.code}")
-    code_bytes = args.code.read_bytes()
-    tokens_with_pos = greedy_tokenizer(code_bytes, id_to_token)
     token_ids = [t[0] for t in tokens_with_pos]
     token_positions = [(t[1], t[2]) for t in tokens_with_pos]
-    print(f"Tokenized into {len(token_ids)} tokens.")
 
     get_mask_timings: list[float] = []
     commit_timings: list[float] = []
@@ -363,10 +327,58 @@ def main():
         if not p.exists():
             parser.error(f"File not found: {p}")
 
+    # --- Setup: Load model and data once ---
+    print("--- Setting up benchmark environment ---")
+    print(f"Loading model class from: {args.model}")
+    ModelClass = load_model_class(args.model)
+
+    print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+    p = str(args.constraint_file)
+    if p.endswith('.gz'):
+        with gzip.open(p, 'rt', encoding='utf-8') as f:
+            constraint_json_str = f.read()
+    else:
+        constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
+
+    # Initial model load
+    print("Performing initial model load...")
+    t_start_load = time.perf_counter()
+    model = ModelClass.from_json_string(constraint_json_str)
+    load_time = time.perf_counter() - t_start_load
+    print(f"Model loaded in {load_time:.4f} seconds.")
+
+    if args.print_stats:
+        print_model_statistics(model, args.model.name)
+
+    # Tokenize input code once
+    print(f"Loading and tokenizing code from: {args.code}")
+    constraint_json = json.loads(constraint_json_str)
+    llm_token_map: tuple[list[int], int] = constraint_json['llm_vocab']['llm_token_map']
+    id_to_token: dict[int, bytes] = {}
+    for token_bytes, token_id in llm_token_map:
+        id_to_token[token_id] = bytes(token_bytes)
+    code_bytes = args.code.read_bytes()
+    tokens_with_pos = greedy_tokenizer(code_bytes, id_to_token)
+    print(f"Tokenized into {len(tokens_with_pos)} tokens.")
+
+    # --- Run benchmark loop ---
     for i in range(args.repeat):
         if args.repeat > 1:
             print(f"\n--- Running benchmark: Run {i + 1}/{args.repeat} for {args.model.name} ---")
-        run_benchmark(args, run_index=i)
+
+        # For runs after the first, reset or reload the model
+        if i > 0:
+            if hasattr(model, 'reset'):
+                print("Resetting model state for new run.")
+                model.reset()
+            else:
+                print("Model has no reset method, reloading for new run.")
+                t_start_reload = time.perf_counter()
+                model = ModelClass.from_json_string(constraint_json_str)
+                reload_time = time.perf_counter() - t_start_reload
+                print(f"Model reloaded in {reload_time:.4f} seconds.")
+
+        run_benchmark(args, model, tokens_with_pos, load_time, run_index=i)
 
 
 if __name__ == "__main__":

@@ -583,6 +583,12 @@ class Model(GraphProvider):
 
         return original_indices
 
+    def reset(self):
+        """Resets the model state to its initial condition."""
+        initial_acc = PyAcc({}, self.all_internal_llm_tokens_bitset)
+        initial_gss = GSS.from_stacks([([], initial_acc)]).push(self.parser_table.start_state_id)
+        self.state = {self.tokenizer_initial_state: initial_gss}
+
     def finalize(self):
         print("\n--- Final Stats Report from Model ---")
         Stats.get().report(sort_by='alpha')

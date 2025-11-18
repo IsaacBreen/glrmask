@@ -6,7 +6,8 @@ class Model:
     """
     A model that wraps the Rust-native `GrammarConstraintState` to serve as a baseline.
     """
-    def __init__(self, constraint_state: ffi.GrammarConstraintState):
+    def __init__(self, constraint: ffi.GrammarConstraint, constraint_state: ffi.GrammarConstraintState):
+        self.constraint = constraint
         self.constraint_state = constraint_state
         # For compatibility with statistics printer
         self.arena: Dict = {}
@@ -20,7 +21,7 @@ class Model:
         s = ffi.GrammarConstraintState(constraint)
         # s.commit_bytes(b"x")
         # print(f"MASK 2: {s.get_mask()}")
-        return Model(constraint_state)
+        return Model(constraint, constraint_state)
 
     def get_mask(self) -> Bitset:
         """Calls the underlying Rust implementation for get_mask."""
@@ -36,6 +37,10 @@ class Model:
         """Commits a token to the underlying Rust state."""
         # print("Committing token", token_id)
         self.constraint_state.commit(token_id)
+
+    def reset(self):
+        """Resets the model state to its initial condition."""
+        self.constraint_state = ffi.GrammarConstraintState(self.constraint)
 
     def is_end(self, node: int) -> bool:
         # Dummy implementation, not used.
