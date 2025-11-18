@@ -373,7 +373,7 @@ fn compute_finality_fixpoint(
                     }
                 };
 
-                let add = f_s & edge_w;
+                let add = &f_s & edge_w;
                 if add.is_empty() {
                     continue;
                 }
