@@ -182,7 +182,7 @@ class Model(GraphProvider):
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
-        model.id_to_token = {v: bytes(k) for k, v in data['vocab']['llm_token_map']}
+        model.id_to_token = {v: bytes(k) for k, v in data['llm_vocab']['llm_token_map']}
         # Convert possible_matches_cache to RangeSet
         pmc_ffi: Dict[int, Dict[int, ffi.HybridBitset]] = constraint.possible_matches()
         pmc_rs: Dict[int, Dict[int, RangeSet]] = {}

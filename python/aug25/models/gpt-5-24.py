@@ -318,7 +318,7 @@ class Model:
         model.state = {model.tokenizer_initial_state: initial_gss}
 
         # Token maps and caches
-        model.id_to_token = {v: bytes(k) for k, v in data['vocab']['llm_token_map']}
+        model.id_to_token = {v: bytes(k) for k, v in data['llm_vocab']['llm_token_map']}
 
         # Convert possible_matches_cache to FastRangeSet
         pmc_ffi: Dict[int, Dict[int, ffi.HybridBitset]] = constraint.possible_matches()

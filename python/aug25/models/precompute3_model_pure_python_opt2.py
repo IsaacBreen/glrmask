@@ -504,7 +504,7 @@ class Model(GraphProvider):
             all_terminals.add(ignore_terminal_id)
         all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
 
-        id_to_token = {v: bytes(k) for k, v in data['vocab']['llm_token_map']}
+        id_to_token = {v: bytes(k) for k, v in data['llm_vocab']['llm_token_map']}
         # Convert possible_matches_cache to RangeSet
         pmc_ffi: Dict[int, Dict[int, ffi.HybridBitset]] = constraint.possible_matches()
         pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}

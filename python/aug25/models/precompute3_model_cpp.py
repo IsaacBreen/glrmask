@@ -60,7 +60,7 @@ class Model(GraphProvider):
         parser_data = data['parser']  # contains 'start_state_id' and 'stage_7_table'
 
         # Build id_to_token mapping (original LLM token map)
-        model.id_to_token = {int(v): bytes(k) for k, v in data['vocab']['llm_token_map']}
+        model.id_to_token = {int(v): bytes(k) for k, v in data['llm_vocab']['llm_token_map']}
 
         vocab = data.get('precompute3_vocab') or data.get('precompute2_vocab') or data.get('precompute_vocab')
         if vocab:
