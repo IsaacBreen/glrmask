@@ -198,6 +198,7 @@ pub fn compute_first_sets_for_nonterminals(
     nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     crate::debug!(3, "Computing first sets for non-terminals");
+    use std::iter;
     use bimap::BiBTreeMap;
     use std::collections::HashSet;
 
@@ -205,10 +206,7 @@ pub fn compute_first_sets_for_nonterminals(
     let mut nt_map = BiBTreeMap::new();
     let mut all_nts = Vec::new();
     for p in productions {
-        for nt in p
-            .lhs
-            .iter()
-            .chain(p.rhs.iter().filter_map(|s| match s {
+        for nt in iter::once(&p.lhs).chain(p.rhs.iter().filter_map(|s| match s {
                 Symbol::NonTerminal(nt) => Some(nt),
                 _ => None,
             }))

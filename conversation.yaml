@@ -3675,6 +3675,7 @@ local_system:
           nullable_nonterminals: &BTreeSet<NonTerminal>,
       ) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
           crate::debug!(3, "Computing first sets for non-terminals");
+          use std::iter;
           use bimap::BiBTreeMap;
           use std::collections::HashSet;
 
@@ -3682,10 +3683,7 @@ local_system:
           let mut nt_map = BiBTreeMap::new();
           let mut all_nts = Vec::new();
           for p in productions {
-              for nt in p
-                  .lhs
-                  .iter()
-                  .chain(p.rhs.iter().filter_map(|s| match s {
+              for nt in iter::once(&p.lhs).chain(p.rhs.iter().filter_map(|s| match s {
                       Symbol::NonTerminal(nt) => Some(nt),
                       _ => None,
                   }))
@@ -11306,5 +11304,188 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Optimize grammar analysis: Replace iterative
       Nullability, FIRST, and FOLLOW set computations with worklist algorithms"'
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --message-format=json-diagnostic-rendered-ansi --no-run --workspace --profile test
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0599]: no method named `iter` found for struct `NonTerminal` in the current scope
+         --> src/glr/automaton.rs:210:14
+          |
+      208 |           for nt in p
+          |  ___________________-
+      209 | |             .lhs
+      210 | |             .iter()
+          | |             -^^^^ method not found in `NonTerminal`
+          | |_____________|
+          |
+          |
+         ::: src/glr/grammar.rs:8:1
+          |
+        8 |   pub struct NonTerminal(pub String);
+          |   ---------------------- method `iter` not found for this struct
+          |
+          = help: items from traits can only be used if the trait is implemented and in scope
+          = note: the following traits define an item `iter`, perhaps you need to implement one of them:
+                  candidate #1: `Matcher`
+                  candidate #2: `bitflags::traits::Flags`
+
+      error[E0599]: no method named `iter` found for struct `NonTerminal` in the current scope
+         --> src/glr/automaton.rs:210:14
+          |
+      208 |           for nt in p
+          |  ___________________-
+      209 | |             .lhs
+      210 | |             .iter()
+          | |             -^^^^ method not found in `NonTerminal`
+          | |_____________|
+          |
+          |
+         ::: src/glr/grammar.rs:8:1
+          |
+        8 |   pub struct NonTerminal(pub String);
+          |   ---------------------- method `iter` not found for this struct
+          |
+          = help: items from traits can only be used if the trait is implemented and in scope
+          = note: the following traits define an item `iter`, perhaps you need to implement one of them:
+                  candidate #1: `Matcher`
+                  candidate #2: `bitflags::traits::Flags`
+
+      error[E0282]: type annotations needed
+         --> src/glr/automaton.rs:216:24
+          |
+      216 |             if !nt_map.contains_left(nt) {
+          |                        ^^^^^^^^^^^^^ cannot infer type of the type parameter `Q` declared on the method `contains_left`
+      217 |                 let id = all_nts.len();
+      218 |                 nt_map.insert(nt.clone(), id);
+          |                                  ----- type must be known at this point
+          |
+      help: consider specifying the generic argument
+          |
+      216 |             if !nt_map.contains_left::<Q>(nt) {
+          |                                     +++++
+
+      error[E0282]: type annotations needed
+         --> src/glr/automaton.rs:216:24
+          |
+      216 |             if !nt_map.contains_left(nt) {
+          |                        ^^^^^^^^^^^^^ cannot infer type of the type parameter `Q` declared on the method `contains_left`
+      217 |                 let id = all_nts.len();
+      218 |                 nt_map.insert(nt.clone(), id);
+          |                                  ----- type must be known at this point
+          |
+      help: consider specifying the generic argument
+          |
+      216 |             if !nt_map.contains_left::<Q>(nt) {
+          |                                     +++++
+
+      Some errors have detailed explanations: E0282, E0599.
+      For more information about an error, try `rustc --explain E0282`.
+      error: could not compile `sep1` (lib) due to 2 previous errors
+      warning: build failed, waiting for other jobs to finish...
+      Some errors have detailed explanations: E0282, E0599.
+      For more information about an error, try `rustc --explain E0282`.
+      error: could not compile `sep1` (lib test) due to 2 previous errors
+      Process finished with exit code 101
+    metadata:
+  - assistant: |-
+      You've caught a clear mistake in my previous implementation. My apologies. The compiler is correct: I tried to call `.iter()` on a `NonTerminal` struct, which is not a collection. The second error regarding type inference was a direct consequence of the first.
+
+      The goal was to create an iterator that yields the single LHS non-terminal, then chain it with the non-terminals from the RHS. The correct way to create an iterator for a single item is `std::iter::once()`.
+
+      Here is the fix.
+
+      ### Step-by-step edits
+
+      1.  **Open `src/glr/automaton.rs`**.
+      2.  Locate the `compute_first_sets_for_nonterminals` function.
+      3.  Add `use std::iter;` at the beginning of the function body.
+      4.  Find this loop:
+          ```rust
+          for nt in p
+              .lhs
+              .iter()
+              .chain(p.rhs.iter().filter_map(|s| match s {
+          ```
+      5.  Change `p.lhs.iter()` to `iter::once(&p.lhs)`. The corrected loop should look like this:
+          ```rust
+          for nt in iter::once(&p.lhs).chain(p.rhs.iter().filter_map(|s| match s {
+          ```
+
+      This single change corrects both compiler errors.
+
+      ### Git Diffs
+
+      Here is the corresponding git diff for `src/glr/automaton.rs`.
+
+      ```diff
+      --- a/src/glr/automaton.rs
+      +++ b/src/glr/automaton.rs
+      @@ -199,21 +199,18 @@
+           nullable_nonterminals: &BTreeSet<NonTerminal>,
+       ) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
+           crate::debug!(3, "Computing first sets for non-terminals");
+      +    use std::iter;
+           use bimap::BiBTreeMap;
+           use std::collections::HashSet;
+       
+           // 1. Assign integer IDs to non-terminals for performance.
+           let mut nt_map = BiBTreeMap::new();
+           let mut all_nts = Vec::new();
+           for p in productions {
+      -        for nt in p
+      -            .lhs
+      -            .iter()
+      -            .chain(p.rhs.iter().filter_map(|s| match s {
+      +        for nt in iter::once(&p.lhs).chain(p.rhs.iter().filter_map(|s| match s {
+                       Symbol::NonTerminal(nt) => Some(nt),
+                       _ => None,
+                   }))
+               {
+                   if !nt_map.contains_left(nt) {
+                       let id = all_nts.len();
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/automaton.rs
+      Applying patch to 'src/glr/automaton.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/automaton.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Correctly iterate over LHS non-terminal
+      in FIRST set computation"'
     metadata:
 ...
