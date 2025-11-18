@@ -388,7 +388,7 @@ class Model(GraphProvider):
     oracle_mode: bool = True
     oracle_exact_cover_threshold: int = 24
     oracle_debug: bool = True
-    suppress_stats_report: bool = False
+    suppress_stats_report: bool = True
     # Advanced oracle planning tunables
     # Weight of pruning benefit (in units of "node cost") when ordering end nodes
     oracle_prune_weight: float = 1.0

@@ -241,7 +241,7 @@ class Model(GraphProvider):
     ignore_terminal_id: Optional[int]
     original_to_dummy_map: Dict[int, int]
     state: Dict[int, GSS]
-    suppress_stats_report: bool = False
+    suppress_stats_report: bool = True
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
 

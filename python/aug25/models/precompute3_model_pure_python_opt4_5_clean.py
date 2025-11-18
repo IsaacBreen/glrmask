@@ -420,7 +420,7 @@ class Model(GraphProvider):
     state: Dict[int, GSS]
     gm_max_edges: int = 1024
     gm_max_dests: int = 1024
-    suppress_stats_report: bool = False
+    suppress_stats_report: bool = True
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
     node_distance_to_end: Dict[NodeID, int] = field(default_factory=dict)
