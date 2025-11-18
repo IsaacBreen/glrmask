@@ -930,61 +930,70 @@ impl NFA {
 
         while let Some(current_set) = worklist.pop() {
             let current_dfa_state = *dfa_state_map.get(&current_set).unwrap();
-            let mut transition_map: BTreeMap<u8, BTreeSet<usize>> = BTreeMap::new();
 
-            // For each state in the current DFA state, look at the NFA transitions
+            // Group NFA transitions by target states for each character
+            let mut char_transitions: BTreeMap<u8, BTreeSet<usize>> = BTreeMap::new();
             for &state in current_set.iter() {
                 for (input, next_states) in &self.states[state].transitions {
-                    for &next_state in next_states {
-                        transition_map
-                            .entry(input)
-                            .or_insert_with(BTreeSet::new)
-                            .insert(next_state);
-                    }
+                    char_transitions
+                        .entry(input)
+                        .or_default()
+                        .extend(next_states);
                 }
             }
 
-            // For each transition, compute the epsilon closure of the resulting state set
-            for (&input_u8, next_states) in &transition_map {
+            // Now, group characters by the set of NFA states they transition to.
+            // This is the core optimization: many characters might lead to the same set of NFA states.
+            let mut target_to_chars: BTreeMap<BTreeSet<usize>, Vec<u8>> = BTreeMap::new();
+            for (input_char, target_states) in char_transitions {
+                target_to_chars
+                    .entry(target_states)
+                    .or_default()
+                    .push(input_char);
+            }
+
+            // For each unique set of target NFA states, compute the epsilon closure once.
+            for (target_states, chars) in target_to_chars {
                 let mut closure = BTreeSet::new();
-                for &next_state in next_states {
+                for &next_state in &target_states {
                     closure.extend(&epsilon_closures[next_state]);
                 }
                 let frozen_closure = FrozenSet::from_iter(closure.iter().cloned());
 
                 // If this set of states is new, add it as a new DFA state
-                let next_dfa_state = if let Some(&existing_state) =
-                    dfa_state_map.get(&frozen_closure)
-                {
-                    existing_state
-                } else {
-                    let new_state_index = dfa_states.len();
-                    dfa_state_map.insert(frozen_closure.clone(), new_state_index);
-                    worklist.push(frozen_closure.clone());
+                let next_dfa_state =
+                    if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
+                        existing_state
+                    } else {
+                        let new_state_index = dfa_states.len();
+                        dfa_state_map.insert(frozen_closure.clone(), new_state_index);
+                        worklist.push(frozen_closure.clone());
 
-                    // Compute finalizers for the new DFA state
-                    let mut new_finalizers = BTreeSet::new();
-                    let mut new_non_greedy_finalizers = BTreeSet::new();
-                    for &state in closure.iter() {
-                        new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                        new_non_greedy_finalizers
-                            .extend(self.states[state].non_greedy_finalizers.iter().cloned());
-                    }
+                        // Compute finalizers for the new DFA state
+                        let mut new_finalizers = BTreeSet::new();
+                        let mut new_non_greedy_finalizers = BTreeSet::new();
+                        for &state in closure.iter() {
+                            new_finalizers.extend(self.states[state].finalizers.iter().cloned());
+                            new_non_greedy_finalizers
+                                .extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                        }
 
-                    dfa_states.push(DFAState {
-                        transitions: TrieMap::new(),
-                        finalizers: new_finalizers,
-                        possible_future_group_ids: BTreeSet::new(), // Will be computed later
-                        group_id_to_u8set: BTreeMap::new(), // Will be computed later
-                    });
+                        dfa_states.push(DFAState {
+                            transitions: TrieMap::new(),
+                            finalizers: new_finalizers,
+                            possible_future_group_ids: BTreeSet::new(), // Will be computed later
+                            group_id_to_u8set: BTreeMap::new(), // Will be computed later
+                        });
 
-                    new_state_index
-                };
+                        new_state_index
+                    };
 
-                // Insert the transition into the DFA state
-                dfa_states[current_dfa_state]
-                    .transitions
-                    .insert(input_u8, next_dfa_state);
+                // Insert transitions for all characters that lead to this new DFA state
+                for input_u8 in chars {
+                    dfa_states[current_dfa_state]
+                        .transitions
+                        .insert(input_u8, next_dfa_state);
+                }
             }
         }
 
