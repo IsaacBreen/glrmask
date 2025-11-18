@@ -6,7 +6,7 @@ use super::bitset::SimpleBitset;
 pub(crate) const STOCHASTIC_DEBUG: bool = false;
 pub(crate) const DETERMINIZE_DEBUG: bool = false;
 pub(crate) const BENCHMARK_DEBUG: bool = false;
-pub(crate) const OPTIMIZE_DEBUG: bool = true;
+pub(crate) const OPTIMIZE_DEBUG: bool = false;
 
 pub type StateID = usize;
 pub type Weight = SimpleBitset;
