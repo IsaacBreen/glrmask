@@ -252,7 +252,30 @@ impl<'a> EbnfParser<'a> {
 
         while self.tokens.peek().is_some() {
             if self.peek_grammar_op("#") {
-                self.parse_ignore_directive(&mut ignore_symbol_name)?;
+                let directive_span = self.tokens.peek().unwrap().span;
+                self.consume_grammar_op("#")?;
+                self.expect_grammar_op("!")?;
+                self.expect_grammar_op("[")?;
+                if ignore_symbol_name.is_some() {
+                    return Err(ParseError::new(
+                        self.source,
+                        directive_span,
+                        "Duplicate ignore directive found",
+                    ));
+                }
+                let (directive_name, directive_name_span) = self.expect_ident()?;
+                if directive_name != "ignore" {
+                    return Err(ParseError::new(
+                        self.source,
+                        directive_name_span,
+                        format!("Unknown directive: {}", directive_name),
+                    ));
+                }
+                self.expect_grammar_op("(")?;
+                let (symbol_name, _) = self.expect_ident()?;
+                self.expect_grammar_op(")")?;
+                self.expect_grammar_op("]")?;
+                ignore_symbol_name = Some(symbol_name);
             } else {
                 let (rule_name, rule_name_span) = self.expect_ident()?;
                 if seen_names.contains(&rule_name) {
@@ -272,91 +295,6 @@ impl<'a> EbnfParser<'a> {
             grammar_rules: rules,
             ignore_symbol_name,
         })
-    }
-
-    fn parse_ignore_directive(
-        &mut self,
-        ignore_symbol_name: &mut Option<String>,
-    ) -> Result<(), ParseError> {
-        let directive_start_span = self.tokens.peek().unwrap().span;
-        self.consume_grammar_op("#")?;
-
-        // Supported forms:
-        //   #![ignore(symbol)]
-        //   #[ignore(symbol)]
-        //   #ignore symbol
-        //   #ignore(symbol)
-        let symbol_name;
-        if self.peek_grammar_op("!") {
-            // #![ignore(symbol)]
-            self.consume_grammar_op("!")?;
-            self.expect_grammar_op("[")?;
-            let (directive_name, directive_span) = self.expect_ident()?;
-            if directive_name != "ignore" {
-                return Err(ParseError::new(
-                    self.source,
-                    directive_span,
-                    format!("Unknown directive: {}", directive_name),
-                ));
-            }
-            self.expect_grammar_op("(")?;
-            let (name, _) = self.expect_ident()?;
-            self.expect_grammar_op(")")?;
-            self.expect_grammar_op("]")?;
-            symbol_name = name;
-        } else if self.peek_grammar_op("[") {
-            // #[ignore(symbol)] (no '!')
-            self.consume_grammar_op("[")?;
-            let (directive_name, directive_span) = self.expect_ident()?;
-            if directive_name != "ignore" {
-                return Err(ParseError::new(
-                    self.source,
-                    directive_span,
-                    format!("Unknown directive: {}", directive_name),
-                ));
-            }
-            self.expect_grammar_op("(")?;
-            let (name, _) = self.expect_ident()?;
-            self.expect_grammar_op(")")?;
-            self.expect_grammar_op("]")?;
-            symbol_name = name;
-        } else {
-            // Legacy: #ignore symbol or #ignore(symbol)
-            let (directive_name, directive_span) = self.expect_ident()?;
-            if directive_name != "ignore" {
-                return Err(ParseError::new(
-                    self.source,
-                    directive_span,
-                    format!("Unknown directive: {}", directive_name),
-                ));
-            }
-            if self.peek_grammar_op("(") {
-                self.consume_grammar_op("(")?;
-                let (name, _) = self.expect_ident()?;
-                self.expect_grammar_op(")")?;
-                symbol_name = name;
-            } else {
-                let (name, _) = self.expect_ident()?;
-                symbol_name = name;
-            }
-        }
-
-        if ignore_symbol_name.is_some() {
-            return Err(ParseError::new(
-                self.source,
-                directive_start_span,
-                "Duplicate ignore directive found",
-            ));
-        }
-
-        // Allow an optional trailing semicolon for directives so that both
-        // `#![ignore(ws)]` and `#ignore ws;` parse correctly.
-        if self.peek_grammar_op(";") {
-            self.consume_grammar_op(";")?;
-        }
-
-        *ignore_symbol_name = Some(symbol_name);
-        Ok(())
     }
 
     fn parse_grammar_expression(&mut self) -> Result<GrammarExpr, ParseError> {

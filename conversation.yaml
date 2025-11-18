@@ -1,1088 +1,241 @@
 local_system:
   attached_files:
-    - src/interface/ebnf.rs
+    - src/bin/grammar_compiler.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/interface/ebnf.rs: |+
-      use crate::interface::GrammarExpr::CharClass;
-      use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
-      use regex::Regex;
-      use std::collections::HashSet;
-      use std::iter::Peekable;
-      use std::sync::OnceLock;
-      use std::vec::IntoIter;
+    src/bin/grammar_compiler.rs: |
+      use clap::Parser;
+      use flate2::write::GzEncoder;
+      use flate2::Compression;
+      use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig};
+      use sep1::interface::GrammarDefinition;
+      use sep1::json_serialization::JSONConvertible;
+      use sep1::tokenizer::{LLMTokenID, LLMTokenMap};
+      use std::collections::BTreeMap;
+      use std::fs::File;
+      use std::io::{BufReader, BufWriter};
+      use std::path::PathBuf;
+      use std::sync::Arc;
 
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-      struct Span {
-          start: usize,
-          end: usize,
+      /// Compiles a grammar and vocabulary into a GrammarConstraint object.
+      #[derive(Parser, Debug)]
+      #[command(author, version, about, long_about = None)]
+      struct Args {
+          /// Path to the EBNF grammar file.
+          #[arg(short, long)]
+          grammar: PathBuf,
+
+          /// Path to the JSON vocabulary file.
+          /// The file should be a JSON object mapping token strings to integer IDs.
+          #[arg(short, long)]
+          vocab: PathBuf,
+
+          /// Path for the output compressed JSON file (.json.gz).
+          #[arg(short, long)]
+          output: Option<PathBuf>,
+
+          /// Optional: load a precompute0 cache from this file to skip rebuilding Trie0.
+          #[arg(long, value_name = "FILE")]
+          load_precompute0: Option<PathBuf>,
+
+          /// Optional: save the precompute0 stage to this file for reuse.
+          #[arg(long, value_name = "FILE")]
+          save_precompute0: Option<PathBuf>,
+
+          /// If specified, only compute and save the precompute0 cache, then exit.
+          #[arg(long, requires = "save_precompute0", conflicts_with = "output")]
+          precompute0_only: bool,
       }
 
-      #[derive(Debug, Clone, PartialEq)]
-      pub(super) struct ParseError {
-          message: String,
-          span: Span,
-          line: usize,
-          column: usize,
-          line_text: String,
+      fn main() -> Result<(), Box<dyn std::error::Error>> {
+          let args = Args::parse();
+
+          if !args.precompute0_only && args.output.is_none() {
+              return Err("Error: --output is required unless --precompute0-only is specified.".into());
+          }
+
+          // 1. Load and compile the grammar.
+          println!("Loading grammar from: {:?}", args.grammar);
+          let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
+          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
+          println!("Grammar loaded successfully.");
+
+          // 2. Load the vocabulary.
+          println!("Loading vocabulary from: {:?}", args.vocab);
+          let vocab_file = File::open(&args.vocab)?;
+          let reader = BufReader::new(vocab_file);
+          let vocab: BTreeMap<String, usize> = serde_json::from_reader(reader)?;
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id = 0;
+
+          for (token_str, token_id) in vocab {
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(token_id));
+              max_original_llm_token_id = max_original_llm_token_id.max(token_id);
+          }
+          println!("Vocabulary loaded ({} tokens, max ID: {}).", llm_token_map.len(), max_original_llm_token_id);
+
+          // 3. Construct the GrammarConstraint.
+          println!("\nConstructing GrammarConstraint...");
+          let config = GrammarConstraintConfig::default();
+
+          let grammar_constraint = GrammarConstraint::new_from_grammar_definition(
+              Arc::new(grammar_definition),
+              llm_token_map,
+              max_original_llm_token_id,
+              &config,
+          );
+
+          println!("GrammarConstraint constructed successfully.");
+          if let Some(path) = args.save_precompute0.as_ref() {
+              println!("Saving precompute0 cache to: {:?}", path);
+              let output_file = File::create(path)?;
+              let writer = BufWriter::new(output_file);
+              let encoder = GzEncoder::new(writer, Compression::default());
+              encoder.finish()?;
+          }
+
+          if args.precompute0_only {
+              println!("--precompute0-only specified. Exiting after saving cache.");
+              return Ok(());
+          }
+
+          // 4. Save the GrammarConstraint to a compressed file.
+          if let Some(output_path) = args.output {
+              println!("Saving GrammarConstraint to: {:?}", output_path);
+              let output_file = File::create(&output_path)?;
+              let writer = BufWriter::new(output_file);
+              let mut encoder = GzEncoder::new(writer, Compression::default());
+              grammar_constraint.to_writer(&mut encoder)?;
+              encoder.finish()?;
+              println!("Successfully saved constraint to {:?}", output_path);
+          }
+
+          Ok(())
       }
-
-      impl ParseError {
-          fn new(source: &str, span: Span, message: impl Into<String>) -> Self {
-              let (line, column, line_text) = compute_line_info(source, span.start);
-              ParseError {
-                  message: message.into(),
-                  span,
-                  line,
-                  column,
-                  line_text,
-              }
-          }
-      }
-
-      // Compute 1-based line and column numbers and capture the offending line.
-      fn compute_line_info(source: &str, byte_index: usize) -> (usize, usize, String) {
-          let len = source.len();
-          let idx = byte_index.min(len);
-
-          let mut line_start = 0;
-          let mut line = 1;
-
-          for (i, ch) in source.char_indices() {
-              if i >= idx {
-                  break;
-              }
-              if ch == '\n' {
-                  line += 1;
-                  line_start = i + 1;
-              }
-          }
-
-          let line_end = source[line_start..]
-              .find('\n')
-              .map(|off| line_start + off)
-              .unwrap_or(len);
-
-          let line_text = source[line_start..line_end].to_string();
-          let column = source[line_start..idx].chars().count() + 1;
-
-          (line, column, line_text)
-      }
-
-      #[derive(Debug, Clone, PartialEq)]
-      enum EbnfTokenKind {
-          Ident(String),
-          Literal(String),
-          CharClass(String),
-          Op(String),
-      }
-      #[derive(Debug, Clone, PartialEq)]
-      struct EbnfToken {
-          kind: EbnfTokenKind,
-          span: Span,
-      }
-
-      impl std::fmt::Display for ParseError {
-          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-              // Human-friendly summary line
-              writeln!(f, "error: EBNF parse error: {}", self.message)?;
-
-              // Location line
-              write!(
-                  f,
-                  " --> line {}, column {} (byte range {}-{})",
-                  self.line, self.column, self.span.start, self.span.end
-              )?;
-
-              // If we captured the offending line, show it with a caret marker.
-              if !self.line_text.is_empty() {
-                  writeln!(f)?;
-                  writeln!(f, "  |")?;
-                  writeln!(f, "  | {}", self.line_text)?;
-                  write!(f, "  | ")?;
-                  let prefix: String = self
-                      .line_text
-                      .chars()
-                      .take(self.column.saturating_sub(1))
-                      .map(|c| if c == '\t' { '\t' } else { ' ' })
-                      .collect();
-                  write!(f, "{}", prefix)?;
-                  write!(f, "^")?;
-              }
-
-              Ok(())
-          }
-      }
-
-      impl std::error::Error for ParseError {}
-
-      impl From<ParseError> for String {
-          fn from(e: ParseError) -> Self {
-              e.to_string()
-          }
-      }
-
-      fn get_token_regex() -> &'static Regex {
-          static TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
-          TOKEN_REGEX.get_or_init(|| {
-              Regex::new(
-                  r#"(?x)
-              (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
-              (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
-              (?P<charclass>\[([^\]\\()\s]|\\.)*\]) |
-              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.|\#) |
-              (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
-              (?P<ws>\s+) |
-              (?P<error>.)
-              "#,
-              )
-              .unwrap()
-          })
-      }
-
-      fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
-          let mut tokens = Vec::new();
-          for cap in get_token_regex().captures_iter(source) {
-              if let Some(m) = cap.name("ident") {
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::Ident(m.as_str().to_string()),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(m) = cap.name("literal") {
-                  let s = m.as_str();
-                  let content = &s[1..s.len() - 1];
-                  let mut unescaped = String::with_capacity(content.len());
-                  let mut chars = content.chars();
-                  while let Some(c) = chars.next() {
-                      if c == '\\' {
-                          if let Some(escaped_char) = chars.next() {
-                              match escaped_char {
-                                  'n' => unescaped.push('\n'),
-                                  't' => unescaped.push('\t'),
-                                  'r' => unescaped.push('\r'),
-                                  'b' => unescaped.push('\u{0008}'),
-                                  'f' => unescaped.push('\u{000C}'),
-                                  'v' => unescaped.push('\u{000B}'),
-                                  '\\' => unescaped.push('\\'),
-                                  '\'' => unescaped.push('\''),
-                                  '"' => unescaped.push('"'),
-                                  other => unescaped.push(other),
-                              }
-                          } else {
-                              // This case should be prevented by the regex, but as a safeguard:
-                              return Err(ParseError::new(
-                                  source,
-                                  Span { start: m.start(), end: m.end() },
-                                  format!("Literal with dangling escape: {}", s),
-                              ));
-                          }
-                      } else {
-                          unescaped.push(c);
-                      }
-                  }
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::Literal(unescaped),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(m) = cap.name("charclass") {
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::CharClass(m.as_str().to_string()),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(m) = cap.name("op") {
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::Op(m.as_str().to_string()),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(e) = cap.name("error") {
-                  let err_text = e.as_str();
-                  let mut message = format!("Unknown token: {}", err_text);
-
-                  if err_text == ":" {
-                      let rest = &source[e.start()..];
-                      if rest.starts_with("::=") {
-                          message.push_str(" (did you mean '::=' for a rule definition?)");
-                      } else if rest.starts_with(":=") {
-                          message.push_str(
-                              " (rule definitions use '::='; did you mean '::=' instead of ':='?)",
-                          );
-                      } else {
-                          message.push_str(
-                              " (':' is not a valid standalone token; rule definitions must use '::=')",
-                          );
-                      }
-                  }
-
-                  return Err(ParseError::new(
-                      source,
-                      Span { start: e.start(), end: e.end() },
-                      message,
-                  ));
-              }
-              // ws and comment are ignored
-          }
-          Ok(tokens)
-      }
-
-      #[derive(Debug)]
-      pub(super) struct EbnfParseResult {
-          pub grammar_rules: Vec<(String, GrammarExpr)>,
-          pub ignore_symbol_name: Option<String>,
-      }
-
-      pub(super) struct EbnfParser<'a> {
-          source: &'a str,
-          tokens: Peekable<IntoIter<EbnfToken>>,
-      }
-
-      impl<'a> EbnfParser<'a> {
-          pub(super) fn new(source: &'a str) -> Result<Self, ParseError> {
-              let tokens = tokenize(source)?;
-              Ok(EbnfParser {
-                  source,
-                  tokens: tokens.into_iter().peekable(),
-              })
-          }
-
-          fn parse_rule_body(&mut self) -> Result<GrammarExpr, ParseError> {
-              self.expect_grammar_op("::=")?;
-              let expr = self.parse_grammar_expression()?;
-              self.expect_grammar_op(";")?;
-              Ok(expr)
-          }
-
-          pub(super) fn parse(&mut self) -> Result<EbnfParseResult, ParseError> {
-              let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
-              let mut seen_names = HashSet::new();
-              let mut ignore_symbol_name = None;
-
-              while self.tokens.peek().is_some() {
-                  if self.peek_grammar_op("#") {
-                      let directive_span = self.tokens.peek().unwrap().span;
-                      self.consume_grammar_op("#")?;
-                      self.expect_grammar_op("!")?;
-                      self.expect_grammar_op("[")?;
-                      if ignore_symbol_name.is_some() {
-                          return Err(ParseError::new(
-                              self.source,
-                              directive_span,
-                              "Duplicate ignore directive found",
-                          ));
-                      }
-                      let (directive_name, directive_name_span) = self.expect_ident()?;
-                      if directive_name != "ignore" {
-                          return Err(ParseError::new(
-                              self.source,
-                              directive_name_span,
-                              format!("Unknown directive: {}", directive_name),
-                          ));
-                      }
-                      self.expect_grammar_op("(")?;
-                      let (symbol_name, _) = self.expect_ident()?;
-                      self.expect_grammar_op(")")?;
-                      self.expect_grammar_op("]")?;
-                      ignore_symbol_name = Some(symbol_name);
-                  } else {
-                      let (rule_name, rule_name_span) = self.expect_ident()?;
-                      if seen_names.contains(&rule_name) {
-                          return Err(ParseError::new(
-                              self.source,
-                              rule_name_span,
-                              format!("Duplicate rule name: {}", rule_name),
-                          ));
-                      }
-                      seen_names.insert(rule_name.clone());
-                      let rule_expr = self.parse_rule_body()?;
-                      rules.push((rule_name, rule_expr));
-                  }
-              }
-
-              Ok(EbnfParseResult {
-                  grammar_rules: rules,
-                  ignore_symbol_name,
-              })
-          }
-
-          fn parse_grammar_expression(&mut self) -> Result<GrammarExpr, ParseError> {
-              let mut choices = vec![self.parse_grammar_sequence()?];
-              while self.peek_grammar_op("|") {
-                  self.consume_grammar_op("|")?;
-                  choices.push(self.parse_grammar_sequence()?);
-              }
-              if choices.len() == 1 {
-                  Ok(choices.remove(0))
-              } else {
-                  Ok(choice(choices))
-              }
-          }
-
-          fn parse_grammar_sequence(&mut self) -> Result<GrammarExpr, ParseError> {
-              let mut terms = Vec::new();
-              // A sequence can be empty, which is a valid choice in an expression (e.g., `A ::= B | ;`)
-              while self.tokens.peek().is_some()
-                  && !self.peek_grammar_op(")")
-                  && !self.peek_grammar_op("]")
-                  && !self.peek_grammar_op("}")
-                  && !self.peek_grammar_op("|")
-                  && !self.peek_grammar_op(";")
-              {
-                  terms.push(self.parse_grammar_term()?);
-              }
-
-              if terms.len() == 1 {
-                  Ok(terms.remove(0))
-              } else {
-                  Ok(sequence(terms))
-              }
-          }
-
-          fn parse_grammar_term(&mut self) -> Result<GrammarExpr, ParseError> {
-              let factor = self.parse_grammar_factor()?;
-
-              if self.peek_grammar_op("?") {
-                  self.consume_grammar_op("?")?;
-                  Ok(optional(factor))
-              } else if self.peek_grammar_op("*") {
-                  self.consume_grammar_op("*")?;
-                  Ok(repeat(factor))
-              } else if self.peek_grammar_op("+") {
-                  self.consume_grammar_op("+")?;
-                  Ok(sequence(vec![factor.clone(), repeat(factor)]))
-              } else {
-                  Ok(factor)
-              }
-          }
-
-          fn parse_grammar_factor(&mut self) -> Result<GrammarExpr, ParseError> {
-              if self.peek_grammar_op(".") {
-                  self.consume_grammar_op(".")?;
-                  Ok(GrammarExpr::AnyChar)
-              } else if let Some(EbnfToken { kind: EbnfTokenKind::Ident(id), .. }) = self.tokens.peek().cloned() {
-                  self.tokens.next();
-                  Ok(r#ref(&id))
-              } else if let Some(EbnfToken { kind: EbnfTokenKind::Literal(lit), .. }) = self.tokens.peek().cloned() {
-                  self.tokens.next();
-                  Ok(literal(lit.into_bytes()))
-              } else if let Some(EbnfToken { kind: EbnfTokenKind::CharClass(cc), .. }) = self.tokens.peek().cloned() {
-                  self.tokens.next();
-                  Ok(CharClass(cc))
-              } else if self.peek_grammar_op("(") {
-                  self.consume_grammar_op("(")?;
-                  let expr = self.parse_grammar_expression()?;
-                  self.expect_grammar_op(")")?;
-                  Ok(expr)
-              } else if self.peek_grammar_op("[") {
-                  self.consume_grammar_op("[")?;
-                  let expr = self.parse_grammar_expression()?;
-                  self.expect_grammar_op("]")?;
-                  Ok(optional(expr))
-              } else if self.peek_grammar_op("{") {
-                  self.consume_grammar_op("{")?;
-                  let expr = self.parse_grammar_expression()?;
-                  self.expect_grammar_op("}")?;
-                  Ok(repeat(expr))
-              } else {
-                  let (message, span) = if let Some(token) = self.tokens.peek() {
-                      (
-                          format!(
-                              "Expected identifier, literal, group, or '.', found {:?}",
-                              &token.kind
-                          ),
-                          token.span,
-                      )
-                  } else {
-                      (
-                          "Expected identifier, literal, group, or '.', found end of input".to_string(),
-                          self.eof_span(),
-                      )
-                  };
-                  Err(ParseError::new(self.source, span, message))
-              }
-          }
-
-          // --- Parser Helpers ---
-
-          fn eof_span(&self) -> Span {
-              let end = self.source.len();
-              Span { start: end, end }
-          }
-
-          fn peek_grammar_op(&mut self, op: &str) -> bool {
-              matches!(self.tokens.peek(), Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op)
-          }
-
-          fn consume_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
-              if self.peek_grammar_op(op) {
-                  self.tokens.next();
-                  Ok(())
-              } else {
-                  let (message, span) = if let Some(token) = self.tokens.peek() {
-                      (
-                          format!("Expected op '{}', found {:?}", op, &token.kind),
-                          token.span,
-                      )
-                  } else {
-                      (
-                          format!("Expected op '{}', found end of input", op),
-                          self.eof_span(),
-                      )
-                  };
-                  Err(ParseError::new(self.source, span, message))
-              }
-          }
-
-          fn expect_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
-              match self.tokens.next() {
-                  Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op => Ok(()),
-                  Some(other) => Err(ParseError::new(
-                      self.source,
-                      other.span,
-                      format!("Expected op '{}', found {:?}", op, other.kind),
-                  )),
-                  None => Err(ParseError::new(
-                      self.source,
-                      self.eof_span(),
-                      format!("Expected op '{}', found end of input", op),
-                  )),
-              }
-          }
-
-          fn expect_ident(&mut self) -> Result<(String, Span), ParseError> {
-              match self.tokens.next() {
-                  Some(EbnfToken { kind: EbnfTokenKind::Ident(id), span }) => Ok((id, span)),
-                  Some(other) => Err(ParseError::new(
-                      self.source,
-                      other.span,
-                      format!("Expected identifier, found {:?}", other.kind),
-                  )),
-                  None => Err(ParseError::new(
-                      self.source,
-                      self.eof_span(),
-                      "Expected identifier, found end of input",
-                  )),
-              }
-          }
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use super::*;
-          use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarDefinition};
-
-          #[test]
-          fn test_ebnf_parser_simple() {
-              let ebnf = r#"
-                  s ::= a b;
-                  a ::= 'a' | ;
-                  b ::= c*;
-                  c ::= 'c'?;
-              "#;
-              let mut parser = EbnfParser::new(ebnf).unwrap();
-              let rules = parser.parse().unwrap().grammar_rules;
-
-              let expected_rules = vec![
-                  ("s".to_string(), sequence(vec![r#ref("a"), r#ref("b")])),
-                  (
-                      "a".to_string(),
-                      choice(vec![literal(b"a".to_vec()), sequence(vec![])]),
-                  ),
-                  ("b".to_string(), repeat(r#ref("c"))),
-                  ("c".to_string(), optional(literal(b"c".to_vec()))),
-              ];
-
-              assert_eq!(rules, expected_rules);
-          }
-
-          #[should_panic]
-          #[test]
-          fn test_ebnf_parser_error_with_span() {
-              let ebnf = r#"
-                  s ::= a b;
-                  a ::= 'a' | ;
-                  b ::= c*;
-                  c ::= 'c'??;
-              "#;
-              let mut parser = EbnfParser::new(ebnf).unwrap();
-              let err = parser.parse().unwrap_err();
-              assert!(err
-                  .message
-                  .contains("Expected identifier, literal, group, or '.'"));
-              assert_eq!(err.span.start, 82);
-          }
-      }
-
   prev_file_contents:
-    src/interface/ebnf.rs: |+
-      use crate::interface::GrammarExpr::CharClass;
-      use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
-      use regex::Regex;
-      use std::collections::HashSet;
-      use std::iter::Peekable;
-      use std::sync::OnceLock;
-      use std::vec::IntoIter;
+    src/bin/grammar_compiler.rs: |
+      use clap::Parser;
+      use flate2::write::GzEncoder;
+      use flate2::Compression;
+      use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig};
+      use sep1::interface::GrammarDefinition;
+      use sep1::json_serialization::JSONConvertible;
+      use sep1::tokenizer::{LLMTokenID, LLMTokenMap};
+      use std::collections::BTreeMap;
+      use std::fs::File;
+      use std::io::{BufReader, BufWriter};
+      use std::path::PathBuf;
+      use std::sync::Arc;
 
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-      struct Span {
-          start: usize,
-          end: usize,
+      /// Compiles a grammar and vocabulary into a GrammarConstraint object.
+      #[derive(Parser, Debug)]
+      #[command(author, version, about, long_about = None)]
+      struct Args {
+          /// Path to the EBNF grammar file.
+          #[arg(short, long)]
+          grammar: PathBuf,
+
+          /// Path to the JSON vocabulary file.
+          /// The file should be a JSON object mapping token strings to integer IDs.
+          #[arg(short, long)]
+          vocab: PathBuf,
+
+          /// Path for the output compressed JSON file (.json.gz).
+          #[arg(short, long)]
+          output: Option<PathBuf>,
+
+          /// Optional: load a precompute0 cache from this file to skip rebuilding Trie0.
+          #[arg(long, value_name = "FILE")]
+          load_precompute0: Option<PathBuf>,
+
+          /// Optional: save the precompute0 stage to this file for reuse.
+          #[arg(long, value_name = "FILE")]
+          save_precompute0: Option<PathBuf>,
+
+          /// If specified, only compute and save the precompute0 cache, then exit.
+          #[arg(long, requires = "save_precompute0", conflicts_with = "output")]
+          precompute0_only: bool,
       }
 
-      #[derive(Debug, Clone, PartialEq)]
-      pub(super) struct ParseError {
-          message: String,
-          span: Span,
-          line: usize,
-          column: usize,
-          line_text: String,
+      fn run() -> Result<(), Box<dyn std::error::Error>> {
+          let args = Args::parse();
+
+          if !args.precompute0_only && args.output.is_none() {
+              return Err("Error: --output is required unless --precompute0-only is specified.".into());
+          }
+
+          // 1. Load and compile the grammar.
+          println!("Loading grammar from: {:?}", args.grammar);
+          let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
+          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
+          println!("Grammar loaded successfully.");
+
+          // 2. Load the vocabulary.
+          println!("Loading vocabulary from: {:?}", args.vocab);
+          let vocab_file = File::open(&args.vocab)?;
+          let reader = BufReader::new(vocab_file);
+          let vocab: BTreeMap<String, usize> = serde_json::from_reader(reader)?;
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id = 0;
+
+          for (token_str, token_id) in vocab {
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(token_id));
+              max_original_llm_token_id = max_original_llm_token_id.max(token_id);
+          }
+          println!("Vocabulary loaded ({} tokens, max ID: {}).", llm_token_map.len(), max_original_llm_token_id);
+
+          // 3. Construct the GrammarConstraint.
+          println!("\nConstructing GrammarConstraint...");
+          let config = GrammarConstraintConfig::default();
+
+          let grammar_constraint = GrammarConstraint::new_from_grammar_definition(
+              Arc::new(grammar_definition),
+              llm_token_map,
+              max_original_llm_token_id,
+              &config,
+          );
+
+          println!("GrammarConstraint constructed successfully.");
+          if let Some(path) = args.save_precompute0.as_ref() {
+              println!("Saving precompute0 cache to: {:?}", path);
+              let output_file = File::create(path)?;
+              let writer = BufWriter::new(output_file);
+              let encoder = GzEncoder::new(writer, Compression::default());
+              encoder.finish()?;
+          }
+
+          if args.precompute0_only {
+              println!("--precompute0-only specified. Exiting after saving cache.");
+              return Ok(());
+          }
+
+          // 4. Save the GrammarConstraint to a compressed file.
+          if let Some(output_path) = args.output {
+              println!("Saving GrammarConstraint to: {:?}", output_path);
+              let output_file = File::create(&output_path)?;
+              let writer = BufWriter::new(output_file);
+              let mut encoder = GzEncoder::new(writer, Compression::default());
+              grammar_constraint.to_writer(&mut encoder)?;
+              encoder.finish()?;
+              println!("Successfully saved constraint to {:?}", output_path);
+          }
+
+          Ok(())
       }
 
-      impl ParseError {
-          fn new(source: &str, span: Span, message: impl Into<String>) -> Self {
-              let (line, column, line_text) = compute_line_info(source, span.start);
-              ParseError {
-                  message: message.into(),
-                  span,
-                  line,
-                  column,
-                  line_text,
-              }
+      fn main() {
+          if let Err(err) = run() {
+              eprintln!("Error: {}", err);
+              std::process::exit(1);
           }
       }
-
-      // Compute 1-based line and column numbers and capture the offending line.
-      fn compute_line_info(source: &str, byte_index: usize) -> (usize, usize, String) {
-          let len = source.len();
-          let idx = byte_index.min(len);
-
-          let mut line_start = 0;
-          let mut line = 1;
-
-          for (i, ch) in source.char_indices() {
-              if i >= idx {
-                  break;
-              }
-              if ch == '\n' {
-                  line += 1;
-                  line_start = i + 1;
-              }
-          }
-
-          let line_end = source[line_start..]
-              .find('\n')
-              .map(|off| line_start + off)
-              .unwrap_or(len);
-
-          let line_text = source[line_start..line_end].to_string();
-          let column = source[line_start..idx].chars().count() + 1;
-
-          (line, column, line_text)
-      }
-
-      #[derive(Debug, Clone, PartialEq)]
-      enum EbnfTokenKind {
-          Ident(String),
-          Literal(String),
-          CharClass(String),
-          Op(String),
-      }
-      #[derive(Debug, Clone, PartialEq)]
-      struct EbnfToken {
-          kind: EbnfTokenKind,
-          span: Span,
-      }
-
-      impl std::fmt::Display for ParseError {
-          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-              // Human-friendly summary line
-              writeln!(f, "error: EBNF parse error: {}", self.message)?;
-
-              // Location line
-              write!(
-                  f,
-                  " --> line {}, column {} (byte range {}-{})",
-                  self.line, self.column, self.span.start, self.span.end
-              )?;
-
-              // If we captured the offending line, show it with a caret marker.
-              if !self.line_text.is_empty() {
-                  writeln!(f)?;
-                  writeln!(f, "  |")?;
-                  writeln!(f, "  | {}", self.line_text)?;
-                  write!(f, "  | ")?;
-                  let prefix: String = self
-                      .line_text
-                      .chars()
-                      .take(self.column.saturating_sub(1))
-                      .map(|c| if c == '\t' { '\t' } else { ' ' })
-                      .collect();
-                  write!(f, "{}", prefix)?;
-                  write!(f, "^")?;
-              }
-
-              Ok(())
-          }
-      }
-
-      impl std::error::Error for ParseError {}
-
-      impl From<ParseError> for String {
-          fn from(e: ParseError) -> Self {
-              e.to_string()
-          }
-      }
-
-      fn get_token_regex() -> &'static Regex {
-          static TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
-          TOKEN_REGEX.get_or_init(|| {
-              Regex::new(
-                  r#"(?x)
-              (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
-              (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
-              (?P<charclass>\[([^\]\\()\s]|\\.)*\]) |
-              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.|\#) |
-              (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
-              (?P<ws>\s+) |
-              (?P<error>.)
-              "#,
-              )
-              .unwrap()
-          })
-      }
-
-      fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
-          let mut tokens = Vec::new();
-          for cap in get_token_regex().captures_iter(source) {
-              if let Some(m) = cap.name("ident") {
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::Ident(m.as_str().to_string()),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(m) = cap.name("literal") {
-                  let s = m.as_str();
-                  let content = &s[1..s.len() - 1];
-                  let mut unescaped = String::with_capacity(content.len());
-                  let mut chars = content.chars();
-                  while let Some(c) = chars.next() {
-                      if c == '\\' {
-                          if let Some(escaped_char) = chars.next() {
-                              match escaped_char {
-                                  'n' => unescaped.push('\n'),
-                                  't' => unescaped.push('\t'),
-                                  'r' => unescaped.push('\r'),
-                                  'b' => unescaped.push('\u{0008}'),
-                                  'f' => unescaped.push('\u{000C}'),
-                                  'v' => unescaped.push('\u{000B}'),
-                                  '\\' => unescaped.push('\\'),
-                                  '\'' => unescaped.push('\''),
-                                  '"' => unescaped.push('"'),
-                                  other => unescaped.push(other),
-                              }
-                          } else {
-                              // This case should be prevented by the regex, but as a safeguard:
-                              return Err(ParseError::new(
-                                  source,
-                                  Span { start: m.start(), end: m.end() },
-                                  format!("Literal with dangling escape: {}", s),
-                              ));
-                          }
-                      } else {
-                          unescaped.push(c);
-                      }
-                  }
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::Literal(unescaped),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(m) = cap.name("charclass") {
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::CharClass(m.as_str().to_string()),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(m) = cap.name("op") {
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::Op(m.as_str().to_string()),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(e) = cap.name("error") {
-                  let err_text = e.as_str();
-                  let mut message = format!("Unknown token: {}", err_text);
-
-                  if err_text == ":" {
-                      let rest = &source[e.start()..];
-                      if rest.starts_with("::=") {
-                          message.push_str(" (did you mean '::=' for a rule definition?)");
-                      } else if rest.starts_with(":=") {
-                          message.push_str(
-                              " (rule definitions use '::='; did you mean '::=' instead of ':='?)",
-                          );
-                      } else {
-                          message.push_str(
-                              " (':' is not a valid standalone token; rule definitions must use '::=')",
-                          );
-                      }
-                  }
-
-                  return Err(ParseError::new(
-                      source,
-                      Span { start: e.start(), end: e.end() },
-                      message,
-                  ));
-              }
-              // ws and comment are ignored
-          }
-          Ok(tokens)
-      }
-
-      #[derive(Debug)]
-      pub(super) struct EbnfParseResult {
-          pub grammar_rules: Vec<(String, GrammarExpr)>,
-          pub ignore_symbol_name: Option<String>,
-      }
-
-      pub(super) struct EbnfParser<'a> {
-          source: &'a str,
-          tokens: Peekable<IntoIter<EbnfToken>>,
-      }
-
-      impl<'a> EbnfParser<'a> {
-          pub(super) fn new(source: &'a str) -> Result<Self, ParseError> {
-              let tokens = tokenize(source)?;
-              Ok(EbnfParser {
-                  source,
-                  tokens: tokens.into_iter().peekable(),
-              })
-          }
-
-          fn parse_rule_body(&mut self) -> Result<GrammarExpr, ParseError> {
-              self.expect_grammar_op("::=")?;
-              let expr = self.parse_grammar_expression()?;
-              self.expect_grammar_op(";")?;
-              Ok(expr)
-          }
-
-          pub(super) fn parse(&mut self) -> Result<EbnfParseResult, ParseError> {
-              let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
-              let mut seen_names = HashSet::new();
-              let mut ignore_symbol_name = None;
-
-              while self.tokens.peek().is_some() {
-                  if self.peek_grammar_op("#") {
-                      self.parse_ignore_directive(&mut ignore_symbol_name)?;
-                  } else {
-                      let (rule_name, rule_name_span) = self.expect_ident()?;
-                      if seen_names.contains(&rule_name) {
-                          return Err(ParseError::new(
-                              self.source,
-                              rule_name_span,
-                              format!("Duplicate rule name: {}", rule_name),
-                          ));
-                      }
-                      seen_names.insert(rule_name.clone());
-                      let rule_expr = self.parse_rule_body()?;
-                      rules.push((rule_name, rule_expr));
-                  }
-              }
-
-              Ok(EbnfParseResult {
-                  grammar_rules: rules,
-                  ignore_symbol_name,
-              })
-          }
-
-          fn parse_ignore_directive(
-              &mut self,
-              ignore_symbol_name: &mut Option<String>,
-          ) -> Result<(), ParseError> {
-              let directive_start_span = self.tokens.peek().unwrap().span;
-              self.consume_grammar_op("#")?;
-
-              // Supported forms:
-              //   #![ignore(symbol)]
-              //   #[ignore(symbol)]
-              //   #ignore symbol
-              //   #ignore(symbol)
-              let symbol_name;
-              if self.peek_grammar_op("!") {
-                  // #![ignore(symbol)]
-                  self.consume_grammar_op("!")?;
-                  self.expect_grammar_op("[")?;
-                  let (directive_name, directive_span) = self.expect_ident()?;
-                  if directive_name != "ignore" {
-                      return Err(ParseError::new(
-                          self.source,
-                          directive_span,
-                          format!("Unknown directive: {}", directive_name),
-                      ));
-                  }
-                  self.expect_grammar_op("(")?;
-                  let (name, _) = self.expect_ident()?;
-                  self.expect_grammar_op(")")?;
-                  self.expect_grammar_op("]")?;
-                  symbol_name = name;
-              } else if self.peek_grammar_op("[") {
-                  // #[ignore(symbol)] (no '!')
-                  self.consume_grammar_op("[")?;
-                  let (directive_name, directive_span) = self.expect_ident()?;
-                  if directive_name != "ignore" {
-                      return Err(ParseError::new(
-                          self.source,
-                          directive_span,
-                          format!("Unknown directive: {}", directive_name),
-                      ));
-                  }
-                  self.expect_grammar_op("(")?;
-                  let (name, _) = self.expect_ident()?;
-                  self.expect_grammar_op(")")?;
-                  self.expect_grammar_op("]")?;
-                  symbol_name = name;
-              } else {
-                  // Legacy: #ignore symbol or #ignore(symbol)
-                  let (directive_name, directive_span) = self.expect_ident()?;
-                  if directive_name != "ignore" {
-                      return Err(ParseError::new(
-                          self.source,
-                          directive_span,
-                          format!("Unknown directive: {}", directive_name),
-                      ));
-                  }
-                  if self.peek_grammar_op("(") {
-                      self.consume_grammar_op("(")?;
-                      let (name, _) = self.expect_ident()?;
-                      self.expect_grammar_op(")")?;
-                      symbol_name = name;
-                  } else {
-                      let (name, _) = self.expect_ident()?;
-                      symbol_name = name;
-                  }
-              }
-
-              if ignore_symbol_name.is_some() {
-                  return Err(ParseError::new(
-                      self.source,
-                      directive_start_span,
-                      "Duplicate ignore directive found",
-                  ));
-              }
-
-              // Allow an optional trailing semicolon for directives so that both
-              // `#![ignore(ws)]` and `#ignore ws;` parse correctly.
-              if self.peek_grammar_op(";") {
-                  self.consume_grammar_op(";")?;
-              }
-
-              *ignore_symbol_name = Some(symbol_name);
-              Ok(())
-          }
-
-          fn parse_grammar_expression(&mut self) -> Result<GrammarExpr, ParseError> {
-              let mut choices = vec![self.parse_grammar_sequence()?];
-              while self.peek_grammar_op("|") {
-                  self.consume_grammar_op("|")?;
-                  choices.push(self.parse_grammar_sequence()?);
-              }
-              if choices.len() == 1 {
-                  Ok(choices.remove(0))
-              } else {
-                  Ok(choice(choices))
-              }
-          }
-
-          fn parse_grammar_sequence(&mut self) -> Result<GrammarExpr, ParseError> {
-              let mut terms = Vec::new();
-              // A sequence can be empty, which is a valid choice in an expression (e.g., `A ::= B | ;`)
-              while self.tokens.peek().is_some()
-                  && !self.peek_grammar_op(")")
-                  && !self.peek_grammar_op("]")
-                  && !self.peek_grammar_op("}")
-                  && !self.peek_grammar_op("|")
-                  && !self.peek_grammar_op(";")
-              {
-                  terms.push(self.parse_grammar_term()?);
-              }
-
-              if terms.len() == 1 {
-                  Ok(terms.remove(0))
-              } else {
-                  Ok(sequence(terms))
-              }
-          }
-
-          fn parse_grammar_term(&mut self) -> Result<GrammarExpr, ParseError> {
-              let factor = self.parse_grammar_factor()?;
-
-              if self.peek_grammar_op("?") {
-                  self.consume_grammar_op("?")?;
-                  Ok(optional(factor))
-              } else if self.peek_grammar_op("*") {
-                  self.consume_grammar_op("*")?;
-                  Ok(repeat(factor))
-              } else if self.peek_grammar_op("+") {
-                  self.consume_grammar_op("+")?;
-                  Ok(sequence(vec![factor.clone(), repeat(factor)]))
-              } else {
-                  Ok(factor)
-              }
-          }
-
-          fn parse_grammar_factor(&mut self) -> Result<GrammarExpr, ParseError> {
-              if self.peek_grammar_op(".") {
-                  self.consume_grammar_op(".")?;
-                  Ok(GrammarExpr::AnyChar)
-              } else if let Some(EbnfToken { kind: EbnfTokenKind::Ident(id), .. }) = self.tokens.peek().cloned() {
-                  self.tokens.next();
-                  Ok(r#ref(&id))
-              } else if let Some(EbnfToken { kind: EbnfTokenKind::Literal(lit), .. }) = self.tokens.peek().cloned() {
-                  self.tokens.next();
-                  Ok(literal(lit.into_bytes()))
-              } else if let Some(EbnfToken { kind: EbnfTokenKind::CharClass(cc), .. }) = self.tokens.peek().cloned() {
-                  self.tokens.next();
-                  Ok(CharClass(cc))
-              } else if self.peek_grammar_op("(") {
-                  self.consume_grammar_op("(")?;
-                  let expr = self.parse_grammar_expression()?;
-                  self.expect_grammar_op(")")?;
-                  Ok(expr)
-              } else if self.peek_grammar_op("[") {
-                  self.consume_grammar_op("[")?;
-                  let expr = self.parse_grammar_expression()?;
-                  self.expect_grammar_op("]")?;
-                  Ok(optional(expr))
-              } else if self.peek_grammar_op("{") {
-                  self.consume_grammar_op("{")?;
-                  let expr = self.parse_grammar_expression()?;
-                  self.expect_grammar_op("}")?;
-                  Ok(repeat(expr))
-              } else {
-                  let (message, span) = if let Some(token) = self.tokens.peek() {
-                      (
-                          format!(
-                              "Expected identifier, literal, group, or '.', found {:?}",
-                              &token.kind
-                          ),
-                          token.span,
-                      )
-                  } else {
-                      (
-                          "Expected identifier, literal, group, or '.', found end of input".to_string(),
-                          self.eof_span(),
-                      )
-                  };
-                  Err(ParseError::new(self.source, span, message))
-              }
-          }
-
-          // --- Parser Helpers ---
-
-          fn eof_span(&self) -> Span {
-              let end = self.source.len();
-              Span { start: end, end }
-          }
-
-          fn peek_grammar_op(&mut self, op: &str) -> bool {
-              matches!(self.tokens.peek(), Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op)
-          }
-
-          fn consume_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
-              if self.peek_grammar_op(op) {
-                  self.tokens.next();
-                  Ok(())
-              } else {
-                  let (message, span) = if let Some(token) = self.tokens.peek() {
-                      (
-                          format!("Expected op '{}', found {:?}", op, &token.kind),
-                          token.span,
-                      )
-                  } else {
-                      (
-                          format!("Expected op '{}', found end of input", op),
-                          self.eof_span(),
-                      )
-                  };
-                  Err(ParseError::new(self.source, span, message))
-              }
-          }
-
-          fn expect_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
-              match self.tokens.next() {
-                  Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op => Ok(()),
-                  Some(other) => Err(ParseError::new(
-                      self.source,
-                      other.span,
-                      format!("Expected op '{}', found {:?}", op, other.kind),
-                  )),
-                  None => Err(ParseError::new(
-                      self.source,
-                      self.eof_span(),
-                      format!("Expected op '{}', found end of input", op),
-                  )),
-              }
-          }
-
-          fn expect_ident(&mut self) -> Result<(String, Span), ParseError> {
-              match self.tokens.next() {
-                  Some(EbnfToken { kind: EbnfTokenKind::Ident(id), span }) => Ok((id, span)),
-                  Some(other) => Err(ParseError::new(
-                      self.source,
-                      other.span,
-                      format!("Expected identifier, found {:?}", other.kind),
-                  )),
-                  None => Err(ParseError::new(
-                      self.source,
-                      self.eof_span(),
-                      "Expected identifier, found end of input",
-                  )),
-              }
-          }
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use super::*;
-          use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarDefinition};
-
-          #[test]
-          fn test_ebnf_parser_simple() {
-              let ebnf = r#"
-                  s ::= a b;
-                  a ::= 'a' | ;
-                  b ::= c*;
-                  c ::= 'c'?;
-              "#;
-              let mut parser = EbnfParser::new(ebnf).unwrap();
-              let rules = parser.parse().unwrap().grammar_rules;
-
-              let expected_rules = vec![
-                  ("s".to_string(), sequence(vec![r#ref("a"), r#ref("b")])),
-                  (
-                      "a".to_string(),
-                      choice(vec![literal(b"a".to_vec()), sequence(vec![])]),
-                  ),
-                  ("b".to_string(), repeat(r#ref("c"))),
-                  ("c".to_string(), optional(literal(b"c".to_vec()))),
-              ];
-
-              assert_eq!(rules, expected_rules);
-          }
-
-          #[should_panic]
-          #[test]
-          fn test_ebnf_parser_error_with_span() {
-              let ebnf = r#"
-                  s ::= a b;
-                  a ::= 'a' | ;
-                  b ::= c*;
-                  c ::= 'c'??;
-              "#;
-              let mut parser = EbnfParser::new(ebnf).unwrap();
-              let err = parser.parse().unwrap_err();
-              assert!(err
-                  .message
-                  .contains("Expected identifier, literal, group, or '.'"));
-              assert_eq!(err.span.start, 82);
-          }
-      }
-
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -1094,7 +247,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gf
   code_completion_model:
     - gf
   commit_message_model:
@@ -1126,521 +279,124 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
-      ```rust "src/interface/ebnf.rs"
-      use crate::interface::GrammarExpr::CharClass;
-      use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
-      use regex::Regex;
-      use std::collections::HashSet;
-      use std::iter::Peekable;
-      use std::sync::OnceLock;
-      use std::vec::IntoIter;
+      ```rust "src/bin/grammar_compiler.rs"
+      use clap::Parser;
+      use flate2::write::GzEncoder;
+      use flate2::Compression;
+      use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig};
+      use sep1::interface::GrammarDefinition;
+      use sep1::json_serialization::JSONConvertible;
+      use sep1::tokenizer::{LLMTokenID, LLMTokenMap};
+      use std::collections::BTreeMap;
+      use std::fs::File;
+      use std::io::{BufReader, BufWriter};
+      use std::path::PathBuf;
+      use std::sync::Arc;
 
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-      struct Span {
-          start: usize,
-          end: usize,
+      /// Compiles a grammar and vocabulary into a GrammarConstraint object.
+      #[derive(Parser, Debug)]
+      #[command(author, version, about, long_about = None)]
+      struct Args {
+          /// Path to the EBNF grammar file.
+          #[arg(short, long)]
+          grammar: PathBuf,
+
+          /// Path to the JSON vocabulary file.
+          /// The file should be a JSON object mapping token strings to integer IDs.
+          #[arg(short, long)]
+          vocab: PathBuf,
+
+          /// Path for the output compressed JSON file (.json.gz).
+          #[arg(short, long)]
+          output: Option<PathBuf>,
+
+          /// Optional: load a precompute0 cache from this file to skip rebuilding Trie0.
+          #[arg(long, value_name = "FILE")]
+          load_precompute0: Option<PathBuf>,
+
+          /// Optional: save the precompute0 stage to this file for reuse.
+          #[arg(long, value_name = "FILE")]
+          save_precompute0: Option<PathBuf>,
+
+          /// If specified, only compute and save the precompute0 cache, then exit.
+          #[arg(long, requires = "save_precompute0", conflicts_with = "output")]
+          precompute0_only: bool,
       }
 
-      #[derive(Debug, Clone, PartialEq)]
-      pub(super) struct ParseError {
-          message: String,
-          span: Span,
-          line: usize,
-          column: usize,
-          line_text: String,
+      fn main() -> Result<(), Box<dyn std::error::Error>> {
+          let args = Args::parse();
+
+          if !args.precompute0_only && args.output.is_none() {
+              return Err("Error: --output is required unless --precompute0-only is specified.".into());
+          }
+
+          // 1. Load and compile the grammar.
+          println!("Loading grammar from: {:?}", args.grammar);
+          let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
+          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
+          println!("Grammar loaded successfully.");
+
+          // 2. Load the vocabulary.
+          println!("Loading vocabulary from: {:?}", args.vocab);
+          let vocab_file = File::open(&args.vocab)?;
+          let reader = BufReader::new(vocab_file);
+          let vocab: BTreeMap<String, usize> = serde_json::from_reader(reader)?;
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id = 0;
+
+          for (token_str, token_id) in vocab {
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(token_id));
+              max_original_llm_token_id = max_original_llm_token_id.max(token_id);
+          }
+          println!("Vocabulary loaded ({} tokens, max ID: {}).", llm_token_map.len(), max_original_llm_token_id);
+
+          // 3. Construct the GrammarConstraint.
+          println!("\nConstructing GrammarConstraint...");
+          let config = GrammarConstraintConfig::default();
+
+          let grammar_constraint = GrammarConstraint::new_from_grammar_definition(
+              Arc::new(grammar_definition),
+              llm_token_map,
+              max_original_llm_token_id,
+              &config,
+          );
+
+          println!("GrammarConstraint constructed successfully.");
+          if let Some(path) = args.save_precompute0.as_ref() {
+              println!("Saving precompute0 cache to: {:?}", path);
+              let output_file = File::create(path)?;
+              let writer = BufWriter::new(output_file);
+              let encoder = GzEncoder::new(writer, Compression::default());
+              encoder.finish()?;
+          }
+
+          if args.precompute0_only {
+              println!("--precompute0-only specified. Exiting after saving cache.");
+              return Ok(());
+          }
+
+          // 4. Save the GrammarConstraint to a compressed file.
+          if let Some(output_path) = args.output {
+              println!("Saving GrammarConstraint to: {:?}", output_path);
+              let output_file = File::create(&output_path)?;
+              let writer = BufWriter::new(output_file);
+              let mut encoder = GzEncoder::new(writer, Compression::default());
+              grammar_constraint.to_writer(&mut encoder)?;
+              encoder.finish()?;
+              println!("Successfully saved constraint to {:?}", output_path);
+          }
+
+          Ok(())
       }
-
-      impl ParseError {
-          fn new(source: &str, span: Span, message: impl Into<String>) -> Self {
-              let (line, column, line_text) = compute_line_info(source, span.start);
-              ParseError {
-                  message: message.into(),
-                  span,
-                  line,
-                  column,
-                  line_text,
-              }
-          }
-      }
-
-      // Compute 1-based line and column numbers and capture the offending line.
-      fn compute_line_info(source: &str, byte_index: usize) -> (usize, usize, String) {
-          let len = source.len();
-          let idx = byte_index.min(len);
-
-          let mut line_start = 0;
-          let mut line = 1;
-
-          for (i, ch) in source.char_indices() {
-              if i >= idx {
-                  break;
-              }
-              if ch == '\n' {
-                  line += 1;
-                  line_start = i + 1;
-              }
-          }
-
-          let line_end = source[line_start..]
-              .find('\n')
-              .map(|off| line_start + off)
-              .unwrap_or(len);
-
-          let line_text = source[line_start..line_end].to_string();
-          let column = source[line_start..idx].chars().count() + 1;
-
-          (line, column, line_text)
-      }
-
-      #[derive(Debug, Clone, PartialEq)]
-      enum EbnfTokenKind {
-          Ident(String),
-          Literal(String),
-          CharClass(String),
-          Op(String),
-      }
-      #[derive(Debug, Clone, PartialEq)]
-      struct EbnfToken {
-          kind: EbnfTokenKind,
-          span: Span,
-      }
-
-      impl std::fmt::Display for ParseError {
-          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-              // Human-friendly summary line
-              writeln!(f, "error: EBNF parse error: {}", self.message)?;
-
-              // Location line
-              write!(
-                  f,
-                  " --> line {}, column {} (byte range {}-{})",
-                  self.line, self.column, self.span.start, self.span.end
-              )?;
-
-              // If we captured the offending line, show it with a caret marker.
-              if !self.line_text.is_empty() {
-                  writeln!(f)?;
-                  writeln!(f, "  |")?;
-                  writeln!(f, "  | {}", self.line_text)?;
-                  write!(f, "  | ")?;
-                  let prefix: String = self
-                      .line_text
-                      .chars()
-                      .take(self.column.saturating_sub(1))
-                      .map(|c| if c == '\t' { '\t' } else { ' ' })
-                      .collect();
-                  write!(f, "{}", prefix)?;
-                  write!(f, "^")?;
-              }
-
-              Ok(())
-          }
-      }
-
-      impl std::error::Error for ParseError {}
-
-      impl From<ParseError> for String {
-          fn from(e: ParseError) -> Self {
-              e.to_string()
-          }
-      }
-
-      fn get_token_regex() -> &'static Regex {
-          static TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
-          TOKEN_REGEX.get_or_init(|| {
-              Regex::new(
-                  r#"(?x)
-              (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
-              (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
-              (?P<charclass>\[([^\]\\()\s]|\\.)*\]) |
-              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.|\#) |
-              (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
-              (?P<ws>\s+) |
-              (?P<error>.)
-              "#,
-              )
-              .unwrap()
-          })
-      }
-
-      fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
-          let mut tokens = Vec::new();
-          for cap in get_token_regex().captures_iter(source) {
-              if let Some(m) = cap.name("ident") {
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::Ident(m.as_str().to_string()),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(m) = cap.name("literal") {
-                  let s = m.as_str();
-                  let content = &s[1..s.len() - 1];
-                  let mut unescaped = String::with_capacity(content.len());
-                  let mut chars = content.chars();
-                  while let Some(c) = chars.next() {
-                      if c == '\\' {
-                          if let Some(escaped_char) = chars.next() {
-                              match escaped_char {
-                                  'n' => unescaped.push('\n'),
-                                  't' => unescaped.push('\t'),
-                                  'r' => unescaped.push('\r'),
-                                  'b' => unescaped.push('\u{0008}'),
-                                  'f' => unescaped.push('\u{000C}'),
-                                  'v' => unescaped.push('\u{000B}'),
-                                  '\\' => unescaped.push('\\'),
-                                  '\'' => unescaped.push('\''),
-                                  '"' => unescaped.push('"'),
-                                  other => unescaped.push(other),
-                              }
-                          } else {
-                              // This case should be prevented by the regex, but as a safeguard:
-                              return Err(ParseError::new(
-                                  source,
-                                  Span { start: m.start(), end: m.end() },
-                                  format!("Literal with dangling escape: {}", s),
-                              ));
-                          }
-                      } else {
-                          unescaped.push(c);
-                      }
-                  }
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::Literal(unescaped),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(m) = cap.name("charclass") {
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::CharClass(m.as_str().to_string()),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(m) = cap.name("op") {
-                  tokens.push(EbnfToken {
-                      kind: EbnfTokenKind::Op(m.as_str().to_string()),
-                      span: Span { start: m.start(), end: m.end() },
-                  });
-              } else if let Some(e) = cap.name("error") {
-                  let err_text = e.as_str();
-                  let mut message = format!("Unknown token: {}", err_text);
-
-                  if err_text == ":" {
-                      let rest = &source[e.start()..];
-                      if rest.starts_with("::=") {
-                          message.push_str(" (did you mean '::=' for a rule definition?)");
-                      } else if rest.starts_with(":=") {
-                          message.push_str(
-                              " (rule definitions use '::='; did you mean '::=' instead of ':='?)",
-                          );
-                      } else {
-                          message.push_str(
-                              " (':' is not a valid standalone token; rule definitions must use '::=')",
-                          );
-                      }
-                  }
-
-                  return Err(ParseError::new(
-                      source,
-                      Span { start: e.start(), end: e.end() },
-                      message,
-                  ));
-              }
-              // ws and comment are ignored
-          }
-          Ok(tokens)
-      }
-
-      #[derive(Debug)]
-      pub(super) struct EbnfParseResult {
-          pub grammar_rules: Vec<(String, GrammarExpr)>,
-          pub ignore_symbol_name: Option<String>,
-      }
-
-      pub(super) struct EbnfParser<'a> {
-          source: &'a str,
-          tokens: Peekable<IntoIter<EbnfToken>>,
-      }
-
-      impl<'a> EbnfParser<'a> {
-          pub(super) fn new(source: &'a str) -> Result<Self, ParseError> {
-              let tokens = tokenize(source)?;
-              Ok(EbnfParser {
-                  source,
-                  tokens: tokens.into_iter().peekable(),
-              })
-          }
-
-          fn parse_rule_body(&mut self) -> Result<GrammarExpr, ParseError> {
-              self.expect_grammar_op("::=")?;
-              let expr = self.parse_grammar_expression()?;
-              self.expect_grammar_op(";")?;
-              Ok(expr)
-          }
-
-          pub(super) fn parse(&mut self) -> Result<EbnfParseResult, ParseError> {
-              let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
-              let mut seen_names = HashSet::new();
-              let mut ignore_symbol_name = None;
-
-              while self.tokens.peek().is_some() {
-                  if self.peek_grammar_op("#") {
-                      let directive_span = self.tokens.peek().unwrap().span;
-                      self.consume_grammar_op("#")?;
-                      self.expect_grammar_op("!")?;
-                      self.expect_grammar_op("[")?;
-                      if ignore_symbol_name.is_some() {
-                          return Err(ParseError::new(
-                              self.source,
-                              directive_span,
-                              "Duplicate ignore directive found",
-                          ));
-                      }
-                      let (directive_name, directive_name_span) = self.expect_ident()?;
-                      if directive_name != "ignore" {
-                          return Err(ParseError::new(
-                              self.source,
-                              directive_name_span,
-                              format!("Unknown directive: {}", directive_name),
-                          ));
-                      }
-                      self.expect_grammar_op("(")?;
-                      let (symbol_name, _) = self.expect_ident()?;
-                      self.expect_grammar_op(")")?;
-                      self.expect_grammar_op("]")?;
-                      ignore_symbol_name = Some(symbol_name);
-                  } else {
-                      let (rule_name, rule_name_span) = self.expect_ident()?;
-                      if seen_names.contains(&rule_name) {
-                          return Err(ParseError::new(
-                              self.source,
-                              rule_name_span,
-                              format!("Duplicate rule name: {}", rule_name),
-                          ));
-                      }
-                      seen_names.insert(rule_name.clone());
-                      let rule_expr = self.parse_rule_body()?;
-                      rules.push((rule_name, rule_expr));
-                  }
-              }
-
-              Ok(EbnfParseResult {
-                  grammar_rules: rules,
-                  ignore_symbol_name,
-              })
-          }
-
-          fn parse_grammar_expression(&mut self) -> Result<GrammarExpr, ParseError> {
-              let mut choices = vec![self.parse_grammar_sequence()?];
-              while self.peek_grammar_op("|") {
-                  self.consume_grammar_op("|")?;
-                  choices.push(self.parse_grammar_sequence()?);
-              }
-              if choices.len() == 1 {
-                  Ok(choices.remove(0))
-              } else {
-                  Ok(choice(choices))
-              }
-          }
-
-          fn parse_grammar_sequence(&mut self) -> Result<GrammarExpr, ParseError> {
-              let mut terms = Vec::new();
-              // A sequence can be empty, which is a valid choice in an expression (e.g., `A ::= B | ;`)
-              while self.tokens.peek().is_some()
-                  && !self.peek_grammar_op(")")
-                  && !self.peek_grammar_op("]")
-                  && !self.peek_grammar_op("}")
-                  && !self.peek_grammar_op("|")
-                  && !self.peek_grammar_op(";")
-              {
-                  terms.push(self.parse_grammar_term()?);
-              }
-
-              if terms.len() == 1 {
-                  Ok(terms.remove(0))
-              } else {
-                  Ok(sequence(terms))
-              }
-          }
-
-          fn parse_grammar_term(&mut self) -> Result<GrammarExpr, ParseError> {
-              let factor = self.parse_grammar_factor()?;
-
-              if self.peek_grammar_op("?") {
-                  self.consume_grammar_op("?")?;
-                  Ok(optional(factor))
-              } else if self.peek_grammar_op("*") {
-                  self.consume_grammar_op("*")?;
-                  Ok(repeat(factor))
-              } else if self.peek_grammar_op("+") {
-                  self.consume_grammar_op("+")?;
-                  Ok(sequence(vec![factor.clone(), repeat(factor)]))
-              } else {
-                  Ok(factor)
-              }
-          }
-
-          fn parse_grammar_factor(&mut self) -> Result<GrammarExpr, ParseError> {
-              if self.peek_grammar_op(".") {
-                  self.consume_grammar_op(".")?;
-                  Ok(GrammarExpr::AnyChar)
-              } else if let Some(EbnfToken { kind: EbnfTokenKind::Ident(id), .. }) = self.tokens.peek().cloned() {
-                  self.tokens.next();
-                  Ok(r#ref(&id))
-              } else if let Some(EbnfToken { kind: EbnfTokenKind::Literal(lit), .. }) = self.tokens.peek().cloned() {
-                  self.tokens.next();
-                  Ok(literal(lit.into_bytes()))
-              } else if let Some(EbnfToken { kind: EbnfTokenKind::CharClass(cc), .. }) = self.tokens.peek().cloned() {
-                  self.tokens.next();
-                  Ok(CharClass(cc))
-              } else if self.peek_grammar_op("(") {
-                  self.consume_grammar_op("(")?;
-                  let expr = self.parse_grammar_expression()?;
-                  self.expect_grammar_op(")")?;
-                  Ok(expr)
-              } else if self.peek_grammar_op("[") {
-                  self.consume_grammar_op("[")?;
-                  let expr = self.parse_grammar_expression()?;
-                  self.expect_grammar_op("]")?;
-                  Ok(optional(expr))
-              } else if self.peek_grammar_op("{") {
-                  self.consume_grammar_op("{")?;
-                  let expr = self.parse_grammar_expression()?;
-                  self.expect_grammar_op("}")?;
-                  Ok(repeat(expr))
-              } else {
-                  let (message, span) = if let Some(token) = self.tokens.peek() {
-                      (
-                          format!(
-                              "Expected identifier, literal, group, or '.', found {:?}",
-                              &token.kind
-                          ),
-                          token.span,
-                      )
-                  } else {
-                      (
-                          "Expected identifier, literal, group, or '.', found end of input".to_string(),
-                          self.eof_span(),
-                      )
-                  };
-                  Err(ParseError::new(self.source, span, message))
-              }
-          }
-
-          // --- Parser Helpers ---
-
-          fn eof_span(&self) -> Span {
-              let end = self.source.len();
-              Span { start: end, end }
-          }
-
-          fn peek_grammar_op(&mut self, op: &str) -> bool {
-              matches!(self.tokens.peek(), Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op)
-          }
-
-          fn consume_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
-              if self.peek_grammar_op(op) {
-                  self.tokens.next();
-                  Ok(())
-              } else {
-                  let (message, span) = if let Some(token) = self.tokens.peek() {
-                      (
-                          format!("Expected op '{}', found {:?}", op, &token.kind),
-                          token.span,
-                      )
-                  } else {
-                      (
-                          format!("Expected op '{}', found end of input", op),
-                          self.eof_span(),
-                      )
-                  };
-                  Err(ParseError::new(self.source, span, message))
-              }
-          }
-
-          fn expect_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
-              match self.tokens.next() {
-                  Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op => Ok(()),
-                  Some(other) => Err(ParseError::new(
-                      self.source,
-                      other.span,
-                      format!("Expected op '{}', found {:?}", op, other.kind),
-                  )),
-                  None => Err(ParseError::new(
-                      self.source,
-                      self.eof_span(),
-                      format!("Expected op '{}', found end of input", op),
-                  )),
-              }
-          }
-
-          fn expect_ident(&mut self) -> Result<(String, Span), ParseError> {
-              match self.tokens.next() {
-                  Some(EbnfToken { kind: EbnfTokenKind::Ident(id), span }) => Ok((id, span)),
-                  Some(other) => Err(ParseError::new(
-                      self.source,
-                      other.span,
-                      format!("Expected identifier, found {:?}", other.kind),
-                  )),
-                  None => Err(ParseError::new(
-                      self.source,
-                      self.eof_span(),
-                      "Expected identifier, found end of input",
-                  )),
-              }
-          }
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use super::*;
-          use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarDefinition};
-
-          #[test]
-          fn test_ebnf_parser_simple() {
-              let ebnf = r#"
-                  s ::= a b;
-                  a ::= 'a' | ;
-                  b ::= c*;
-                  c ::= 'c'?;
-              "#;
-              let mut parser = EbnfParser::new(ebnf).unwrap();
-              let rules = parser.parse().unwrap().grammar_rules;
-
-              let expected_rules = vec![
-                  ("s".to_string(), sequence(vec![r#ref("a"), r#ref("b")])),
-                  (
-                      "a".to_string(),
-                      choice(vec![literal(b"a".to_vec()), sequence(vec![])]),
-                  ),
-                  ("b".to_string(), repeat(r#ref("c"))),
-                  ("c".to_string(), optional(literal(b"c".to_vec()))),
-              ];
-
-              assert_eq!(rules, expected_rules);
-          }
-
-          #[should_panic]
-          #[test]
-          fn test_ebnf_parser_error_with_span() {
-              let ebnf = r#"
-                  s ::= a b;
-                  a ::= 'a' | ;
-                  b ::= c*;
-                  c ::= 'c'??;
-              "#;
-              let mut parser = EbnfParser::new(ebnf).unwrap();
-              let err = parser.parse().unwrap_err();
-              assert!(err
-                  .message
-                  .contains("Expected identifier, literal, group, or '.'"));
-              assert_eq!(err.span.start, 82);
-          }
-      }
-
 
       ```
     metadata:
-      filename: src/interface/ebnf.rs
-  - user: scripts/generate_diff_grammar.py is generating grammars that are incompatible
-      with src/interface/ebnf.rs. Closely examine both file. Find all possible incompatiblities
-      and fix them.
+      filename: src/bin/grammar_compiler.rs
+  - user: Errors on the line let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
+      are getting printed with newlines escpaed. This unprettifies them. Fix it.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1660,396 +416,64 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here’s what to change to make `src/interface/ebnf.rs` compatible with grammars that `scripts/generate_diff_grammar.py` is likely generating.
+      The issue of escaped newlines in error messages when using the `?` operator and returning `Result<(), Box<dyn std::error::Error>>` from `main` is often due to how the Rust runtime or the shell prints the boxed error, sometimes using the `Debug` format (`{:?}`) which escapes newlines, instead of the `Display` format (`{}`).
 
-      I’m assuming the generator uses a simpler directive syntax like:
+      To fix this, you should wrap the existing logic in a separate function (e.g., `run`) and introduce a new `main` function that explicitly handles the error, printing it using the `Display` trait (`{}`) to preserve newlines.
 
-      - `#ignore WS`  
-      - or `#ignore WS;`  
-      - or `#ignore(WS)`  
+      Here are the step-by-step instructions:
 
-      instead of the strict Rust‑attribute style `#![ignore(WS)]` that the current parser requires.  
+      1.  **Rename `main` to `run`:** In `src/bin/grammar_compiler.rs`, change the function signature on line 47 from `fn main() -> Result<(), Box<dyn std::error::Error>> {` to `fn run() -> Result<(), Box<dyn std::error::Error>> {`.
+      2.  **Add a new `main` function:** Append a new `main` function at the end of `src/bin/grammar_compiler.rs` that calls `run()` and prints any resulting error to `stderr` using the `Display` format (`{}`).
 
-      The changes below make the parser accept **all** of these forms:
+      ### Step-by-step Edits
 
-      - `#![ignore(ws)]` (current syntax)
-      - `#![ignore(ws)];` (same, optional `;`)
-      - `#[ignore(ws)]`
-      - `#ignore ws`
-      - `#ignore(ws)`
-      - `#ignore ws;`
-      - `#ignore(ws);`
+      **File: `src/bin/grammar_compiler.rs`**
 
-      No changes to the Python script are needed if it uses any of these.
+      1.  **Change line 47:**
+          ```rust
+          // Old line 47:
+          fn main() -> Result<(), Box<dyn std::error::Error>> {
+          // New line 47:
+          fn run() -> Result<(), Box<dyn std::error::Error>> {
+          ```
 
-      ---
-
-      ## Step‑by‑step edits
-
-      ### File: `src/interface/ebnf.rs`
-
-      #### 1. Replace the inline ignore‑directive handling in `parse()`
-
-      Locate the `impl<'a> EbnfParser<'a>` block and find the `parse` method. It currently looks like this (abridged to the relevant part):
-
-      ```rust
-          pub(super) fn parse(&mut self) -> Result<EbnfParseResult, ParseError> {
-              let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
-              let mut seen_names = HashSet::new();
-              let mut ignore_symbol_name = None;
-
-              while self.tokens.peek().is_some() {
-                  if self.peek_grammar_op("#") {
-                      let directive_span = self.tokens.peek().unwrap().span;
-                      self.consume_grammar_op("#")?;
-                      self.expect_grammar_op("!")?;
-                      self.expect_grammar_op("[")?;
-                      if ignore_symbol_name.is_some() {
-                          return Err(ParseError::new(
-                              self.source,
-                              directive_span,
-                              "Duplicate ignore directive found",
-                          ));
-                      }
-                      let (directive_name, directive_name_span) = self.expect_ident()?;
-                      if directive_name != "ignore" {
-                          return Err(ParseError::new(
-                              self.source,
-                              directive_name_span,
-                              format!("Unknown directive: {}", directive_name),
-                          ));
-                      }
-                      self.expect_grammar_op("(")?;
-                      let (symbol_name, _) = self.expect_ident()?;
-                      self.expect_grammar_op(")")?;
-                      self.expect_grammar_op("]")?;
-                      ignore_symbol_name = Some(symbol_name);
-                  } else {
-                      let (rule_name, rule_name_span) = self.expect_ident()?;
-                      if seen_names.contains(&rule_name) {
-                          return Err(ParseError::new(
-                              self.source,
-                              rule_name_span,
-                              format!("Duplicate rule name: {}", rule_name),
-                          ));
-                      }
-                      seen_names.insert(rule_name.clone());
-                      let rule_expr = self.parse_rule_body()?;
-                      rules.push((rule_name, rule_expr));
-                  }
+      2.  **Insert new `main` function:** Add the following code after the closing brace of the `run` function (after line 124):
+          ```rust
+          fn main() {
+              if let Err(err) = run() {
+                  eprintln!("Error: {}", err);
+                  std::process::exit(1);
               }
-
-              Ok(EbnfParseResult {
-                  grammar_rules: rules,
-                  ignore_symbol_name,
-              })
           }
-      ```
+          ```
 
-      **Replace** the `while` loop body so that it delegates directive handling to a new helper:
-
-      ```rust
-          pub(super) fn parse(&mut self) -> Result<EbnfParseResult, ParseError> {
-              let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
-              let mut seen_names = HashSet::new();
-              let mut ignore_symbol_name = None;
-
-              while self.tokens.peek().is_some() {
-                  if self.peek_grammar_op("#") {
-                      self.parse_ignore_directive(&mut ignore_symbol_name)?;
-                  } else {
-                      let (rule_name, rule_name_span) = self.expect_ident()?;
-                      if seen_names.contains(&rule_name) {
-                          return Err(ParseError::new(
-                              self.source,
-                              rule_name_span,
-                              format!("Duplicate rule name: {}", rule_name),
-                          ));
-                      }
-                      seen_names.insert(rule_name.clone());
-                      let rule_expr = self.parse_rule_body()?;
-                      rules.push((rule_name, rule_expr));
-                  }
-              }
-
-              Ok(EbnfParseResult {
-                  grammar_rules: rules,
-                  ignore_symbol_name,
-              })
-          }
-      ```
-
-      This removes the hard‑coded requirement for `#![ignore(...)]` and prepares for the more flexible directive parser.
-
-      #### 2. Add a new helper `parse_ignore_directive`
-
-      Immediately **after** the `parse` method you just edited (and before `fn parse_grammar_expression`), **insert** a new method:
-
-      ```rust
-          fn parse_ignore_directive(
-              &mut self,
-              ignore_symbol_name: &mut Option<String>,
-          ) -> Result<(), ParseError> {
-              let directive_start_span = self.tokens.peek().unwrap().span;
-              self.consume_grammar_op("#")?;
-
-              // Supported forms:
-              //   #![ignore(symbol)]
-              //   #[ignore(symbol)]
-              //   #ignore symbol
-              //   #ignore(symbol)
-              let symbol_name;
-              if self.peek_grammar_op("!") {
-                  // #![ignore(symbol)]
-                  self.consume_grammar_op("!")?;
-                  self.expect_grammar_op("[")?;
-                  let (directive_name, directive_span) = self.expect_ident()?;
-                  if directive_name != "ignore" {
-                      return Err(ParseError::new(
-                          self.source,
-                          directive_span,
-                          format!("Unknown directive: {}", directive_name),
-                      ));
-                  }
-                  self.expect_grammar_op("(")?;
-                  let (name, _) = self.expect_ident()?;
-                  self.expect_grammar_op(")")?;
-                  self.expect_grammar_op("]")?;
-                  symbol_name = name;
-              } else if self.peek_grammar_op("[") {
-                  // #[ignore(symbol)] (no '!')
-                  self.consume_grammar_op("[")?;
-                  let (directive_name, directive_span) = self.expect_ident()?;
-                  if directive_name != "ignore" {
-                      return Err(ParseError::new(
-                          self.source,
-                          directive_span,
-                          format!("Unknown directive: {}", directive_name),
-                      ));
-                  }
-                  self.expect_grammar_op("(")?;
-                  let (name, _) = self.expect_ident()?;
-                  self.expect_grammar_op(")")?;
-                  self.expect_grammar_op("]")?;
-                  symbol_name = name;
-              } else {
-                  // Legacy: #ignore symbol or #ignore(symbol)
-                  let (directive_name, directive_span) = self.expect_ident()?;
-                  if directive_name != "ignore" {
-                      return Err(ParseError::new(
-                          self.source,
-                          directive_span,
-                          format!("Unknown directive: {}", directive_name),
-                      ));
-                  }
-                  if self.peek_grammar_op("(") {
-                      self.consume_grammar_op("(")?;
-                      let (name, _) = self.expect_ident()?;
-                      self.expect_grammar_op(")")?;
-                      symbol_name = name;
-                  } else {
-                      let (name, _) = self.expect_ident()?;
-                      symbol_name = name;
-                  }
-              }
-
-              if ignore_symbol_name.is_some() {
-                  return Err(ParseError::new(
-                      self.source,
-                      directive_start_span,
-                      "Duplicate ignore directive found",
-                  ));
-              }
-
-              // Allow an optional trailing semicolon for directives so that both
-              // `#![ignore(ws)]` and `#ignore ws;` parse correctly.
-              if self.peek_grammar_op(";") {
-                  self.consume_grammar_op(";")?;
-              }
-
-              *ignore_symbol_name = Some(symbol_name);
-              Ok(())
-          }
-      ```
-
-      **Behavioral summary of this helper:**
-
-      - Consumes the leading `#` token.
-      - If the next token is:
-        - `!` and then `[`: treats it as `#![ignore(symbol)]` (existing syntax).
-        - `[` directly: treats it as `#[ignore(symbol)]`.
-        - Otherwise: expects `ignore` as an identifier, then either:
-          - a bare identifier (`#ignore ws`) or
-          - an identifier wrapped in parentheses (`#ignore(ws)`).
-      - Throws an error if:
-        - The directive name is not `ignore`.
-        - An `ignore` directive is seen more than once.
-      - Accepts an **optional trailing `;`** after any of these directive forms.
-
-      This is what bridges the incompatibility with a generator that emits `#ignore WS` or `#ignore WS;` instead of `#![ignore(WS)]`.
-
-      ---
-
-      ## Git diff patches
-
-      Below is the corresponding unified diff for `src/interface/ebnf.rs`.
+      ### Git Diff
 
       ```diff
-      diff --git a/src/interface/ebnf.rs b/src/interface/ebnf.rs
-      --- a/src/interface/ebnf.rs
-      +++ b/src/interface/ebnf.rs
-      @@ -248,51 +248,113 @@ impl<'a> EbnfParser<'a> {
-           pub(super) fn parse(&mut self) -> Result<EbnfParseResult, ParseError> {
-               let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
-               let mut seen_names = HashSet::new();
-               let mut ignore_symbol_name = None;
+      diff --git a/src/bin/grammar_compiler.rs b/src/bin/grammar_compiler.rs
+      --- a/src/bin/grammar_compiler.rs
+      +++ b/src/bin/grammar_compiler.rs
+      @@ -44,7 +44,7 @@
+           precompute0_only: bool,
+       }
        
-               while self.tokens.peek().is_some() {
-      -            if self.peek_grammar_op("#") {
-      -                let directive_span = self.tokens.peek().unwrap().span;
-      -                self.consume_grammar_op("#")?;
-      -                self.expect_grammar_op("!")?;
-      -                self.expect_grammar_op("[")?;
-      -                if ignore_symbol_name.is_some() {
-      -                    return Err(ParseError::new(
-      -                        self.source,
-      -                        directive_span,
-      -                        "Duplicate ignore directive found",
-      -                    ));
-      -                }
-      -                let (directive_name, directive_name_span) = self.expect_ident()?;
-      -                if directive_name != "ignore" {
-      -                    return Err(ParseError::new(
-      -                        self.source,
-      -                        directive_name_span,
-      -                        format!("Unknown directive: {}", directive_name),
-      -                    ));
-      -                }
-      -                self.expect_grammar_op("(")?;
-      -                let (symbol_name, _) = self.expect_ident()?;
-      -                self.expect_grammar_op(")")?;
-      -                self.expect_grammar_op("]")?;
-      -                ignore_symbol_name = Some(symbol_name);
-      -            } else {
-      -                let (rule_name, rule_name_span) = self.expect_ident()?;
-      -                if seen_names.contains(&rule_name) {
-      -                    return Err(ParseError::new(
-      -                        self.source,
-      -                        rule_name_span,
-      -                        format!("Duplicate rule name: {}", rule_name),
-      -                    ));
-      -                }
-      -                seen_names.insert(rule_name.clone());
-      -                let rule_expr = self.parse_rule_body()?;
-      -                rules.push((rule_name, rule_expr));
-      -            }
-      +            if self.peek_grammar_op("#") {
-      +                self.parse_ignore_directive(&mut ignore_symbol_name)?;
-      +            } else {
-      +                let (rule_name, rule_name_span) = self.expect_ident()?;
-      +                if seen_names.contains(&rule_name) {
-      +                    return Err(ParseError::new(
-      +                        self.source,
-      +                        rule_name_span,
-      +                        format!("Duplicate rule name: {}", rule_name),
-      +                    ));
-      +                }
-      +                seen_names.insert(rule_name.clone());
-      +                let rule_expr = self.parse_rule_body()?;
-      +                rules.push((rule_name, rule_expr));
-      +            }
-               }
+      -fn main() -> Result<(), Box<dyn std::error::Error>> {
+      +fn run() -> Result<(), Box<dyn std::error::Error>> {
+           let args = Args::parse();
        
-               Ok(EbnfParseResult {
-                   grammar_rules: rules,
-                   ignore_symbol_name,
-               })
+           if !args.precompute0_only && args.output.is_none() {
+      @@ -120,5 +120,12 @@
            }
+       
+           Ok(())
+       }
       +
-      +    fn parse_ignore_directive(
-      +        &mut self,
-      +        ignore_symbol_name: &mut Option<String>,
-      +    ) -> Result<(), ParseError> {
-      +        let directive_start_span = self.tokens.peek().unwrap().span;
-      +        self.consume_grammar_op("#")?;
-      +
-      +        // Supported forms:
-      +        //   #![ignore(symbol)]
-      +        //   #[ignore(symbol)]
-      +        //   #ignore symbol
-      +        //   #ignore(symbol)
-      +        let symbol_name;
-      +        if self.peek_grammar_op("!") {
-      +            // #![ignore(symbol)]
-      +            self.consume_grammar_op("!")?;
-      +            self.expect_grammar_op("[")?;
-      +            let (directive_name, directive_span) = self.expect_ident()?;
-      +            if directive_name != "ignore" {
-      +                return Err(ParseError::new(
-      +                    self.source,
-      +                    directive_span,
-      +                    format!("Unknown directive: {}", directive_name),
-      +                ));
-      +            }
-      +            self.expect_grammar_op("(")?;
-      +            let (name, _) = self.expect_ident()?;
-      +            self.expect_grammar_op(")")?;
-      +            self.expect_grammar_op("]")?;
-      +            symbol_name = name;
-      +        } else if self.peek_grammar_op("[") {
-      +            // #[ignore(symbol)] (no '!')
-      +            self.consume_grammar_op("[")?;
-      +            let (directive_name, directive_span) = self.expect_ident()?;
-      +            if directive_name != "ignore" {
-      +                return Err(ParseError::new(
-      +                    self.source,
-      +                    directive_span,
-      +                    format!("Unknown directive: {}", directive_name),
-      +                ));
-      +            }
-      +            self.expect_grammar_op("(")?;
-      +            let (name, _) = self.expect_ident()?;
-      +            self.expect_grammar_op(")")?;
-      +            self.expect_grammar_op("]")?;
-      +            symbol_name = name;
-      +        } else {
-      +            // Legacy: #ignore symbol or #ignore(symbol)
-      +            let (directive_name, directive_span) = self.expect_ident()?;
-      +            if directive_name != "ignore" {
-      +                return Err(ParseError::new(
-      +                    self.source,
-      +                    directive_span,
-      +                    format!("Unknown directive: {}", directive_name),
-      +                ));
-      +            }
-      +            if self.peek_grammar_op("(") {
-      +                self.consume_grammar_op("(")?;
-      +                let (name, _) = self.expect_ident()?;
-      +                self.expect_grammar_op(")")?;
-      +                symbol_name = name;
-      +            } else {
-      +                let (name, _) = self.expect_ident()?;
-      +                symbol_name = name;
-      +            }
-      +        }
-      +
-      +        if ignore_symbol_name.is_some() {
-      +            return Err(ParseError::new(
-      +                self.source,
-      +                directive_start_span,
-      +                "Duplicate ignore directive found",
-      +            ));
-      +        }
-      +
-      +        // Allow an optional trailing semicolon for directives so that both
-      +        // `#![ignore(ws)]` and `#ignore ws;` parse correctly.
-      +        if self.peek_grammar_op(";") {
-      +            self.consume_grammar_op(";")?;
-      +        }
-      +
-      +        *ignore_symbol_name = Some(symbol_name);
-      +        Ok(())
+      +fn main() {
+      +    if let Err(err) = run() {
+      +        eprintln!("Error: {}", err);
+      +        std::process::exit(1);
       +    }
+      +}
       ```
     metadata:
   - user: |
@@ -2057,11 +481,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/interface/ebnf.rs
-      Applying patch to 'src/interface/ebnf.rs' using custom patcher...
-      Successfully applied patch and wrote to src/interface/ebnf.rs.
+      Identified target file: src/bin/grammar_compiler.rs
+      Applying patch to 'src/bin/grammar_compiler.rs' using custom patcher...
+      Successfully applied patch and wrote to src/bin/grammar_compiler.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor EBNF parser to support flexible
-      ignore directives (#ignore, #[...], #![...]) and optional trailing semicolon"'
+  - user: 'Changes committed with message: "Fix escaped newlines in main error output
+      by using a run function"'
     metadata:
 ...
