@@ -34,14 +34,16 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
          [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
     );
 
+    let all_states: HashSet<NWAStateID> = (0..nwa.states.len()).collect();
+
     progress_step(&pb, 1, "Compute cancellations");
-    apply_cancellations(&mut nwa.states, &(0..nwa.states.len()).collect());
+    apply_cancellations(&mut nwa.states, &all_states);
 
     progress_step(&pb, 2, "Propagate finality");
-    apply_finality_fixpoint(&mut nwa.states, &(0..nwa.states.len()).collect());
+    apply_finality_fixpoint(&mut nwa.states, &all_states);
 
     progress_step(&pb, 3, "Apply changes & remove negatives");
-    remove_negative_transitions(&mut nwa.states, &(0..nwa.states.len()).collect());
+    remove_negative_transitions(&mut nwa.states, &all_states);
     crate::debug!(4, "Applied changes to NWA.");
 
     if let Some(p) = &pb {
