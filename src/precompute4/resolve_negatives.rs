@@ -59,14 +59,19 @@ pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSe
     }
 }
 
-pub fn apply_finality_fixpoint(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+pub fn apply_finality_fixpoint(
+    states: &mut NWAStates,
+    source_states_filter: &HashSet<NWAStateID>,
+) {
     let final_fix = compute_finality_fixpoint(states, source_states_filter);
     for &sid in source_states_filter {
-        let st = &mut states.0[sid];
-        if let Some(fw) = &mut st.final_weight {
-            *fw |= &final_fix[sid];
-        } else {
-            st.final_weight = Some(final_fix[sid].clone());
+        if let Some(add) = final_fix.get(&sid) {
+            let st = &mut states.0[sid];
+            if let Some(fw) = &mut st.final_weight {
+                *fw |= add;
+            } else {
+                st.final_weight = Some(add.clone());
+            }
         }
     }
 }
@@ -237,56 +242,147 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
     result
 }
 
-fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
+fn compute_finality_fixpoint(
+    states: &NWAStates,
+    source_states_filter: &HashSet<NWAStateID>,
+) -> HashMap<NWAStateID, Weight> {
     let n = states.len();
-    let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-    let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
 
-    for u in 0..n {
-        for &(v, ref w) in &states[u].epsilons {
-            if v < n {
-                predecessors.entry(v).or_default().push((u, w.clone()));
+    // future_final[a] = summary of all epsilon/negative paths from `a` to any final state.
+    // We only need entries for a ∈ source_states_filter.
+    let mut future_final: HashMap<NWAStateID, Weight> = HashMap::new();
+
+    // queries_at_state[s][a] = aggregated weight of all epsilon/negative paths
+    // from `a` (where a ∈ source_states_filter) to `s`.
+    let mut queries_at_state: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
+    let mut worklist: VecDeque<(NWAStateID, NWAStateID, Weight)> = VecDeque::new();
+
+    // Seed zero-length paths: if `a` is already final, include its own final weight.
+    for &a in source_states_filter {
+        if a >= n {
+            continue;
+        }
+        if let Some(ref fw) = states[a].final_weight {
+            if !fw.is_empty() {
+                let entry = future_final.entry(a).or_insert_with(Weight::zeros);
+                *entry |= fw;
             }
         }
     }
-    for &u in source_states_filter {
-        for (&label, targets) in &states[u].transitions {
+
+    // Seed one-step paths from each source in the filter.
+    for &a in source_states_filter {
+        if a >= n {
+            continue;
+        }
+
+        // Epsilon edges from `a`.
+        for &(target, ref w) in &states[a].epsilons {
+            if target >= n || w.is_empty() {
+                continue;
+            }
+            let entry = queries_at_state
+                .entry(target)
+                .or_default()
+                .entry(a)
+                .or_insert_with(Weight::zeros);
+            let old = entry.clone();
+            *entry |= w;
+            if *entry != old {
+                worklist.push_back((target, a, entry.clone()));
+            }
+        }
+
+        // Negative transitions from `a`.
+        for (&label, targets) in &states[a].transitions {
             if !is_negative_symbol(label) {
                 continue;
             }
-            for (v, w) in targets {
-                if *v < n {
-                    predecessors.entry(*v).or_default().push((u, w.clone()));
-                }
-            }
-        }
-    }
-
-    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-    for s in 0..n {
-        if let Some(ref fw) = states[s].final_weight {
-            if !fw.is_empty() {
-                future_final[s] = fw.clone();
-                queue.push_back(s);
-            }
-        }
-    }
-
-    while let Some(v) = queue.pop_front() {
-        let fv = future_final[v].clone();
-        if fv.is_empty() {
-            continue;
-        }
-        if let Some(preds) = predecessors.get(&v) {
-            for &(u, ref w_uv) in preds {
-                let add = &fv & w_uv;
-                if add.is_empty() {
+            for (target, w) in targets {
+                if *target >= n || w.is_empty() {
                     continue;
                 }
-                let old = &future_final[u];
-                if (&add & old) != add {
-                    future_final[u] |= &add;
-                    queue.push_back(u);
+                let entry = queries_at_state
+                    .entry(*target)
+                    .or_default()
+                    .entry(a)
+                    .or_insert_with(Weight::zeros);
+                let old = entry.clone();
+                *entry |= w;
+                if *entry != old {
+                    worklist.push_back((*target, a, entry.clone()));
+                }
+            }
+        }
+    }
+
+    // Propagate paths forward until a fixpoint is reached.
+    while let Some((s, a, w_as)) = worklist.pop_front() {
+        if w_as.is_empty() {
+            continue;
+        }
+
+        // If `s` is final, accumulate its contribution to `a`.
+        if let Some(ref fw) = states[s].final_weight {
+            if !fw.is_empty() {
+                let add = &w_as & fw;
+                if !add.is_empty() {
+                    let entry = future_final.entry(a).or_insert_with(Weight::zeros);
+                    let old = entry.clone();
+                    *entry |= &add;
+                    if *entry != old {
+                        // `future_final` is only an output accumulator; it does not
+                        // affect further propagation, so we do not enqueue anything.
+                    }
+                }
+            }
+        }
+
+        // Propagate along epsilon transitions from `s`.
+        for &(target, ref w_st) in &states[s].epsilons {
+            if target >= n || w_st.is_empty() {
+                continue;
+            }
+            let new_w = &w_as & w_st;
+            if new_w.is_empty() {
+                continue;
+            }
+            let entry = queries_at_state
+                .entry(target)
+                .or_default()
+                .entry(a)
+                .or_insert_with(Weight::zeros);
+            let old = entry.clone();
+            *entry |= &new_w;
+            if *entry != old {
+                worklist.push_back((target, a, entry.clone()));
+            }
+        }
+
+        // Propagate along negative transitions from `s` only if `s` is in the filter.
+        if source_states_filter.contains(&s) {
+            for (&label, targets) in &states[s].transitions {
+                if !is_negative_symbol(label) {
+                    continue;
+                }
+                for (target, w_st) in targets {
+                    if *target >= n || w_st.is_empty() {
+                        continue;
+                    }
+                    let new_w = &w_as & w_st;
+                    if new_w.is_empty() {
+                        continue;
+                    }
+                    let entry = queries_at_state
+                        .entry(*target)
+                        .or_default()
+                        .entry(a)
+                        .or_insert_with(Weight::zeros);
+                    let old = entry.clone();
+                    *entry |= &new_w;
+                    if *entry != old {
+                        worklist.push_back((*target, a, entry.clone()));
+                    }
                 }
             }
         }

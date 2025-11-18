@@ -122,11 +122,11 @@ local_system:
       fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
           let n = states.len();
 
-          let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
+          let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();
           let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
 
           // new_eps_from[from][to] = weight of the cancellation epsilon from `from` to `to`.
-          let mut new_eps_from: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); n];
+          let mut new_eps_from: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
 
           // Seed from negative transitions.
           for &a in source_states_filter {
@@ -140,7 +140,7 @@ local_system:
                           continue;
                       }
                       let query_key: QueryKey = (a, c);
-                      let query_weight = queries[*b].entry(query_key).or_default();
+                      let query_weight = queries.entry(*b).or_default().entry(query_key).or_default();
                       let old_w = query_weight.clone();
                       *query_weight |= w_ab;
                       if *query_weight != old_w {
@@ -153,14 +153,14 @@ local_system:
           while let Some((s, a, c, w_as)) = worklist.pop_front() {
               // First, propagate this query through any already-known cancellation epsilons
               // originating from the current location `s`.
-              if !new_eps_from[s].is_empty() {
-                  for (&target, eps_w) in &new_eps_from[s] {
+              if let Some(epsilons_from_s) = new_eps_from.get(&s) {
+                  for (&target, eps_w) in epsilons_from_s {
                       let prop_w = &w_as & eps_w;
                       if prop_w.is_empty() {
                           continue;
                       }
                       let query_key: QueryKey = (a, c);
-                      let query_weight = queries[target].entry(query_key).or_default();
+                      let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
                       let old_qw = query_weight.clone();
                       *query_weight |= &prop_w;
                       if *query_weight != old_qw {
@@ -178,7 +178,7 @@ local_system:
                   }
 
                   // Epsilon summarizing a cancellation from `a` (the negative's source) to `target`.
-                  let eps_from_a = &mut new_eps_from[a];
+                  let eps_from_a = new_eps_from.entry(a).or_default();
                   let eps_weight = eps_from_a.entry(target).or_default();
                   let old_eps_w = eps_weight.clone();
                   *eps_weight |= &new_eps_w;
@@ -186,18 +186,19 @@ local_system:
                   if *eps_weight != old_eps_w {
                       // When this epsilon grows, any existing queries that are currently at `a`
                       // can also traverse it.
-                      let queries_at_a = queries[a].clone();
-                      for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
-                          let prop_w = w_a_prime_a & &*eps_weight;
-                          if prop_w.is_empty() {
-                              continue;
-                          }
-                          let query_key: QueryKey = (a_prime, c_prime);
-                          let query_weight = queries[target].entry(query_key).or_default();
-                          let old_qw = query_weight.clone();
-                          *query_weight |= &prop_w;
-                          if *query_weight != old_qw {
-                              worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
+                      if let Some(queries_at_a) = queries.get(&a) {
+                          for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a.clone() {
+                              let prop_w = w_a_prime_a & &*eps_weight;
+                              if prop_w.is_empty() {
+                                  continue;
+                              }
+                              let query_key: QueryKey = (a_prime, c_prime);
+                              let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
+                              let old_qw = query_weight.clone();
+                              *query_weight |= &prop_w;
+                              if *query_weight != old_qw {
+                                  worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
+                              }
                           }
                       }
                   }
@@ -225,7 +226,7 @@ local_system:
                       continue;
                   }
                   let query_key: QueryKey = (a, c);
-                  let query_weight = queries[*t].entry(query_key).or_default();
+                  let query_weight = queries.entry(*t).or_default().entry(query_key).or_default();
                   let old_qw = query_weight.clone();
                   *query_weight |= &prop_w;
                   if *query_weight != old_qw {
@@ -235,7 +236,7 @@ local_system:
           }
 
           let mut result = Vec::new();
-          for (from, targets) in new_eps_from.into_iter().enumerate() {
+          for (from, targets) in new_eps_from {
               for (to, w) in targets {
                   result.push((from, to, w));
               }
@@ -246,18 +247,24 @@ local_system:
       fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
           let n = states.len();
           let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
+          let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
 
           for u in 0..n {
               for &(v, ref w) in &states[u].epsilons {
-                  predecessors[v].push((u, w.clone()));
+                  if v < n {
+                      predecessors.entry(v).or_default().push((u, w.clone()));
+                  }
               }
+          }
+          for &u in source_states_filter {
               for (&label, targets) in &states[u].transitions {
                   if !is_negative_symbol(label) {
                       continue;
                   }
                   for (v, w) in targets {
-                      predecessors[*v].push((u, w.clone()));
+                      if *v < n {
+                          predecessors.entry(*v).or_default().push((u, w.clone()));
+                      }
                   }
               }
           }
@@ -277,15 +284,17 @@ local_system:
               if fv.is_empty() {
                   continue;
               }
-              for &(u, ref w_uv) in &predecessors[v] {
-                  let add = &fv & w_uv;
-                  if add.is_empty() {
-                      continue;
-                  }
-                  let old = &future_final[u];
-                  if (&add & old) != add {
-                      future_final[u] |= &add;
-                      queue.push_back(u);
+              if let Some(preds) = predecessors.get(&v) {
+                  for &(u, ref w_uv) in preds {
+                      let add = &fv & w_uv;
+                      if add.is_empty() {
+                          continue;
+                      }
+                      let old = &future_final[u];
+                      if (&add & old) != add {
+                          future_final[u] |= &add;
+                          queue.push_back(u);
+                      }
                   }
               }
           }
@@ -294,6 +303,442 @@ local_system:
       }
   prev_file_contents:
     src/precompute4/resolve_negatives.rs: |
+      use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
+      use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
+      use crate::profiler::PROGRESS_BAR_ENABLED;
+      use indicatif::{ProgressBar, ProgressStyle};
+      use std::collections::{HashMap, HashSet, VecDeque};
+      use std::time::Instant;
+
+      type Code = i16;
+      type QueryKey = (NWAStateID, Code);
+
+      #[inline]
+      fn is_negative_symbol(label: Code) -> bool { label < 0 && label != DEFAULT_TRANSITION_SYMBOL }
+
+      fn make_progress_bar(length: u64, template: &str) -> Option<ProgressBar> {
+          if !PROGRESS_BAR_ENABLED {
+              return None;
+          }
+          let pb = ProgressBar::new(length);
+          pb.set_style(ProgressStyle::default_bar().template(template).expect("progress-bar"));
+          Some(pb)
+      }
+
+      fn progress_step(pb: &Option<ProgressBar>, step: u64, msg: &str) {
+          if let Some(p) = pb {
+              p.set_message(msg.to_string());
+              p.set_position(step);
+          }
+      }
+
+      pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
+          let pb = make_progress_bar(
+              3,
+              "{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] \
+               [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
+          );
+
+          let all_states: HashSet<NWAStateID> = (0..nwa.states.len()).collect();
+
+          progress_step(&pb, 1, "Compute cancellations");
+          apply_cancellations(&mut nwa.states, &all_states);
+
+          progress_step(&pb, 2, "Propagate finality");
+          apply_finality_fixpoint(&mut nwa.states, &all_states);
+
+          progress_step(&pb, 3, "Apply changes & remove negatives");
+          remove_negative_transitions(&mut nwa.states, &all_states);
+          crate::debug!(6, "Applied changes to NWA.");
+
+          if let Some(p) = &pb {
+              p.finish_with_message("Done");
+          }
+      }
+
+      pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+          let epsilons_to_add = compute_cancellations(states, source_states_filter);
+          crate::debug!(6, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
+          for (from, to, w) in epsilons_to_add {
+              states.add_epsilon(from, to, w);
+          }
+      }
+
+      pub fn apply_finality_fixpoint(
+          states: &mut NWAStates,
+          source_states_filter: &HashSet<NWAStateID>,
+      ) {
+          let final_fix = compute_finality_fixpoint(states, source_states_filter);
+          for &sid in source_states_filter {
+              if let Some(add) = final_fix.get(&sid) {
+                  let st = &mut states.0[sid];
+                  if let Some(fw) = &mut st.final_weight {
+                      *fw |= add;
+                  } else {
+                      st.final_weight = Some(add.clone());
+                  }
+              }
+          }
+      }
+
+      pub fn remove_negative_transitions(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+          for &sid in source_states_filter {
+              states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
+          }
+      }
+
+      /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
+      pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
+          let now = Instant::now();
+          crate::debug!(6, "Resolving negative codes in DWA with {} states...", dwa.states.len());
+
+          let pb = make_progress_bar(
+              4,
+              "{spinner:.green} [Resolving negative codes: {elapsed_precise}] \
+               [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
+          );
+
+          progress_step(&pb, 1, "DWA -> NWA");
+          let mut nwa = NWA::from_dwa(dwa);
+          crate::debug!(6, "Converted to NWA with {} states.", nwa.states.len());
+          crate::debug!(6, "Stats for NWA from DWA:\n{}", nwa.stats());
+
+          progress_step(&pb, 2, "Resolve negatives in NWA");
+          resolve_negative_codes_in_nwa(&mut nwa);
+          crate::debug!(6, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
+          crate::debug!(6, "Stats for NWA after negative resolution:\n{}", nwa.stats());
+
+          progress_step(&pb, 3, "Determinize");
+          let mut result = nwa.determinize_to_dwa();
+
+          progress_step(&pb, 4, "Simplify");
+          result.simplify();
+          *dwa = result;
+          crate::debug!(6, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
+
+          if let Some(p) = &pb {
+              p.finish_with_message("Done");
+          }
+          crate::debug!(6, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
+      }
+
+      fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
+          let n = states.len();
+
+          let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();
+          let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
+
+          // new_eps_from[from][to] = weight of the cancellation epsilon from `from` to `to`.
+          let mut new_eps_from: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
+
+          // Seed from negative transitions.
+          for &a in source_states_filter {
+              for (&label, targets) in &states[a].transitions {
+                  if !is_negative_symbol(label) {
+                      continue;
+                  }
+                  let c = label.wrapping_sub(Code::MIN);
+                  for (b, w_ab) in targets {
+                      if *b >= n {
+                          continue;
+                      }
+                      let query_key: QueryKey = (a, c);
+                      let query_weight = queries.entry(*b).or_default().entry(query_key).or_default();
+                      let old_w = query_weight.clone();
+                      *query_weight |= w_ab;
+                      if *query_weight != old_w {
+                          worklist.push_back((*b, a, c, query_weight.clone()));
+                      }
+                  }
+              }
+          }
+
+          while let Some((s, a, c, w_as)) = worklist.pop_front() {
+              // First, propagate this query through any already-known cancellation epsilons
+              // originating from the current location `s`.
+              if let Some(epsilons_from_s) = new_eps_from.get(&s) {
+                  for (&target, eps_w) in epsilons_from_s {
+                      let prop_w = &w_as & eps_w;
+                      if prop_w.is_empty() {
+                          continue;
+                      }
+                      let query_key: QueryKey = (a, c);
+                      let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
+                      let old_qw = query_weight.clone();
+                      *query_weight |= &prop_w;
+                      if *query_weight != old_qw {
+                          worklist.push_back((target, a, c, query_weight.clone()));
+                      }
+                  }
+              }
+
+              let mut check_cancellations = |target: NWAStateID,
+                                             w_st: &Weight,
+                                             worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code, Weight)>| {
+                  let new_eps_w = &w_as & w_st;
+                  if new_eps_w.is_empty() {
+                      return;
+                  }
+
+                  // Epsilon summarizing a cancellation from `a` (the negative's source) to `target`.
+                  let eps_from_a = new_eps_from.entry(a).or_default();
+                  let eps_weight = eps_from_a.entry(target).or_default();
+                  let old_eps_w = eps_weight.clone();
+                  *eps_weight |= &new_eps_w;
+
+                  if *eps_weight != old_eps_w {
+                      // When this epsilon grows, any existing queries that are currently at `a`
+                      // can also traverse it.
+                      if let Some(queries_at_a) = queries.get(&a) {
+                          for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a.clone() {
+                              let prop_w = w_a_prime_a & &*eps_weight;
+                              if prop_w.is_empty() {
+                                  continue;
+                              }
+                              let query_key: QueryKey = (a_prime, c_prime);
+                              let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
+                              let old_qw = query_weight.clone();
+                              *query_weight |= &prop_w;
+                              if *query_weight != old_qw {
+                                  worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
+                              }
+                          }
+                      }
+                  }
+              };
+
+              if let Some(pos_targets) = states[s].transitions.get(&c) {
+                  for (t, w_st) in pos_targets {
+                      if *t < n {
+                          check_cancellations(*t, w_st, &mut worklist);
+                      }
+                  }
+              }
+              if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+                  for (target, weight) in default_targets {
+                      check_cancellations(*target, weight, &mut worklist);
+                  }
+              }
+
+              for (t, w_st) in &states[s].epsilons {
+                  if *t >= n {
+                      continue;
+                  }
+                  let prop_w = &w_as & w_st;
+                  if prop_w.is_empty() {
+                      continue;
+                  }
+                  let query_key: QueryKey = (a, c);
+                  let query_weight = queries.entry(*t).or_default().entry(query_key).or_default();
+                  let old_qw = query_weight.clone();
+                  *query_weight |= &prop_w;
+                  if *query_weight != old_qw {
+                      worklist.push_back((*t, a, c, query_weight.clone()));
+                  }
+              }
+          }
+
+          let mut result = Vec::new();
+          for (from, targets) in new_eps_from {
+              for (to, w) in targets {
+                  result.push((from, to, w));
+              }
+          }
+          result
+      }
+
+      fn compute_finality_fixpoint(
+          states: &NWAStates,
+          source_states_filter: &HashSet<NWAStateID>,
+      ) -> HashMap<NWAStateID, Weight> {
+          let n = states.len();
+
+          // future_final[a] = summary of all epsilon/negative paths from `a` to any final state.
+          // We only need entries for a ∈ source_states_filter.
+          let mut future_final: HashMap<NWAStateID, Weight> = HashMap::new();
+
+          // queries_at_state[s][a] = aggregated weight of all epsilon/negative paths
+          // from `a` (where a ∈ source_states_filter) to `s`.
+          let mut queries_at_state: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
+          let mut worklist: VecDeque<(NWAStateID, NWAStateID, Weight)> = VecDeque::new();
+
+          // Seed zero-length paths: if `a` is already final, include its own final weight.
+          for &a in source_states_filter {
+              if a >= n {
+                  continue;
+              }
+              if let Some(ref fw) = states[a].final_weight {
+                  if !fw.is_empty() {
+                      let entry = future_final.entry(a).or_insert_with(Weight::zeros);
+                      *entry |= fw;
+                  }
+              }
+          }
+
+          // Seed one-step paths from each source in the filter.
+          for &a in source_states_filter {
+              if a >= n {
+                  continue;
+              }
+
+              // Epsilon edges from `a`.
+              for &(target, ref w) in &states[a].epsilons {
+                  if target >= n || w.is_empty() {
+                      continue;
+                  }
+                  let entry = queries_at_state
+                      .entry(target)
+                      .or_default()
+                      .entry(a)
+                      .or_insert_with(Weight::zeros);
+                  let old = entry.clone();
+                  *entry |= w;
+                  if *entry != old {
+                      worklist.push_back((target, a, entry.clone()));
+                  }
+              }
+
+              // Negative transitions from `a`.
+              for (&label, targets) in &states[a].transitions {
+                  if !is_negative_symbol(label) {
+                      continue;
+                  }
+                  for (target, w) in targets {
+                      if *target >= n || w.is_empty() {
+                          continue;
+                      }
+                      let entry = queries_at_state
+                          .entry(*target)
+                          .or_default()
+                          .entry(a)
+                          .or_insert_with(Weight::zeros);
+                      let old = entry.clone();
+                      *entry |= w;
+                      if *entry != old {
+                          worklist.push_back((*target, a, entry.clone()));
+                      }
+                  }
+              }
+          }
+
+          // Propagate paths forward until a fixpoint is reached.
+          while let Some((s, a, w_as)) = worklist.pop_front() {
+              if w_as.is_empty() {
+                  continue;
+              }
+
+              // If `s` is final, accumulate its contribution to `a`.
+              if let Some(ref fw) = states[s].final_weight {
+                  if !fw.is_empty() {
+                      let add = &w_as & fw;
+                      if !add.is_empty() {
+                          let entry = future_final.entry(a).or_insert_with(Weight::zeros);
+                          let old = entry.clone();
+                          *entry |= &add;
+                          if *entry != old {
+                              // `future_final` is only an output accumulator; it does not
+                              // affect further propagation, so we do not enqueue anything.
+                          }
+                      }
+                  }
+              }
+
+              // Propagate along epsilon transitions from `s`.
+              for &(target, ref w_st) in &states[s].epsilons {
+                  if target >= n || w_st.is_empty() {
+                      continue;
+                  }
+                  let new_w = &w_as & w_st;
+                  if new_w.is_empty() {
+                      continue;
+                  }
+                  let entry = queries_at_state
+                      .entry(target)
+                      .or_default()
+                      .entry(a)
+                      .or_insert_with(Weight::zeros);
+                  let old = entry.clone();
+                  *entry |= &new_w;
+                  if *entry != old {
+                      worklist.push_back((target, a, entry.clone()));
+                  }
+              }
+
+              // Propagate along negative transitions from `s` only if `s` is in the filter.
+              if source_states_filter.contains(&s) {
+                  for (&label, targets) in &states[s].transitions {
+                      if !is_negative_symbol(label) {
+                          continue;
+                      }
+                      for (target, w_st) in targets {
+                          if *target >= n || w_st.is_empty() {
+                              continue;
+                          }
+                          let new_w = &w_as & w_st;
+                          if new_w.is_empty() {
+                              continue;
+                          }
+                          let entry = queries_at_state
+                              .entry(*target)
+                              .or_default()
+                              .entry(a)
+                              .or_insert_with(Weight::zeros);
+                          let old = entry.clone();
+                          *entry |= &new_w;
+                          if *entry != old {
+                              worklist.push_back((*target, a, entry.clone()));
+                          }
+                      }
+                  }
+              }
+          }
+
+          future_final
+      }
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+  default_end_line:
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - gpt-5
+  code_completion_model:
+    - gf
+  commit_message_model:
+    - gemini/gemini-flash-lite-latest
+  diff_correction_model:
+    - gf
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
+    metadata:
+      kind: core-guidance
+      role: developer
+      ephemeral: false
+  - user: |-
+      ```rust "src/precompute4/resolve_negatives.rs"
       use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
       use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
       use crate::profiler::PROGRESS_BAR_ENABLED;
@@ -590,349 +1035,15 @@ local_system:
 
           future_final
       }
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-  default_end_line:
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - gp
-  code_completion_model:
-    - gf
-  commit_message_model:
-    - gemini/gemini-flash-lite-latest
-  diff_correction_model:
-    - gf
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
-
-
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```rust "src/precompute4/resolve_negatives.rs"
-      use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
-      use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
-      use crate::profiler::PROGRESS_BAR_ENABLED;
-      use indicatif::{ProgressBar, ProgressStyle};
-      use std::collections::{HashMap, HashSet, VecDeque};
-      use std::time::Instant;
-
-      type Code = i16;
-      type QueryKey = (NWAStateID, Code);
-
-      #[inline]
-      fn is_negative_symbol(label: Code) -> bool { label < 0 && label != DEFAULT_TRANSITION_SYMBOL }
-
-      fn make_progress_bar(length: u64, template: &str) -> Option<ProgressBar> {
-          if !PROGRESS_BAR_ENABLED {
-              return None;
-          }
-          let pb = ProgressBar::new(length);
-          pb.set_style(ProgressStyle::default_bar().template(template).expect("progress-bar"));
-          Some(pb)
-      }
-
-      fn progress_step(pb: &Option<ProgressBar>, step: u64, msg: &str) {
-          if let Some(p) = pb {
-              p.set_message(msg.to_string());
-              p.set_position(step);
-          }
-      }
-
-      pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-          let pb = make_progress_bar(
-              3,
-              "{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] \
-               [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
-          );
-
-          let all_states: HashSet<NWAStateID> = (0..nwa.states.len()).collect();
-
-          progress_step(&pb, 1, "Compute cancellations");
-          apply_cancellations(&mut nwa.states, &all_states);
-
-          progress_step(&pb, 2, "Propagate finality");
-          apply_finality_fixpoint(&mut nwa.states, &all_states);
-
-          progress_step(&pb, 3, "Apply changes & remove negatives");
-          remove_negative_transitions(&mut nwa.states, &all_states);
-          crate::debug!(6, "Applied changes to NWA.");
-
-          if let Some(p) = &pb {
-              p.finish_with_message("Done");
-          }
-      }
-
-      pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
-          let epsilons_to_add = compute_cancellations(states, source_states_filter);
-          crate::debug!(6, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
-          for (from, to, w) in epsilons_to_add {
-              states.add_epsilon(from, to, w);
-          }
-      }
-
-      pub fn apply_finality_fixpoint(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
-          let final_fix = compute_finality_fixpoint(states, source_states_filter);
-          for &sid in source_states_filter {
-              let st = &mut states.0[sid];
-              if let Some(fw) = &mut st.final_weight {
-                  *fw |= &final_fix[sid];
-              } else {
-                  st.final_weight = Some(final_fix[sid].clone());
-              }
-          }
-      }
-
-      pub fn remove_negative_transitions(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
-          for &sid in source_states_filter {
-              states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
-          }
-      }
-
-      /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
-      pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
-          let now = Instant::now();
-          crate::debug!(6, "Resolving negative codes in DWA with {} states...", dwa.states.len());
-
-          let pb = make_progress_bar(
-              4,
-              "{spinner:.green} [Resolving negative codes: {elapsed_precise}] \
-               [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
-          );
-
-          progress_step(&pb, 1, "DWA -> NWA");
-          let mut nwa = NWA::from_dwa(dwa);
-          crate::debug!(6, "Converted to NWA with {} states.", nwa.states.len());
-          crate::debug!(6, "Stats for NWA from DWA:\n{}", nwa.stats());
-
-          progress_step(&pb, 2, "Resolve negatives in NWA");
-          resolve_negative_codes_in_nwa(&mut nwa);
-          crate::debug!(6, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
-          crate::debug!(6, "Stats for NWA after negative resolution:\n{}", nwa.stats());
-
-          progress_step(&pb, 3, "Determinize");
-          let mut result = nwa.determinize_to_dwa();
-
-          progress_step(&pb, 4, "Simplify");
-          result.simplify();
-          *dwa = result;
-          crate::debug!(6, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
-
-          if let Some(p) = &pb {
-              p.finish_with_message("Done");
-          }
-          crate::debug!(6, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
-      }
-
-      fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-          let n = states.len();
-
-          let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
-          let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
-
-          // new_eps_from[from][to] = weight of the cancellation epsilon from `from` to `to`.
-          let mut new_eps_from: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); n];
-
-          // Seed from negative transitions.
-          for &a in source_states_filter {
-              for (&label, targets) in &states[a].transitions {
-                  if !is_negative_symbol(label) {
-                      continue;
-                  }
-                  let c = label.wrapping_sub(Code::MIN);
-                  for (b, w_ab) in targets {
-                      if *b >= n {
-                          continue;
-                      }
-                      let query_key: QueryKey = (a, c);
-                      let query_weight = queries[*b].entry(query_key).or_default();
-                      let old_w = query_weight.clone();
-                      *query_weight |= w_ab;
-                      if *query_weight != old_w {
-                          worklist.push_back((*b, a, c, query_weight.clone()));
-                      }
-                  }
-              }
-          }
-
-          while let Some((s, a, c, w_as)) = worklist.pop_front() {
-              // First, propagate this query through any already-known cancellation epsilons
-              // originating from the current location `s`.
-              if !new_eps_from[s].is_empty() {
-                  for (&target, eps_w) in &new_eps_from[s] {
-                      let prop_w = &w_as & eps_w;
-                      if prop_w.is_empty() {
-                          continue;
-                      }
-                      let query_key: QueryKey = (a, c);
-                      let query_weight = queries[target].entry(query_key).or_default();
-                      let old_qw = query_weight.clone();
-                      *query_weight |= &prop_w;
-                      if *query_weight != old_qw {
-                          worklist.push_back((target, a, c, query_weight.clone()));
-                      }
-                  }
-              }
-
-              let mut check_cancellations = |target: NWAStateID,
-                                             w_st: &Weight,
-                                             worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code, Weight)>| {
-                  let new_eps_w = &w_as & w_st;
-                  if new_eps_w.is_empty() {
-                      return;
-                  }
-
-                  // Epsilon summarizing a cancellation from `a` (the negative's source) to `target`.
-                  let eps_from_a = &mut new_eps_from[a];
-                  let eps_weight = eps_from_a.entry(target).or_default();
-                  let old_eps_w = eps_weight.clone();
-                  *eps_weight |= &new_eps_w;
-
-                  if *eps_weight != old_eps_w {
-                      // When this epsilon grows, any existing queries that are currently at `a`
-                      // can also traverse it.
-                      let queries_at_a = queries[a].clone();
-                      for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
-                          let prop_w = w_a_prime_a & &*eps_weight;
-                          if prop_w.is_empty() {
-                              continue;
-                          }
-                          let query_key: QueryKey = (a_prime, c_prime);
-                          let query_weight = queries[target].entry(query_key).or_default();
-                          let old_qw = query_weight.clone();
-                          *query_weight |= &prop_w;
-                          if *query_weight != old_qw {
-                              worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-                          }
-                      }
-                  }
-              };
-
-              if let Some(pos_targets) = states[s].transitions.get(&c) {
-                  for (t, w_st) in pos_targets {
-                      if *t < n {
-                          check_cancellations(*t, w_st, &mut worklist);
-                      }
-                  }
-              }
-              if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-                  for (target, weight) in default_targets {
-                      check_cancellations(*target, weight, &mut worklist);
-                  }
-              }
-
-              for (t, w_st) in &states[s].epsilons {
-                  if *t >= n {
-                      continue;
-                  }
-                  let prop_w = &w_as & w_st;
-                  if prop_w.is_empty() {
-                      continue;
-                  }
-                  let query_key: QueryKey = (a, c);
-                  let query_weight = queries[*t].entry(query_key).or_default();
-                  let old_qw = query_weight.clone();
-                  *query_weight |= &prop_w;
-                  if *query_weight != old_qw {
-                      worklist.push_back((*t, a, c, query_weight.clone()));
-                  }
-              }
-          }
-
-          let mut result = Vec::new();
-          for (from, targets) in new_eps_from.into_iter().enumerate() {
-              for (to, w) in targets {
-                  result.push((from, to, w));
-              }
-          }
-          result
-      }
-
-      fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
-          let n = states.len();
-          let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
-
-          for u in 0..n {
-              for &(v, ref w) in &states[u].epsilons {
-                  predecessors[v].push((u, w.clone()));
-              }
-              for (&label, targets) in &states[u].transitions {
-                  if !is_negative_symbol(label) {
-                      continue;
-                  }
-                  for (v, w) in targets {
-                      predecessors[*v].push((u, w.clone()));
-                  }
-              }
-          }
-
-          let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-          for s in 0..n {
-              if let Some(ref fw) = states[s].final_weight {
-                  if !fw.is_empty() {
-                      future_final[s] = fw.clone();
-                      queue.push_back(s);
-                  }
-              }
-          }
-
-          while let Some(v) = queue.pop_front() {
-              let fv = future_final[v].clone();
-              if fv.is_empty() {
-                  continue;
-              }
-              for &(u, ref w_uv) in &predecessors[v] {
-                  let add = &fv & w_uv;
-                  if add.is_empty() {
-                      continue;
-                  }
-                  let old = &future_final[u];
-                  if (&add & old) != add {
-                      future_final[u] |= &add;
-                      queue.push_back(u);
-                  }
-              }
-          }
-
-          future_final
-      }
 
       ```
     metadata:
       filename: src/precompute4/resolve_negatives.rs
-  - user: "`source_states_filter` isn't used very well in `compute_finality_fixpoint`.
-      Make better use of it. Keep it compact and efficient. Used properly `source_states_filter`
-      should make this far faster. In fact, just double check the rest of the code
-      too. We pass states filters because we don't want to do ops over the entire
-      NWA, just some part of it. It's an efficiency thing. It's really important that
-      if state filters are passed then the computational cost is proportional to the
-      size of the state filters, essentially, and independent from the overall number
-      of NWA states."
+  - user: |-
+      `source_states_filter` isn't used very well in this code. Make better use of it. Keep it compact and efficient. Used properly `source_states_filter` should make this far faster. In fact, just double check the rest of the code too. We pass states filters because we don't want to do ops over the entire NWA, just some part of it. It's an efficiency thing. It's really important that if state filters are passed then the computational cost is proportional to the size of the state filters, essentially, and independent from the overall number of NWA states. e.g. we should NOT have any loops over `0..states.len()`. It's quite common that `states.len()` is on the order of 100 million but `source_states_filter.len()` is like 100.
+      NOT part of the computation should be proportional in cost to `states.len()`.
+      BUT it MUST be functionally equivalent. This is crucial.
+      Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your output.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -952,207 +1063,814 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. I can help you improve the efficiency of your code by making better use of `source_states_filter` and optimizing data structures. Here are the step-by-step instructions and the corresponding git diff.
+      ### Step-by-step instructions
 
-      ### Step-by-step Instructions
+      Below are concrete edits to `src/precompute4/resolve_negatives.rs` that:
 
-      I'll make two main changes to `src/precompute4/resolve_negatives.rs`:
+      * Remove all `0..states.len()` loops from the finality fixpoint computation.
+      * Make `compute_finality_fixpoint` cost proportional to the size of `source_states_filter` and the subgraph it touches, not to `states.len()`.
+      * Preserve semantics for all states in `source_states_filter`.
 
-      1.  In `compute_cancellations`, I will change `queries` and `new_eps_from` from `Vec` to `HashMap`. This will make memory usage and performance proportional to the number of states involved in cancellations, rather than the total number of states in the automaton. This is especially effective when `source_states_filter` is small.
+      I’ll also explain why the new algorithm is mathematically equivalent to the old one.
 
-      2.  In `compute_finality_fixpoint`, I will:
-          *   Change `predecessors` from a `Vec<Vec<...>>` to a `HashMap` to avoid a large allocation when the predecessor graph is sparse.
-          *   Restrict the construction of the predecessor graph for negative transitions. Instead of iterating over all states, I will only iterate over states in `source_states_filter`, since those are the only states whose negative transitions are being removed.
-          *   Add bounds checks to prevent panics from out-of-bounds state IDs.
+      ---
 
-      Here are the detailed edits for `src/precompute4/resolve_negatives.rs`:
+      #### 1. Change `apply_finality_fixpoint` to consume a sparse map instead of a dense `Vec`
 
-      #### File: `src/precompute4/resolve_negatives.rs`
+      **File:** `src/precompute4/resolve_negatives.rs`  
+      **Old code (for context):**
+      ```rust
+      pub fn apply_finality_fixpoint(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+          let final_fix = compute_finality_fixpoint(states, source_states_filter);
+          for &sid in source_states_filter {
+              let st = &mut states.0[sid];
+              if let Some(fw) = &mut st.final_weight {
+                  *fw |= &final_fix[sid];
+              } else {
+                  st.final_weight = Some(final_fix[sid].clone());
+              }
+          }
+      }
+      ```
 
-      1.  **In `compute_cancellations` function:**
-          *   Replace `let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];` with `let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();`.
-          *   Replace `let mut new_eps_from: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); n];` with `let mut new_eps_from: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();`.
-          *   Update all accesses to `queries` and `new_eps_from` to use `HashMap` APIs (e.g., `.entry()`, `.get()`). This involves several lines in the seeding part, the `while` loop, and the `check_cancellations` closure.
-          *   Update the final loop that builds the `result` vector to iterate over the `new_eps_from` `HashMap`.
+      **Edit:**
 
-      2.  **In `compute_finality_fixpoint` function:**
-          *   Replace `let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];` with `let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();`.
-          *   Split the loop that builds `predecessors`. The first part will iterate from `u in 0..n` to collect all epsilon transitions. The second part will iterate over `&u in source_states_filter` to collect only the relevant negative transitions.
-          *   Add `if v < n` or `if *v < n` checks before pushing to `predecessors` to guard against invalid state IDs.
-          *   Update the `while` loop to access `predecessors` using `.get()`.
+      1. Change the function signature to be multi-line (purely stylistic).
+      2. Treat `compute_finality_fixpoint`’s result as a `HashMap<NWAStateID, Weight>` instead of a `Vec<Weight>`.
+      3. Only update a state if there is a non-zero entry for that state in the map.
 
-      These changes will make your code more robust and significantly more performant when dealing with a filtered set of states.
+      **New code:**
+      ```rust
+      pub fn apply_finality_fixpoint(
+          states: &mut NWAStates,
+          source_states_filter: &HashSet<NWAStateID>,
+      ) {
+          let final_fix = compute_finality_fixpoint(states, source_states_filter);
+          for &sid in source_states_filter {
+              if let Some(add) = final_fix.get(&sid) {
+                  let st = &mut states.0[sid];
+                  if let Some(fw) = &mut st.final_weight {
+                      *fw |= add;
+                  } else {
+                      st.final_weight = Some(add.clone());
+                  }
+              }
+          }
+      }
+      ```
 
-      ### Git Diff
+      **Why this is safe:**
 
-      Here is the git diff for the changes:
+      * Previously `compute_finality_fixpoint` returned a `Vec<Weight>` with `Weight::zeros()` for states that had no future-final contribution. Applying `*fw |= zeros` is a no-op.
+      * Now we simply omit entries with zero weight from the `HashMap`. Skipping states not present in the map is semantically identical to adding a zero weight.
+
+      ---
+
+      #### 2. Replace `compute_finality_fixpoint` with a filter-local, forward fixpoint
+
+      **File:** `src/precompute4/resolve_negatives.rs`  
+      **Old function (for reference):**
+      ```rust
+      fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
+          let n = states.len();
+          let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
+          let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
+
+          for u in 0..n {
+              for &(v, ref w) in &states[u].epsilons {
+                  if v < n {
+                      predecessors.entry(v).or_default().push((u, w.clone()));
+                  }
+              }
+          }
+          for &u in source_states_filter {
+              for (&label, targets) in &states[u].transitions {
+                  if !is_negative_symbol(label) {
+                      continue;
+                  }
+                  for (v, w) in targets {
+                      if *v < n {
+                          predecessors.entry(*v).or_default().push((u, w.clone()));
+                      }
+                  }
+              }
+          }
+
+          let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+          for s in 0..n {
+              if let Some(ref fw) = states[s].final_weight {
+                  if !fw.is_empty() {
+                      future_final[s] = fw.clone();
+                      queue.push_back(s);
+                  }
+              }
+          }
+
+          while let Some(v) = queue.pop_front() {
+              let fv = future_final[v].clone();
+              if fv.is_empty() {
+                  continue;
+              }
+              if let Some(preds) = predecessors.get(&v) {
+                  for &(u, ref w_uv) in preds {
+                      let add = &fv & w_uv;
+                      if add.is_empty() {
+                          continue;
+                      }
+                      let old = &future_final[u];
+                      if (&add & old) != add {
+                          future_final[u] |= &add;
+                          queue.push_back(u);
+                      }
+                  }
+              }
+          }
+
+          future_final
+      }
+      ```
+
+      **Core issues with the old implementation:**
+
+      * It allocates a `Vec<Weight>` of length `states.len()` and iterates `0..n` twice (building `predecessors` and seeding `queue`), even if `source_states_filter` has size 100 and `states.len()` is 100M.
+      * It builds a full predecessor graph for epsilon edges across all states, regardless of whether they are relevant to the filtered states.
+      * This makes the cost inherently proportional to `states.len()`, which violates your requirement.
+
+      ---
+
+      ##### 2.1. New high-level algorithm
+
+      We rewrite `compute_finality_fixpoint` as a **forward** propagation from the filtered states instead of a **backward** propagation from all final states:
+
+      * Graph edges considered:
+        * Epsilon edges `(u -> v, w)` for all states `u`.
+        * Negative transitions `(u -> v, w)` **only if** `u ∈ source_states_filter` (same restriction as before).
+      * For each origin `a ∈ source_states_filter`, we want:
+        * `future_final[a] =` union over all paths `P` from `a` to any final state `t` of  
+          `final_weight[t] & (∧ over all edge weights along P)`.
+        * Paths may traverse epsilon edges anywhere, and negative edges only from states in `source_states_filter`.
+      * Instead of:
+        * “Start from all finals and propagate backwards to everyone along predecessors,”
+        * we do:
+          * “Start from each `a ∈ source_states_filter` and propagate forward along allowed edges, keeping track of accumulated path weights; whenever we reach a final state, we add its contribution to `future_final[a]`.”
+
+      Data structures:
+
+      * `future_final: HashMap<NWAStateID, Weight>`  
+        Aggregates the final-weight contributions for each origin `a ∈ source_states_filter`.
+
+      * `queries_at_state: HashMap<NWAStateID, HashMap<NWAStateID, Weight>>`  
+        For each current location `s`, and origin `a`, stores the union of weights of all (epsilon/negative) paths from `a` to `s`.
+
+      * `worklist: VecDeque<(NWAStateID /* current */, NWAStateID /* origin */, Weight /* path weight */)>`  
+        Worklist for fixpoint iteration. We re-enqueue a triple only when its weight strictly grows.
+
+      Complexity:
+
+      * Outer loops are over `source_states_filter`, not `0..states.len()`.
+      * We only visit states reachable from `source_states_filter` via epsilon and allowed negative edges.
+      * No `Vec` of length `states.len()` is allocated; only `HashMap`s whose size is proportional to the reachable subgraph.
+
+      ---
+
+      ##### 2.2. New implementation of `compute_finality_fixpoint`
+
+      Replace the old function with:
+
+      ```rust
+      fn compute_finality_fixpoint(
+          states: &NWAStates,
+          source_states_filter: &HashSet<NWAStateID>,
+      ) -> HashMap<NWAStateID, Weight> {
+          let n = states.len();
+
+          // future_final[a] = summary of all epsilon/negative paths from `a` to any final state.
+          // We only need entries for a ∈ source_states_filter.
+          let mut future_final: HashMap<NWAStateID, Weight> = HashMap::new();
+
+          // queries_at_state[s][a] = aggregated weight of all epsilon/negative paths
+          // from `a` (where a ∈ source_states_filter) to `s`.
+          let mut queries_at_state: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
+          let mut worklist: VecDeque<(NWAStateID, NWAStateID, Weight)> = VecDeque::new();
+
+          // Seed zero-length paths: if `a` is already final, include its own final weight.
+          for &a in source_states_filter {
+              if a >= n {
+                  continue;
+              }
+              if let Some(ref fw) = states[a].final_weight {
+                  if !fw.is_empty() {
+                      let entry = future_final.entry(a).or_insert_with(Weight::zeros);
+                      *entry |= fw;
+                  }
+              }
+          }
+
+          // Seed one-step paths from each source in the filter.
+          for &a in source_states_filter {
+              if a >= n {
+                  continue;
+              }
+
+              // Epsilon edges from `a`.
+              for &(target, ref w) in &states[a].epsilons {
+                  if target >= n || w.is_empty() {
+                      continue;
+                  }
+                  let entry = queries_at_state
+                      .entry(target)
+                      .or_default()
+                      .entry(a)
+                      .or_insert_with(Weight::zeros);
+                  let old = entry.clone();
+                  *entry |= w;
+                  if *entry != old {
+                      worklist.push_back((target, a, entry.clone()));
+                  }
+              }
+
+              // Negative transitions from `a`.
+              for (&label, targets) in &states[a].transitions {
+                  if !is_negative_symbol(label) {
+                      continue;
+                  }
+                  for (target, w) in targets {
+                      if *target >= n || w.is_empty() {
+                          continue;
+                      }
+                      let entry = queries_at_state
+                          .entry(*target)
+                          .or_default()
+                          .entry(a)
+                          .or_insert_with(Weight::zeros);
+                      let old = entry.clone();
+                      *entry |= w;
+                      if *entry != old {
+                          worklist.push_back((*target, a, entry.clone()));
+                      }
+                  }
+              }
+          }
+
+          // Propagate paths forward until a fixpoint is reached.
+          while let Some((s, a, w_as)) = worklist.pop_front() {
+              if w_as.is_empty() {
+                  continue;
+              }
+
+              // If `s` is final, accumulate its contribution to `a`.
+              if let Some(ref fw) = states[s].final_weight {
+                  if !fw.is_empty() {
+                      let add = &w_as & fw;
+                      if !add.is_empty() {
+                          let entry = future_final.entry(a).or_insert_with(Weight::zeros);
+                          let old = entry.clone();
+                          *entry |= &add;
+                          if *entry != old {
+                              // `future_final` is only an output accumulator; it does not
+                              // affect further propagation, so we do not enqueue anything.
+                          }
+                      }
+                  }
+              }
+
+              // Propagate along epsilon transitions from `s`.
+              for &(target, ref w_st) in &states[s].epsilons {
+                  if target >= n || w_st.is_empty() {
+                      continue;
+                  }
+                  let new_w = &w_as & w_st;
+                  if new_w.is_empty() {
+                      continue;
+                  }
+                  let entry = queries_at_state
+                      .entry(target)
+                      .or_default()
+                      .entry(a)
+                      .or_insert_with(Weight::zeros);
+                  let old = entry.clone();
+                  *entry |= &new_w;
+                  if *entry != old {
+                      worklist.push_back((target, a, entry.clone()));
+                  }
+              }
+
+              // Propagate along negative transitions from `s` only if `s` is in the filter.
+              if source_states_filter.contains(&s) {
+                  for (&label, targets) in &states[s].transitions {
+                      if !is_negative_symbol(label) {
+                          continue;
+                      }
+                      for (target, w_st) in targets {
+                          if *target >= n || w_st.is_empty() {
+                              continue;
+                          }
+                          let new_w = &w_as & w_st;
+                          if new_w.is_empty() {
+                              continue;
+                          }
+                          let entry = queries_at_state
+                              .entry(*target)
+                              .or_default()
+                              .entry(a)
+                              .or_insert_with(Weight::zeros);
+                          let old = entry.clone();
+                          *entry |= &new_w;
+                          if *entry != old {
+                              worklist.push_back((*target, a, entry.clone()));
+                          }
+                      }
+                  }
+              }
+          }
+
+          future_final
+      }
+      ```
+
+      Key points:
+
+      * No `for u in 0..n` loops.
+      * The only dependence on `n = states.len()` is to **bound** state indices, as in the existing code (`if target < n`).
+      * Epsilon edges are traversed from any state we reach (as before).
+      * Negative edges are traversed only from states in `source_states_filter` (as before).
+      * Every triple `(s, a, w_as)` is only re-enqueued when the weight grows (`|=` increases the set), ensuring termination and efficiency.
+
+      ---
+
+      #### 3. Mathematical correctness argument
+
+      Here is a more rigorous argument that the new algorithm is semantically equivalent to the old one for all states in `source_states_filter`.
+
+      ##### 3.1. Common notation and hypotheses
+
+      Let:
+
+      * `V = {0, …, n-1}` be the set of states.
+      * `Final(v)` be the final weight of `v` (`states[v].final_weight.unwrap_or(zeros)`).
+      * `E_eps` be the set of epsilon edges: `(u, v, w)` whenever `states[u].epsilons` contains `(v, w)` and `v < n`.
+      * `E_neg_filt` be the set of negative edges considered:
+        * `(u, v, w)` whenever:
+          * `u ∈ source_states_filter`,
+          * there is a transition from `u` with a label `label` such that `is_negative_symbol(label)` and it has target `(v, w)`,
+          * and `v < n`.
+      * `E = E_eps ∪ E_neg_filt`.
+
+      We assume the following about `Weight` (consistent with how it is used elsewhere):
+
+      * `|` is a commutative, associative, idempotent “union-like” operation.
+      * `&` is a commutative, associative, idempotent “intersection-like” or “meet-like” operation.
+      * `Weight::zeros()` is the additive identity: `zeros | x = x`, `zeros & x = zeros`.
+      * `is_empty()` detects the “zero” element.
+
+      These are exactly the properties that make the original fixpoint algorithm well-defined and terminating; they are also implicit in checks like `if (&add & old) != add` and `fw.is_empty()`.
+
+      ##### 3.2. Semantics of the old algorithm
+
+      The original `compute_finality_fixpoint` constructs a vector `future_final: V → Weight` that is the least fixpoint of:
+
+      ```text
+      future_final(v) = Final(v) ∪ ⋃_{(v→u, w) ∈ E} (future_final(u) & w)
+      ```
+
+      This is obtained by:
+
+      *Initializing*
+
+      * `future_final[v] = Final(v)` for all `v`.
+      * A work queue seeded with all `v` such that `Final(v) ≠ zeros`.
+
+      *Iterating*
+
+      * For each dequeued `v`, propagate `future_final[v]` to its predecessors `u` via edges `(u→v, w)` in `E` by:
+        * `add = future_final[v] & w`
+        * If `add` contains anything new for `u`, update `future_final[u] |= add` and enqueue `u`.
+
+      Classic fixpoint theory for such monotone equations says:
+
+      *Define path semantics*:
+
+      For a path `P = v0 → v1 → … → vk` (with edges in `E`) where `vk` is final, define:
+
+      ```text
+      w(P) = Final(vk) & w(v_{k-1}→vk) & … & w(v0→v1)
+      ```
+
+      For a path of length 0 (k = 0, v0 = vk = v), define `w(P) = Final(v)`.
+
+      Then the least fixpoint `future_final` is exactly:
+
+      ```text
+      future_final(v) = ⋃_{paths P starting at v and ending at some final state} w(P)
+      ```
+
+      In other words:
+
+      * `future_final(v)` is the union of all weights accumulated along all epsilon/negative paths from `v` to any final state.
+
+      This follows from standard “unfolding” arguments: each application of the equation adds contributions from paths one edge longer, and the least fixpoint is the union over all finite path lengths.
+
+      Note: The original implementation **computes this for all `v ∈ V`**, but only `future_final[sid]` for `sid ∈ source_states_filter` is actually used by `apply_finality_fixpoint`.
+
+      ##### 3.3. Semantics of the new algorithm
+
+      The new algorithm views the problem from the opposite direction:
+
+      For each origin `a ∈ source_states_filter`, we consider all paths
+
+      ```text
+      P: a = v0 → v1 → … → vk
+      ```
+
+      in `E`, where `vk` is final, and compute:
+
+      ```text
+      w(P) = Final(vk) & w(v_{k-1}→vk) & … & w(a→v1)
+      ```
+
+      We then set:
+
+      ```text
+      future_final[a] = ⋃_{such paths P starting at a} w(P)
+      ```
+
+      Algorithmically:
+
+      1. For each `a ∈ source_states_filter`:
+         * Seed `future_final[a]` with `Final(a)` (the length-0 path).
+      2. For each `a`, seed `queries_at_state[s][a]` with one-step paths `a → s` along epsilon and negative edges, with weight equal to the edge weight.
+      3. Using a worklist over `(s, a, w_as)`:
+         * Interpret `w_as` as the union of weights over all paths from `a` to `s`.
+         * When we pop `(s, a, w_as)`:
+           * If `s` is final, we add `w_as & Final(s)` to `future_final[a]`.
+           * For each outgoing epsilon edge `s → t` with weight `w_st`, we propagate:
+             * `new_w = w_as & w_st` to `(t, a)`.
+           * For each negative edge `s → t` (only if `s ∈ source_states_filter`), we do the same.
+
+      An invariant of the propagation:
+
+      * At any point,
+        * `queries_at_state[s][a]` equals the union of path edge-weights (`w(v0→v1) & … & w(v_{k-1}→vk)`) over all known paths from `a` to `s`.
+      * We never **lose** contributions, because each time we discover a path with weight `w_new` to `(s, a)`, we do `queries_at_state[s][a] |= w_new`.
+      * We only re-enqueue `(s, a)` when `queries_at_state[s][a]` strictly grows; since `Weight` is finite and `&` and `|` are monotone, this terminates and reaches the least fixpoint.
+
+      At termination:
+
+      * For each `a ∈ source_states_filter` and each state `s`, `queries_at_state[s][a]` equals the union (over all paths from `a` to `s`) of the edge-weight products.
+      * For any final state `t`, we have added `queries_at_state[t][a] & Final(t)` to `future_final[a]`.
+      * So:
+
+      ```text
+      future_final[a] = Final(a) ∪ ⋃_{paths P: a→…→t, t final} w(P)
+      ```
+
+      which is exactly the same path semantics as in §3.2, but restricted to the starting state `a`.
+
+      ##### 3.4. Equivalence for states in `source_states_filter`
+
+      Let `F_old(v)` denote the vector produced by the old algorithm, and `F_new(a)` the map produced by the new algorithm.
+
+      From §3.2:
+
+      ```text
+      F_old(v) = ⋃_{paths P starting at v, ending at final t} w(P).
+      ```
+
+      From §3.3:
+
+      ```text
+      F_new(a) = ⋃_{paths P starting at a, ending at final t} w(P).
+      ```
+
+      Thus, for every `a ∈ source_states_filter`:
+
+      ```text
+      F_new(a) = F_old(a).
+      ```
+
+      Note:
+
+      * Both algorithms use the **same edge set** `E`:
+        * Epsilon edges everywhere.
+        * Negative edges only from states in `source_states_filter`.
+      * Both ignore edges to `v ≥ n` in exactly the same way.
+      * Both count all finite paths (including ones that pass through states outside `source_states_filter`).
+
+      Therefore, the new `compute_finality_fixpoint` yields exactly the same weights for all states that `apply_finality_fixpoint` ever uses.
+
+      ##### 3.5. Behaviour of `apply_finality_fixpoint`
+
+      Originally:
+
+      ```rust
+      for &sid in source_states_filter {
+          let st = &mut states.0[sid];
+          if let Some(fw) = &mut st.final_weight {
+              *fw |= &future_final[sid];
+          } else {
+              st.final_weight = Some(future_final[sid].clone());
+          }
+      }
+      ```
+
+      With `future_final[sid] = F_old(sid)`.
+
+      Now:
+
+      ```rust
+      for &sid in source_states_filter {
+          if let Some(add) = final_fix.get(&sid) {
+              let st = &mut states.0[sid];
+              if let Some(fw) = &mut st.final_weight {
+                  *fw |= add;
+              } else {
+                  st.final_weight = Some(add.clone());
+              }
+          }
+      }
+      ```
+
+      with `add = F_new(sid) = F_old(sid)` if present.
+
+      For states where `F_old(sid) = zeros`, the old code was effectively a no-op (since `fw |= zeros` is identity). The new code simply omits those states entirely. Hence, for all `sid`:
+
+      *If `F_old(sid) != zeros`, the updated `final_weight[sid]` is the same.*  
+      *If `F_old(sid) = zeros`, both old and new code leave `final_weight[sid]` unchanged.*
+
+      This proves the functional equivalence of the entire `apply_finality_fixpoint` + `compute_finality_fixpoint` pair.
+
+      ---
+
+      #### 4. Double-check of the rest of the file with respect to filters
+
+      Quick scan of the remaining functions in `src/precompute4/resolve_negatives.rs`:
+
+      * `resolve_negative_codes_in_nwa`:
+        * Intentionally processes the full NWA and explicitly constructs `all_states = (0..nwa.states.len()).collect()`.
+        * This is the entry point for “do it for the whole automaton”; O(`states.len()`) is expected here.
+      * `apply_cancellations`:
+        * Calls `compute_cancellations(states, source_states_filter)` where the only loop over states is `for &a in source_states_filter`. There is no `0..states.len()` iteration; exploration is restricted to the subgraph reachable from those sources.
+      * `compute_cancellations`:
+        * Uses `let n = states.len()` only as an upper bound for valid state indices.
+        * The seeding loop iterates `for &a in source_states_filter`.
+        * Subsequent propagation is via a worklist over reachable states, not all states. Complexity is proportional to the reachable subgraph, not `states.len()`.
+      * `remove_negative_transitions`:
+        * Loops only over `for &sid in source_states_filter`.
+
+      After the change to `compute_finality_fixpoint`, **no function that accepts `source_states_filter` performs any work proportional to `states.len()`**. The only `0..states.len()` loop left is in `resolve_negative_codes_in_nwa`, which is explicitly the whole-automaton case.
+
+      ---
+
+      ### Git diff
 
       ```diff
+      diff --git a/src/precompute4/resolve_negatives.rs b/src/precompute4/resolve_negatives.rs
       --- a/src/precompute4/resolve_negatives.rs
       +++ b/src/precompute4/resolve_negatives.rs
-      @@ -141,11 +141,11 @@
-       fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
-           let n = states.len();
-       
-      -    let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
-      +    let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();
-           let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
-       
-           // new_eps_from[from][to] = weight of the cancellation epsilon from `from` to `to`.
-      -    let mut new_eps_from: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); n];
-      +    let mut new_eps_from: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
-       
-           // Seed from negative transitions.
-           for &a in source_states_filter {
-      @@ -159,7 +159,7 @@
-                           continue;
-                       }
-                       let query_key: QueryKey = (a, c);
-      -                let query_weight = queries[*b].entry(query_key).or_default();
-      +                let query_weight = queries.entry(*b).or_default().entry(query_key).or_default();
-                       let old_w = query_weight.clone();
-                       *query_weight |= w_ab;
-                       if *query_weight != old_w {
-      @@ -172,14 +172,14 @@
-           while let Some((s, a, c, w_as)) = worklist.pop_front() {
-               // First, propagate this query through any already-known cancellation epsilons
-               // originating from the current location `s`.
-      -        if !new_eps_from[s].is_empty() {
-      -            for (&target, eps_w) in &new_eps_from[s] {
-      +        if let Some(epsilons_from_s) = new_eps_from.get(&s) {
-      +            for (&target, eps_w) in epsilons_from_s {
-                       let prop_w = &w_as & eps_w;
-                       if prop_w.is_empty() {
-                           continue;
-                       }
-                       let query_key: QueryKey = (a, c);
-      -                let query_weight = queries[target].entry(query_key).or_default();
-      +                let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
-                       let old_qw = query_weight.clone();
-                       *query_weight |= &prop_w;
-                       if *query_weight != old_qw {
-      @@ -196,24 +196,25 @@
-                   }
-       
-                   // Epsilon summarizing a cancellation from `a` (the negative's source) to `target`.
-      -            let eps_from_a = &mut new_eps_from[a];
-      +            let eps_from_a = new_eps_from.entry(a).or_default();
-                   let eps_weight = eps_from_a.entry(target).or_default();
-                   let old_eps_w = eps_weight.clone();
-                   *eps_weight |= &new_eps_w;
-       
-                   if *eps_weight != old_eps_w {
-                       // When this epsilon grows, any existing queries that are currently at `a`
-                       // can also traverse it.
-      -                let queries_at_a = queries[a].clone();
-      -                for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
-      -                    let prop_w = w_a_prime_a & &*eps_weight;
-      -                    if prop_w.is_empty() {
-      -                        continue;
-      -                    }
-      -                    let query_key: QueryKey = (a_prime, c_prime);
-      -                    let query_weight = queries[target].entry(query_key).or_default();
-      -                    let old_qw = query_weight.clone();
-      -                    *query_weight |= &prop_w;
-      -                    if *query_weight != old_qw {
-      -                        worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-      +                if let Some(queries_at_a) = queries.get(&a) {
-      +                    for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a.clone() {
-      +                        let prop_w = w_a_prime_a & &*eps_weight;
-      +                        if prop_w.is_empty() {
-      +                            continue;
-      +                        }
-      +                        let query_key: QueryKey = (a_prime, c_prime);
-      +                        let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
-      +                        let old_qw = query_weight.clone();
-      +                        *query_weight |= &prop_w;
-      +                        if *query_weight != old_qw {
-      +                            worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-      +                        }
-                           }
-                       }
-                   }
-      @@ -242,7 +243,7 @@
-                       continue;
-                   }
-                   let query_key: QueryKey = (a, c);
-      -            let query_weight = queries[*t].entry(query_key).or_default();
-      +            let query_weight = queries.entry(*t).or_default().entry(query_key).or_default();
-                   let old_qw = query_weight.clone();
-                   *query_weight |= &prop_w;
-                   if *query_weight != old_qw {
-      @@ -252,7 +253,7 @@
+      @@ -59,14 +59,20 @@ pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSe
+           crate::debug!(6, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
+           for (from, to, w) in epsilons_to_add {
+               states.add_epsilon(from, to, w);
            }
+       }
        
-           let mut result = Vec::new();
-      -    for (from, targets) in new_eps_from.into_iter().enumerate() {
-      +    for (from, targets) in new_eps_from {
-               for (to, w) in targets {
-                   result.push((from, to, w));
-               }
-      @@ -263,20 +264,26 @@
-       fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
-           let n = states.len();
-           let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-      -    let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
-      +    let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
-       
-           for u in 0..n {
-               for &(v, ref w) in &states[u].epsilons {
-      -            predecessors[v].push((u, w.clone()));
+      -pub fn apply_finality_fixpoint(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+      -    let final_fix = compute_finality_fixpoint(states, source_states_filter);
+      -    for &sid in source_states_filter {
+      -        let st = &mut states.0[sid];
+      -        if let Some(fw) = &mut st.final_weight {
+      -            *fw |= &final_fix[sid];
+      -        } else {
+      -            st.final_weight = Some(final_fix[sid].clone());
       -        }
-      +            if v < n {
-      +                predecessors.entry(v).or_default().push((u, w.clone()));
+      -    }
+      -}
+      +pub fn apply_finality_fixpoint(
+      +    states: &mut NWAStates,
+      +    source_states_filter: &HashSet<NWAStateID>,
+      +) {
+      +    let final_fix = compute_finality_fixpoint(states, source_states_filter);
+      +    for &sid in source_states_filter {
+      +        if let Some(add) = final_fix.get(&sid) {
+      +            let st = &mut states.0[sid];
+      +            if let Some(fw) = &mut st.final_weight {
+      +                *fw |= add;
+      +            } else {
+      +                st.final_weight = Some(add.clone());
       +            }
       +        }
       +    }
-      +    for &u in source_states_filter {
-               for (&label, targets) in &states[u].transitions {
-                   if !is_negative_symbol(label) {
-                       continue;
-                   }
-                   for (v, w) in targets {
-      -                predecessors[*v].push((u, w.clone()));
+      +}
+      @@ -237,59 +243,141 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
+           }
+           result
+       }
+       
+      -fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
+      -    let n = states.len();
+      -    let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
+      -    let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
+      -
+      -    for u in 0..n {
+      -        for &(v, ref w) in &states[u].epsilons {
+      -            if v < n {
+      -                predecessors.entry(v).or_default().push((u, w.clone()));
       -            }
       -        }
-      +                if *v < n {
-      +                    predecessors.entry(*v).or_default().push((u, w.clone()));
+      -    }
+      -    for &u in source_states_filter {
+      -        for (&label, targets) in &states[u].transitions {
+      -            if !is_negative_symbol(label) {
+      -                continue;
+      -            }
+      -            for (v, w) in targets {
+      -                if *v < n {
+      -                    predecessors.entry(*v).or_default().push((u, w.clone()));
+      -                }
+      -            }
+      -        }
+      -    }
+      -
+      -    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+      -    for s in 0..n {
+      -        if let Some(ref fw) = states[s].final_weight {
+      -            if !fw.is_empty() {
+      -                future_final[s] = fw.clone();
+      -                queue.push_back(s);
+      -            }
+      -        }
+      -    }
+      -
+      -    while let Some(v) = queue.pop_front() {
+      -        let fv = future_final[v].clone();
+      -        if fv.is_empty() {
+      -            continue;
+      -        }
+      -        if let Some(preds) = predecessors.get(&v) {
+      -            for &(u, ref w_uv) in preds {
+      -                let add = &fv & w_uv;
+      -                if add.is_empty() {
+      -                    continue;
+      -                }
+      -                let old = &future_final[u];
+      -                if (&add & old) != add {
+      -                    future_final[u] |= &add;
+      -                    queue.push_back(u);
+      -                }
+      -            }
+      -        }
+      -    }
+      -
+      -    future_final
+      -}
+      +fn compute_finality_fixpoint(
+      +    states: &NWAStates,
+      +    source_states_filter: &HashSet<NWAStateID>,
+      +) -> HashMap<NWAStateID, Weight> {
+      +    let n = states.len();
+      +
+      +    // future_final[a] = summary of all epsilon/negative paths from `a` to any final state.
+      +    // We only need entries for a ∈ source_states_filter.
+      +    let mut future_final: HashMap<NWAStateID, Weight> = HashMap::new();
+      +
+      +    // queries_at_state[s][a] = aggregated weight of all epsilon/negative paths
+      +    // from `a` (where a ∈ source_states_filter) to `s`.
+      +    let mut queries_at_state: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
+      +    let mut worklist: VecDeque<(NWAStateID, NWAStateID, Weight)> = VecDeque::new();
+      +
+      +    // Seed zero-length paths: if `a` is already final, include its own final weight.
+      +    for &a in source_states_filter {
+      +        if a >= n {
+      +            continue;
+      +        }
+      +        if let Some(ref fw) = states[a].final_weight {
+      +            if !fw.is_empty() {
+      +                let entry = future_final.entry(a).or_insert_with(Weight::zeros);
+      +                *entry |= fw;
+      +            }
+      +        }
+      +    }
+      +
+      +    // Seed one-step paths from each source in the filter.
+      +    for &a in source_states_filter {
+      +        if a >= n {
+      +            continue;
+      +        }
+      +
+      +        // Epsilon edges from `a`.
+      +        for &(target, ref w) in &states[a].epsilons {
+      +            if target >= n || w.is_empty() {
+      +                continue;
+      +            }
+      +            let entry = queries_at_state
+      +                .entry(target)
+      +                .or_default()
+      +                .entry(a)
+      +                .or_insert_with(Weight::zeros);
+      +            let old = entry.clone();
+      +            *entry |= w;
+      +            if *entry != old {
+      +                worklist.push_back((target, a, entry.clone()));
+      +            }
+      +        }
+      +
+      +        // Negative transitions from `a`.
+      +        for (&label, targets) in &states[a].transitions {
+      +            if !is_negative_symbol(label) {
+      +                continue;
+      +            }
+      +            for (target, w) in targets {
+      +                if *target >= n || w.is_empty() {
+      +                    continue;
+      +                }
+      +                let entry = queries_at_state
+      +                    .entry(*target)
+      +                    .or_default()
+      +                    .entry(a)
+      +                    .or_insert_with(Weight::zeros);
+      +                let old = entry.clone();
+      +                *entry |= w;
+      +                if *entry != old {
+      +                    worklist.push_back((*target, a, entry.clone()));
       +                }
       +            }
       +        }
-           }
-       
-           let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-      @@ -294,16 +301,18 @@
-               if fv.is_empty() {
-                   continue;
-               }
-      -        for &(u, ref w_uv) in &predecessors[v] {
-      -            let add = &fv & w_uv;
-      -            if add.is_empty() {
-      -                continue;
-      -            }
-      -            let old = &future_final[u];
-      -            if (&add & old) != add {
-      -                future_final[u] |= &add;
-      -                queue.push_back(u);
-      -            }
-      +        if let Some(preds) = predecessors.get(&v) {
-      +            for &(u, ref w_uv) in preds {
-      +                let add = &fv & w_uv;
-      +                if add.is_empty() {
-      +                    continue;
-      +                }
-      +                let old = &future_final[u];
-      +                if (&add & old) != add {
-      +                    future_final[u] |= &add;
-      +                    queue.push_back(u);
+      +    }
+      +
+      +    // Propagate paths forward until a fixpoint is reached.
+      +    while let Some((s, a, w_as)) = worklist.pop_front() {
+      +        if w_as.is_empty() {
+      +            continue;
+      +        }
+      +
+      +        // If `s` is final, accumulate its contribution to `a`.
+      +        if let Some(ref fw) = states[s].final_weight {
+      +            if !fw.is_empty() {
+      +                let add = &w_as & fw;
+      +                if !add.is_empty() {
+      +                    let entry = future_final.entry(a).or_insert_with(Weight::zeros);
+      +                    let old = entry.clone();
+      +                    *entry |= &add;
+      +                    if *entry != old {
+      +                        // `future_final` is only an output accumulator; it does not
+      +                        // affect further propagation, so we do not enqueue anything.
+      +                    }
       +                }
       +            }
-               }
-           }
-       
-
+      +        }
+      +
+      +        // Propagate along epsilon transitions from `s`.
+      +        for &(target, ref w_st) in &states[s].epsilons {
+      +            if target >= n || w_st.is_empty() {
+      +                continue;
+      +            }
+      +            let new_w = &w_as & w_st;
+      +            if new_w.is_empty() {
+      +                continue;
+      +            }
+      +            let entry = queries_at_state
+      +                .entry(target)
+      +                .or_default()
+      +                .entry(a)
+      +                .or_insert_with(Weight::zeros);
+      +            let old = entry.clone();
+      +            *entry |= &new_w;
+      +            if *entry != old {
+      +                worklist.push_back((target, a, entry.clone()));
+      +            }
+      +        }
+      +
+      +        // Propagate along negative transitions from `s` only if `s` is in the filter.
+      +        if source_states_filter.contains(&s) {
+      +            for (&label, targets) in &states[s].transitions {
+      +                if !is_negative_symbol(label) {
+      +                    continue;
+      +                }
+      +                for (target, w_st) in targets {
+      +                    if *target >= n || w_st.is_empty() {
+      +                        continue;
+      +                    }
+      +                    let new_w = &w_as & w_st;
+      +                    if new_w.is_empty() {
+      +                        continue;
+      +                    }
+      +                    let entry = queries_at_state
+      +                        .entry(*target)
+      +                        .or_default()
+      +                        .entry(a)
+      +                        .or_insert_with(Weight::zeros);
+      +                    let old = entry.clone();
+      +                    *entry |= &new_w;
+      +                    if *entry != old {
+      +                        worklist.push_back((*target, a, entry.clone()));
+      +                    }
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    future_final
+      +}
       ```
     metadata:
   - user: |
@@ -1164,7 +1882,7 @@ messages:
       Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
     metadata:
-  - user: 'Changes committed with message: "perf: Optimize negative resolution by
-      using HashMaps in cancellation/finality computation"'
+  - user: 'Changes committed with message: "Refactor compute_finality_fixpoint for
+      O(|reachable_subgraph|) complexity by using forward propagation from source_states_filter"'
     metadata:
 ...
