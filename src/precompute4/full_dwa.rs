@@ -297,9 +297,9 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     let num_states = combined_nwa.states.len();
     apply_cancellations(&mut combined_nwa, &(0..num_states).collect());
     crate::debug!(4, "Applied cancellations.");
-    apply_finality_fixpoint(&mut combined_nwa);
+    apply_finality_fixpoint(&mut combined_nwa, &(0..num_states).collect());
     crate::debug!(4, "Applied finality fixpoint.");
-    remove_negative_transitions(&mut combined_nwa);
+    remove_negative_transitions(&mut combined_nwa, &(0..num_states).collect());
     crate::debug!(4, "Removed negative transitions.");
     combined_nwa.simplify_rustfst();
     crate::debug!(

@@ -60,6 +60,9 @@ pub fn apply_cancellations(nwa: &mut NWA, source_states_filter: &HashSet<NWAStat
 pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
     let final_fix = compute_finality_fixpoint(&nwa.states, source_states_filter);
     for sid in 0..nwa.states.len() {
+        if !source_states_filter.contains(&sid) {
+            continue;
+        }
         if final_fix[sid].is_empty() {
             continue;
         }
@@ -73,7 +76,10 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWA
 }
 
 pub fn remove_negative_transitions(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
-    for st in &mut nwa.states.0 {
+    for (stid, st) in nwa.states.0.iter_mut().enumerate() {
+        if !source_states_filter.contains(&stid) {
+            continue;
+        }
         st.transitions.retain(|&label, _| !is_negative_symbol(label));
     }
 }
