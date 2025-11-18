@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::common::{BENCHMARK_DEBUG, NWAStateID, StateID, Weight};
+use super::common::{BENCHMARK_DEBUG, OPTIMIZE_DEBUG, NWAStateID, StateID, Weight};
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -124,13 +124,29 @@ struct DwaStateBuilder {
     trans: BTreeMap<i16, (StateID, Weight)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DwaPass {
+    PruneUnreachable,
+    PruneDeadEnds,
+    PushWeights,
+    Minimize,
+}
+
+const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
+    &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::Minimize],
+    &[DwaPass::Minimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
+    &[DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::Minimize],
+];
+
 impl DWA {
     pub fn simplify(&mut self) {
         if self.states.len() == 0 {
             return;
         }
 
-        if BENCHMARK_DEBUG {
+        if OPTIMIZE_DEBUG {
+            self.run_optimization_experiment();
+        } else if BENCHMARK_DEBUG {
             let initial_states = self.states.len();
             let mut internal = self.clone();
             let internal_start = std::time::Instant::now();
@@ -162,6 +178,51 @@ impl DWA {
             *self = internal;
         } else {
             self.simplify_internal();
+        }
+    }
+
+    fn run_optimization_experiment(&mut self) {
+        let initial_clone = self.clone();
+        let initial_states = self.states.len();
+        crate::debug!(4, "[DWA Optimize] Starting experiment with {} states.", initial_states);
+
+        let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;
+
+        for (i, &ordering) in DWA_PASS_ORDERINGS.iter().enumerate() {
+            let mut dwa = initial_clone.clone();
+            let start_time = std::time::Instant::now();
+
+            loop {
+                let mut changed_in_iteration = false;
+                for &pass in ordering {
+                    let changed = match pass {
+                        DwaPass::PruneUnreachable => dwa.prune_unreachable(),
+                        DwaPass::PruneDeadEnds => dwa.prune_dead_ends(),
+                        DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
+                        DwaPass::Minimize => dwa.minimize_states(),
+                    };
+                    changed_in_iteration |= changed;
+                }
+                if !changed_in_iteration {
+                    break;
+                }
+            }
+
+            let elapsed = start_time.elapsed();
+            let final_states = dwa.states.len();
+
+            let ordering_str = format!("{:?}", ordering);
+            crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
+
+            if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+                final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
+            }) {
+                best_result = Some((dwa, elapsed, final_states));
+            }
+        }
+
+        if let Some((best_dwa, _, _)) = best_result {
+            *self = best_dwa;
         }
     }
 
@@ -651,13 +712,30 @@ struct NwaStateBuilder {
     trans: BTreeMap<i16, BTreeMap<NWAStateID, Weight>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NwaPass {
+    PruneUnreachable,
+    PruneDeadEnds,
+    PushFinalWeights,
+    CompressTransitions,
+    Minimize,
+}
+
+const NWA_PASS_ORDERINGS: &[&[NwaPass]] = &[
+    &[NwaPass::PruneUnreachable, NwaPass::PushFinalWeights, NwaPass::CompressTransitions, NwaPass::PruneDeadEnds, NwaPass::Minimize],
+    &[NwaPass::Minimize, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::PushFinalWeights, NwaPass::CompressTransitions],
+    &[NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::Minimize],
+];
+
 impl NWA {
     pub fn simplify(&mut self) {
         if self.states.len() == 0 {
             return;
         }
 
-        if BENCHMARK_DEBUG {
+        if OPTIMIZE_DEBUG {
+            self.run_optimization_experiment();
+        } else if BENCHMARK_DEBUG {
             let initial_states = self.states.len();
             let mut internal = self.clone();
             let internal_start = std::time::Instant::now();
@@ -692,6 +770,52 @@ impl NWA {
         }
     }
 
+    fn run_optimization_experiment(&mut self) {
+        let initial_clone = self.clone();
+        let initial_states = self.states.len();
+        crate::debug!(4, "[NWA Optimize] Starting experiment with {} states.", initial_states);
+
+        let mut best_result: Option<(NWA, std::time::Duration, usize)> = None;
+
+        for (i, &ordering) in NWA_PASS_ORDERINGS.iter().enumerate() {
+            let mut nwa = initial_clone.clone();
+            let start_time = std::time::Instant::now();
+
+            loop {
+                let mut changed_in_iteration = false;
+                for &pass in ordering {
+                    let changed = match pass {
+                        NwaPass::PruneUnreachable => nwa.prune_unreachable(),
+                        NwaPass::PruneDeadEnds => nwa.prune_dead_ends(),
+                        NwaPass::PushFinalWeights => nwa.push_final_weights_along_epsilons(),
+                        NwaPass::CompressTransitions => nwa.compress_transitions(),
+                        NwaPass::Minimize => nwa.minimize_states(),
+                    };
+                    changed_in_iteration |= changed;
+                }
+                if !changed_in_iteration {
+                    break;
+                }
+            }
+
+            let elapsed = start_time.elapsed();
+            let final_states = nwa.states.len();
+
+            let ordering_str = format!("{:?}", ordering);
+            crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}", i, ordering_str, elapsed, final_states);
+
+            if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+                final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
+            }) {
+                best_result = Some((nwa, elapsed, final_states));
+            }
+        }
+
+        if let Some((best_nwa, _, _)) = best_result {
+            *self = best_nwa;
+        }
+    }
+
     pub fn simplify_with_rustfst(&mut self) -> bool {
         let min_config = MinimizeConfig::default().with_allow_nondet(true);
         let mut fst = self.to_rustfst();
@@ -721,17 +845,9 @@ impl NWA {
         changed |= self.prune_dead_ends();
         crate::debug!(4, "[NWA::simplify] After prune_dead_ends (1) ({:.2?}): {}", start.elapsed(), self.stats());
 
-        let n = self.states.len();
-        if n > 1 {
-            let start_minimize = std::time::Instant::now();
-            let partition = minimize_nwa_partition(&self.states);
-            if partition.num_classes() < n {
-                crate::debug!(4, "[NWA::simplify] Minimizing states ({} -> {})...", n, partition.num_classes());
-                self.rebuild_from_partition(partition);
-                changed = true;
-                crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start_minimize.elapsed(), self.stats());
-            }
-        }
+        start = std::time::Instant::now();
+        changed |= self.minimize_states();
+        crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start.elapsed(), self.stats());
 
         start = std::time::Instant::now();
         changed |= self.prune_unreachable();
@@ -742,6 +858,19 @@ impl NWA {
         crate::debug!(4, "[NWA::simplify] After prune_dead_ends (2) ({:.2?}): {}", start.elapsed(), self.stats());
         crate::debug!(4, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
         changed
+    }
+
+    fn minimize_states(&mut self) -> bool {
+        let n = self.states.len();
+        if n <= 1 {
+            return false;
+        }
+        let partition = minimize_nwa_partition(&self.states);
+        if partition.num_classes() >= n {
+            return false;
+        }
+        self.rebuild_from_partition(partition);
+        true
     }
 
     /// Canonicalize NWA transitions by merging parallel transitions:
