@@ -59,11 +59,8 @@ pub fn apply_cancellations(nwa: &mut NWA, source_states_filter: &HashSet<NWAStat
 
 pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
     let final_fix = compute_finality_fixpoint(&nwa.states, source_states_filter);
-    for sid in 0..nwa.states.len() {
-        if !source_states_filter.contains(&sid) {
-            continue;
-        }
-        if final_fix[sid].is_empty() {
+    for &sid in source_states_filter {
+        if sid >= nwa.states.len() || final_fix[sid].is_empty() {
             continue;
         }
         let st = &mut nwa.states.0[sid];
@@ -129,7 +126,7 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
     let mut new_eps_from: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); n];
 
     // Seed from negative transitions.
-    for a in 0..n {
+    for &a in source_states_filter {
         for (&label, targets) in &states[a].transitions {
             if !is_negative_symbol(label) {
                 continue;
@@ -240,7 +237,6 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
             result.push((from, to, w));
         }
     }
-    result.retain(|(from, _, _)| source_states_filter.contains(from));
     result
 }
 
