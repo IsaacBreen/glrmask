@@ -16,6 +16,51 @@ struct Span {
 pub(super) struct ParseError {
     message: String,
     span: Span,
+    line: usize,
+    column: usize,
+    line_text: String,
+}
+
+impl ParseError {
+    fn new(source: &str, span: Span, message: impl Into<String>) -> Self {
+        let (line, column, line_text) = compute_line_info(source, span.start);
+        ParseError {
+            message: message.into(),
+            span,
+            line,
+            column,
+            line_text,
+        }
+    }
+}
+
+// Compute 1-based line and column numbers and capture the offending line.
+fn compute_line_info(source: &str, byte_index: usize) -> (usize, usize, String) {
+    let len = source.len();
+    let idx = byte_index.min(len);
+
+    let mut line_start = 0;
+    let mut line = 1;
+
+    for (i, ch) in source.char_indices() {
+        if i >= idx {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+
+    let line_end = source[line_start..]
+        .find('\n')
+        .map(|off| line_start + off)
+        .unwrap_or(len);
+
+    let line_text = source[line_start..line_end].to_string();
+    let column = source[line_start..idx].chars().count() + 1;
+
+    (line, column, line_text)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,10 +78,28 @@ struct EbnfToken {
 
 impl From<ParseError> for String {
     fn from(e: ParseError) -> Self {
-        format!(
-            "Parse error at byte range {}-{}: {}",
-            e.span.start, e.span.end, e.message
-        )
+        let mut out = format!(
+            "Parse error at line {}, column {} (byte range {}-{}): {}\n",
+            e.line, e.column, e.span.start, e.span.end, e.message
+        );
+
+        if !e.line_text.is_empty() {
+            out.push_str("  -->\n");
+            out.push_str("   | ");
+            out.push_str(&e.line_text);
+            out.push('\n');
+            out.push_str("   | ");
+            let prefix: String = e
+                .line_text
+                .chars()
+                .take(e.column.saturating_sub(1))
+                .map(|c| if c == '\t' { '\t' } else { ' ' })
+                .collect();
+            out.push_str(&prefix);
+            out.push('^');
+        }
+
+        out
     }
 }
 
@@ -88,10 +151,11 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
                         }
                     } else {
                         // This case should be prevented by the regex, but as a safeguard:
-                        return Err(ParseError {
-                            message: format!("Literal with dangling escape: {}", s),
-                            span: Span { start: m.start(), end: m.end() },
-                        });
+                        return Err(ParseError::new(
+                            source,
+                            Span { start: m.start(), end: m.end() },
+                            format!("Literal with dangling escape: {}", s),
+                        ));
                     }
                 } else {
                     unescaped.push(c);
@@ -112,10 +176,15 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
                 span: Span { start: m.start(), end: m.end() },
             });
         } else if let Some(e) = cap.name("error") {
-            return Err(ParseError {
-                message: format!("Unknown token: {}", e.as_str()),
-                span: Span { start: e.start(), end: e.end() },
-            });
+            let mut message = format!("Unknown token: {}", e.as_str());
+            if e.as_str() == ":" && source[e.start()..].starts_with("::=") {
+                message.push_str(" (did you mean '::=' for a rule definition?)");
+            }
+            return Err(ParseError::new(
+                source,
+                Span { start: e.start(), end: e.end() },
+                message,
+            ));
         }
         // ws and comment are ignored
     }
@@ -161,17 +230,19 @@ impl<'a> EbnfParser<'a> {
                 self.expect_grammar_op("!")?;
                 self.expect_grammar_op("[")?;
                 if ignore_symbol_name.is_some() {
-                    return Err(ParseError {
-                        message: "Duplicate ignore directive found".to_string(),
-                        span: directive_span,
-                    });
+                    return Err(ParseError::new(
+                        self.source,
+                        directive_span,
+                        "Duplicate ignore directive found",
+                    ));
                 }
                 let (directive_name, directive_name_span) = self.expect_ident()?;
                 if directive_name != "ignore" {
-                    return Err(ParseError {
-                        message: format!("Unknown directive: {}", directive_name),
-                        span: directive_name_span,
-                    });
+                    return Err(ParseError::new(
+                        self.source,
+                        directive_name_span,
+                        format!("Unknown directive: {}", directive_name),
+                    ));
                 }
                 self.expect_grammar_op("(")?;
                 let (symbol_name, _) = self.expect_ident()?;
@@ -181,10 +252,11 @@ impl<'a> EbnfParser<'a> {
             } else {
                 let (rule_name, rule_name_span) = self.expect_ident()?;
                 if seen_names.contains(&rule_name) {
-                    return Err(ParseError {
-                        message: format!("Duplicate rule name: {}", rule_name),
-                        span: rule_name_span,
-                    });
+                    return Err(ParseError::new(
+                        self.source,
+                        rule_name_span,
+                        format!("Duplicate rule name: {}", rule_name),
+                    ));
                 }
                 seen_names.insert(rule_name.clone());
                 let rule_expr = self.parse_rule_body()?;
@@ -291,7 +363,7 @@ impl<'a> EbnfParser<'a> {
                     self.eof_span(),
                 )
             };
-            Err(ParseError { message, span })
+            Err(ParseError::new(self.source, span, message))
         }
     }
 
@@ -322,35 +394,39 @@ impl<'a> EbnfParser<'a> {
                     self.eof_span(),
                 )
             };
-            Err(ParseError { message, span })
+            Err(ParseError::new(self.source, span, message))
         }
     }
 
     fn expect_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
         match self.tokens.next() {
             Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op => Ok(()),
-            Some(other) => Err(ParseError {
-                message: format!("Expected op '{}', found {:?}", op, other.kind),
-                span: other.span,
-            }),
-            None => Err(ParseError {
-                message: format!("Expected op '{}', found end of input", op),
-                span: self.eof_span(),
-            }),
+            Some(other) => Err(ParseError::new(
+                self.source,
+                other.span,
+                format!("Expected op '{}', found {:?}", op, other.kind),
+            )),
+            None => Err(ParseError::new(
+                self.source,
+                self.eof_span(),
+                format!("Expected op '{}', found end of input", op),
+            )),
         }
     }
 
     fn expect_ident(&mut self) -> Result<(String, Span), ParseError> {
         match self.tokens.next() {
             Some(EbnfToken { kind: EbnfTokenKind::Ident(id), span }) => Ok((id, span)),
-            Some(other) => Err(ParseError {
-                message: format!("Expected identifier, found {:?}", other.kind),
-                span: other.span,
-            }),
-            None => Err(ParseError {
-                message: "Expected identifier, found end of input".to_string(),
-                span: self.eof_span(),
-            }),
+            Some(other) => Err(ParseError::new(
+                self.source,
+                other.span,
+                format!("Expected identifier, found {:?}", other.kind),
+            )),
+            None => Err(ParseError::new(
+                self.source,
+                self.eof_span(),
+                "Expected identifier, found end of input",
+            )),
         }
     }
 }
