@@ -196,6 +196,19 @@ impl JSONNode {
             )),
         }
     }
+
+    pub fn and_then<T, F>(self, f: F) -> Result<T, String>
+    where
+        F: FnOnce(Self) -> Result<T, String>,
+    {
+        match self {
+            JSONNode::Null => f(self),
+            other => Err(format!(
+                "Expected JSONNode::Null, got {}",
+                other.short_preview()
+            )),
+        }
+    }
 }
 
 // --- JSONConvertible Trait ---

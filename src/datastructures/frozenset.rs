@@ -9,7 +9,7 @@ pub struct FrozenSet<T: Eq + Ord> {
     inner: Box<[T]>,
 }
 
-impl<T: Eq + Ord + JSONConvertible> JSONConvertible for FrozenSet<T> {
+impl<T: Eq + Ord + JSONConvertible + Clone> JSONConvertible for FrozenSet<T> {
     fn to_json(&self) -> JSONNode {
         // Preserve the previous JSON format by round-tripping through BTreeSet.
         let tmp: BTreeSet<T> = self.inner.iter().cloned().collect();

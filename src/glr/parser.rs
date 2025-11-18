@@ -1,7 +1,7 @@
 use crate::constraint::{LLMVocab, StateIDBV};
 use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::items::{Item, LRMode, LR_MODE};
+use crate::glr::items::{Item};
 use crate::glr::table::{
     Goto, NonTerminalID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table,
     TerminalID,
