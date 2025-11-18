@@ -238,59 +238,75 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
 }
 
 fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
-    let n = states.len();
-    let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-    let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
+	let n = states.len();
 
-    for u in 0..n {
-        for &(v, ref w) in &states[u].epsilons {
-            if v < n {
-                predecessors.entry(v).or_default().push((u, w.clone()));
-            }
-        }
-    }
-    for &u in source_states_filter {
-        for (&label, targets) in &states[u].transitions {
-            if !is_negative_symbol(label) {
-                continue;
-            }
-            for (v, w) in targets {
-                if *v < n {
-                    predecessors.entry(*v).or_default().push((u, w.clone()));
-                }
-            }
-        }
-    }
+	// 1. Find relevant states: epsilon-reachable from targets of negative transitions from the filter.
+	let mut q: VecDeque<NWAStateID> = VecDeque::new();
+	let mut relevant_states: HashSet<NWAStateID> = HashSet::new();
+	for &s in source_states_filter {
+		for (&label, targets) in &states[s].transitions {
+			if is_negative_symbol(label) {
+				for (t, _) in targets {
+					if *t < n && relevant_states.insert(*t) {
+						q.push_back(*t);
+					}
+				}
+			}
+		}
+	}
 
-    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-    for s in 0..n {
-        if let Some(ref fw) = states[s].final_weight {
-            if !fw.is_empty() {
-                future_final[s] = fw.clone();
-                queue.push_back(s);
-            }
-        }
-    }
+	let mut relevant_states_vec = q.iter().cloned().collect::<Vec<_>>();
+	let mut head = 0;
+	while head < relevant_states_vec.len() {
+		let u = relevant_states_vec[head];
+		head += 1;
+		for (v, _) in &states[u].epsilons {
+			if *v < n && relevant_states.insert(*v) {
+				relevant_states_vec.push(*v);
+			}
+		}
+	}
 
-    while let Some(v) = queue.pop_front() {
-        let fv = future_final[v].clone();
-        if fv.is_empty() {
-            continue;
-        }
-        if let Some(preds) = predecessors.get(&v) {
-            for &(u, ref w_uv) in preds {
-                let add = &fv & w_uv;
-                if add.is_empty() {
-                    continue;
-                }
-                let old = &future_final[u];
-                if (&add & old) != add {
-                    future_final[u] |= &add;
-                    queue.push_back(u);
-                }
-            }
-        }
-    }
+	// 2. Compute finality reachable via epsilon paths for relevant states.
+	let mut eps_finality: HashMap<NWAStateID, Weight> = HashMap::new();
+	for &u in &relevant_states {
+		if let Some(fw) = &states[u].final_weight {
+			eps_finality.insert(u, fw.clone());
+		}
+	}
 
-    future_final
+	// Iterate to fixpoint.
+	loop {
+		let mut changed = false;
+		// Iterate in reverse order of discovery, which is a cheap approximation of reverse topological sort.
+		for &u in relevant_states_vec.iter().rev() {
+			let mut w = eps_finality.get(&u).cloned().unwrap_or_default();
+			let old_w = w.clone();
+			for (v, w_uv) in &states[u].epsilons {
+				if let Some(v_final) = eps_finality.get(v) {
+					w |= &(w_uv & v_final);
+				}
+			}
+			if w != old_w {
+				eps_finality.insert(u, w);
+				changed = true;
+			}
+		}
+		if !changed { break; }
+	}
+
+	// 3. Propagate this finality back across the initial negative transitions.
+	let mut future_final = vec![Weight::zeros(); n];
+	for &s in source_states_filter {
+		for (&label, targets) in &states[s].transitions {
+			if is_negative_symbol(label) {
+				for (t, w) in targets {
+					if let Some(tf) = eps_finality.get(t) {
+						future_final[s] |= &(w & tf);
+					}
+				}
+			}
+		}
+	}
+	future_final
 }
