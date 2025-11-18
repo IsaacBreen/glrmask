@@ -122,11 +122,11 @@ local_system:
       fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
           let n = states.len();
 
-          let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();
+          let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
           let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
 
           // new_eps_from[from][to] = weight of the cancellation epsilon from `from` to `to`.
-          let mut new_eps_from: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
+          let mut new_eps_from: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); n];
 
           // Seed from negative transitions.
           for &a in source_states_filter {
@@ -140,7 +140,7 @@ local_system:
                           continue;
                       }
                       let query_key: QueryKey = (a, c);
-                      let query_weight = queries.entry(*b).or_default().entry(query_key).or_default();
+                      let query_weight = queries[*b].entry(query_key).or_default();
                       let old_w = query_weight.clone();
                       *query_weight |= w_ab;
                       if *query_weight != old_w {
@@ -153,14 +153,14 @@ local_system:
           while let Some((s, a, c, w_as)) = worklist.pop_front() {
               // First, propagate this query through any already-known cancellation epsilons
               // originating from the current location `s`.
-              if let Some(epsilons_from_s) = new_eps_from.get(&s) {
-                  for (&target, eps_w) in epsilons_from_s {
+              if !new_eps_from[s].is_empty() {
+                  for (&target, eps_w) in &new_eps_from[s] {
                       let prop_w = &w_as & eps_w;
                       if prop_w.is_empty() {
                           continue;
                       }
                       let query_key: QueryKey = (a, c);
-                      let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
+                      let query_weight = queries[target].entry(query_key).or_default();
                       let old_qw = query_weight.clone();
                       *query_weight |= &prop_w;
                       if *query_weight != old_qw {
@@ -178,7 +178,7 @@ local_system:
                   }
 
                   // Epsilon summarizing a cancellation from `a` (the negative's source) to `target`.
-                  let eps_from_a = new_eps_from.entry(a).or_default();
+                  let eps_from_a = &mut new_eps_from[a];
                   let eps_weight = eps_from_a.entry(target).or_default();
                   let old_eps_w = eps_weight.clone();
                   *eps_weight |= &new_eps_w;
@@ -186,19 +186,18 @@ local_system:
                   if *eps_weight != old_eps_w {
                       // When this epsilon grows, any existing queries that are currently at `a`
                       // can also traverse it.
-                      if let Some(queries_at_a) = queries.get(&a) {
-                          for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a.clone() {
-                              let prop_w = w_a_prime_a & &*eps_weight;
-                              if prop_w.is_empty() {
-                                  continue;
-                              }
-                              let query_key: QueryKey = (a_prime, c_prime);
-                              let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
-                              let old_qw = query_weight.clone();
-                              *query_weight |= &prop_w;
-                              if *query_weight != old_qw {
-                                  worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-                              }
+                      let queries_at_a = queries[a].clone();
+                      for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
+                          let prop_w = w_a_prime_a & &*eps_weight;
+                          if prop_w.is_empty() {
+                              continue;
+                          }
+                          let query_key: QueryKey = (a_prime, c_prime);
+                          let query_weight = queries[target].entry(query_key).or_default();
+                          let old_qw = query_weight.clone();
+                          *query_weight |= &prop_w;
+                          if *query_weight != old_qw {
+                              worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
                           }
                       }
                   }
@@ -226,7 +225,7 @@ local_system:
                       continue;
                   }
                   let query_key: QueryKey = (a, c);
-                  let query_weight = queries.entry(*t).or_default().entry(query_key).or_default();
+                  let query_weight = queries[*t].entry(query_key).or_default();
                   let old_qw = query_weight.clone();
                   *query_weight |= &prop_w;
                   if *query_weight != old_qw {
@@ -236,7 +235,7 @@ local_system:
           }
 
           let mut result = Vec::new();
-          for (from, targets) in new_eps_from {
+          for (from, targets) in new_eps_from.into_iter().enumerate() {
               for (to, w) in targets {
                   result.push((from, to, w));
               }
@@ -247,24 +246,18 @@ local_system:
       fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
           let n = states.len();
           let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
+          let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
 
           for u in 0..n {
               for &(v, ref w) in &states[u].epsilons {
-                  if v < n {
-                      predecessors.entry(v).or_default().push((u, w.clone()));
-                  }
+                  predecessors[v].push((u, w.clone()));
               }
-          }
-          for &u in source_states_filter {
               for (&label, targets) in &states[u].transitions {
                   if !is_negative_symbol(label) {
                       continue;
                   }
                   for (v, w) in targets {
-                      if *v < n {
-                          predecessors.entry(*v).or_default().push((u, w.clone()));
-                      }
+                      predecessors[*v].push((u, w.clone()));
                   }
               }
           }
@@ -284,17 +277,15 @@ local_system:
               if fv.is_empty() {
                   continue;
               }
-              if let Some(preds) = predecessors.get(&v) {
-                  for &(u, ref w_uv) in preds {
-                      let add = &fv & w_uv;
-                      if add.is_empty() {
-                          continue;
-                      }
-                      let old = &future_final[u];
-                      if (&add & old) != add {
-                          future_final[u] |= &add;
-                          queue.push_back(u);
-                      }
+              for &(u, ref w_uv) in &predecessors[v] {
+                  let add = &fv & w_uv;
+                  if add.is_empty() {
+                      continue;
+                  }
+                  let old = &future_final[u];
+                  if (&add & old) != add {
+                      future_final[u] |= &add;
+                      queue.push_back(u);
                   }
               }
           }
@@ -543,77 +534,61 @@ local_system:
       }
 
       fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
-      	let n = states.len();
+          let n = states.len();
+          let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
+          let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
 
-      	// 1. Find relevant states: epsilon-reachable from targets of negative transitions from the filter.
-      	let mut q: VecDeque<NWAStateID> = VecDeque::new();
-      	let mut relevant_states: HashSet<NWAStateID> = HashSet::new();
-      	for &s in source_states_filter {
-      		for (&label, targets) in &states[s].transitions {
-      			if is_negative_symbol(label) {
-      				for (t, _) in targets {
-      					if *t < n && relevant_states.insert(*t) {
-      						q.push_back(*t);
-      					}
-      				}
-      			}
-      		}
-      	}
+          for u in 0..n {
+              for &(v, ref w) in &states[u].epsilons {
+                  if v < n {
+                      predecessors.entry(v).or_default().push((u, w.clone()));
+                  }
+              }
+          }
+          for &u in source_states_filter {
+              for (&label, targets) in &states[u].transitions {
+                  if !is_negative_symbol(label) {
+                      continue;
+                  }
+                  for (v, w) in targets {
+                      if *v < n {
+                          predecessors.entry(*v).or_default().push((u, w.clone()));
+                      }
+                  }
+              }
+          }
 
-      	let mut relevant_states_vec = q.iter().cloned().collect::<Vec<_>>();
-      	let mut head = 0;
-      	while head < relevant_states_vec.len() {
-      		let u = relevant_states_vec[head];
-      		head += 1;
-      		for (v, _) in &states[u].epsilons {
-      			if *v < n && relevant_states.insert(*v) {
-      				relevant_states_vec.push(*v);
-      			}
-      		}
-      	}
+          let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+          for s in 0..n {
+              if let Some(ref fw) = states[s].final_weight {
+                  if !fw.is_empty() {
+                      future_final[s] = fw.clone();
+                      queue.push_back(s);
+                  }
+              }
+          }
 
-      	// 2. Compute finality reachable via epsilon paths for relevant states.
-      	let mut eps_finality: HashMap<NWAStateID, Weight> = HashMap::new();
-      	for &u in &relevant_states {
-      		if let Some(fw) = &states[u].final_weight {
-      			eps_finality.insert(u, fw.clone());
-      		}
-      	}
+          while let Some(v) = queue.pop_front() {
+              let fv = future_final[v].clone();
+              if fv.is_empty() {
+                  continue;
+              }
+              if let Some(preds) = predecessors.get(&v) {
+                  for &(u, ref w_uv) in preds {
+                      let add = &fv & w_uv;
+                      if add.is_empty() {
+                          continue;
+                      }
+                      let old = &future_final[u];
+                      if (&add & old) != add {
+                          future_final[u] |= &add;
+                          queue.push_back(u);
+                      }
+                  }
+              }
+          }
 
-      	// Iterate to fixpoint.
-      	loop {
-      		let mut changed = false;
-      		// Iterate in reverse order of discovery, which is a cheap approximation of reverse topological sort.
-      		for &u in relevant_states_vec.iter().rev() {
-      			let mut w = eps_finality.get(&u).cloned().unwrap_or_default();
-      			let old_w = w.clone();
-      			for (v, w_uv) in &states[u].epsilons {
-      				if let Some(v_final) = eps_finality.get(v) {
-      					w |= &(w_uv & v_final);
-      				}
-      			}
-      			if w != old_w {
-      				eps_finality.insert(u, w);
-      				changed = true;
-      			}
-      		}
-      		if !changed { break; }
-      	}
-
-      	// 3. Propagate this finality back across the initial negative transitions.
-      	let mut future_final = vec![Weight::zeros(); n];
-      	for &s in source_states_filter {
-      		for (&label, targets) in &states[s].transitions {
-      			if is_negative_symbol(label) {
-      				for (t, w) in targets {
-      					if let Some(tf) = eps_finality.get(t) {
-      						future_final[s] |= &(w & tf);
-      					}
-      				}
-      			}
-      		}
-      	}
-      	future_final
+          future_final
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -776,11 +751,11 @@ messages:
       fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
           let n = states.len();
 
-          let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();
+          let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
           let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
 
           // new_eps_from[from][to] = weight of the cancellation epsilon from `from` to `to`.
-          let mut new_eps_from: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
+          let mut new_eps_from: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); n];
 
           // Seed from negative transitions.
           for &a in source_states_filter {
@@ -794,7 +769,7 @@ messages:
                           continue;
                       }
                       let query_key: QueryKey = (a, c);
-                      let query_weight = queries.entry(*b).or_default().entry(query_key).or_default();
+                      let query_weight = queries[*b].entry(query_key).or_default();
                       let old_w = query_weight.clone();
                       *query_weight |= w_ab;
                       if *query_weight != old_w {
@@ -807,14 +782,14 @@ messages:
           while let Some((s, a, c, w_as)) = worklist.pop_front() {
               // First, propagate this query through any already-known cancellation epsilons
               // originating from the current location `s`.
-              if let Some(epsilons_from_s) = new_eps_from.get(&s) {
-                  for (&target, eps_w) in epsilons_from_s {
+              if !new_eps_from[s].is_empty() {
+                  for (&target, eps_w) in &new_eps_from[s] {
                       let prop_w = &w_as & eps_w;
                       if prop_w.is_empty() {
                           continue;
                       }
                       let query_key: QueryKey = (a, c);
-                      let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
+                      let query_weight = queries[target].entry(query_key).or_default();
                       let old_qw = query_weight.clone();
                       *query_weight |= &prop_w;
                       if *query_weight != old_qw {
@@ -832,7 +807,7 @@ messages:
                   }
 
                   // Epsilon summarizing a cancellation from `a` (the negative's source) to `target`.
-                  let eps_from_a = new_eps_from.entry(a).or_default();
+                  let eps_from_a = &mut new_eps_from[a];
                   let eps_weight = eps_from_a.entry(target).or_default();
                   let old_eps_w = eps_weight.clone();
                   *eps_weight |= &new_eps_w;
@@ -840,19 +815,18 @@ messages:
                   if *eps_weight != old_eps_w {
                       // When this epsilon grows, any existing queries that are currently at `a`
                       // can also traverse it.
-                      if let Some(queries_at_a) = queries.get(&a) {
-                          for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a.clone() {
-                              let prop_w = w_a_prime_a & &*eps_weight;
-                              if prop_w.is_empty() {
-                                  continue;
-                              }
-                              let query_key: QueryKey = (a_prime, c_prime);
-                              let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
-                              let old_qw = query_weight.clone();
-                              *query_weight |= &prop_w;
-                              if *query_weight != old_qw {
-                                  worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
-                              }
+                      let queries_at_a = queries[a].clone();
+                      for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
+                          let prop_w = w_a_prime_a & &*eps_weight;
+                          if prop_w.is_empty() {
+                              continue;
+                          }
+                          let query_key: QueryKey = (a_prime, c_prime);
+                          let query_weight = queries[target].entry(query_key).or_default();
+                          let old_qw = query_weight.clone();
+                          *query_weight |= &prop_w;
+                          if *query_weight != old_qw {
+                              worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
                           }
                       }
                   }
@@ -880,7 +854,7 @@ messages:
                       continue;
                   }
                   let query_key: QueryKey = (a, c);
-                  let query_weight = queries.entry(*t).or_default().entry(query_key).or_default();
+                  let query_weight = queries[*t].entry(query_key).or_default();
                   let old_qw = query_weight.clone();
                   *query_weight |= &prop_w;
                   if *query_weight != old_qw {
@@ -890,7 +864,7 @@ messages:
           }
 
           let mut result = Vec::new();
-          for (from, targets) in new_eps_from {
+          for (from, targets) in new_eps_from.into_iter().enumerate() {
               for (to, w) in targets {
                   result.push((from, to, w));
               }
@@ -901,24 +875,18 @@ messages:
       fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
           let n = states.len();
           let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-          let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
+          let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
 
           for u in 0..n {
               for &(v, ref w) in &states[u].epsilons {
-                  if v < n {
-                      predecessors.entry(v).or_default().push((u, w.clone()));
-                  }
+                  predecessors[v].push((u, w.clone()));
               }
-          }
-          for &u in source_states_filter {
               for (&label, targets) in &states[u].transitions {
                   if !is_negative_symbol(label) {
                       continue;
                   }
                   for (v, w) in targets {
-                      if *v < n {
-                          predecessors.entry(*v).or_default().push((u, w.clone()));
-                      }
+                      predecessors[*v].push((u, w.clone()));
                   }
               }
           }
@@ -938,17 +906,15 @@ messages:
               if fv.is_empty() {
                   continue;
               }
-              if let Some(preds) = predecessors.get(&v) {
-                  for &(u, ref w_uv) in preds {
-                      let add = &fv & w_uv;
-                      if add.is_empty() {
-                          continue;
-                      }
-                      let old = &future_final[u];
-                      if (&add & old) != add {
-                          future_final[u] |= &add;
-                          queue.push_back(u);
-                      }
+              for &(u, ref w_uv) in &predecessors[v] {
+                  let add = &fv & w_uv;
+                  if add.is_empty() {
+                      continue;
+                  }
+                  let old = &future_final[u];
+                  if (&add & old) != add {
+                      future_final[u] |= &add;
+                      queue.push_back(u);
                   }
               }
           }
@@ -966,7 +932,7 @@ messages:
       NWA, just some part of it. It's an efficiency thing. It's really important that
       if state filters are passed then the computational cost is proportional to the
       size of the state filters, essentially, and independent from the overall number
-      of NWA states. e.g. we should NOT have any loops over `0..states.len()`."
+      of NWA states."
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -986,240 +952,206 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. I can help you with that. The current implementation of `compute_finality_fixpoint` is inefficient when a `source_states_filter` is provided, as it iterates over all states in the automaton regardless of the filter's size. I'll refactor it to ensure its computational cost is proportional to the size of the filter and the portion of the graph reachable from it.
-
-      Here are the step-by-step instructions to modify `src/precompute4/resolve_negatives.rs`:
+      Of course. I can help you improve the efficiency of your code by making better use of `source_states_filter` and optimizing data structures. Here are the step-by-step instructions and the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/precompute4/resolve_negatives.rs`**.
+      I'll make two main changes to `src/precompute4/resolve_negatives.rs`:
 
-      2.  **Locate the function `compute_finality_fixpoint`**. It starts around line 281.
+      1.  In `compute_cancellations`, I will change `queries` and `new_eps_from` from `Vec` to `HashMap`. This will make memory usage and performance proportional to the number of states involved in cancellations, rather than the total number of states in the automaton. This is especially effective when `source_states_filter` is small.
 
-      3.  **Replace the entire body of the `compute_finality_fixpoint` function** with the new, optimized implementation. The new implementation will:
-          *   First, determine the set of "relevant states" by finding all states reachable via epsilon transitions from the targets of negative transitions originating from `source_states_filter`. This avoids iterating over all states.
-          *   Then, it will run a fixpoint iteration only on this smaller set of relevant states to compute which of them can reach a final state via epsilon paths.
-          *   Finally, it will propagate these finality weights back to the states in `source_states_filter` across their negative transitions.
+      2.  In `compute_finality_fixpoint`, I will:
+          *   Change `predecessors` from a `Vec<Vec<...>>` to a `HashMap` to avoid a large allocation when the predecessor graph is sparse.
+          *   Restrict the construction of the predecessor graph for negative transitions. Instead of iterating over all states, I will only iterate over states in `source_states_filter`, since those are the only states whose negative transitions are being removed.
+          *   Add bounds checks to prevent panics from out-of-bounds state IDs.
 
-      This approach completely avoids loops over all states in the automaton (`0..states.len()`), making its performance dependent on the size of the filter and its local neighborhood in the graph, as requested.
+      Here are the detailed edits for `src/precompute4/resolve_negatives.rs`:
 
-      Here is the code to replace the function with:
+      #### File: `src/precompute4/resolve_negatives.rs`
 
-      ```rust
-      fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
-          let n = states.len();
+      1.  **In `compute_cancellations` function:**
+          *   Replace `let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];` with `let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();`.
+          *   Replace `let mut new_eps_from: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); n];` with `let mut new_eps_from: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();`.
+          *   Update all accesses to `queries` and `new_eps_from` to use `HashMap` APIs (e.g., `.entry()`, `.get()`). This involves several lines in the seeding part, the `while` loop, and the `check_cancellations` closure.
+          *   Update the final loop that builds the `result` vector to iterate over the `new_eps_from` `HashMap`.
 
-          // 1. Find relevant states: epsilon-reachable from targets of negative transitions from the filter.
-          let mut q: VecDeque<NWAStateID> = VecDeque::new();
-          let mut relevant_states: HashSet<NWAStateID> = HashSet::new();
-          for &s in source_states_filter {
-              for (&label, targets) in &states[s].transitions {
-                  if is_negative_symbol(label) {
-                      for (t, _) in targets {
-                          if *t < n && relevant_states.insert(*t) {
-                              q.push_back(*t);
-                          }
-                      }
-                  }
-              }
-          }
+      2.  **In `compute_finality_fixpoint` function:**
+          *   Replace `let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];` with `let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();`.
+          *   Split the loop that builds `predecessors`. The first part will iterate from `u in 0..n` to collect all epsilon transitions. The second part will iterate over `&u in source_states_filter` to collect only the relevant negative transitions.
+          *   Add `if v < n` or `if *v < n` checks before pushing to `predecessors` to guard against invalid state IDs.
+          *   Update the `while` loop to access `predecessors` using `.get()`.
 
-          let mut relevant_states_vec = q.iter().cloned().collect::<Vec<_>>();
-          let mut head = 0;
-          while head < relevant_states_vec.len() {
-              let u = relevant_states_vec[head];
-              head += 1;
-              for (v, _) in &states[u].epsilons {
-                  if *v < n && relevant_states.insert(*v) {
-                      relevant_states_vec.push(*v);
-                  }
-              }
-          }
-
-          // 2. Compute finality reachable via epsilon paths for relevant states.
-          let mut eps_finality: HashMap<NWAStateID, Weight> = HashMap::new();
-          for &u in &relevant_states {
-              if let Some(fw) = &states[u].final_weight {
-                  eps_finality.insert(u, fw.clone());
-              }
-          }
-
-          // Iterate to fixpoint.
-          loop {
-              let mut changed = false;
-              // Iterate in reverse order of discovery, which is a cheap approximation of reverse topological sort.
-              for &u in relevant_states_vec.iter().rev() {
-                  let mut w = eps_finality.get(&u).cloned().unwrap_or_default();
-                  let old_w = w.clone();
-                  for (v, w_uv) in &states[u].epsilons {
-                      if let Some(v_final) = eps_finality.get(v) {
-                          w |= &(w_uv & v_final);
-                      }
-                  }
-                  if w != old_w {
-                      eps_finality.insert(u, w);
-                      changed = true;
-                  }
-              }
-              if !changed { break; }
-          }
-
-          // 3. Propagate this finality back across the initial negative transitions.
-          let mut future_final = vec![Weight::zeros(); n];
-          for &s in source_states_filter {
-              for (&label, targets) in &states[s].transitions {
-                  if is_negative_symbol(label) {
-                      for (t, w) in targets {
-                          if let Some(tf) = eps_finality.get(t) {
-                              future_final[s] |= &(w & tf);
-                          }
-                      }
-                  }
-              }
-          }
-          future_final
-      }
-      ```
+      These changes will make your code more robust and significantly more performant when dealing with a filtered set of states.
 
       ### Git Diff
 
-      Here is the corresponding git diff for the changes:
+      Here is the git diff for the changes:
 
       ```diff
       --- a/src/precompute4/resolve_negatives.rs
       +++ b/src/precompute4/resolve_negatives.rs
-      @@ -282,51 +282,75 @@
-       }
+      @@ -141,11 +141,11 @@
+       fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
+           let n = states.len();
        
+      -    let mut queries: Vec<HashMap<QueryKey, Weight>> = vec![HashMap::new(); n];
+      +    let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();
+           let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
+       
+           // new_eps_from[from][to] = weight of the cancellation epsilon from `from` to `to`.
+      -    let mut new_eps_from: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); n];
+      +    let mut new_eps_from: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
+       
+           // Seed from negative transitions.
+           for &a in source_states_filter {
+      @@ -159,7 +159,7 @@
+                           continue;
+                       }
+                       let query_key: QueryKey = (a, c);
+      -                let query_weight = queries[*b].entry(query_key).or_default();
+      +                let query_weight = queries.entry(*b).or_default().entry(query_key).or_default();
+                       let old_w = query_weight.clone();
+                       *query_weight |= w_ab;
+                       if *query_weight != old_w {
+      @@ -172,14 +172,14 @@
+           while let Some((s, a, c, w_as)) = worklist.pop_front() {
+               // First, propagate this query through any already-known cancellation epsilons
+               // originating from the current location `s`.
+      -        if !new_eps_from[s].is_empty() {
+      -            for (&target, eps_w) in &new_eps_from[s] {
+      +        if let Some(epsilons_from_s) = new_eps_from.get(&s) {
+      +            for (&target, eps_w) in epsilons_from_s {
+                       let prop_w = &w_as & eps_w;
+                       if prop_w.is_empty() {
+                           continue;
+                       }
+                       let query_key: QueryKey = (a, c);
+      -                let query_weight = queries[target].entry(query_key).or_default();
+      +                let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
+                       let old_qw = query_weight.clone();
+                       *query_weight |= &prop_w;
+                       if *query_weight != old_qw {
+      @@ -196,24 +196,25 @@
+                   }
+       
+                   // Epsilon summarizing a cancellation from `a` (the negative's source) to `target`.
+      -            let eps_from_a = &mut new_eps_from[a];
+      +            let eps_from_a = new_eps_from.entry(a).or_default();
+                   let eps_weight = eps_from_a.entry(target).or_default();
+                   let old_eps_w = eps_weight.clone();
+                   *eps_weight |= &new_eps_w;
+       
+                   if *eps_weight != old_eps_w {
+                       // When this epsilon grows, any existing queries that are currently at `a`
+                       // can also traverse it.
+      -                let queries_at_a = queries[a].clone();
+      -                for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a {
+      -                    let prop_w = w_a_prime_a & &*eps_weight;
+      -                    if prop_w.is_empty() {
+      -                        continue;
+      -                    }
+      -                    let query_key: QueryKey = (a_prime, c_prime);
+      -                    let query_weight = queries[target].entry(query_key).or_default();
+      -                    let old_qw = query_weight.clone();
+      -                    *query_weight |= &prop_w;
+      -                    if *query_weight != old_qw {
+      -                        worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
+      +                if let Some(queries_at_a) = queries.get(&a) {
+      +                    for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a.clone() {
+      +                        let prop_w = w_a_prime_a & &*eps_weight;
+      +                        if prop_w.is_empty() {
+      +                            continue;
+      +                        }
+      +                        let query_key: QueryKey = (a_prime, c_prime);
+      +                        let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
+      +                        let old_qw = query_weight.clone();
+      +                        *query_weight |= &prop_w;
+      +                        if *query_weight != old_qw {
+      +                            worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
+      +                        }
+                           }
+                       }
+                   }
+      @@ -242,7 +243,7 @@
+                       continue;
+                   }
+                   let query_key: QueryKey = (a, c);
+      -            let query_weight = queries[*t].entry(query_key).or_default();
+      +            let query_weight = queries.entry(*t).or_default().entry(query_key).or_default();
+                   let old_qw = query_weight.clone();
+                   *query_weight |= &prop_w;
+                   if *query_weight != old_qw {
+      @@ -252,7 +253,7 @@
+           }
+       
+           let mut result = Vec::new();
+      -    for (from, targets) in new_eps_from.into_iter().enumerate() {
+      +    for (from, targets) in new_eps_from {
+               for (to, w) in targets {
+                   result.push((from, to, w));
+               }
+      @@ -263,20 +264,26 @@
        fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
-      -    let n = states.len();
-      -    let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-      -    let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
-      -
-      -    for u in 0..n {
-      -        for &(v, ref w) in &states[u].epsilons {
-      -            if v < n {
-      -                predecessors.entry(v).or_default().push((u, w.clone()));
+           let n = states.len();
+           let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
+      -    let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
+      +    let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
+       
+           for u in 0..n {
+               for &(v, ref w) in &states[u].epsilons {
+      -            predecessors[v].push((u, w.clone()));
+      -        }
+      +            if v < n {
+      +                predecessors.entry(v).or_default().push((u, w.clone()));
+      +            }
+      +        }
+      +    }
+      +    for &u in source_states_filter {
+               for (&label, targets) in &states[u].transitions {
+                   if !is_negative_symbol(label) {
+                       continue;
+                   }
+                   for (v, w) in targets {
+      -                predecessors[*v].push((u, w.clone()));
       -            }
       -        }
-      -    }
-      -    for &u in source_states_filter {
-      -        for (&label, targets) in &states[u].transitions {
-      -            if !is_negative_symbol(label) {
+      +                if *v < n {
+      +                    predecessors.entry(*v).or_default().push((u, w.clone()));
+      +                }
+      +            }
+      +        }
+           }
+       
+           let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+      @@ -294,16 +301,18 @@
+               if fv.is_empty() {
+                   continue;
+               }
+      -        for &(u, ref w_uv) in &predecessors[v] {
+      -            let add = &fv & w_uv;
+      -            if add.is_empty() {
       -                continue;
       -            }
-      -            for (v, w) in targets {
-      -                if *v < n {
-      -                    predecessors.entry(*v).or_default().push((u, w.clone()));
-      -                }
+      -            let old = &future_final[u];
+      -            if (&add & old) != add {
+      -                future_final[u] |= &add;
+      -                queue.push_back(u);
       -            }
-      -        }
-      -    }
-      -
-      -    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-      -    for s in 0..n {
-      -        if let Some(ref fw) = states[s].final_weight {
-      -            if !fw.is_empty() {
-      -                future_final[s] = fw.clone();
-      -                queue.push_back(s);
-      -            }
-      -        }
-      -    }
-      -
-      -    while let Some(v) = queue.pop_front() {
-      -        let fv = future_final[v].clone();
-      -        if fv.is_empty() {
-      -            continue;
-      -        }
-      -        if let Some(preds) = predecessors.get(&v) {
-      -            for &(u, ref w_uv) in preds {
-      -                let add = &fv & w_uv;
-      -                if add.is_empty() {
-      -                    continue;
-      -                }
-      -                let old = &future_final[u];
-      -                if (&add & old) != add {
-      -                    future_final[u] |= &add;
-      -                    queue.push_back(u);
-      -                }
-      -            }
-      -        }
-      -    }
-      -
-      -    future_final
-      -}
-      +	let n = states.len();
-      +
-      +	// 1. Find relevant states: epsilon-reachable from targets of negative transitions from the filter.
-      +	let mut q: VecDeque<NWAStateID> = VecDeque::new();
-      +	let mut relevant_states: HashSet<NWAStateID> = HashSet::new();
-      +	for &s in source_states_filter {
-      +		for (&label, targets) in &states[s].transitions {
-      +			if is_negative_symbol(label) {
-      +				for (t, _) in targets {
-      +					if *t < n && relevant_states.insert(*t) {
-      +						q.push_back(*t);
-      +					}
-      +				}
-      +			}
-      +		}
-      +	}
-      +
-      +	let mut relevant_states_vec = q.iter().cloned().collect::<Vec<_>>();
-      +	let mut head = 0;
-      +	while head < relevant_states_vec.len() {
-      +		let u = relevant_states_vec[head];
-      +		head += 1;
-      +		for (v, _) in &states[u].epsilons {
-      +			if *v < n && relevant_states.insert(*v) {
-      +				relevant_states_vec.push(*v);
-      +			}
-      +		}
-      +	}
-      +
-      +	// 2. Compute finality reachable via epsilon paths for relevant states.
-      +	let mut eps_finality: HashMap<NWAStateID, Weight> = HashMap::new();
-      +	for &u in &relevant_states {
-      +		if let Some(fw) = &states[u].final_weight {
-      +			eps_finality.insert(u, fw.clone());
-      +		}
-      +	}
-      +
-      +	// Iterate to fixpoint.
-      +	loop {
-      +		let mut changed = false;
-      +		// Iterate in reverse order of discovery, which is a cheap approximation of reverse topological sort.
-      +		for &u in relevant_states_vec.iter().rev() {
-      +			let mut w = eps_finality.get(&u).cloned().unwrap_or_default();
-      +			let old_w = w.clone();
-      +			for (v, w_uv) in &states[u].epsilons {
-      +				if let Some(v_final) = eps_finality.get(v) {
-      +					w |= &(w_uv & v_final);
-      +				}
-      +			}
-      +			if w != old_w {
-      +				eps_finality.insert(u, w);
-      +				changed = true;
-      +			}
-      +		}
-      +		if !changed { break; }
-      +	}
-      +
-      +	// 3. Propagate this finality back across the initial negative transitions.
-      +	let mut future_final = vec![Weight::zeros(); n];
-      +	for &s in source_states_filter {
-      +		for (&label, targets) in &states[s].transitions {
-      +			if is_negative_symbol(label) {
-      +				for (t, w) in targets {
-      +					if let Some(tf) = eps_finality.get(t) {
-      +						future_final[s] |= &(w & tf);
-      +					}
-      +				}
-      +			}
-      +		}
-      +	}
-      +	future_final
-      +}
+      +        if let Some(preds) = predecessors.get(&v) {
+      +            for &(u, ref w_uv) in preds {
+      +                let add = &fv & w_uv;
+      +                if add.is_empty() {
+      +                    continue;
+      +                }
+      +                let old = &future_final[u];
+      +                if (&add & old) != add {
+      +                    future_final[u] |= &add;
+      +                    queue.push_back(u);
+      +                }
+      +            }
+               }
+           }
+       
 
       ```
     metadata:
@@ -1232,7 +1164,7 @@ messages:
       Applying patch to 'src/precompute4/resolve_negatives.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/resolve_negatives.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Optimize compute_finality_fixpoint
-      by restricting fixpoint iteration to relevant states based on source_states_filter."'
+  - user: 'Changes committed with message: "perf: Optimize negative resolution by
+      using HashMaps in cancellation/finality computation"'
     metadata:
 ...
