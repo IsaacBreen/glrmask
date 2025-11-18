@@ -273,34 +273,34 @@ impl DWA {
 
     fn simplify_internal(&mut self) -> bool {
         crate::debug!(4, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
-        let mut changed = false;
-        let mut start;
+        let mut total_changed = false;
+        let ordering = &[
+            DwaPass::PruneDeadEnds,
+            DwaPass::Minimize,
+            DwaPass::PushWeights,
+            DwaPass::PruneUnreachable,
+        ];
 
-        start = std::time::Instant::now();
-        changed |= self.prune_unreachable();
-        crate::debug!(4, "[DWA::simplify] After prune_unreachable (1) ({:.2?}): {}", start.elapsed(), self.stats());
+        for _ in 0..MAX_OPTIMIZE_ITERATIONS {
+            let mut changed_in_iteration = false;
+            for &pass in ordering {
+                let pass_changed = match pass {
+                    DwaPass::PruneUnreachable => self.prune_unreachable(),
+                    DwaPass::PruneDeadEnds => self.prune_dead_ends(),
+                    DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
+                    DwaPass::Minimize => self.minimize_states(),
+                };
+                changed_in_iteration |= pass_changed;
+            }
 
-        start = std::time::Instant::now();
-        changed |= self.prune_dead_ends();
-        crate::debug!(4, "[DWA::simplify] After prune_dead_ends (1) ({:.2?}): {}", start.elapsed(), self.stats());
+            total_changed |= changed_in_iteration;
+            if !changed_in_iteration {
+                break;
+            }
+        }
 
-        start = std::time::Instant::now();
-        changed |= self.push_weights_into_transitions_and_finals();
-        crate::debug!(4, "[DWA::simplify] After pushing weights ({:.2?}): {}", start.elapsed(), self.stats());
-
-        start = std::time::Instant::now();
-        changed |= self.minimize_states();
-        crate::debug!(4, "[DWA::simplify] After minimizing ({:.2?}): {}", start.elapsed(), self.stats());
-
-        start = std::time::Instant::now();
-        changed |= self.prune_unreachable();
-        crate::debug!(4, "[DWA::simplify] After prune_unreachable (2) ({:.2?}): {}", start.elapsed(), self.stats());
-
-        start = std::time::Instant::now();
-        changed |= self.prune_dead_ends();
-        crate::debug!(4, "[DWA::simplify] After prune_dead_ends (2) ({:.2?}): {}", start.elapsed(), self.stats());
-        crate::debug!(4, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
-        changed
+        crate::debug!(4, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+        total_changed
     }
 
     fn push_weights_into_transitions_and_finals(&mut self) -> bool {
@@ -891,38 +891,36 @@ impl NWA {
 
     pub fn simplify_internal(&mut self) -> bool {
         crate::debug!(4, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
-        let mut changed = false;
-        let mut start;
+        let mut total_changed = false;
+        let ordering = &[
+            NwaPass::Minimize,
+            NwaPass::CompressTransitions,
+            NwaPass::PushFinalWeights,
+            NwaPass::PruneUnreachable,
+            NwaPass::PruneDeadEnds,
+        ];
 
-        start = std::time::Instant::now();
-        changed |= self.prune_unreachable();
-        crate::debug!(4, "[NWA::simplify] After prune_unreachable (1) ({:.2?}): {}", start.elapsed(), self.stats());
+        for _ in 0..MAX_OPTIMIZE_ITERATIONS {
+            let mut changed_in_iteration = false;
+            for &pass in ordering {
+                let pass_changed = match pass {
+                    NwaPass::PruneUnreachable => self.prune_unreachable(),
+                    NwaPass::PruneDeadEnds => self.prune_dead_ends(),
+                    NwaPass::PushFinalWeights => self.push_final_weights_along_epsilons(),
+                    NwaPass::CompressTransitions => self.compress_transitions(),
+                    NwaPass::Minimize => self.minimize_states(),
+                };
+                changed_in_iteration |= pass_changed;
+            }
 
-        start = std::time::Instant::now();
-        changed |= self.push_final_weights_along_epsilons();
-        crate::debug!(4, "[NWA::simplify] After pushing final weights along epsilons ({:.2?}): {}", start.elapsed(), self.stats());
+            total_changed |= changed_in_iteration;
+            if !changed_in_iteration {
+                break;
+            }
+        }
 
-        start = std::time::Instant::now();
-        changed |= self.compress_transitions();
-        crate::debug!(4, "[NWA::simplify] After compress_transitions ({:.2?}): {}", start.elapsed(), self.stats());
-
-        start = std::time::Instant::now();
-        changed |= self.prune_dead_ends();
-        crate::debug!(4, "[NWA::simplify] After prune_dead_ends (1) ({:.2?}): {}", start.elapsed(), self.stats());
-
-        start = std::time::Instant::now();
-        changed |= self.minimize_states();
-        crate::debug!(4, "[NWA::simplify] After minimizing ({:.2?}): {}", start.elapsed(), self.stats());
-
-        start = std::time::Instant::now();
-        changed |= self.prune_unreachable();
-        crate::debug!(4, "[NWA::simplify] After prune_unreachable (2) ({:.2?}): {}", start.elapsed(), self.stats());
-
-        start = std::time::Instant::now();
-        changed |= self.prune_dead_ends();
-        crate::debug!(4, "[NWA::simplify] After prune_dead_ends (2) ({:.2?}): {}", start.elapsed(), self.stats());
-        crate::debug!(4, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", changed, self.stats());
-        changed
+        crate::debug!(4, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+        total_changed
     }
 
     fn minimize_states(&mut self) -> bool {
