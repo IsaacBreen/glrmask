@@ -6,12 +6,29 @@ use std::iter::Peekable;
 use std::sync::OnceLock;
 use std::vec::IntoIter;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Span {
+    start: usize,
+    end: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
-enum EbnfToken {
+pub(super) struct ParseError {
+    message: String,
+    span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum EbnfTokenKind {
     Ident(String),
     Literal(String),
     CharClass(String),
     Op(String),
+}
+#[derive(Debug, Clone, PartialEq)]
+struct EbnfToken {
+    kind: EbnfTokenKind,
+    span: Span,
 }
 
 fn get_token_regex() -> &'static Regex {
@@ -32,13 +49,16 @@ fn get_token_regex() -> &'static Regex {
     })
 }
 
-fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
+fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
     let mut tokens = Vec::new();
     for cap in get_token_regex().captures_iter(source) {
-        if let Some(ident) = cap.name("ident") {
-            tokens.push(EbnfToken::Ident(ident.as_str().to_string()));
-        } else if let Some(lit) = cap.name("literal") {
-            let s = lit.as_str();
+        if let Some(m) = cap.name("ident") {
+            tokens.push(EbnfToken {
+                kind: EbnfTokenKind::Ident(m.as_str().to_string()),
+                span: Span { start: m.start(), end: m.end() },
+            });
+        } else if let Some(m) = cap.name("literal") {
+            let s = m.as_str();
             let content = &s[1..s.len() - 1];
             let mut unescaped = String::with_capacity(content.len());
             let mut chars = content.chars();
@@ -59,19 +79,34 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
                         }
                     } else {
                         // This case should be prevented by the regex, but as a safeguard:
-                        return Err(format!("Literal with dangling escape: {}", s));
+                        return Err(ParseError {
+                            message: format!("Literal with dangling escape: {}", s),
+                            span: Span { start: m.start(), end: m.end() },
+                        });
                     }
                 } else {
                     unescaped.push(c);
                 }
             }
-            tokens.push(EbnfToken::Literal(unescaped));
-        } else if let Some(cc) = cap.name("charclass") {
-            tokens.push(EbnfToken::CharClass(cc.as_str().to_string()));
-        } else if let Some(op) = cap.name("op") {
-            tokens.push(EbnfToken::Op(op.as_str().to_string()));
+            tokens.push(EbnfToken {
+                kind: EbnfTokenKind::Literal(unescaped),
+                span: Span { start: m.start(), end: m.end() },
+            });
+        } else if let Some(m) = cap.name("charclass") {
+            tokens.push(EbnfToken {
+                kind: EbnfTokenKind::CharClass(m.as_str().to_string()),
+                span: Span { start: m.start(), end: m.end() },
+            });
+        } else if let Some(m) = cap.name("op") {
+            tokens.push(EbnfToken {
+                kind: EbnfTokenKind::Op(m.as_str().to_string()),
+                span: Span { start: m.start(), end: m.end() },
+            });
         } else if let Some(e) = cap.name("error") {
-            return Err(format!("Unknown token: {}", e.as_str()));
+            return Err(ParseError {
+                message: format!("Unknown token: {}", e.as_str()),
+                span: Span { start: e.start(), end: e.end() },
+            });
         }
         // ws and comment are ignored
     }
@@ -83,54 +118,66 @@ pub(super) struct EbnfParseResult {
     pub ignore_symbol_name: Option<String>,
 }
 
-pub(super) struct EbnfParser {
+pub(super) struct EbnfParser<'a> {
+    source: &'a str,
     tokens: Peekable<IntoIter<EbnfToken>>,
 }
 
-impl EbnfParser {
-    pub(super) fn new(source: &str) -> Result<Self, String> {
+impl<'a> EbnfParser<'a> {
+    pub(super) fn new(source: &'a str) -> Result<Self, ParseError> {
         let tokens = tokenize(source)?;
         Ok(EbnfParser {
+            source,
             tokens: tokens.into_iter().peekable(),
         })
     }
 
-    fn parse_rule(&mut self) -> Result<(String, GrammarExpr), String> {
-        let name = self.expect_ident()?;
+    fn parse_rule_body(&mut self) -> Result<GrammarExpr, ParseError> {
         self.expect_grammar_op("::=")?;
         let expr = self.parse_grammar_expression()?;
         self.expect_grammar_op(";")?;
-        Ok((name, expr))
+        Ok(expr)
     }
 
-    pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
+    pub(super) fn parse(&mut self) -> Result<EbnfParseResult, ParseError> {
         let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
         let mut seen_names = HashSet::new();
         let mut ignore_symbol_name = None;
 
         while self.tokens.peek().is_some() {
             if self.peek_grammar_op("#") {
+                let directive_span = self.tokens.peek().unwrap().span;
                 self.consume_grammar_op("#")?;
                 self.expect_grammar_op("!")?;
                 self.expect_grammar_op("[")?;
                 if ignore_symbol_name.is_some() {
-                    return Err("Duplicate ignore directive found".to_string());
+                    return Err(ParseError {
+                        message: "Duplicate ignore directive found".to_string(),
+                        span: directive_span,
+                    });
                 }
-                let directive_name = self.expect_ident()?;
+                let (directive_name, directive_name_span) = self.expect_ident()?;
                 if directive_name != "ignore" {
-                    return Err(format!("Unknown directive: {}", directive_name));
+                    return Err(ParseError {
+                        message: format!("Unknown directive: {}", directive_name),
+                        span: directive_name_span,
+                    });
                 }
                 self.expect_grammar_op("(")?;
-                let symbol_name = self.expect_ident()?;
+                let (symbol_name, _) = self.expect_ident()?;
                 self.expect_grammar_op(")")?;
                 self.expect_grammar_op("]")?;
                 ignore_symbol_name = Some(symbol_name);
             } else {
-                let (rule_name, rule_expr) = self.parse_rule()?;
+                let (rule_name, rule_name_span) = self.expect_ident()?;
                 if seen_names.contains(&rule_name) {
-                    return Err(format!("Duplicate rule name: {}", rule_name));
+                    return Err(ParseError {
+                        message: format!("Duplicate rule name: {}", rule_name),
+                        span: rule_name_span,
+                    });
                 }
                 seen_names.insert(rule_name.clone());
+                let rule_expr = self.parse_rule_body()?;
                 rules.push((rule_name, rule_expr));
             }
         }
@@ -141,7 +188,7 @@ impl EbnfParser {
         })
     }
 
-    fn parse_grammar_expression(&mut self) -> Result<GrammarExpr, String> {
+    fn parse_grammar_expression(&mut self) -> Result<GrammarExpr, ParseError> {
         let mut choices = vec![self.parse_grammar_sequence()?];
         while self.peek_grammar_op("|") {
             self.consume_grammar_op("|")?;
@@ -154,7 +201,7 @@ impl EbnfParser {
         }
     }
 
-    fn parse_grammar_sequence(&mut self) -> Result<GrammarExpr, String> {
+    fn parse_grammar_sequence(&mut self) -> Result<GrammarExpr, ParseError> {
         let mut terms = Vec::new();
         // A sequence can be empty, which is a valid choice in an expression (e.g., `A ::= B | ;`)
         while self.tokens.peek().is_some()
@@ -174,7 +221,7 @@ impl EbnfParser {
         }
     }
 
-    fn parse_grammar_term(&mut self) -> Result<GrammarExpr, String> {
+    fn parse_grammar_term(&mut self) -> Result<GrammarExpr, ParseError> {
         let factor = self.parse_grammar_factor()?;
 
         if self.peek_grammar_op("?") {
@@ -191,17 +238,17 @@ impl EbnfParser {
         }
     }
 
-    fn parse_grammar_factor(&mut self) -> Result<GrammarExpr, String> {
+    fn parse_grammar_factor(&mut self) -> Result<GrammarExpr, ParseError> {
         if self.peek_grammar_op(".") {
             self.consume_grammar_op(".")?;
             Ok(GrammarExpr::AnyChar)
-        } else if let Some(EbnfToken::Ident(id)) = self.tokens.peek().cloned() {
+        } else if let Some(EbnfToken { kind: EbnfTokenKind::Ident(id), .. }) = self.tokens.peek().cloned() {
             self.tokens.next();
             Ok(r#ref(&id))
-        } else if let Some(EbnfToken::Literal(lit)) = self.tokens.peek().cloned() {
+        } else if let Some(EbnfToken { kind: EbnfTokenKind::Literal(lit), .. }) = self.tokens.peek().cloned() {
             self.tokens.next();
             Ok(literal(lit.into_bytes()))
-        } else if let Some(EbnfToken::CharClass(cc)) = self.tokens.peek().cloned() {
+        } else if let Some(EbnfToken { kind: EbnfTokenKind::CharClass(cc), .. }) = self.tokens.peek().cloned() {
             self.tokens.next();
             Ok(CharClass(cc))
         } else if self.peek_grammar_op("(") {
@@ -220,39 +267,80 @@ impl EbnfParser {
             self.expect_grammar_op("}")?;
             Ok(repeat(expr))
         } else {
-            Err(format!(
-                "Expected identifier, literal, group, or '.', found {:?}",
-                self.tokens.peek()
-            ))
+            let (message, span) = if let Some(token) = self.tokens.peek() {
+                (
+                    format!(
+                        "Expected identifier, literal, group, or '.', found {:?}",
+                        &token.kind
+                    ),
+                    token.span,
+                )
+            } else {
+                (
+                    "Expected identifier, literal, group, or '.', found end of input".to_string(),
+                    self.eof_span(),
+                )
+            };
+            Err(ParseError { message, span })
         }
     }
 
     // --- Parser Helpers ---
 
-    fn peek_grammar_op(&mut self, op: &str) -> bool {
-        matches!(self.tokens.peek(), Some(EbnfToken::Op(s)) if s == op)
+    fn eof_span(&self) -> Span {
+        let end = self.source.len();
+        Span { start: end, end }
     }
 
-    fn consume_grammar_op(&mut self, op: &str) -> Result<(), String> {
+    fn peek_grammar_op(&mut self, op: &str) -> bool {
+        matches!(self.tokens.peek(), Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op)
+    }
+
+    fn consume_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
         if self.peek_grammar_op(op) {
             self.tokens.next();
             Ok(())
         } else {
-            Err(format!("Expected op '{}', found {:?}", op, self.tokens.peek()))
+            let (message, span) = if let Some(token) = self.tokens.peek() {
+                (
+                    format!("Expected op '{}', found {:?}", op, &token.kind),
+                    token.span,
+                )
+            } else {
+                (
+                    format!("Expected op '{}', found end of input", op),
+                    self.eof_span(),
+                )
+            };
+            Err(ParseError { message, span })
         }
     }
 
-    fn expect_grammar_op(&mut self, op: &str) -> Result<(), String> {
+    fn expect_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
         match self.tokens.next() {
-            Some(EbnfToken::Op(s)) if s == op => Ok(()),
-            other => Err(format!("Expected op '{}', found {:?}", op, other)),
+            Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op => Ok(()),
+            Some(other) => Err(ParseError {
+                message: format!("Expected op '{}', found {:?}", op, other.kind),
+                span: other.span,
+            }),
+            None => Err(ParseError {
+                message: format!("Expected op '{}', found end of input", op),
+                span: self.eof_span(),
+            }),
         }
     }
 
-    fn expect_ident(&mut self) -> Result<String, String> {
+    fn expect_ident(&mut self) -> Result<(String, Span), ParseError> {
         match self.tokens.next() {
-            Some(EbnfToken::Ident(id)) => Ok(id),
-            other => Err(format!("Expected identifier, found {:?}", other)),
+            Some(EbnfToken { kind: EbnfTokenKind::Ident(id), span }) => Ok((id, span)),
+            Some(other) => Err(ParseError {
+                message: format!("Expected identifier, found {:?}", other.kind),
+                span: other.span,
+            }),
+            None => Err(ParseError {
+                message: "Expected identifier, found end of input".to_string(),
+                span: self.eof_span(),
+            }),
         }
     }
 }
@@ -284,6 +372,22 @@ mod tests {
         ];
 
         assert_eq!(rules, expected_rules);
+    }
+
+    #[test]
+    fn test_ebnf_parser_error_with_span() {
+        let ebnf = r#"
+            s ::= a b;
+            a ::= 'a' | ;
+            b ::= c*;
+            c ::= 'c'??;
+        "#;
+        let mut parser = EbnfParser::new(ebnf).unwrap();
+        let err = parser.parse().unwrap_err();
+        assert!(err
+            .message
+            .contains("Expected identifier, literal, group, or '.'"));
+        assert_eq!(err.span.start, 82);
     }
 }
 
