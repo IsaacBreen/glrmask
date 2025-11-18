@@ -214,11 +214,7 @@ pub fn precompute4(
             for (right_body, terminal_map) in nwa_bodies_map {
                 let mut effective_terminal_map = BTreeMap::new();
                 for (terminal_id_opt, weight) in terminal_map {
-                    let accum_weight = weight & Weight::from_rsb(tokens.inner.as_ref().clone());
-                    if accum_weight.is_empty() {
-                        continue;
-                    }
-                    effective_terminal_map.insert(terminal_id_opt, accum_weight);
+                    effective_terminal_map.insert(terminal_id_opt, weight);
                 }
 
                 if effective_terminal_map.is_empty() {
