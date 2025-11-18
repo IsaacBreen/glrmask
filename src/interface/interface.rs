@@ -1476,9 +1476,7 @@ mod tests {
             regex_name_to_group_id,
             max_llm_token_id,
         );
-        // The test passes if it compiles and runs without panic.
-        // println!("Precomputation (implicitly done by GrammarConstraint::new) successful.");
-        assert!(true); // Placeholder assertion
+        println!("Precomputation (implicitly done by GrammarConstraint::new) successful.");
     }
 
     #[test]
