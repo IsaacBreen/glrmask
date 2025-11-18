@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::time::Instant;
 
@@ -10,11 +10,11 @@ use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::json_serialization::JSONConvertible;
 use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
+use crate::glr::table::TerminalID;
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
 use crate::precompute4::template_nwa::{build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas};
 use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStates, Weight};
 use crate::r#macro::is_debug_level_enabled;
-use crate::glr::table::TerminalID;
 use crate::tokenizer::TokenizerStateID;
 
 struct SimplifyRustfstConfig {
@@ -51,67 +51,67 @@ pub fn precompute4(
     let now_total = Instant::now();
     let now = Instant::now();
     crate::debug!(5, "Starting precompute4...");
-
+    
     // 1. Build template DWAs for all terminals.
-    let template_dwas = match build_template_dwas(parser) {
+    let mut template_dwas = match build_template_dwas(parser) {
         Ok(m) => m,
         Err(e) => panic!("Failed to build template DWAs: {:?}", e),
     };
-    let ignore_dwa = build_ignore_terminal_dwa();
+
+    // 1.5 Build Super DWA
+    let mut term_to_bit: BTreeMap<Option<TerminalID>, usize> = BTreeMap::new();
+    let mut bit_to_term: Vec<Option<TerminalID>> = Vec::new();
+
+    let mut all_terminals: Vec<Option<TerminalID>> = parser.terminals().map(Some).collect();
+    if parser.ignore_terminal_id.is_some() {
+        // Don't add None if there is no ignore terminal
+        all_terminals.push(None);
+    }
+
+    for term_opt in all_terminals.iter() {
+        let bit = bit_to_term.len();
+        bit_to_term.push(*term_opt);
+        term_to_bit.insert(*term_opt, bit);
+    }
+
+    let mut combined_nwa_states = NWAStates::default();
+    let combined_start = combined_nwa_states.add_state();
+
+    for term_opt in all_terminals {
+        let mut template_dwa = match term_opt {
+            Some(term_id) => template_dwas.remove(&term_id).unwrap(),
+            None => build_ignore_terminal_dwa(),
+        };
+        let bit = *term_to_bit.get(&term_opt).unwrap();
+        let mut weight = Weight::zeros();
+        weight.set(bit, true);
+
+        template_dwa.apply_weight_to_all_states(&weight);
+
+        let template_nwa = NWA::from_dwa(&template_dwa);
+        let (start, _) = combined_nwa_states.copy_subgraph_from(&template_nwa.states, template_nwa.body.start_state);
+        combined_nwa_states.add_epsilon(combined_start, start, Weight::all());
+    }
+
+    let mut super_nwa = NWA {
+        states: combined_nwa_states,
+        body: NWABody { start_state: combined_start },
+    };
+    super_nwa.simplify();
+    let super_dwa = super_nwa.determinize_to_dwa_with_rustfst();
+    crate::debug!(
+        4,
+        "Built super DWA with {} states in {:?}",
+        super_dwa.states.len(),
+        now.elapsed()
+    );
+
     crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
     if is_debug_level_enabled(5) {
         for (term, dwa) in template_dwas.iter().take(5) {
             crate::debug!(5, "Stats for template DWA for terminal {:?}:\n{}", term, dwa.stats());
         }
     }
-
-    // Build a "super DWA" that contains all templates, distinguished by weights.
-    let mut term_to_bit = BTreeMap::new();
-    let mut bit_to_term: Vec<Option<TerminalID>> = Vec::new();
-
-    let mut all_terminals: BTreeSet<TerminalID> = template_dwas.keys().cloned().collect();
-    if let Some(ignore_term) = parser.ignore_terminal_id {
-        all_terminals.insert(ignore_term);
-    }
-
-    term_to_bit.insert(None, 0);
-    bit_to_term.push(None);
-    for (i, term_id) in all_terminals.iter().enumerate() {
-        term_to_bit.insert(Some(*term_id), i + 1);
-        bit_to_term.push(Some(*term_id));
-    }
-
-    let now_super_dwa = Instant::now();
-    let mut super_nwa_states = NWAStates::default();
-    let super_nwa_start = super_nwa_states.add_state();
-
-    for (term_id_opt, bit) in &term_to_bit {
-        let mut weight = Weight::zeros();
-        weight.set(*bit, true);
-
-        let template_dwa = match term_id_opt {
-            Some(term_id) if Some(*term_id) != parser.ignore_terminal_id => template_dwas.get(term_id).unwrap(),
-            _ => &ignore_dwa,
-        };
-
-        let mut weighted_dwa = template_dwa.clone();
-        weighted_dwa.apply_weight_inplace(&weight);
-
-        let nwa = NWA::from_dwa(&weighted_dwa);
-        let (start, _) = super_nwa_states.copy_subgraph_from(&nwa.states, nwa.body.start_state);
-        super_nwa_states.add_epsilon(super_nwa_start, start, Weight::all());
-    }
-
-    let mut super_nwa = NWA { states: super_nwa_states, body: NWABody { start_state: super_nwa_start } };
-    super_nwa.simplify();
-    let mut super_dwa = super_nwa.determinize_to_dwa();
-    super_dwa.simplify();
-    crate::debug!(
-        4,
-        "Built super DWA with {} states in {:?}",
-        super_dwa.states.len(),
-        now_super_dwa.elapsed()
-    );
 
     // 2. Shared NWA state arena.
     let states_arena = RefCell::new(NWAStates::default());
@@ -136,7 +136,6 @@ pub fn precompute4(
         NWABody { start_state: start }
     };
     let initial_tokens = LLMTokenBV::max_ones();
-    use crate::glr::table::TerminalID;
     let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
     let initial_body_map = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
     let initial_values: Vec<(Trie2Index, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
@@ -211,28 +210,28 @@ pub fn precompute4(
             crate::debug!(6, "{:?}", nwa_bodies_map);
 
             for (right_body, terminal_map) in nwa_bodies_map {
-                let mut effective_terminal_map = BTreeMap::new();
-                for (terminal_id_opt, weight) in terminal_map {
+                let mut bundle = BTreeMap::new();
+                for (term_opt, weight) in terminal_map {
                     let accum_weight = weight & Weight::from_rsb(tokens.inner.as_ref().clone());
-                    if accum_weight.is_empty() {
-                        continue;
+                    if !accum_weight.is_empty() {
+                        bundle.insert(term_opt, accum_weight);
                     }
-                    effective_terminal_map.insert(terminal_id_opt, accum_weight);
                 }
-
-                if effective_terminal_map.is_empty() {
+                if bundle.is_empty() {
                     continue;
                 }
 
-                let mut left_dwa = specialize_dwa(&super_dwa, &effective_terminal_map, &bit_to_term);
-                left_dwa.simplify();
+                let left_dwa = specialize_dwa(&super_dwa, &bundle, &bit_to_term);
+                let start_state = &left_dwa.states[left_dwa.body.start_state];
+                if start_state.final_weight.is_none() && start_state.transitions.is_empty() {
+                    continue;
+                }
                 let left_nwa = NWA::from_dwa(&left_dwa);
-
+                let (start, _) = states_arena.borrow_mut().copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
+                let left_bodies_union = NWABody { start_state: start };
                 let mut states = states_arena.borrow_mut();
-                let (left_body_start, _) = states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
-                let left_body = NWABody { start_state: left_body_start };
-
-                let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+                let composed_body =
+                    NWA::concatenate_components(&mut states, &left_bodies_union, &right_body, &Weight::all());
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
             }
 
@@ -390,52 +389,71 @@ fn specialize_dwa(
     bundle: &BTreeMap<Option<TerminalID>, Weight>,
     bit_to_term: &[Option<TerminalID>],
 ) -> DWA {
-    let mut specialized_dwa = super_dwa.clone();
-    let mut weight_cache: HashMap<Weight, Weight> = HashMap::new();
+    let mut specialized = super_dwa.clone();
+    let mut weight_cache: BTreeMap<Weight, Weight> = BTreeMap::new();
 
-    for state in &mut specialized_dwa.states.0 {
-        if let Some(fw) = &mut state.final_weight {
-            *fw = specialize_weight(fw, bundle, bit_to_term, &mut weight_cache);
-            if fw.is_empty() {
-                state.final_weight = None;
+    for state in &mut specialized.states.0 {
+        if let Some(sw) = state.state_weight.take() {
+            let new_sw = weight_cache.entry(sw).or_insert_with_key(|old_weight| {
+                let mut new_weight = Weight::zeros();
+                for bit in old_weight.iter_ones() {
+                    if let Some(term_opt) = bit_to_term.get(bit) {
+                        if let Some(bundle_weight) = bundle.get(term_opt) {
+                            new_weight |= bundle_weight;
+                        }
+                    }
+                }
+                new_weight
+            });
+            if !new_sw.is_empty() {
+                state.state_weight = Some(new_sw.clone());
             }
         }
-        if let Some(sw) = &mut state.state_weight {
-            *sw = specialize_weight(sw, bundle, bit_to_term, &mut weight_cache);
-            if sw.is_empty() {
-                state.state_weight = None;
+
+        if let Some(fw) = state.final_weight.take() {
+            let new_fw = weight_cache.entry(fw).or_insert_with_key(|old_weight| {
+                let mut new_weight = Weight::zeros();
+                for bit in old_weight.iter_ones() {
+                    if let Some(term_opt) = bit_to_term.get(bit) {
+                        if let Some(bundle_weight) = bundle.get(term_opt) {
+                            new_weight |= bundle_weight;
+                        }
+                    }
+                }
+                new_weight
+            });
+            if !new_fw.is_empty() {
+                state.final_weight = Some(new_fw.clone());
             }
         }
+
         for tw in state.trans_weights.values_mut() {
-            *tw = specialize_weight(tw, bundle, bit_to_term, &mut weight_cache);
+            let new_tw = weight_cache.entry(tw.clone()).or_insert_with_key(|old_weight| {
+                let mut new_weight = Weight::zeros();
+                for bit in old_weight.iter_ones() {
+                    if let Some(term_opt) = bit_to_term.get(bit) {
+                        if let Some(bundle_weight) = bundle.get(term_opt) {
+                            new_weight |= bundle_weight;
+                        }
+                    }
+                }
+                new_weight
+            });
+            *tw = new_tw.clone();
         }
-        state.trans_weights.retain(|_, w| !w.is_empty());
-        state.transitions.retain(|k, _| state.trans_weights.contains_key(k));
     }
-    specialized_dwa
+
+    specialized.simplify();
+    specialized
 }
 
-fn specialize_weight(
-    weight: &Weight,
-    bundle: &BTreeMap<Option<TerminalID>, Weight>,
-    bit_to_term: &[Option<TerminalID>],
-    cache: &mut HashMap<Weight, Weight>,
-) -> Weight {
-    if let Some(cached) = cache.get(weight) {
-        return cached.clone();
-    }
-
-    let mut new_weight = Weight::zeros();
-    for bit_idx in weight.iter_up_to(bit_to_term.len()) {
-        if let Some(term_id_opt) = bit_to_term.get(bit_idx) {
-            if let Some(bundle_weight) = bundle.get(term_id_opt) {
-                new_weight |= bundle_weight;
-            }
-        }
-    }
-
-    cache.insert(weight.clone(), new_weight.clone());
-    new_weight
+fn simplify_and_determinize_nwa(nwa: &mut NWA) {
+    crate::debug!(5, "Simplifying and determinizing NWA with {} states...", nwa.states.len());
+    nwa.simplify();
+    crate::debug!(5, "NWA simplified to {} states.", nwa.states.len());
+    let dwa = nwa.determinize_to_dwa_with_rustfst();
+    crate::debug!(5, "NWA determinized to DWA with {} states.", dwa.states.len());
+    *nwa = NWA::from_dwa(&dwa);
 }
 
 fn simplify_remove_epsilon(nwa: &mut NWA) {

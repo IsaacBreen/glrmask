@@ -246,6 +246,12 @@ impl DWA {
         from_state.trans_weights.insert(on, weight);
         Ok(())
     }
+
+    pub fn apply_weight_to_all_states(&mut self, weight: &Weight) {
+        for state in &mut self.states.0 {
+            state.apply_weight(weight);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
