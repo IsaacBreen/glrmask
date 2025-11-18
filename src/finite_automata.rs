@@ -4,9 +4,7 @@ use crate::datastructures::u8set::U8Set;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
-// Added
 use std::collections::BTreeMap as StdMap;
-// Added for derive macro pattern, aliased
 use std::collections::HashMap;
 use std::sync::Arc;
 
