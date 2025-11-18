@@ -60,13 +60,15 @@ pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSe
 }
 
 pub fn apply_finality_fixpoint(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
-    let final_fix = compute_finality_fixpoint(states, source_states_filter);
+    let final_fix = compute_finality_fixpoint(states, source_states_filter); // Now a HashMap
     for &sid in source_states_filter {
-        let st = &mut states.0[sid];
-        if let Some(fw) = &mut st.final_weight {
-            *fw |= &final_fix[sid];
-        } else {
-            st.final_weight = Some(final_fix[sid].clone());
+        if let Some(fix_w) = final_fix.get(&sid) {
+            let st = &mut states.0[sid];
+            if let Some(fw) = &mut st.final_weight {
+                *fw |= fix_w;
+            } else {
+                st.final_weight = Some(fix_w.clone());
+            }
         }
     }
 }
@@ -237,55 +239,79 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
     result
 }
 
-fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
-    let n = states.len();
-    let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
-    let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
+fn compute_finality_fixpoint(
+    states: &NWAStates,
+    source_states_filter: &HashSet<NWAStateID>,
+) -> HashMap<NWAStateID, Weight> {
+    // 1. Find all states reachable from the source_states_filter via epsilon and negative transitions.
+    // This defines the subgraph we need to work on.
+    let mut reachable_states = HashSet::new();
+    let mut queue: VecDeque<NWAStateID> = source_states_filter.iter().cloned().collect();
+    for s in source_states_filter {
+        reachable_states.insert(*s);
+    }
 
-    for u in 0..n {
-        for &(v, ref w) in &states[u].epsilons {
-            if v < n {
-                predecessors.entry(v).or_default().push((u, w.clone()));
+    while let Some(u) = queue.pop_front() {
+        // Epsilon transitions
+        for (v, _) in &states[u].epsilons {
+            if reachable_states.insert(*v) {
+                queue.push_back(*v);
             }
         }
-    }
-    for &u in source_states_filter {
-        for (&label, targets) in &states[u].transitions {
-            if !is_negative_symbol(label) {
-                continue;
-            }
-            for (v, w) in targets {
-                if *v < n {
-                    predecessors.entry(*v).or_default().push((u, w.clone()));
+        // Negative transitions are only from the source filter set
+        if source_states_filter.contains(&u) {
+            for (label, targets) in &states[u].transitions {
+                if is_negative_symbol(*label) {
+                    for (v, _) in targets {
+                        if reachable_states.insert(*v) {
+                            queue.push_back(*v);
+                        }
+                    }
                 }
             }
         }
     }
 
+    // 2. Run backward finality propagation only on the relevant subgraph.
+    let mut future_final: HashMap<NWAStateID, Weight> = HashMap::new();
+    let mut predecessors: HashMap<NWAStateID, Vec<(NWAStateID, Weight)>> = HashMap::new();
     let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-    for s in 0..n {
-        if let Some(ref fw) = states[s].final_weight {
+
+    for &u in &reachable_states {
+        for &(v, ref w) in &states[u].epsilons {
+            if reachable_states.contains(&v) {
+                predecessors.entry(v).or_default().push((u, w.clone()));
+            }
+        }
+        if source_states_filter.contains(&u) {
+            for (label, targets) in &states[u].transitions {
+                if !is_negative_symbol(*label) {
+                    continue;
+                }
+                for (v, w) in targets {
+                    predecessors.entry(*v).or_default().push((u, w.clone()));
+                }
+            }
+        }
+        if let Some(ref fw) = states[u].final_weight {
             if !fw.is_empty() {
-                future_final[s] = fw.clone();
-                queue.push_back(s);
+                future_final.insert(u, fw.clone());
+                queue.push_back(u);
             }
         }
     }
 
     while let Some(v) = queue.pop_front() {
-        let fv = future_final[v].clone();
-        if fv.is_empty() {
-            continue;
-        }
+        let fv = future_final.get(&v).cloned().unwrap_or_else(Weight::zeros);
+        if fv.is_empty() { continue; }
         if let Some(preds) = predecessors.get(&v) {
             for &(u, ref w_uv) in preds {
                 let add = &fv & w_uv;
-                if add.is_empty() {
-                    continue;
-                }
-                let old = &future_final[u];
-                if (&add & old) != add {
-                    future_final[u] |= &add;
+                if add.is_empty() { continue; }
+                let weight = future_final.entry(u).or_default();
+                let old_weight = weight.clone();
+                *weight |= &add;
+                if *weight != old_weight {
                     queue.push_back(u);
                 }
             }
