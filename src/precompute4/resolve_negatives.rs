@@ -346,7 +346,7 @@ fn compute_finality_fixpoint(
 
     while let Some(s) = worklist.pop_front() {
         let f_s = match future_final_all.get(&s) {
-            Some(w) if !w.is_empty() => w,
+            Some(w) if !w.is_empty() => w.clone(),
             _ => continue,
         };
 
