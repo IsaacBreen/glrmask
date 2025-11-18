@@ -1,35 +1,56 @@
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeSet;
 // Added
-use std::hash::Hash;
+use std::collections::{BTreeSet, HashSet};
+use std::hash::{Hash, Hasher};
 // Added for T bound in JSONConvertible for HashSet
 
 /// A frozen set implementation in Rust, similar to Python's frozenset.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FrozenSet<T: Eq + Ord> {
-    inner: BTreeSet<T>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenSet<T: Eq + Ord + Hash> {
+    inner: HashSet<T>,
 }
 
-impl<T: Eq + Ord + JSONConvertible> JSONConvertible for FrozenSet<T> {
+impl<T: Eq + Ord + Hash> Hash for FrozenSet<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let mut members: Vec<_> = self.inner.iter().collect();
+        members.sort_unstable(); // Requires T: Ord
+        for member in members {
+            member.hash(state);
+        }
+    }
+}
+
+impl<T: Eq + Ord + Hash + JSONConvertible> JSONConvertible for FrozenSet<T> {
     fn to_json(&self) -> JSONNode {
-        self.inner.to_json() // Delegate to BTreeSet<T>'s implementation
+        let mut original_members: Vec<_> = self.inner.iter().collect();
+        original_members.sort_unstable();
+        JSONNode::Array(
+            original_members
+                .iter()
+                .map(|item| (*item).to_json())
+                .collect(),
+        )
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        BTreeSet::<T>::from_json(node).map(|inner_set| FrozenSet { inner: inner_set })
+        match node {
+            JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect::<Result<HashSet<T>, String>>()
+                                      .map(|inner| FrozenSet { inner }),
+            _ => Err("Expected JSONNode::Array for FrozenSet".to_string()),
+        }
     }
 }
 
 
-impl<T: Eq + Ord> FrozenSet<T> {
+impl<T: Eq + Ord + Hash> FrozenSet<T> {
     /// Creates a new empty FrozenSet.
     pub fn new() -> Self {
-        let inner = BTreeSet::new();
+        let inner = HashSet::new();
         FrozenSet { inner }
     }
 
     /// Constructs a FrozenSet from an iterator.
     pub fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let inner = BTreeSet::from_iter(iter);
+        let inner = HashSet::from_iter(iter);
         FrozenSet { inner }
     }
 
@@ -51,50 +72,50 @@ impl<T: Eq + Ord> FrozenSet<T> {
 
 impl<T> Default for FrozenSet<T>
 where
-    T: Eq + Ord,
+    T: Eq + Ord + Hash,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Eq + Ord> FromIterator<T> for FrozenSet<T> {
+impl<T: Eq + Ord + Hash> FromIterator<T> for FrozenSet<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         Self::from_iter(iter) // Calls the inherent method
     }
 }
 
-impl<T: Eq + Ord> From<BTreeSet<T>> for FrozenSet<T> {
+impl<T: Eq + Ord + Hash> From<BTreeSet<T>> for FrozenSet<T> {
     fn from(inner: BTreeSet<T>) -> Self {
-        Self::from_iter(inner.into_iter())
+        FrozenSet { inner: inner.into_iter().collect() }
     }
 }
 
 /// Extension trait for BTreeSet to allow conversion into a FrozenSet.
-pub trait FreezeBTreeSet<T: Eq + Ord> {
+pub trait Freeze<T: Eq + Ord + Hash> {
     fn freeze(self) -> FrozenSet<T>;
 }
 
-impl<T: Eq + Ord> FreezeBTreeSet<T> for BTreeSet<T> {
+impl<T: Eq + Ord + Hash> Freeze<T> for BTreeSet<T> {
     fn freeze(self) -> FrozenSet<T> {
         FrozenSet::from_iter(self)
     }
 }
 
 /// Unfreeze a FrozenSet into a BTreeSet.
-pub trait UnfreezeBTreeSet<T: Eq + Ord> {
-    fn unfreeze(self) -> BTreeSet<T>;
+pub trait Unfreeze<T: Eq + Ord + Hash> {
+    fn unfreeze_to_btree_set(self) -> BTreeSet<T>;
 }
 
-impl<T: Eq + Ord> UnfreezeBTreeSet<T> for FrozenSet<T> {
-    fn unfreeze(self) -> BTreeSet<T> {
-        self.inner
+impl<T: Eq + Ord + Hash> Unfreeze<T> for FrozenSet<T> {
+    fn unfreeze_to_btree_set(self) -> BTreeSet<T> {
+        self.inner.into_iter().collect()
     }
 }
 
 /// An iterator over the elements of a `FrozenSet`.
 pub struct Iter<'a, T: 'a> {
-    inner: std::collections::btree_set::Iter<'a, T>,
+    inner: std::collections::hash_set::Iter<'a, T>,
 }
 
 impl<'a, T> Iterator for Iter<'a, T> {
@@ -105,7 +126,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
     }
 }
 
-impl<'a, T: Eq + Ord> IntoIterator for &'a FrozenSet<T> {
+impl<'a, T: Eq + Ord + Hash> IntoIterator for &'a FrozenSet<T> {
     type Item = &'a T;
     type IntoIter = Iter<'a, T>;
 
@@ -118,7 +139,7 @@ impl<'a, T: Eq + Ord> IntoIterator for &'a FrozenSet<T> {
 
 /// An iterator over the elements of a `FrozenSet`.
 pub struct IntoIter<T> {
-    inner: std::collections::btree_set::IntoIter<T>,
+    inner: std::collections::hash_set::IntoIter<T>,
 }
 
 impl<T> Iterator for IntoIter<T> {
@@ -129,7 +150,7 @@ impl<T> Iterator for IntoIter<T> {
     }
 }
 
-impl<T: Eq + Ord> IntoIterator for FrozenSet<T> {
+impl<T: Eq + Ord + Hash> IntoIterator for FrozenSet<T> {
     type Item = T;
     type IntoIter = IntoIter<T>;
 
@@ -140,7 +161,7 @@ impl<T: Eq + Ord> IntoIterator for FrozenSet<T> {
     }
 }
 
-impl<T: Eq + Ord> FrozenSet<T> {
+impl<T: Eq + Ord + Hash> FrozenSet<T> {
     pub fn iter(&self) -> Iter<T> {
         Iter {
             inner: self.inner.iter(),
@@ -183,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn test_freeze_BTreeSet() {
+    fn test_freeze_btreeset() {
         let hs: BTreeSet<i32> = [1, 2, 3, 4, 5].iter().cloned().collect();
         let fs = hs.freeze();
         assert_eq!(fs.len(), 5);
@@ -191,15 +212,7 @@ mod tests {
             assert!(fs.contains(&i));
         }
     }
-
-    #[test]
-    fn test_freeze_btreeset() {
-        let bs: BTreeSet<i32> = [5, 4, 3, 2, 1].iter().cloned().collect();
-        let fs = bs.freeze();
-        assert_eq!(fs.len(), 5);
-        for i in 1..=5 {
-            assert!(fs.contains(&i));
-        }
-    }
 }
+
+
 

@@ -2,10 +2,8 @@ use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
-use std::collections::BTreeMap as StdMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub type GroupID = usize;
@@ -21,7 +19,7 @@ pub struct NFAState {
 // Manual impl for NFAState
 impl JSONConvertible for NFAState {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("transitions".to_string(), self.transitions.to_json());
         obj.insert(
             "epsilon_transitions".to_string(),
@@ -76,7 +74,7 @@ pub struct NFA {
 // Manual impl for NFA
 impl JSONConvertible for NFA {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("states".to_string(), self.states.to_json());
         obj.insert("start_state".to_string(), self.start_state.to_json());
         JSONNode::Object(obj)
@@ -113,7 +111,7 @@ pub struct DFAState {
 // Manual impl for DFAState
 impl JSONConvertible for DFAState {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("transitions".to_string(), self.transitions.to_json());
         obj.insert("finalizers".to_string(), self.finalizers.to_json());
         obj.insert(
@@ -171,7 +169,7 @@ pub struct DFA {
 // Manual impl for DFA
 impl JSONConvertible for DFA {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("states".to_string(), self.states.to_json());
         obj.insert("start_state".to_string(), self.start_state.to_json());
         obj.insert(
@@ -217,7 +215,7 @@ pub struct Regex {
 // Manual impl for Regex
 impl JSONConvertible for Regex {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("dfa".to_string(), self.dfa.to_json());
         JSONNode::Object(obj)
     }
@@ -244,7 +242,7 @@ pub struct Match {
 // Manual impl for Match
 impl JSONConvertible for Match {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("group_id".to_string(), self.group_id.to_json());
         obj.insert("position".to_string(), self.position.to_json());
         JSONNode::Object(obj)
@@ -276,7 +274,7 @@ pub struct FinalStateReport {
 // Manual impl for FinalStateReport
 impl JSONConvertible for FinalStateReport {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("position".to_string(), self.position.to_json());
         obj.insert("matches".to_string(), self.matches.to_json());
         JSONNode::Object(obj)
@@ -320,7 +318,7 @@ impl<'a> JSONConvertible for RegexState<'a> {
     fn to_json(&self) -> JSONNode {
         todo!("RegexState serialization is complex due to lifetime and reference.")
         // Potentially serialize only non-reference fields if useful for debugging.
-        // let mut obj = StdMap::new();
+        // let mut obj = BTreeMap::new();
         // obj.insert("position".to_string(), self.position.to_json());
         // obj.insert("current_state".to_string(), self.current_state.to_json());
         // obj.insert("matches".to_string(), self.matches.to_json());
@@ -345,7 +343,7 @@ pub enum Expr {
 
 impl JSONConvertible for Expr {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         match self {
             Expr::U8Seq(bytes) => {
                 obj.insert("variant".to_string(), JSONNode::String("U8Seq".to_string()));
@@ -484,7 +482,7 @@ pub struct ExprGroup {
 // Manual impl for ExprGroup
 impl JSONConvertible for ExprGroup {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("expr".to_string(), self.expr.to_json());
         obj.insert("is_non_greedy".to_string(), self.is_non_greedy.to_json());
         JSONNode::Object(obj)
@@ -518,7 +516,7 @@ pub struct ExprGroups {
 // Manual impl for ExprGroups
 impl JSONConvertible for ExprGroups {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("groups".to_string(), self.groups.to_json());
         JSONNode::Object(obj)
     }
@@ -901,7 +899,7 @@ impl NFA {
 
     pub fn to_dfa(self) -> DFA {
         let mut dfa_states: Vec<DFAState> = Vec::new();
-        let mut dfa_state_map: BTreeMap<FrozenSet<usize>, usize> = BTreeMap::new();
+        let mut dfa_state_map: HashMap<FrozenSet<usize>, usize> = HashMap::new();
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
         let mut epsilon_closures = self.compute_epsilon_closures();
@@ -930,7 +928,7 @@ impl NFA {
 
         while let Some(current_set) = worklist.pop() {
             let current_dfa_state = *dfa_state_map.get(&current_set).unwrap();
-            let mut transition_map: BTreeMap<u8, BTreeSet<usize>> = BTreeMap::new();
+            let mut transition_map: HashMap<u8, HashSet<usize>> = HashMap::new();
 
             // For each state in the current DFA state, look at the NFA transitions
             for &state in current_set.iter() {
@@ -938,7 +936,7 @@ impl NFA {
                     for &next_state in next_states {
                         transition_map
                             .entry(input)
-                            .or_insert_with(BTreeSet::new)
+                            .or_insert_with(HashSet::new)
                             .insert(next_state);
                     }
                 }
@@ -946,7 +944,7 @@ impl NFA {
 
             // For each transition, compute the epsilon closure of the resulting state set
             for (&input_u8, next_states) in &transition_map {
-                let mut closure = BTreeSet::new();
+                let mut closure = HashSet::new();
                 for &next_state in next_states {
                     closure.extend(&epsilon_closures[next_state]);
                 }
@@ -1005,8 +1003,8 @@ impl NFA {
         dfa
     }
 
-    fn epsilon_closure(&self, state: usize) -> BTreeSet<usize> {
-        let mut closure = BTreeSet::new();
+    fn epsilon_closure(&self, state: usize) -> HashSet<usize> {
+        let mut closure = HashSet::new();
         let mut stack = vec![state];
 
         while let Some(state) = stack.pop() {
@@ -1018,7 +1016,7 @@ impl NFA {
         closure
     }
 
-    fn compute_epsilon_closures(&self) -> Vec<BTreeSet<usize>> {
+    fn compute_epsilon_closures(&self) -> Vec<HashSet<usize>> {
         (0..self.states.len())
             .map(|state| self.epsilon_closure(state))
             .collect()
