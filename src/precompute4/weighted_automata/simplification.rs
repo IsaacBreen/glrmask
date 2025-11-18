@@ -51,36 +51,30 @@ impl DwaStateSignature {
     fn from_state(state_id: StateID, states: &DWAStates, classes: &[usize]) -> Self {
         let st = &states[state_id];
 
-        // Aggregate transitions by (label, dest_class), summing (unioning) their weights.
-        // This is semantically justified since in the bitset semiring we have:
-        //   (w1 & x) | (w2 & x) = (w1 | w2) & x
-        // so multiple parallel transitions to the same equivalence class under the same
-        // label are equivalent to a single transition whose weight is the union.
-        let mut agg: BTreeMap<(i16, usize), Weight> = BTreeMap::new();
+        // For a DWA, there is at most one transition per (state, label).
+        // This means we never have to aggregate multiple transitions with the
+        // same (label, dest_class): each label contributes at most one
+        // (label, dest_class, weight) triple to the signature.
+        let mut outgoing = Vec::with_capacity(st.transitions.len());
         for (&label, &dest) in &st.transitions {
-            let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+            let w = st
+                .trans_weights
+                .get(&label)
+                .cloned()
+                .unwrap_or_else(Weight::all);
             if w.is_empty() {
                 continue;
             }
             let dest_class = classes[dest];
-            let key = (label, dest_class);
-            agg.entry(key)
-                .and_modify(|acc| *acc |= &w)
-                .or_insert(w);
+            outgoing.push(DwaTransitionSig {
+                label,
+                dest_class,
+                weight: w,
+            });
         }
-
-        let mut outgoing = Vec::with_capacity(agg.len());
-        for ((label, dest_class), weight) in agg {
-            if !weight.is_empty() {
-                outgoing.push(DwaTransitionSig { label, dest_class, weight });
-            }
-        }
-        outgoing.sort_by(|a, b| {
-            a.label
-                .cmp(&b.label)
-                .then_with(|| a.dest_class.cmp(&b.dest_class))
-                .then_with(|| hash_value(&a.weight).cmp(&hash_value(&b.weight)))
-        });
+        // Iteration over the BTreeMap `transitions` yields labels in a
+        // canonical sorted order, so `outgoing` is canonical without any
+        // additional sorting.
         DwaStateSignature {
             final_weight: st.final_weight.clone(),
             outgoing,
@@ -674,9 +668,9 @@ impl NwaStateSignature {
                 });
             }
         }
-
-        outgoing.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-
+        // The `temp` BTreeMap is keyed by `(ArcLabel, dest_class)` and is
+        // iterated in sorted key order, so `outgoing` is already in a
+        // canonical order. No extra sorting is needed.
         NwaStateSignature {
             final_weight: st.final_weight.clone(),
             outgoing,
