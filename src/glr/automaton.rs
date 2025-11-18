@@ -147,26 +147,10 @@ pub fn compute_first_sets_for_nonterminals(
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
-    let mut worklist = VecDeque::new();
-    let mut influences: BTreeMap<NonTerminal, Vec<NonTerminal>> = BTreeMap::new();
 
     for p in productions {
         prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
         first_sets.entry(p.lhs.clone()).or_default();
-        let mut prev_are_nullable = true;
-        for s in &p.rhs {
-            if !prev_are_nullable {
-                break;
-            }
-            if let Symbol::NonTerminal(nt) = s {
-                influences.entry(nt.clone()).or_default().push(p.lhs.clone());
-                if !nullable_nonterminals.contains(nt) {
-                    prev_are_nullable = false;
-                }
-            } else {
-                prev_are_nullable = false;
-            }
-        }
     }
 
     let mut changed = true;
@@ -261,10 +245,7 @@ pub fn compute_follow_sets_for_nonterminals(
 
                     if suffix_is_nullable {
                         let follow_lhs = follow_sets.get(lhs).unwrap().clone();
-                        if follow_sets.get_mut(nt).unwrap().extend(follow_lhs) > 0 {
-                           // The set was modified, but extend returns () in stable Rust.
-                           // We rely on the length check below.
-                        }
+                        follow_sets.get_mut(nt).unwrap().extend(follow_lhs);
                     }
 
                     if follow_sets.get(nt).unwrap().len() != old_len {
