@@ -753,7 +753,10 @@ impl ExprGroups {
 
         let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
         for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
-            let end_state = Expr::handle_expr_cached(expr, &mut nfa, 0, &mut cache);
+            let group_start_state = nfa.add_state();
+            nfa.add_epsilon_transition(nfa.start_state, group_start_state);
+            let end_state =
+                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache);
             if is_non_greedy {
                 nfa.states[end_state].finalizers.insert(group);
                 // Additionally, track that this finalizer is non-greedy
