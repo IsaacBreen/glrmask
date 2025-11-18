@@ -294,12 +294,10 @@ fn test_resolve_negatives_from_large_nwa_log() {
         "DWA did not accept [0, 422] with expected weight after resolving negatives."
     );
     let mut nwa2 = NWA::from_dwa(&d);
-    let num_states = nwa2.states.len();
-    resolve_negative_codes_in_nwa(&mut nwa2, &(0..num_states).collect());
+    resolve_negative_codes_in_nwa(&mut nwa2);
     println!("After negative resolution (from DWA):\n{}", nwa2);
 
-    let num_states = nwa.states.len();
-    resolve_negative_codes_in_nwa(&mut nwa, &(0..num_states).collect());
+    resolve_negative_codes_in_nwa(&mut nwa);
     println!("After negative resolution (from NWA):\n{}", nwa);
     let mut d = nwa.determinize_to_dwa();
     println!("DWA after negative resolution:\n{}", d);

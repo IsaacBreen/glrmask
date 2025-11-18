@@ -27,7 +27,7 @@ fn progress_step(pb: &Option<ProgressBar>, step: u64, msg: &str) {
     }
 }
 
-pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
+pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     let pb = make_progress_bar(
         3,
         "{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] \
@@ -95,8 +95,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
 
     progress_step(&pb, 2, "Resolve negatives in NWA");
-    let num_states = nwa.states.len();
-    resolve_negative_codes_in_nwa(&mut nwa, &(0..num_states).collect());
+    resolve_negative_codes_in_nwa(&mut nwa);
     crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
     crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
 
