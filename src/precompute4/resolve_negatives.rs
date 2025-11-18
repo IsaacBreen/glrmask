@@ -369,13 +369,14 @@ fn compute_finality_fixpoint(
                             .expect("stored negative edge must exist");
                         let &(target, ref w) = &targets[trans_idx];
                         debug_assert_eq!(target, s);
-                       (from, w)
-                   }
-               };
-               let add = f_s.clone() & edge_w;
-               if add.is_empty() {
-                   continue;
-               }
+                        (from, w)
+                    }
+                };
+
+                let add = f_s & edge_w;
+                if add.is_empty() {
+                    continue;
+                }
 
                 let entry = future_final_all
                     .entry(pred_state)
