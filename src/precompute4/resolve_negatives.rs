@@ -38,10 +38,10 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     apply_cancellations(nwa, &(0..nwa.states.len()).collect());
 
     progress_step(&pb, 2, "Propagate finality");
-    apply_finality_fixpoint(nwa);
+    apply_finality_fixpoint(nwa, &(0..nwa.states.len()).collect());
 
     progress_step(&pb, 3, "Apply changes & remove negatives");
-    remove_negative_transitions(nwa);
+    remove_negative_transitions(nwa, &(0..nwa.states.len()).collect());
     crate::debug!(4, "Applied changes to NWA.");
 
     if let Some(p) = &pb {
