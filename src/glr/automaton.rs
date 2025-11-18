@@ -17,72 +17,42 @@ pub enum Nullability {
 pub fn compute_nonterminal_nullability(
     productions: &[Production],
 ) -> BTreeMap<NonTerminal, Nullability> {
-    use bimap::BiBTreeMap;
-    use std::iter;
-
     if productions.is_empty() {
         return BTreeMap::new();
     }
 
-    // 1. Assign integer IDs to non-terminals.
-    let mut nt_map = BiBTreeMap::new();
-    let mut all_nts = Vec::new();
-    for p in productions {
-        for nt in iter::once(&p.lhs).chain(p.rhs.iter().filter_map(|s| match s {
-            Symbol::NonTerminal(nt) => Some(nt),
-            _ => None,
-        })) {
-            if !nt_map.contains_left(nt) {
-                let id = all_nts.len();
-                nt_map.insert(nt.clone(), id);
-                all_nts.push(nt.clone());
-            }
-        }
-    }
-    let num_nts = all_nts.len();
-
-    // Map productions to use NT IDs.
-    let prods_with_ids: Vec<(usize, Vec<Option<usize>>)> = productions
-        .iter()
-        .map(|p| {
-            let lhs_id = *nt_map.get_by_left(&p.lhs).unwrap();
-            let rhs_ids: Vec<Option<usize>> = p
-                .rhs
-                .iter()
-                .map(|s| match s {
-                    Symbol::Terminal(_) => None,
-                    Symbol::NonTerminal(nt) => Some(*nt_map.get_by_left(nt).unwrap()),
-                })
-                .collect();
-            (lhs_id, rhs_ids)
-        })
-        .collect();
-
+    // Collect all non-terminals and record where they appear on the RHS.
+    let mut all_nonterminals = BTreeSet::new();
     let n_prods = productions.len();
-    let mut nt_rhs_occurs_by_id: Vec<Vec<usize>> = vec![Vec::new(); num_nts];
-    for (idx, (_, rhs_ids)) in prods_with_ids.iter().enumerate() {
-        for id_opt in rhs_ids {
-            if let Some(id) = id_opt {
-                nt_rhs_occurs_by_id[*id].push(idx);
-            }
-        }
-    }
+    let mut nt_rhs_occurs: BTreeMap<NonTerminal, Vec<usize>> = BTreeMap::new();
 
     // For ε computation: only productions whose RHS contains no terminals matter.
     let mut eps_relevant = vec![true; n_prods];
     let mut eps_unsatisfied = vec![0usize; n_prods];
 
-    for (idx, (_, rhs_ids)) in prods_with_ids.iter().enumerate() {
+    for (idx, p) in productions.iter().enumerate() {
+        all_nonterminals.insert(p.lhs.clone());
+
+        let mut has_terminal = false;
         let mut nonterm_count = 0usize;
-        for id_opt in rhs_ids {
-            if id_opt.is_none() {
-                // Terminal
-                eps_relevant[idx] = false;
-                break;
+
+        for sym in &p.rhs {
+            match sym {
+                Symbol::Terminal(_) => {
+                    has_terminal = true;
+                }
+                Symbol::NonTerminal(nt) => {
+                    all_nonterminals.insert(nt.clone());
+                    nonterm_count += 1;
+                    // Record each occurrence so that we can update counts accurately.
+                    nt_rhs_occurs.entry(nt.clone()).or_default().push(idx);
+                }
             }
-            nonterm_count += 1;
         }
-        if eps_relevant[idx] {
+
+        if has_terminal {
+            eps_relevant[idx] = false;
+        } else {
             eps_unsatisfied[idx] = nonterm_count;
         }
     }
@@ -90,32 +60,32 @@ pub fn compute_nonterminal_nullability(
     // ---------------------------------------------------------------------
     // Phase 1: compute the set of non-terminals that can derive ε.
     // ---------------------------------------------------------------------
-    let mut can_derive_epsilon_by_id = vec![false; num_nts];
-    let mut queue_eps: VecDeque<usize> = VecDeque::new();
+    let mut can_derive_epsilon = BTreeSet::new();
+    let mut queue_eps: VecDeque<NonTerminal> = VecDeque::new();
 
-    for (idx, (lhs_id, _)) in prods_with_ids.iter().enumerate() {
+    for (idx, p) in productions.iter().enumerate() {
         if eps_relevant[idx] && eps_unsatisfied[idx] == 0 {
-            if !can_derive_epsilon_by_id[*lhs_id] {
-                can_derive_epsilon_by_id[*lhs_id] = true;
-                queue_eps.push_back(*lhs_id);
+            if can_derive_epsilon.insert(p.lhs.clone()) {
+                queue_eps.push_back(p.lhs.clone());
             }
         }
     }
 
-    while let Some(nt_id) = queue_eps.pop_front() {
-        for &p_idx in &nt_rhs_occurs_by_id[nt_id] {
-            if !eps_relevant[p_idx] {
-                continue;
-            }
-            if eps_unsatisfied[p_idx] == 0 {
-                continue;
-            }
-            eps_unsatisfied[p_idx] -= 1;
-            if eps_unsatisfied[p_idx] == 0 {
-                let lhs_id = prods_with_ids[p_idx].0;
-                if !can_derive_epsilon_by_id[lhs_id] {
-                    can_derive_epsilon_by_id[lhs_id] = true;
-                    queue_eps.push_back(lhs_id);
+    while let Some(nt) = queue_eps.pop_front() {
+        if let Some(prods_using) = nt_rhs_occurs.get(&nt) {
+            for &p_idx in prods_using {
+                if !eps_relevant[p_idx] {
+                    continue;
+                }
+                if eps_unsatisfied[p_idx] == 0 {
+                    continue;
+                }
+                eps_unsatisfied[p_idx] -= 1;
+                if eps_unsatisfied[p_idx] == 0 {
+                    let lhs = productions[p_idx].lhs.clone();
+                    if can_derive_epsilon.insert(lhs.clone()) {
+                        queue_eps.push_back(lhs);
+                    }
                 }
             }
         }
@@ -128,15 +98,17 @@ pub fn compute_nonterminal_nullability(
     let mut prod_unsatisfied = vec![0usize; n_prods];
     let mut prod_has_terminal_or_prod_nt = vec![false; n_prods];
 
-    for (idx, (_, rhs_ids)) in prods_with_ids.iter().enumerate() {
-        for id_opt in rhs_ids {
-            match id_opt {
-                None => {
-                    // Terminal
+    for (idx, p) in productions.iter().enumerate() {
+        for sym in &p.rhs {
+            match sym {
+                Symbol::Terminal(_) => {
                     prod_has_terminal_or_prod_nt[idx] = true;
                 }
-                Some(nt_id) => {
-                    if !can_derive_epsilon_by_id[*nt_id] {
+                Symbol::NonTerminal(nt) => {
+                    // This non-terminal already counts as "able to derive a string"
+                    // if it can derive ε. Otherwise we wait until it becomes
+                    // terminal-productive.
+                    if !can_derive_epsilon.contains(nt) {
                         prod_unsatisfied[idx] += 1;
                     }
                 }
@@ -144,32 +116,39 @@ pub fn compute_nonterminal_nullability(
         }
     }
 
-    let mut can_derive_terminal_by_id = vec![false; num_nts];
-    let mut queue_term: VecDeque<usize> = VecDeque::new();
+    let mut can_derive_terminal = BTreeSet::new();
+    let mut queue_term: VecDeque<NonTerminal> = VecDeque::new();
 
-    for (idx, (lhs_id, _)) in prods_with_ids.iter().enumerate() {
+    // Seed with productions whose RHS already contains a terminal and whose
+    // remaining non-terminals are known to derive *some* string.
+    for (idx, p) in productions.iter().enumerate() {
         if prod_has_terminal_or_prod_nt[idx] && prod_unsatisfied[idx] == 0 {
-            if !can_derive_terminal_by_id[*lhs_id] {
-                can_derive_terminal_by_id[*lhs_id] = true;
-                queue_term.push_back(*lhs_id);
+            if can_derive_terminal.insert(p.lhs.clone()) {
+                queue_term.push_back(p.lhs.clone());
             }
         }
     }
 
-    while let Some(nt_id) = queue_term.pop_front() {
-        for &p_idx in &nt_rhs_occurs_by_id[nt_id] {
-            if !can_derive_epsilon_by_id[nt_id] && prod_unsatisfied[p_idx] > 0 {
-                prod_unsatisfied[p_idx] -= 1;
-            }
-            if !prod_has_terminal_or_prod_nt[p_idx] {
-                prod_has_terminal_or_prod_nt[p_idx] = true;
-            }
+    while let Some(nt) = queue_term.pop_front() {
+        if let Some(prods_using) = nt_rhs_occurs.get(&nt) {
+            for &p_idx in prods_using {
+                // If this occurrence was counted as "unsatisfied" (i.e. the
+                // non-terminal was not known nullable), decrement the counter.
+                if !can_derive_epsilon.contains(&nt) && prod_unsatisfied[p_idx] > 0 {
+                    prod_unsatisfied[p_idx] -= 1;
+                }
 
-            if prod_unsatisfied[p_idx] == 0 && prod_has_terminal_or_prod_nt[p_idx] {
-                let lhs_id = prods_with_ids[p_idx].0;
-                if !can_derive_terminal_by_id[lhs_id] {
-                    can_derive_terminal_by_id[lhs_id] = true;
-                    queue_term.push_back(lhs_id);
+                // The production now definitely has a source of terminals:
+                // either a direct terminal or this productive non-terminal.
+                if !prod_has_terminal_or_prod_nt[p_idx] {
+                    prod_has_terminal_or_prod_nt[p_idx] = true;
+                }
+
+                if prod_unsatisfied[p_idx] == 0 && prod_has_terminal_or_prod_nt[p_idx] {
+                    let lhs = productions[p_idx].lhs.clone();
+                    if can_derive_terminal.insert(lhs.clone()) {
+                        queue_term.push_back(lhs);
+                    }
                 }
             }
         }
@@ -178,12 +157,11 @@ pub fn compute_nonterminal_nullability(
     // ---------------------------------------------------------------------
     // Combine ε-derivability and terminal-derivability into Nullability.
     // ---------------------------------------------------------------------
-    all_nts
+    all_nonterminals
         .into_iter()
         .map(|nt| {
-            let id = *nt_map.get_by_left(&nt).unwrap();
-            let is_nullable = can_derive_epsilon_by_id[id];
-            let is_productive = can_derive_terminal_by_id[id];
+            let is_nullable = can_derive_epsilon.contains(&nt);
+            let is_productive = can_derive_terminal.contains(&nt);
 
             let status = match (is_nullable, is_productive) {
                 (true, false) => Nullability::Null,
@@ -220,18 +198,19 @@ pub fn compute_first_sets_for_nonterminals(
     nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     crate::debug!(3, "Computing first sets for non-terminals");
+    use std::iter;
     use bimap::BiBTreeMap;
     use std::collections::HashSet;
-    use std::iter;
 
     // 1. Assign integer IDs to non-terminals for performance.
     let mut nt_map = BiBTreeMap::new();
     let mut all_nts = Vec::new();
     for p in productions {
         for nt in iter::once(&p.lhs).chain(p.rhs.iter().filter_map(|s| match s {
-            Symbol::NonTerminal(nt) => Some(nt),
-            _ => None,
-        })) {
+                Symbol::NonTerminal(nt) => Some(nt),
+                _ => None,
+            }))
+        {
             if !nt_map.contains_left(nt) {
                 let id = all_nts.len();
                 nt_map.insert(nt.clone(), id);
@@ -303,49 +282,37 @@ pub fn compute_follow_sets_for_nonterminals(
     nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
     crate::debug!(3, "Computing follow sets for non-terminals");
-    use bimap::BiBTreeMap;
-    use std::iter;
 
-    if productions.is_empty() {
-        return BTreeMap::new();
-    }
+    let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
+    let mut edges: BTreeMap<NonTerminal, Vec<NonTerminal>> = BTreeMap::new();
 
-    // 1. Assign integer IDs to non-terminals.
-    let mut nt_map = BiBTreeMap::new();
-    let mut all_nts = Vec::new();
-    for p in productions {
-        for nt in iter::once(&p.lhs).chain(p.rhs.iter().filter_map(|s| match s {
-            Symbol::NonTerminal(nt) => Some(nt),
-            _ => None,
-        })) {
-            if !nt_map.contains_left(nt) {
-                let id = all_nts.len();
-                nt_map.insert(nt.clone(), id);
-                all_nts.push(nt.clone());
+    // Initialize FOLLOW sets for all non-terminals that appear.
+    for production in productions {
+        follow_sets.entry(production.lhs.clone()).or_default();
+        for symbol in &production.rhs {
+            if let Symbol::NonTerminal(nt) = symbol {
+                follow_sets.entry(nt.clone()).or_default();
             }
         }
     }
-    let num_nts = all_nts.len();
 
-    // 2. Use Vecs indexed by ID for data structures.
-    let mut follow_sets_by_id: Vec<BTreeSet<Option<Terminal>>> = vec![BTreeSet::new(); num_nts];
-    let mut edges_by_id: Vec<Vec<usize>> = vec![Vec::new(); num_nts];
+    if productions.is_empty() {
+        return follow_sets;
+    }
 
     // Rule 1: EOF (None) is in FOLLOW(S) where S is the start symbol.
-    let start_nt = &productions[0].lhs;
-    let start_id = *nt_map.get_by_left(start_nt).unwrap();
-    follow_sets_by_id[start_id].insert(None);
+    let start_nt = productions[0].lhs.clone();
+    follow_sets.entry(start_nt.clone()).or_default().insert(None);
 
     // Rules 2 & 3: For each A -> α B β, add FIRST(β) \ {ε} to FOLLOW(B),
     // and if β is nullable, add an edge A -> B for propagation of FOLLOW(A).
     for production in productions {
-        let lhs_id = *nt_map.get_by_left(&production.lhs).unwrap();
+        let lhs = &production.lhs;
         let rhs = &production.rhs;
         let n = rhs.len();
 
         for i in 0..n {
             if let Symbol::NonTerminal(ref b_nt) = rhs[i] {
-                let b_id = *nt_map.get_by_left(b_nt).unwrap();
                 let mut first_of_suffix: BTreeSet<Terminal> = BTreeSet::new();
                 let mut suffix_nullable = true;
 
@@ -368,56 +335,50 @@ pub fn compute_follow_sets_for_nonterminals(
                     }
                 }
 
-                let dest = &mut follow_sets_by_id[b_id];
+                let follow_b = follow_sets.entry(b_nt.clone()).or_default();
                 for t in first_of_suffix {
-                    dest.insert(Some(t));
+                    follow_b.insert(Some(t));
                 }
 
                 if suffix_nullable {
-                    edges_by_id[lhs_id].push(b_id);
+                    edges.entry(lhs.clone()).or_default().push(b_nt.clone());
                 }
             }
         }
     }
 
     // Worklist algorithm to propagate FOLLOW sets along the edges A -> B.
-    let mut worklist: VecDeque<usize> = VecDeque::new();
-    let mut in_queue: BTreeSet<usize> = BTreeSet::new();
+    let mut worklist: VecDeque<NonTerminal> = VecDeque::new();
+    let mut in_queue: BTreeSet<NonTerminal> = BTreeSet::new();
 
-    for id in 0..num_nts {
-        if !follow_sets_by_id[id].is_empty() {
-            worklist.push_back(id);
-            in_queue.insert(id);
+    for (nt, set) in &follow_sets {
+        if !set.is_empty() {
+            worklist.push_back(nt.clone());
+            in_queue.insert(nt.clone());
         }
     }
 
-    while let Some(a_id) = worklist.pop_front() {
-        in_queue.remove(&a_id);
-        let src = follow_sets_by_id[a_id].clone();
+    while let Some(a_nt) = worklist.pop_front() {
+        in_queue.remove(&a_nt);
+        let src = match follow_sets.get(&a_nt) {
+            Some(s) => s.clone(),
+            None => continue,
+        };
 
-        if src.is_empty() {
-            continue;
-        }
-
-        for &b_id in &edges_by_id[a_id] {
-            let dest = &mut follow_sets_by_id[b_id];
-            let old_len = dest.len();
-            dest.extend(src.iter().cloned());
-            if dest.len() != old_len && !in_queue.contains(&b_id) {
-                worklist.push_back(b_id);
-                in_queue.insert(b_id);
+        if let Some(targets) = edges.get(&a_nt) {
+            for b_nt in targets {
+                let dest = follow_sets.entry(b_nt.clone()).or_default();
+                let old_len = dest.len();
+                dest.extend(src.iter().cloned());
+                if dest.len() != old_len && !in_queue.contains(b_nt) {
+                    worklist.push_back(b_nt.clone());
+                    in_queue.insert(b_nt.clone());
+                }
             }
         }
     }
 
-    // 5. Convert back to the required BTreeMap format.
-    all_nts
-        .into_iter()
-        .map(|nt| {
-            let id = *nt_map.get_by_left(&nt).unwrap();
-            (nt, follow_sets_by_id[id].clone())
-        })
-        .collect()
+    follow_sets
 }
 
 #[time_it]
