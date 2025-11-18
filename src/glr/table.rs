@@ -643,7 +643,7 @@ fn stage_7(
         for (terminal, action) in &row.shifts_and_reduces {
             let terminal_id = *terminal_map
                 .get_by_left(terminal)
-                .expect_else(|| format!("Terminal {} not found in terminal map", terminal));
+                .expect_else(|| format!("Terminal {} not found in terminal map. Terminals: {:?}", terminal, terminal_map.left_values()));
             let maybe_shift: Option<StateID> = action.shift;
 
             let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> =
