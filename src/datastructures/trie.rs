@@ -2016,6 +2016,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             }
 
             while let Some(pos) = local_queue.pop_front() {
+                pb.set_postfix_str(&format!("pending nodes: {}", values.len()));
                 let node_idx = nodes[pos];
                 let u = node_idx.as_usize();
                 // We are about to process u; mark as not in queue until we decide to requeue.
@@ -2092,6 +2093,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 }
             }
         }
+        pb.set_postfix_str("");
         println!(
             "special_map_grouped finished in {:?}. Time in step: {:?}, merge: {:?}, process: {:?}",
             total_now.elapsed(),
