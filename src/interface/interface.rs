@@ -23,7 +23,7 @@ type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 
 // --- GrammarExpr: Definition of grammar structure before compilation ---
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GrammarExpr {
     Ref(String),
     Sequence(Vec<GrammarExpr>),
@@ -445,6 +445,7 @@ impl GrammarDefinition {
         next_terminal_group_id: &mut usize,
         per_base_counters: &mut HashMap<String, usize>,
         all_names: &mut HashSet<String>,
+        memo: &mut BTreeMap<GrammarExpr, NonTerminal>,
     ) -> Result<(Vec<Symbol>, Vec<Production>), String> { // Return symbols and new productions
         match expr {
             GrammarExpr::AnyChar => Err("AnyChar (`.`) is only allowed inside terminal definitions (rules with uppercase names).".to_string()),
@@ -483,6 +484,7 @@ impl GrammarDefinition {
                         next_terminal_group_id,
                         per_base_counters,
                         all_names,
+                        memo,
                     )?;
                     combined_symbols.extend(symbols);
                     combined_productions.extend(new_productions);
@@ -490,6 +492,9 @@ impl GrammarDefinition {
                 Ok((combined_symbols, combined_productions))
             }
             GrammarExpr::Choice(exprs) => {
+                if let Some(nt) = memo.get(expr) {
+                    return Ok((vec![Symbol::NonTerminal(nt.clone())], Vec::new()));
+                }
                 let choice_nt_name = Self::generate_unique_indexed_name(
                     current_rule_name_or_path,
                     per_base_counters,
@@ -512,6 +517,7 @@ impl GrammarDefinition {
                         next_terminal_group_id,
                         per_base_counters,
                         all_names,
+                        memo,
                     )?;
                     choice_defining_productions.push(Production {
                         lhs: nt.clone(),
@@ -523,6 +529,7 @@ impl GrammarDefinition {
                 let mut all_new_productions = choice_defining_productions;
                 all_new_productions.extend(children_productions_from_arms);
 
+                memo.insert(expr.clone(), nt.clone());
                 Ok((vec![Symbol::NonTerminal(nt)], all_new_productions))
             }
             GrammarExpr::Optional(expr_box) => {
@@ -537,9 +544,13 @@ impl GrammarDefinition {
                     next_terminal_group_id,
                     per_base_counters,
                     all_names,
+                    memo,
                 ) // Return symbols and productions from the equivalent Choice
             }
             GrammarExpr::Repeat(expr_box) => {
+                if let Some(nt) = memo.get(expr) {
+                    return Ok((vec![Symbol::NonTerminal(nt.clone())], Vec::new()));
+                }
                 let repeat_nt_name = Self::generate_unique_indexed_name(
                     current_rule_name_or_path, // Fixed typo here
                     per_base_counters,
@@ -558,6 +569,7 @@ impl GrammarDefinition {
                     next_terminal_group_id,
                     per_base_counters,
                     all_names,
+                    memo,
                 )?;
 
                 let mut current_level_productions = Vec::new();
@@ -580,6 +592,7 @@ impl GrammarDefinition {
                 let mut all_new_productions = current_level_productions;
                 all_new_productions.extend(productions_from_expr_box);
 
+                memo.insert(expr.clone(), nt.clone());
                 Ok((vec![Symbol::NonTerminal(nt)], all_new_productions))
             }
         }
@@ -736,6 +749,7 @@ impl GrammarDefinition {
         let mut all_names: HashSet<String> = grammar_exprs.iter().map(|(name, _)| name.clone()).collect();
         all_names.extend(regex_name_to_group_id.left_values().cloned());
         let mut per_base_counters: HashMap<String, usize> = HashMap::new();
+        let mut memo: BTreeMap<GrammarExpr, NonTerminal> = BTreeMap::new();
 
         let mut start_production_name = "start'".to_string();
         let nonterminal_names_from_rules: HashSet<&str> = grammar_exprs.iter().map(|(name, _)| name.as_str()).collect();
@@ -772,6 +786,7 @@ impl GrammarDefinition {
                         &mut next_terminal_group_id,
                         &mut per_base_counters,
                         &mut all_names,
+                        &mut memo,
                     )?;
                     productions.push(Production { lhs: lhs.clone(), rhs: rhs_symbols_for_arm });
                     productions.extend(new_productions_for_arm); // Extend with productions from the arm's processing
@@ -787,6 +802,7 @@ impl GrammarDefinition {
                     &mut next_terminal_group_id,
                     &mut per_base_counters,
                     &mut all_names,
+                    &mut memo,
                 )?;
                 productions.push(Production { lhs, rhs: rhs_symbols });
                 productions.extend(new_productions_for_rhs); // Extend with productions from processing the rhs
