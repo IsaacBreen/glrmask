@@ -211,6 +211,7 @@ pub fn precompute4(
             crate::debug!(6, "{:?}", nwa_bodies_map);
 
             println!("Processing bundle");
+            let mut now_step = Instant::now();
             for (right_body, terminal_map) in nwa_bodies_map {
                 let mut effective_terminal_map = BTreeMap::new();
                 for (terminal_id_opt, weight) in terminal_map {
@@ -225,9 +226,11 @@ pub fn precompute4(
                     continue;
                 }
 
-                println!("Specializing DWA");
+                println!("Specializing DWA (took {:?})", now_step.elapsed());
+                now_step = Instant::now();
                 let mut left_dwa = specialize_dwa(&super_dwa, &effective_terminal_map, &bit_to_term);
-                println!("Simplifying DWA");
+                println!("Simplifying DWA (took {:?})", now_step.elapsed());
+                now_step = Instant::now();
                 left_dwa.simplify();
                 let left_nwa = NWA::from_dwa(&left_dwa);
 
@@ -239,20 +242,26 @@ pub fn precompute4(
 
                 let left_body = NWABody { start_state: left_body_start };
 
-                println!("Concatenating components");
+                println!("Concatenating components (took {:?})", now_step.elapsed());
+                now_step = Instant::now();
                 let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
 
                 if !new_states_filter.is_empty() {
-                    println!("Applying cancellations");
+                    println!("Applying cancellations (took {:?})", now_step.elapsed());
+                    now_step = Instant::now();
                     apply_cancellations(&mut states, &new_states_filter);
-                    println!("Propagating finality");
+                    println!("Propagating finality (took {:?})", now_step.elapsed());
+                    now_step = Instant::now();
                     apply_finality_fixpoint(&mut states, &new_states_filter);
-                    println!("Removing negative transitions");
+                    println!("Removing negative transitions (took {:?})", now_step.elapsed());
+                    now_step = Instant::now();
                     remove_negative_transitions(&mut states, &new_states_filter);
-                    println!("Done");
+                    println!("Done (took {:?})", now_step.elapsed());
+                    now_step = Instant::now();
                 }
 
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
+                now_step = Instant::now();
             }
 
             crate::debug!(
