@@ -158,7 +158,7 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                     .remove("variant")
                     .ok_or_else(|| {
                         "Missing field variant for Stage7ShiftsAndReducesLookaheadValue".to_string()
-                    })?
+                    })
                     .and_then(String::from_json)?;
                 match variant.as_str() {
                     "Shift" => {
@@ -179,7 +179,7 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                             .and_then(usize::from_json)?;
                         let production_ids = obj
                             .remove("production_ids")
-                            .ok_or_else(|| "Missing field production_ids for Reduce".to_string())?
+                            .ok_or_else(|| "Missing field production_ids for Reduce".to_string())
                             .and_then(|n| BTreeSet::<ProductionID>::from_json(n))?;
                         Ok(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                             nonterminal_id,
@@ -194,7 +194,7 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                             .and_then(Option::<StateID>::from_json)?;
                         let reduces = obj
                             .remove("reduces")
-                            .ok_or_else(|| "Missing field reduces for Split".to_string())?
+                            .ok_or_else(|| "Missing field reduces for Split".to_string())
                             .and_then(|n| {
                                 BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(
                                     n,
@@ -339,11 +339,11 @@ impl JSONConvertible for Goto {
             JSONNode::Object(mut obj) => Ok(Goto {
                 state_id: obj
                     .remove("state_id")
-                    .ok_or_else(|| "Missing field 'state_id' for Goto".to_string())?
+                    .ok_or_else(|| "Missing field 'state_id' for Goto".to_string())
                     .and_then(Option::<StateID>::from_json)?,
                 accept: obj
                     .remove("accept")
-                    .ok_or_else(|| "Missing field 'accept' for Goto".to_string())?
+                    .ok_or_else(|| "Missing field 'accept' for Goto".to_string())
                     .and_then(bool::from_json)?,
             }),
             _ => Err("Expected JSONNode::Object for Goto".to_string()),
