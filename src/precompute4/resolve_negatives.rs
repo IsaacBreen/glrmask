@@ -44,7 +44,7 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
 
     progress_step(&pb, 3, "Apply changes & remove negatives");
     remove_negative_transitions(&mut nwa.states, &all_states);
-    crate::debug!(4, "Applied changes to NWA.");
+    crate::debug!(6, "Applied changes to NWA.");
 
     if let Some(p) = &pb {
         p.finish_with_message("Done");
@@ -53,7 +53,7 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
 
 pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
     let epsilons_to_add = compute_cancellations(states, source_states_filter);
-    crate::debug!(4, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
+    crate::debug!(6, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
     for (from, to, w) in epsilons_to_add {
         states.add_epsilon(from, to, w);
     }
@@ -80,7 +80,7 @@ pub fn remove_negative_transitions(states: &mut NWAStates, source_states_filter:
 /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
 pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     let now = Instant::now();
-    crate::debug!(4, "Resolving negative codes in DWA with {} states...", dwa.states.len());
+    crate::debug!(6, "Resolving negative codes in DWA with {} states...", dwa.states.len());
 
     let pb = make_progress_bar(
         4,
@@ -90,13 +90,13 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
 
     progress_step(&pb, 1, "DWA -> NWA");
     let mut nwa = NWA::from_dwa(dwa);
-    crate::debug!(4, "Converted to NWA with {} states.", nwa.states.len());
-    crate::debug!(4, "Stats for NWA from DWA:\n{}", nwa.stats());
+    crate::debug!(6, "Converted to NWA with {} states.", nwa.states.len());
+    crate::debug!(6, "Stats for NWA from DWA:\n{}", nwa.stats());
 
     progress_step(&pb, 2, "Resolve negatives in NWA");
     resolve_negative_codes_in_nwa(&mut nwa);
-    crate::debug!(4, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
-    crate::debug!(4, "Stats for NWA after negative resolution:\n{}", nwa.stats());
+    crate::debug!(6, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
+    crate::debug!(6, "Stats for NWA after negative resolution:\n{}", nwa.stats());
 
     progress_step(&pb, 3, "Determinize");
     let mut result = nwa.determinize_to_dwa();
@@ -104,12 +104,12 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     progress_step(&pb, 4, "Simplify");
     result.simplify();
     *dwa = result;
-    crate::debug!(4, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
+    crate::debug!(6, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
 
     if let Some(p) = &pb {
         p.finish_with_message("Done");
     }
-    crate::debug!(4, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
+    crate::debug!(6, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
 }
 
 fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
