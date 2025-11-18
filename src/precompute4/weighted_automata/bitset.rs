@@ -3,20 +3,46 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
+use once_cell::sync::Lazy;
 use range_set_blaze::RangeSetBlaze;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub, SubAssign};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Not, Sub, SubAssign};
+use std::sync::{Arc, Mutex};
 
 /// Thin wrapper around `RangeSetBlaze<usize>` with cached fingerprint and `is_all` flag.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Default)]
-pub struct SimpleBitset {
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SimpleBitset(Arc<SimpleBitsetInner>);
+
+#[derive(Eq, PartialEq, Ord, PartialOrd)]
+pub struct SimpleBitsetInner {
     pub(crate) rsb: RangeSetBlaze<usize>,
     pub(crate) fp: u64,
     is_all: bool,
 }
+
+impl Deref for SimpleBitset {
+    type Target = SimpleBitsetInner;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl Default for SimpleBitset {
+    fn default() -> Self { Self::zeros() }
+}
+
+// Global interning for SimpleBitset
+struct Interner(HashMap<u64, Vec<Arc<SimpleBitsetInner>>>);
+static INTERNER: Lazy<Mutex<Interner>> = Lazy::new(|| Mutex::new(Interner(HashMap::new())));
+static ZEROS: Lazy<SimpleBitset> =
+    Lazy::new(|| SimpleBitset(Arc::new(SimpleBitsetInner { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false })));
+static ALL: Lazy<SimpleBitset> = Lazy::new(|| {
+    SimpleBitset(Arc::new(SimpleBitsetInner { rsb: universe_rsb(), fp: FP_ALL, is_all: true }))
+});
 
 pub(crate) const FP_ZERO: u64 = 0x9E37_79B9_7F4A_7C15;
 const FP_ALL: u64 = 0xD6E8_FEB8_6659_FD93;
@@ -52,6 +78,28 @@ fn calc_is_all_and_fp(rsb: &RangeSetBlaze<usize>) -> (bool, u64) {
     }
 }
 
+fn intern(rsb: RangeSetBlaze<usize>) -> SimpleBitset {
+    if rsb.is_empty() {
+        return ZEROS.clone();
+    }
+    let (is_all, fp) = calc_is_all_and_fp(&rsb);
+    if is_all {
+        return ALL.clone();
+    }
+
+    let mut interner = INTERNER.lock().unwrap();
+    let candidates = interner.0.entry(fp).or_default();
+    for candidate in candidates.iter() {
+        if candidate.rsb == rsb {
+            return SimpleBitset(candidate.clone());
+        }
+    }
+
+    let new_inner = Arc::new(SimpleBitsetInner { rsb, fp, is_all });
+    candidates.push(new_inner.clone());
+    SimpleBitset(new_inner)
+}
+
 #[inline]
 fn universe_rsb() -> RangeSetBlaze<usize> { RangeSetBlaze::from_iter([0usize..=usize::MAX]) }
 
@@ -59,36 +107,21 @@ fn universe_rsb() -> RangeSetBlaze<usize> { RangeSetBlaze::from_iter([0usize..=u
 fn complement_rsb(rsb: &RangeSetBlaze<usize>) -> RangeSetBlaze<usize> { &universe_rsb() - rsb }
 
 impl SimpleBitset {
-    #[inline]
-    fn from_rsb_inner(rsb: RangeSetBlaze<usize>) -> Self {
-        let (is_all, fp) = calc_is_all_and_fp(&rsb);
-        SimpleBitset { rsb, fp, is_all }
-    }
+    pub fn zeros() -> Self { ZEROS.clone() }
 
-    #[inline]
-    fn update_cached(&mut self) {
-        let (is_all, fp) = calc_is_all_and_fp(&self.rsb);
-        self.is_all = is_all;
-        self.fp = fp;
-    }
+    pub fn all() -> Self { ALL.clone() }
 
-    pub fn zeros() -> Self {
-        SimpleBitset { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false }
-    }
-
-    pub fn all() -> Self {
-        SimpleBitset { rsb: universe_rsb(), fp: FP_ALL, is_all: true }
-    }
-
-    pub fn from_item(item: usize) -> Self { SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter([item])) }
+    pub fn from_item(item: usize) -> Self { intern(RangeSetBlaze::from_iter([item])) }
 
     pub fn from_ranges(ranges: &[(usize, usize)]) -> Self {
         let rsb = RangeSetBlaze::from_iter(ranges.iter().map(|&(s, e)| s..=e));
-        SimpleBitset::from_rsb_inner(rsb)
+        intern(rsb)
     }
 
-    pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self { SimpleBitset::from_rsb_inner(rsb) }
+    pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self { intern(rsb) }
+}
 
+impl SimpleBitsetInner {
     pub fn len(&self) -> usize { self.rsb.len().try_into().unwrap_or(usize::MAX) }
 
     pub fn is_empty(&self) -> bool { self.rsb.is_empty() }
@@ -114,7 +147,9 @@ impl SimpleBitset {
         (&self.rsb & &RangeSetBlaze::from_iter([0..=max])).into_iter()
     }
 
-    #[inline]
+}
+
+impl SimpleBitset {
     pub fn is_subset_of(&self, rhs: &SimpleBitset) -> bool { (self & rhs) == *self }
 
     pub fn complement(&self) -> SimpleBitset {
@@ -125,28 +160,26 @@ impl SimpleBitset {
             return SimpleBitset::zeros();
         }
         let rsb = complement_rsb(&self.rsb);
-        SimpleBitset::from_rsb_inner(rsb)
+        intern(rsb)
     }
 
     pub fn insert(&mut self, item: usize) {
         if self.is_all_fast() {
             return;
         }
-        self.rsb.insert(item);
-        self.update_cached();
+        let mut rsb = self.rsb.clone();
+        rsb.insert(item);
+        *self = intern(rsb);
     }
 
     pub fn add(&mut self, item: usize) { self.insert(item); }
 
     pub fn remove(&mut self, item: usize) {
-        if self.is_empty() {
-            return;
+        if self.contains(item) {
+            let mut rsb = self.rsb.clone();
+            rsb.remove(item);
+            *self = intern(rsb);
         }
-        if self.is_all_fast() {
-            self.rsb = universe_rsb();
-        }
-        self.rsb.remove(item);
-        self.update_cached();
     }
 
     pub fn set(&mut self, item: usize, value: bool) {
@@ -157,22 +190,15 @@ impl SimpleBitset {
         }
     }
 
-    pub fn clear(&mut self) {
-        self.rsb.clear();
-        self.fp = FP_ZERO;
-        self.is_all = false;
-    }
+    pub fn clear(&mut self) { *self = Self::zeros(); }
 
     pub fn clip_to_range(&mut self, min: usize, max: usize) {
         if self.is_empty() {
             return;
         }
-        if self.is_all_fast() {
-            self.rsb = universe_rsb();
-        }
         let clip_rsb = RangeSetBlaze::from_iter([min..=max]);
-        self.rsb = &self.rsb & &clip_rsb;
-        self.update_cached();
+        let rsb = &self.rsb & &clip_rsb;
+        *self = intern(rsb);
     }
 
     pub fn clip_min(&mut self, min: usize) { self.clip_to_range(min, usize::MAX); }
@@ -189,7 +215,7 @@ impl Debug for SimpleBitset {
         if self.is_all_fast() {
             write!(f, "SimpleBitset(ALL)")
         } else {
-            Debug::fmt(&self.rsb, f)
+            Debug::fmt(&self.0.rsb, f)
         }
     }
 }
@@ -217,13 +243,13 @@ impl Display for SimpleBitset {
 
 impl FromIterator<usize> for SimpleBitset {
     fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
-        SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter(iter))
+        intern(RangeSetBlaze::from_iter(iter))
     }
 }
 
 impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
     fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
-        SimpleBitset::from_rsb_inner(RangeSetBlaze::from_iter(iter))
+        intern(RangeSetBlaze::from_iter(iter))
     }
 }
 
@@ -239,7 +265,7 @@ impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
         if rhs.is_all_fast() {
             return self.clone();
         }
-        SimpleBitset::from_rsb_inner(&self.rsb & &rhs.rsb)
+        intern(&self.rsb & &rhs.rsb)
     }
 }
 
@@ -255,46 +281,19 @@ impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
         if rhs.is_empty() {
             return self.clone();
         }
-        SimpleBitset::from_rsb_inner(&self.rsb | &rhs.rsb)
+        intern(&self.rsb | &rhs.rsb)
     }
 }
 
 impl BitAndAssign<&SimpleBitset> for SimpleBitset {
     fn bitand_assign(&mut self, rhs: &SimpleBitset) {
-        if self.is_empty() {
-            return;
-        }
-        if rhs.is_empty() {
-            *self = SimpleBitset::zeros();
-            return;
-        }
-        if rhs.is_all_fast() {
-            return;
-        }
-        if self.is_all_fast() {
-            *self = rhs.clone();
-            return;
-        }
-        self.rsb = &self.rsb & &rhs.rsb;
-        self.update_cached();
+        *self = &*self & rhs;
     }
 }
 
 impl BitOrAssign<&SimpleBitset> for SimpleBitset {
     fn bitor_assign(&mut self, rhs: &SimpleBitset) {
-        if self.is_all_fast() || rhs.is_all_fast() {
-            *self = SimpleBitset::all();
-            return;
-        }
-        if rhs.is_empty() {
-            return;
-        }
-        if self.is_empty() {
-            *self = rhs.clone();
-            return;
-        }
-        self.rsb |= &rhs.rsb;
-        self.update_cached();
+        *self = &*self | rhs;
     }
 }
 
@@ -330,15 +329,7 @@ impl<'a> BitOr<SimpleBitset> for &'a SimpleBitset {
 
 impl SubAssign<&SimpleBitset> for SimpleBitset {
     fn sub_assign(&mut self, rhs: &SimpleBitset) {
-        if self.is_empty() || rhs.is_empty() {
-            return;
-        }
-        if self.is_all_fast() && rhs.is_all_fast() {
-            *self = SimpleBitset::zeros();
-            return;
-        }
-        self.rsb = &self.rsb - &rhs.rsb;
-        self.update_cached();
+        *self = &*self - rhs;
     }
 }
 
@@ -360,7 +351,7 @@ impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
         if self.is_all_fast() && rhs.is_all_fast() {
             return SimpleBitset::zeros();
         }
-        SimpleBitset::from_rsb_inner(&self.rsb - &rhs.rsb)
+        intern(&self.rsb - &rhs.rsb)
     }
 }
 
@@ -373,7 +364,7 @@ impl Not for SimpleBitset {
         if self.is_all_fast() {
             return SimpleBitset::zeros();
         }
-        SimpleBitset::from_rsb_inner(complement_rsb(&self.rsb))
+        intern(complement_rsb(&self.rsb))
     }
 }
 
@@ -386,7 +377,7 @@ impl Not for &SimpleBitset {
         if self.is_all_fast() {
             return SimpleBitset::zeros();
         }
-        SimpleBitset::from_rsb_inner(complement_rsb(&self.rsb))
+        intern(complement_rsb(&self.rsb))
     }
 }
 
@@ -458,7 +449,7 @@ impl<'de> Deserialize<'de> for SimpleBitset {
                     RangeRepr::Single(i) => i..=i,
                     RangeRepr::Range((s, e)) => s..=e,
                 }));
-                Ok(SimpleBitset::from_rsb_inner(rsb))
+                Ok(intern(rsb))
             }
         }
     }
