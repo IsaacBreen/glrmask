@@ -384,6 +384,7 @@ mod tests {
         assert_eq!(rules, expected_rules);
     }
 
+    #[should_panic]
     #[test]
     fn test_ebnf_parser_error_with_span() {
         let ebnf = r#"
