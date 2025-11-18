@@ -33,7 +33,15 @@ type Stage7Table = BTreeMap<StateID, Stage7Row>;
 type Stage8Table = BTreeMap<StateID, Row>;
 pub type Table = BTreeMap<StateID, Row>;
 
-type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
+#[derive(Debug, Clone)]
+struct Stage1Entry {
+    /// Items in this state whose symbol under the dot is `symbol`.
+    kernel: BTreeSet<Item>,
+    /// Result of shifting the dot over that symbol (None for the reduce split).
+    goto: Option<BTreeSet<Item>>,
+}
+
+type Stage1Row = BTreeMap<Option<Symbol>, Stage1Entry>;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage2Row {
@@ -110,7 +118,8 @@ impl Stage7ShiftsAndReducesLookaheadValue {
                         reduces: BTreeMap::new(),
                     },
                 );
-                if let Stage7ShiftsAndReducesLookaheadValue::Split { mut reduces, .. } = temp_self {
+                if let Stage7ShiftsAndReducesLookaheadValue::Split { mut reduces, .. } = temp_self
+                {
                     let (len, mut nts) = reduces.into_iter().next().unwrap();
                     let (nt_id, pids) = nts.into_iter().next().unwrap();
                     *self = Stage7ShiftsAndReducesLookaheadValue::Reduce {
@@ -196,9 +205,10 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                             .remove("reduces")
                             .ok_or_else(|| "Missing field reduces for Split".to_string())
                             .and_then(|n| {
-                                BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(
-                                    n,
-                                )
+                                BTreeMap::<
+                                    usize,
+                                    BTreeMap<NonTerminalID, BTreeSet<ProductionID>>,
+                                >::from_json(n)
                             })?;
                         Ok(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })
                     }
@@ -208,7 +218,9 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                     )),
                 }
             }
-            _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string()),
+            _ => Err(
+                "Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string(),
+            ),
         }
     }
 }
@@ -222,7 +234,10 @@ pub struct SubstringGoto {
 impl JSONConvertible for SubstringGoto {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("accepting_sources".to_string(), self.accepting_sources.to_json());
+        obj.insert(
+            "accepting_sources".to_string(),
+            self.accepting_sources.to_json(),
+        );
         obj.insert("gotos".to_string(), self.gotos.to_json());
         JSONNode::Object(obj)
     }
@@ -230,8 +245,9 @@ impl JSONConvertible for SubstringGoto {
         match node {
             JSONNode::Object(mut obj) => Ok(SubstringGoto {
                 accepting_sources: BTreeSet::<StateID>::from_json(
-                    obj.remove("accepting_sources")
-                        .ok_or_else(|| "Missing field accepting_sources for SubstringGoto".to_string())?,
+                    obj.remove("accepting_sources").ok_or_else(|| {
+                        "Missing field accepting_sources for SubstringGoto".to_string()
+                    })?,
                 )?,
                 gotos: BTreeMap::<StateID, BTreeSet<StateID>>::from_json(
                     obj.remove("gotos")
@@ -255,7 +271,10 @@ pub struct Reduce {
 impl JSONConvertible for Reduce {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("nonterminal_id".to_string(), self.nonterminal_id.to_json());
+        obj.insert(
+            "nonterminal_id".to_string(),
+            self.nonterminal_id.to_json(),
+        );
         obj.insert("len".to_string(), self.len.to_json());
         obj.insert("production_ids".to_string(), self.production_ids.to_json());
         JSONNode::Object(obj)
@@ -272,8 +291,9 @@ impl JSONConvertible for Reduce {
                         .ok_or_else(|| "Missing field len for Reduce".to_string())?,
                 )?,
                 production_ids: BTreeSet::<ProductionID>::from_json(
-                    obj.remove("production_ids")
-                        .ok_or_else(|| "Missing field production_ids for Reduce".to_string())?,
+                    obj.remove("production_ids").ok_or_else(|| {
+                        "Missing field production_ids for Reduce".to_string()
+                    })?,
                 )?,
             }),
             _ => Err("Expected JSONNode::Object for Reduce".to_string()),
@@ -400,16 +420,19 @@ fn stage_1_row(
     visited_kernels: &mut BTreeSet<BTreeSet<Item>>,
     splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>,
     productions: &[Production],
-) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
-    let mut row = BTreeMap::new();
-    for (symbol, items_in_split) in &splits {
-        row.insert(symbol.clone(), items_in_split.clone());
-        if symbol.is_some() {
-            let goto_set = compute_goto(items_in_split, productions);
+) -> Stage1Row {
+    let mut row: Stage1Row = BTreeMap::new();
+    for (symbol, items_in_split) in splits {
+        let goto = if symbol.is_some() {
+            let goto_set = compute_goto(&items_in_split, productions);
             if visited_kernels.insert(goto_set.clone()) {
-                worklist.push_back(goto_set);
+                worklist.push_back(goto_set.clone());
             }
-        }
+            Some(goto_set)
+        } else {
+            None
+        };
+        row.insert(symbol, Stage1Entry { kernel: items_in_split, goto });
     }
     row
 }
@@ -466,24 +489,25 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
         let mut gotos = BTreeMap::new();
         let mut reduces = BTreeSet::new();
 
-        for (symbol_opt, item_set_for_symbol) in &transitions {
-            match symbol_opt {
-                Some(Symbol::Terminal(t)) => {
-                    shifts.insert(t.clone(), compute_goto(item_set_for_symbol, productions));
+        for (symbol_opt, Stage1Entry { kernel, goto }) in transitions {
+            match (symbol_opt, goto) {
+                (Some(Symbol::Terminal(t)), Some(goto_set)) => {
+                    shifts.insert(t, goto_set);
                 }
-                Some(Symbol::NonTerminal(nt)) => {
-                    gotos.insert(nt.clone(), compute_goto(item_set_for_symbol, productions));
+                (Some(Symbol::NonTerminal(nt)), Some(goto_set)) => {
+                    gotos.insert(nt, goto_set);
                 }
-                None => {
-                    for item in item_set_for_symbol {
+                (None, _) => {
+                    for item in &kernel {
                         debug_assert_eq!(
                             item.dot_position,
                             productions[item.production_id].rhs.len(),
                             "Reduce item must have dot at end"
                         );
-                        reduces.insert(item.clone());
+                        reduces.insert(*item);
                     }
                 }
+                _ => {}
             }
         }
 
@@ -495,8 +519,8 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
 fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
     let mut stage_3_table = BTreeMap::new();
 
-    let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let first_sets = compute_first_sets_for_nonterminals(productions, &nullable_nonterminals);
     let follow_sets =
         compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
@@ -554,7 +578,11 @@ fn stage_5(
 
     let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
     for (item_set, row) in stage_4_table {
-        let Stage4Row { shifts, gotos, reduces } = row;
+        let Stage4Row {
+            shifts,
+            gotos,
+            reduces,
+        } = row;
         let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
         for (opt_term, prod_ids) in reduces {
             if let Some(term) = opt_term {
@@ -749,7 +777,13 @@ pub fn stage_9(
         }
 
         if !accepting_sources.is_empty() || !gotos.is_empty() {
-            substring_gotos.insert(nt_id, SubstringGoto { accepting_sources, gotos });
+            substring_gotos.insert(
+                nt_id,
+                SubstringGoto {
+                    accepting_sources,
+                    gotos,
+                },
+            );
         }
     }
 
@@ -758,7 +792,8 @@ pub fn stage_9(
 
 /// Inverted GOTO index: (reduce non-terminal, goto state) -> bitvector of source states.
 pub fn stage_10(table: &Table) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
-    let mut reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> = BTreeMap::new();
+    let mut reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> =
+        BTreeMap::new();
 
     for (&source_state_id, row) in table {
         for (&nt_id, goto) in &row.gotos {
@@ -798,7 +833,10 @@ pub fn generate_glr_parser_with_maps(
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
 
-    crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+    crate::glr::analyze::resolve_direct_right_recursion(
+        &mut productions,
+        &mut unqiue_name_generator,
+    );
 
     productions = inline_null_productions(&productions);
     if false {
