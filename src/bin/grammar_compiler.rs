@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Construct the GrammarConstraint.
     println!("\nConstructing GrammarConstraint...");
-    let mut config = GrammarConstraintConfig::default();
+    let config = GrammarConstraintConfig::default();
 
     let grammar_constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
