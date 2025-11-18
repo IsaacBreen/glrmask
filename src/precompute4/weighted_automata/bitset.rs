@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
+use lru::LruCache;
 use once_cell::sync::Lazy;
 use range_set_blaze::RangeSetBlaze;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -10,6 +11,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
+use std::num::NonZeroUsize;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Not, Sub, SubAssign};
 use std::sync::{Arc, Mutex};
 
@@ -43,6 +45,15 @@ static ZEROS: Lazy<SimpleBitset> =
 static ALL: Lazy<SimpleBitset> = Lazy::new(|| {
     SimpleBitset(Arc::new(SimpleBitsetInner { rsb: universe_rsb(), fp: FP_ALL, is_all: true }))
 });
+
+type OpCache = LruCache<(usize, usize), SimpleBitset>;
+const CACHE_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(1024) };
+
+static UNION_CACHE: Lazy<Mutex<OpCache>> =
+    Lazy::new(|| Mutex::new(LruCache::new(CACHE_SIZE)));
+static INTERSECTION_CACHE: Lazy<Mutex<OpCache>> =
+    Lazy::new(|| Mutex::new(LruCache::new(CACHE_SIZE)));
+static SUB_CACHE: Lazy<Mutex<OpCache>> = Lazy::new(|| Mutex::new(LruCache::new(CACHE_SIZE)));
 
 pub(crate) const FP_ZERO: u64 = 0x9E37_79B9_7F4A_7C15;
 const FP_ALL: u64 = 0xD6E8_FEB8_6659_FD93;
@@ -256,6 +267,9 @@ impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
 impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;
     fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
+        if Arc::ptr_eq(&self.0, &rhs.0) {
+            return self.clone();
+        }
         if self.is_empty() || rhs.is_empty() {
             return SimpleBitset::zeros();
         }
@@ -265,13 +279,28 @@ impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
         if rhs.is_all_fast() {
             return self.clone();
         }
-        intern(&self.rsb & &rhs.rsb)
+
+        let p1 = Arc::as_ptr(&self.0) as usize;
+        let p2 = Arc::as_ptr(&rhs.0) as usize;
+        let key = if p1 < p2 { (p1, p2) } else { (p2, p1) };
+
+        let mut cache = INTERSECTION_CACHE.lock().unwrap();
+        if let Some(result) = cache.get(&key) {
+            return result.clone();
+        }
+
+        let result = intern(&self.rsb & &rhs.rsb);
+        cache.put(key, result.clone());
+        result
     }
 }
 
 impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;
     fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
+        if Arc::ptr_eq(&self.0, &rhs.0) {
+            return self.clone();
+        }
         if self.is_all_fast() || rhs.is_all_fast() {
             return SimpleBitset::all();
         }
@@ -281,7 +310,19 @@ impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
         if rhs.is_empty() {
             return self.clone();
         }
-        intern(&self.rsb | &rhs.rsb)
+
+        let p1 = Arc::as_ptr(&self.0) as usize;
+        let p2 = Arc::as_ptr(&rhs.0) as usize;
+        let key = if p1 < p2 { (p1, p2) } else { (p2, p1) };
+
+        let mut cache = UNION_CACHE.lock().unwrap();
+        if let Some(result) = cache.get(&key) {
+            return result.clone();
+        }
+
+        let result = intern(&self.rsb | &rhs.rsb);
+        cache.put(key, result.clone());
+        result
     }
 }
 
@@ -345,13 +386,32 @@ impl Sub<SimpleBitset> for SimpleBitset {
 impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
     type Output = SimpleBitset;
     fn sub(self, rhs: &'a SimpleBitset) -> Self::Output {
+        if Arc::ptr_eq(&self.0, &rhs.0) {
+            return SimpleBitset::zeros();
+        }
         if self.is_empty() || rhs.is_empty() {
             return self.clone();
         }
-        if self.is_all_fast() && rhs.is_all_fast() {
+        if rhs.is_all_fast() {
             return SimpleBitset::zeros();
         }
-        intern(&self.rsb - &rhs.rsb)
+
+        let p1 = Arc::as_ptr(&self.0) as usize;
+        let p2 = Arc::as_ptr(&rhs.0) as usize;
+        let key = (p1, p2);
+
+        let mut cache = SUB_CACHE.lock().unwrap();
+        if let Some(result) = cache.get(&key) {
+            return result.clone();
+        }
+
+        let result = if self.is_all_fast() {
+            rhs.complement()
+        } else {
+            intern(&self.rsb - &rhs.rsb)
+        };
+        cache.put(key, result.clone());
+        result
     }
 }
 
