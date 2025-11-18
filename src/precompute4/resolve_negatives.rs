@@ -239,23 +239,20 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
 }
 
 fn compute_finality_fixpoint(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<Weight> {
+    let n = states.len();
     let mut future_final: Vec<Weight> = vec![Weight::zeros(); n];
     let mut predecessors: Vec<Vec<(NWAStateID, Weight)>> = vec![vec![]; n];
 
     for u in 0..n {
         for &(v, ref w) in &states[u].epsilons {
-            if v < n {
-                predecessors[v].push((u, w.clone()));
-            }
+            predecessors[v].push((u, w.clone()));
         }
         for (&label, targets) in &states[u].transitions {
             if !is_negative_symbol(label) {
                 continue;
             }
             for (v, w) in targets {
-                if *v < n {
-                    predecessors[*v].push((u, w.clone()));
-                }
+                predecessors[*v].push((u, w.clone()));
             }
         }
     }
