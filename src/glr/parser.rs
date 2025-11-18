@@ -377,10 +377,7 @@ impl GLRParser {
             };
             let action = match row.shifts_and_reduces_full.get(&token) {
                 Some(a) => a,
-                None => match &row.default_action {
-                    Some(a) => a,
-                    None => continue,
-                },
+                None => continue,
             };
 
             match action {
