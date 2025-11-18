@@ -8374,9 +8374,9 @@ local_system:
               let mut may_be_null_terminals:    HashSet<String> = HashSet::new();
 
               for (terminal_name, group_id) in regex_name_to_group_id.iter() {
-                  let expr = regex_expr_to_group_id
-                      .get_by_right(group_id)
-                      .expect("regex_name_to_group_id / regex_expr_to_group_id out of sync")
+                  let expr = group_id_to_expr
+                      .get(group_id)
+                      .expect("regex_name_to_group_id / group_id_to_expr out of sync")
                       .clone();
 
                   match get_nullability(expr) {
@@ -15126,5 +15126,114 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Correctly handle anonymous literals
       in grammar conversion and update nullability test to use regex name lookup"'
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/interface/interface.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |+
+      error[E0425]: cannot find value `regex_expr_to_group_id` in this scope
+         --> src/interface/interface.rs:877:24
+          |
+      877 |             let expr = regex_expr_to_group_id
+          |                        ^^^^^^^^^^^^^^^^^^^^^^ help: a local variable with a similar name exists: `regex_name_to_group_id`
+
+    metadata:
+  - assistant: |-
+      You've caught another error from the refactoring. It seems I missed updating one last place where the old `regex_expr_to_group_id` field was being used. My apologies for that oversight.
+
+      Here are the instructions to fix this final compile error.
+
+      ### Step-by-step Instructions
+
+      #### File: `src/interface/interface.rs`
+
+      1.  **Update the terminal nullability check in `from_exprs`:**
+          -   Navigate to the function `GrammarDefinition::from_exprs`.
+          -   Find the section commented with `// 1. Work out the nullability of every *terminal* in the grammar`.
+          -   Inside the loop `for (terminal_name, group_id) in regex_name_to_group_id.iter()`, you will find the erroneous code.
+          -   **Replace** this block:
+              ```rust
+              let expr = regex_expr_to_group_id
+                  .get_by_right(group_id)
+                  .expect("regex_name_to_group_id / regex_expr_to_group_id out of sync")
+                  .clone();
+              ```
+          -   with this corrected version that uses the new `group_id_to_expr` map:
+              ```rust
+              let expr = group_id_to_expr
+                  .get(group_id)
+                  .expect("regex_name_to_group_id / group_id_to_expr out of sync")
+                  .clone();
+              ```
+
+      This change correctly retrieves the terminal's expression from the new `group_id_to_expr` map, resolving the "value not found" error.
+
+      ### Git Diff
+
+      Here is the git patch for the change.
+
+      ```diff
+      --- a/src/interface/interface.rs
+      +++ b/src/interface/interface.rs
+      @@ -874,9 +874,9 @@
+               let mut may_be_null_terminals:    HashSet<String> = HashSet::new();
+       
+               for (terminal_name, group_id) in regex_name_to_group_id.iter() {
+      -            let expr = regex_expr_to_group_id
+      -                .get_by_right(group_id)
+      -                .expect("regex_name_to_group_id / regex_expr_to_group_id out of sync")
+      +            let expr = group_id_to_expr
+      +                .get(group_id)
+      +                .expect("regex_name_to_group_id / group_id_to_expr out of sync")
+                       .clone();
+       
+                   match get_nullability(expr) {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/interface/interface.rs
+      Applying patch to 'src/interface/interface.rs' using custom patcher...
+      Successfully applied patch and wrote to src/interface/interface.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Update terminal nullability check
+      to use group_id_to_expr map"'
     metadata:
 ...

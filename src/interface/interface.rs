@@ -874,9 +874,9 @@ impl GrammarDefinition {
         let mut may_be_null_terminals:    HashSet<String> = HashSet::new();
 
         for (terminal_name, group_id) in regex_name_to_group_id.iter() {
-            let expr = regex_expr_to_group_id
-                .get_by_right(group_id)
-                .expect("regex_name_to_group_id / regex_expr_to_group_id out of sync")
+            let expr = group_id_to_expr
+                .get(group_id)
+                .expect("regex_name_to_group_id / group_id_to_expr out of sync")
                 .clone();
 
             match get_nullability(expr) {
