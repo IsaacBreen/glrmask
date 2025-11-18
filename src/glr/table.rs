@@ -763,6 +763,8 @@ pub fn generate_glr_parser_with_maps(
         }
     }
 
+    crate::debug!(2, "Number of products: {}", productions.len());
+
     crate::debug!(2, "Stage 1");
     let stage_1_table = stage_1(&productions);
     crate::debug!(2, "Stage 2");
