@@ -819,34 +819,31 @@ impl Expr {
                 }
             }
             Expr::Quantifier(expr, quantifier_type) => match quantifier_type {
-                QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
-                    let loop_start_state = nfa.add_state();
-
-                    // Epsilon transition from current state to loop start state
-                    nfa.add_epsilon_transition(current_state, loop_start_state);
-
-                    // Process the expr
-                    let expr_end_state =
-                        Self::handle_expr_cached(*expr, nfa, loop_start_state, cache);
-
-                    // Epsilon transition from expr end state back to loop start state for repetition
-                    nfa.add_epsilon_transition(expr_end_state, loop_start_state);
-
-                    match quantifier_type {
-                        QuantifierType::ZeroOrMore => loop_start_state, // The loop start state becomes the new current state
-                        QuantifierType::OneOrMore => expr_end_state,    // The expr end state becomes the new current state
-                        _ => unreachable!(),
-                    }
+                QuantifierType::ZeroOrMore => {
+                    let entry_state = nfa.add_state();
+                    nfa.add_epsilon_transition(current_state, entry_state);
+                    let body_end_state = Self::handle_expr_cached(*expr, nfa, entry_state, cache);
+                    let exit_state = nfa.add_state();
+                    nfa.add_epsilon_transition(entry_state, exit_state); // 0 times
+                    nfa.add_epsilon_transition(body_end_state, entry_state); // loop
+                    nfa.add_epsilon_transition(body_end_state, exit_state); // exit loop
+                    exit_state
+                }
+                QuantifierType::OneOrMore => {
+                    let entry_state = current_state;
+                    let body_end_state = Self::handle_expr_cached(*expr, nfa, entry_state, cache);
+                    let exit_state = nfa.add_state();
+                    nfa.add_epsilon_transition(body_end_state, entry_state); // loop
+                    nfa.add_epsilon_transition(body_end_state, exit_state); // exit loop
+                    exit_state
                 }
                 QuantifierType::ZeroOrOne => {
-                    // Process the expr
-                    let expr_end_state = Self::handle_expr_cached(*expr, nfa, current_state, cache);
-
-                    // Epsilon transition from current state to expr end state
-                    nfa.add_epsilon_transition(current_state, expr_end_state);
-
-                    // The expr end state becomes the new current state
-                    expr_end_state
+                    let body_end_state =
+                        Self::handle_expr_cached(*expr, nfa, current_state, cache);
+                    let exit_state = nfa.add_state();
+                    nfa.add_epsilon_transition(current_state, exit_state); // skip
+                    nfa.add_epsilon_transition(body_end_state, exit_state); // take
+                    exit_state
                 }
             },
             Expr::Choice(exprs) => {
@@ -1139,106 +1136,119 @@ impl DFA {
             return;
         }
 
-        // Step 1: Create initial partition based on finalizers and transitions
-        let mut partitions =
-            BTreeMap::<(BTreeSet<GroupID>, BTreeMap<u8, usize>), BTreeSet<usize>>::new();
+        self.remove_unreachable_states();
 
+        // Step 1: Initial partition based on finalizers.
+        let mut partitions_map: BTreeMap<BTreeSet<GroupID>, BTreeSet<usize>> = BTreeMap::new();
         for (state_idx, state) in self.states.iter().enumerate() {
-            let key = (
-                state.finalizers.clone(),
-                state
-                    .transitions
-                    .iter()
-                    .map(|(u8, &next)| (u8, next))
-                    .collect(),
-            );
-            partitions.entry(key).or_default().insert(state_idx);
+            partitions_map
+                .entry(state.finalizers.clone())
+                .or_default()
+                .insert(state_idx);
+        }
+        let mut partition_list: Vec<BTreeSet<usize>> = partitions_map.into_values().collect();
+
+        // state_to_partition map for O(1) lookups.
+        let mut state_to_partition = vec![0; self.states.len()];
+        for (part_idx, partition) in partition_list.iter().enumerate() {
+            for &state_idx in partition {
+                state_to_partition[state_idx] = part_idx;
+            }
         }
 
-        // Step 2: Refine partitions until no more refinement is possible
-        let mut partition_list: Vec<BTreeSet<usize>> = partitions.into_values().collect();
-        let mut changed = true;
-        while changed {
-            changed = false;
-            let mut new_partitions = Vec::new();
+        // Step 2: Refine partitions until a fixed point is reached.
+        loop {
+            let mut changed = false;
+            let mut new_partition_list: Vec<BTreeSet<usize>> = Vec::new();
 
             for partition in &partition_list {
-                let mut refined_partitions = BTreeMap::new();
+                if partition.len() <= 1 {
+                    new_partition_list.push(partition.clone());
+                    continue;
+                }
 
-                for &state in partition {
-                    let mut signature = BTreeMap::new();
-
-                    // For each transition, record which partition it leads to
-                    for (u8, &next_state) in &self.states[state].transitions {
-                        let target_partition = new_partitions
-                            .iter()
-                            .chain(partition_list.iter())
-                            .position(|p| p.contains(&next_state))
-                            .unwrap_or(usize::MAX);
-                        signature.insert(u8, target_partition);
-                    }
-
-                    refined_partitions
-                        .entry(signature)
-                        .or_insert_with(BTreeSet::new)
-                        .insert(state);
+                // Split this partition based on transition signatures.
+                // A signature maps a character to the partition index of the target state.
+                let mut refined_partitions: BTreeMap<BTreeMap<u8, usize>, BTreeSet<usize>> =
+                    BTreeMap::new();
+                for &state_idx in partition {
+                    let signature: BTreeMap<u8, usize> = self.states[state_idx]
+                        .transitions
+                        .iter()
+                        .map(|(input, &next_state)| (input, state_to_partition[next_state]))
+                        .collect();
+                    refined_partitions.entry(signature).or_default().insert(state_idx);
                 }
 
                 if refined_partitions.len() > 1 {
                     changed = true;
-                    new_partitions.extend(refined_partitions.into_values());
-                } else {
-                    new_partitions.push(partition.clone());
                 }
+                new_partition_list.extend(refined_partitions.into_values());
             }
 
-            partition_list = new_partitions;
+            partition_list = new_partition_list;
+
+            if !changed {
+                break;
+            }
+
+            // Rebuild state_to_partition map for the next iteration.
+            for (part_idx, partition) in partition_list.iter().enumerate() {
+                for &state_idx in partition {
+                    state_to_partition[state_idx] = part_idx;
+                }
+            }
         }
 
-        // Step 3: Build the minimized DFA
+        // Step 3: Build the minimized DFA from the final partitions.
+        let (state_mapping, new_states) = self.rebuild_from_partitions(partition_list);
+
+        self.states = new_states;
+        self.start_state = state_mapping[self.start_state];
+
+        // Recompute metadata as the structure has changed.
+        self.compute_possible_future_group_ids();
+        self.compute_group_id_to_u8set();
+    }
+
+    fn rebuild_from_partitions(
+        &self,
+        mut partition_list: Vec<BTreeSet<usize>>,
+    ) -> (Vec<usize>, Vec<DFAState>) {
         let mut state_mapping = vec![0; self.states.len()];
 
-        // Find which partition contains the start state
-        let start_partition_idx = partition_list
+        // Ensure the start state's partition is at index 0.
+        if let Some(start_part_idx) = partition_list
             .iter()
             .position(|p| p.contains(&self.start_state))
-            .unwrap();
-
-        // Ensure the start partition is first in the list
-        if start_partition_idx != 0 {
-            partition_list.swap(0, start_partition_idx);
+        {
+            partition_list.swap(0, start_part_idx);
         }
 
-        // Build state mapping
-        for (new_state, partition) in partition_list.iter().enumerate() {
-            for &old_state in partition {
-                state_mapping[old_state] = new_state;
+        // Build the mapping from old state index to new state index (which is the partition index).
+        for (new_idx, partition) in partition_list.iter().enumerate() {
+            for &old_idx in partition {
+                state_mapping[old_idx] = new_idx;
             }
         }
 
         let mut new_states = Vec::with_capacity(partition_list.len());
         for partition in &partition_list {
-            let old_state = partition.iter().next().unwrap();
-            let mut new_state = self.states[*old_state].clone();
+            // All states in a partition are equivalent, so we can pick any one as a representative.
+            let representative_old_idx = *partition.iter().next().unwrap();
+            let mut new_state = self.states[representative_old_idx].clone();
 
-            // Update transitions according to the new state mapping
+            // Update transitions to point to the new partition indices.
             new_state.transitions = new_state
                 .transitions
                 .iter()
-                .map(|(u8, &next)| (u8, state_mapping[next]))
+                .map(|(u8, &old_next_idx)| (u8, state_mapping[old_next_idx]))
                 .collect();
 
             new_states.push(new_state);
         }
 
-        // The start state should now be at index 0
-        self.start_state = 0;
-        self.states = new_states;
-        self.remove_unreachable_states();
-
-        // Recompute metadata
-        self.compute_possible_future_group_ids();
-        self.compute_group_id_to_u8set();
+        (state_mapping, new_states)
     }
 }
 
