@@ -233,17 +233,20 @@ pub fn precompute4(
                     states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
 
                 let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
-                if !new_states_filter.is_empty() {
-                    let mut temp_nwa = NWA { states: states.clone(), body: NWABody::default() };
-                    apply_cancellations(&mut temp_nwa, &new_states_filter);
-                    apply_finality_fixpoint(&mut temp_nwa, &new_states_filter);
-                    remove_negative_transitions(&mut temp_nwa, &new_states_filter);
-                    *states = temp_nwa.states;
-                }
 
                 let left_body = NWABody { start_state: left_body_start };
 
-                let composed_body = NWA::concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+                let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+
+                if !new_states_filter.is_empty() {
+                    let mut temp_nwa = NWA { states: states.clone(), body: composed_body.clone() };
+                    let n = temp_nwa.states.len();
+                    apply_cancellations(&mut temp_nwa, &(0..n).collect());
+                    apply_finality_fixpoint(&mut temp_nwa, &(0..n).collect());
+                    remove_negative_transitions(&mut temp_nwa, &(0..n).collect());
+                    *states = temp_nwa.states;
+                }
+
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
             }
 

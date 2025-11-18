@@ -223,6 +223,16 @@ impl NWA {
         right: &NWABody,
         eps_weight: &Weight,
     ) -> NWABody {
+        let new_left = states.copy_subgraph_in_place_and_return_body(*left);
+        Self::_concatenate_components(states, &new_left, right, eps_weight)
+    }
+
+    pub fn _concatenate_components(
+        states: &mut NWAStates,
+        left: &NWABody,
+        right: &NWABody,
+        eps_weight: &Weight,
+    ) -> NWABody {
         if STOCHASTIC_DEBUG {
             let nwa1 = NWA { states: states.clone(), body: left.clone() };
             let nwa2 = NWA { states: states.clone(), body: right.clone() };
@@ -237,8 +247,7 @@ impl NWA {
             let result_dwa = concat_nwa.determinize_to_dwa();
             DWA::stochastic_validate_concatenate(&dwa1, &dwa2, &result_dwa, eps_weight);
         }
-        let new_left = states.copy_subgraph_in_place_and_return_body(*left);
-        Self::internal_concatenate_components(states, &new_left, right, eps_weight)
+        Self::internal_concatenate_components(states, &left, right, eps_weight)
     }
 
     pub fn determinize_components(states: &NWAStates, body: &NWABody) -> DWA {

@@ -60,9 +60,6 @@ pub fn apply_cancellations(nwa: &mut NWA, source_states_filter: &HashSet<NWAStat
 pub fn apply_finality_fixpoint(nwa: &mut NWA, source_states_filter: &HashSet<NWAStateID>) {
     let final_fix = compute_finality_fixpoint(&nwa.states, source_states_filter);
     for &sid in source_states_filter {
-        if sid >= nwa.states.len() || final_fix[sid].is_empty() {
-            continue;
-        }
         let st = &mut nwa.states.0[sid];
         if let Some(fw) = &mut st.final_weight {
             *fw |= &final_fix[sid];
