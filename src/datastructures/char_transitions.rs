@@ -37,29 +37,29 @@ impl<T> CharTransitions<T> {
 
     /// Insert a value for `key`, returning the old value if any.
     pub fn insert(&mut self, key: u8, value: T) -> Option<T> {
-        for (k, v) in &mut self.entries {
-            if *k == key {
-                return Some(std::mem::replace(v, value));
+        match self.entries.binary_search_by_key(&key, |&(k, _)| k) {
+            Ok(index) => Some(std::mem::replace(&mut self.entries[index].1, value)),
+            Err(index) => {
+                self.entries.insert(index, (key, value));
+                None
             }
         }
-        self.entries.push((key, value));
-        None
     }
 
     /// Get a shared reference to the value for `key`, if present.
     pub fn get(&self, key: u8) -> Option<&T> {
         self.entries
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| v)
+            .binary_search_by_key(&key, |&(k, _)| k)
+            .ok()
+            .map(|index| &self.entries[index].1)
     }
 
     /// Get a mutable reference to the value for `key`, if present.
     pub fn get_mut(&mut self, key: u8) -> Option<&mut T> {
         self.entries
-            .iter_mut()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| v)
+            .binary_search_by_key(&key, |&(k, _)| k)
+            .ok()
+            .map(move |index| &mut self.entries[index].1)
     }
 
     /// Test if the map contains a given key.
