@@ -1,9 +1,8 @@
 use clap::Parser;
-use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig};
-use sep1::interface::{CompiledGrammar, GrammarDefinition};
+use sep1::interface::GrammarDefinition;
 use sep1::json_serialization::JSONConvertible;
 use sep1::tokenizer::{LLMTokenID, LLMTokenMap};
 use std::collections::BTreeMap;
@@ -88,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Saving precompute0 cache to: {:?}", path);
         let output_file = File::create(path)?;
         let writer = BufWriter::new(output_file);
-        let mut encoder = GzEncoder::new(writer, Compression::default());
+        let encoder = GzEncoder::new(writer, Compression::default());
         encoder.finish()?;
     }
 
