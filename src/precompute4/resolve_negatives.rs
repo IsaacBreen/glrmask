@@ -247,146 +247,161 @@ fn compute_finality_fixpoint(
     source_states_filter: &HashSet<NWAStateID>,
 ) -> HashMap<NWAStateID, Weight> {
     let n = states.len();
+    if n == 0 || source_states_filter.is_empty() {
+        return HashMap::new();
+    }
 
-    // future_final[a] = summary of all epsilon/negative paths from `a` to any final state.
-    // We only need entries for a ∈ source_states_filter.
-    let mut future_final: HashMap<NWAStateID, Weight> = HashMap::new();
+    #[derive(Clone, Copy)]
+    enum PredEdge {
+        Epsilon { from: NWAStateID, eps_idx: usize },
+        Negative { from: NWAStateID, label: Code, trans_idx: usize },
+    }
 
-    // queries_at_state[s][a] = aggregated weight of all epsilon/negative paths
-    // from `a` (where a ∈ source_states_filter) to `s`.
-    let mut queries_at_state: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
-    let mut worklist: VecDeque<(NWAStateID, NWAStateID, Weight)> = VecDeque::new();
+    // Phase 1: forward exploration from the filtered sources,
+    // restricted to epsilon edges everywhere and negative edges
+    // only from states in `source_states_filter`. While exploring we
+    // also build the reverse adjacency (predecessor lists) restricted
+    // to this reachable subgraph.
+    let mut visited = vec![false; n];
+    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+    let mut reachable_states: Vec<NWAStateID> = Vec::new();
+    let mut preds: HashMap<NWAStateID, Vec<PredEdge>> = HashMap::new();
 
-    // Seed zero-length paths: if `a` is already final, include its own final weight.
+    // Seed BFS from the filtered source states.
     for &a in source_states_filter {
         if a >= n {
             continue;
         }
-        if let Some(ref fw) = states[a].final_weight {
-            if !fw.is_empty() {
-                let entry = future_final.entry(a).or_insert_with(Weight::zeros);
-                *entry |= fw;
-            }
+        if !visited[a] {
+            visited[a] = true;
+            queue.push_back(a);
+            reachable_states.push(a);
         }
     }
 
-    // Seed one-step paths from each source in the filter.
-    for &a in source_states_filter {
-        if a >= n {
-            continue;
-        }
+    while let Some(s) = queue.pop_front() {
+        let state = &states[s];
 
-        // Epsilon edges from `a`.
-        for &(target, ref w) in &states[a].epsilons {
+        // Epsilon edges from `s` are always allowed.
+        for (eps_idx, &(target, ref w)) in state.epsilons.iter().enumerate() {
             if target >= n || w.is_empty() {
                 continue;
             }
-            let entry = queries_at_state
+            preds
                 .entry(target)
-                .or_default()
-                .entry(a)
-                .or_insert_with(Weight::zeros);
-            let old = entry.clone();
-            *entry |= w;
-            if *entry != old {
-                worklist.push_back((target, a, entry.clone()));
+                .or_insert_with(Vec::new)
+                .push(PredEdge::Epsilon { from: s, eps_idx });
+            if !visited[target] {
+                visited[target] = true;
+                queue.push_back(target);
+                reachable_states.push(target);
             }
         }
 
-        // Negative transitions from `a`.
-        for (&label, targets) in &states[a].transitions {
-            if !is_negative_symbol(label) {
-                continue;
-            }
-            for (target, w) in targets {
-                if *target >= n || w.is_empty() {
-                    continue;
-                }
-                let entry = queries_at_state
-                    .entry(*target)
-                    .or_default()
-                    .entry(a)
-                    .or_insert_with(Weight::zeros);
-                let old = entry.clone();
-                *entry |= w;
-                if *entry != old {
-                    worklist.push_back((*target, a, entry.clone()));
-                }
-            }
-        }
-    }
-
-    // Propagate paths forward until a fixpoint is reached.
-    while let Some((s, a, w_as)) = worklist.pop_front() {
-        if w_as.is_empty() {
-            continue;
-        }
-
-        // If `s` is final, accumulate its contribution to `a`.
-        if let Some(ref fw) = states[s].final_weight {
-            if !fw.is_empty() {
-                let add = &w_as & fw;
-                if !add.is_empty() {
-                    let entry = future_final.entry(a).or_insert_with(Weight::zeros);
-                    let old = entry.clone();
-                    *entry |= &add;
-                    if *entry != old {
-                        // `future_final` is only an output accumulator; it does not
-                        // affect further propagation, so we do not enqueue anything.
-                    }
-                }
-            }
-        }
-
-        // Propagate along epsilon transitions from `s`.
-        for &(target, ref w_st) in &states[s].epsilons {
-            if target >= n || w_st.is_empty() {
-                continue;
-            }
-            let new_w = &w_as & w_st;
-            if new_w.is_empty() {
-                continue;
-            }
-            let entry = queries_at_state
-                .entry(target)
-                .or_default()
-                .entry(a)
-                .or_insert_with(Weight::zeros);
-            let old = entry.clone();
-            *entry |= &new_w;
-            if *entry != old {
-                worklist.push_back((target, a, entry.clone()));
-            }
-        }
-
-        // Propagate along negative transitions from `s` only if `s` is in the filter.
+        // Negative transitions from `s` are only allowed when `s` is in the filter.
         if source_states_filter.contains(&s) {
-            for (&label, targets) in &states[s].transitions {
+            for (&label, targets) in &state.transitions {
                 if !is_negative_symbol(label) {
                     continue;
                 }
-                for (target, w_st) in targets {
-                    if *target >= n || w_st.is_empty() {
+                for (trans_idx, &(target, ref w)) in targets.iter().enumerate() {
+                    if target >= n || w.is_empty() {
                         continue;
                     }
-                    let new_w = &w_as & w_st;
-                    if new_w.is_empty() {
-                        continue;
-                    }
-                    let entry = queries_at_state
-                        .entry(*target)
-                        .or_default()
-                        .entry(a)
-                        .or_insert_with(Weight::zeros);
-                    let old = entry.clone();
-                    *entry |= &new_w;
-                    if *entry != old {
-                        worklist.push_back((*target, a, entry.clone()));
+                    preds
+                        .entry(target)
+                        .or_insert_with(Vec::new)
+                        .push(PredEdge::Negative {
+                            from: s,
+                            label,
+                            trans_idx,
+                        });
+                    if !visited[target] {
+                        visited[target] = true;
+                        queue.push_back(target);
+                        reachable_states.push(target);
                     }
                 }
             }
         }
     }
 
-    future_final
+    // Phase 2: backward fixpoint over the reachable subgraph.
+    //
+    // future_final_all[s] = summary weight of all allowed epsilon/negative
+    // paths from `s` to any final state (including the zero-length path
+    // when `s` itself is final).
+    let mut future_final_all: HashMap<NWAStateID, Weight> = HashMap::new();
+    let mut worklist: VecDeque<NWAStateID> = VecDeque::new();
+
+    // Initialize from final states in the reachable subgraph.
+    for &s in &reachable_states {
+        if let Some(ref fw) = states[s].final_weight {
+            if !fw.is_empty() {
+                future_final_all.insert(s, fw.clone());
+                worklist.push_back(s);
+            }
+        }
+    }
+
+    while let Some(s) = worklist.pop_front() {
+        let f_s = match future_final_all.get(&s) {
+            Some(w) if !w.is_empty() => w,
+            _ => continue,
+        };
+
+        if let Some(pred_edges) = preds.get(&s) {
+            for edge in pred_edges {
+                let (pred_state, edge_w): (NWAStateID, &Weight) = match *edge {
+                    PredEdge::Epsilon { from, eps_idx } => {
+                        let &(target, ref w) = &states[from].epsilons[eps_idx];
+                        debug_assert_eq!(target, s);
+                        (from, w)
+                    }
+                    PredEdge::Negative {
+                        from,
+                        label,
+                        trans_idx,
+                    } => {
+                        let targets = states[from]
+                            .transitions
+                            .get(&label)
+                            .expect("stored negative edge must exist");
+                        let &(target, ref w) = &targets[trans_idx];
+                        debug_assert_eq!(target, s);
+                        (from, w)
+                    }
+                };
+
+                let add = f_s & edge_w;
+                if add.is_empty() {
+                    continue;
+                }
+
+                let entry = future_final_all
+                    .entry(pred_state)
+                    .or_insert_with(Weight::zeros);
+                let old = entry.clone();
+                *entry |= &add;
+                if *entry != old {
+                    worklist.push_back(pred_state);
+                }
+            }
+        }
+    }
+
+    // We only need entries for states in `source_states_filter`.
+    let mut result: HashMap<NWAStateID, Weight> = HashMap::new();
+    for &a in source_states_filter {
+        if a >= n {
+            continue;
+        }
+        if let Some(w) = future_final_all.get(&a) {
+            if !w.is_empty() {
+                result.insert(a, w.clone());
+            }
+        }
+    }
+
+    result
 }
