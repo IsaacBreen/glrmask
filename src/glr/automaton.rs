@@ -459,7 +459,7 @@ pub fn compute_first_sets_ids(
     // i.e. ID < num_terminals => Terminal(ID)
     //      ID >= num_terminals => NonTerminal(ID - num_terminals)
     
-    let mut first_sets = vec![BTreeSet::new(); num_nonterminals];
+    let mut first_sets = vec![BTreeSet::<TerminalID>::new(); num_nonterminals];
     let mut deps: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
     let mut worklist: VecDeque<(usize, TerminalID)> = VecDeque::new();
 
