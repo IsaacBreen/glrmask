@@ -314,12 +314,12 @@ pub struct Row {
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
-pub fn iter_rows(table: &Table) -> impl Iterator<Item = (StateID, &Row)> {
-    table.iter().enumerate().map(|(i, row)| (StateID(i), row))
+pub fn iter_rows(table: &Table) -> impl Iterator<Item = (&StateID, &Row)> {
+    table.iter()
 }
 
 pub fn get_row(table: &Table, state_id: StateID) -> Option<&Row> {
-    table.get(state_id.0)
+    table.get(&state_id)
 }
 
 impl Row {

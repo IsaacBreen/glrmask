@@ -107,11 +107,11 @@ fn build_label_follower_map(parser: &GLRParser) -> BTreeMap<ParserStateID, State
                 _ => None,
             })
         {
-            add_follower(from_sid, to_sid);
+            add_follower(*from_sid, to_sid);
         }
         for goto in row.gotos.values() {
             if let Some(to_sid) = goto.state_id {
-                add_follower(from_sid, to_sid);
+                add_follower(*from_sid, to_sid);
             }
         }
     }

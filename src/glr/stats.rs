@@ -140,7 +140,7 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
             }
         }
 
-        all_state_stats.insert(state_id, current_state_stats);
+        all_state_stats.insert(*state_id, current_state_stats);
     }
 
     GLRStats {
