@@ -1,6 +1,5 @@
 use crate::constraint::{LLMVocab, StateIDBV};
 use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
-use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::{Item};
 use crate::glr::table::{
@@ -376,46 +375,22 @@ impl GLRParser {
                 Some(r) => r,
                 None => continue,
             };
-            
-            let shift = row.shifts.get(&token).cloned();
-            let mut reduces_map: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<crate::glr::table::ProductionID>>> = BTreeMap::new();
-
-            for (bv, reduce) in &row.reduces {
-                if bv.contains(token.0) {
-                    reduces_map.entry(reduce.len)
-                        .or_default()
-                        .entry(reduce.nonterminal_id)
-                        .or_default()
-                        .extend(reduce.production_ids.iter().cloned());
-                }
-            }
-
-            if shift.is_none() && reduces_map.is_empty() {
-                continue;
-            }
-
-            // Construct the action on the fly
-            let action = if shift.is_some() && reduces_map.is_empty() {
-                Stage7ShiftsAndReducesLookaheadValue::Shift(shift.unwrap())
-            } else if shift.is_none() && reduces_map.len() == 1 && reduces_map.values().next().unwrap().len() == 1 {
-                let (len, nts) = reduces_map.into_iter().next().unwrap();
-                let (nt_id, pids) = nts.into_iter().next().unwrap();
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt_id, len, production_ids: pids }
-            } else {
-                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces: reduces_map }
+            let action = match row.shifts_and_reduces_full.get(&token) {
+                Some(a) => a,
+                None => continue,
             };
 
             match action {
                 Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                    let edge = ParseStateEdgeContent { state_id: to };
+                    let edge = ParseStateEdgeContent { state_id: *to };
                     shifted.push(state_gss.push(edge));
                 }
                 Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
-                    self.apply_reduces(&state_gss, len, nonterminal_id, &mut heads_by_state);
+                    self.apply_reduces(&state_gss, *len, *nonterminal_id, &mut heads_by_state);
                 }
                 Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                     if let Some(to) = shift {
-                        let edge = ParseStateEdgeContent { state_id: to };
+                        let edge = ParseStateEdgeContent { state_id: *to };
                         shifted.push(state_gss.push(edge));
                     }
                     for (len, nts) in reduces {
