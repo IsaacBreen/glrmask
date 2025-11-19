@@ -256,11 +256,12 @@ pub fn precompute4(
 
             let mut results = Vec::new();
             for (dest_idx, llm_token_bv) in dest_map.iter() {
-                let next_tokens = current_tokens & llm_token_bv;
+                let weight_hb = LLMTokenBV::from(llm_token_bv.clone());
+                let next_tokens = current_tokens & &weight_hb;
                 if next_tokens.is_empty() {
                     continue;
                 }
-                let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                let weight = llm_token_bv.clone();
                 let mut terminal_map = BTreeMap::new();
                 terminal_map.insert(terminal_id, weight);
                 let mut body_map = BTreeMap::new();

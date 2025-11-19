@@ -38,13 +38,13 @@ pub struct TrieTraversalData {
     /// The nodes reachable from the roots, in a fixed order.
     pub(crate) nodes: Vec<Trie2Index>,
     /// A map from a node's `usize` index to its position in the `nodes` vector.
-    pos_of_u: HashMap<usize, usize>,
+    pub(crate) pos_of_u: HashMap<usize, usize>,
     /// A map from a node's position in `nodes` to its SCC ID.
-    comp_id: Vec<usize>,
+    pub(crate) comp_id: Vec<usize>,
     /// The list of SCCs. Each inner vector contains node positions.
     pub(crate) sccs: Vec<Vec<usize>>,
     /// The topologically sorted list of SCC IDs.
-    topo: Vec<usize>,
+    pub(crate) topo: Vec<usize>,
 }
 
 /// Represents a node in a Trie–like structure (allowing shared subtrees and DAGs).

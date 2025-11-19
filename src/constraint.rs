@@ -2143,7 +2143,7 @@ impl<'r> Precomputer1<'r> {
                                                 & &dest_live_tokens)
                                                 .is_empty()
                                         {
-                                            Some(*dest_node)
+                                            Some(*dest_state)
                                         } else {
                                             None
                                         }
