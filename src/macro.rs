@@ -30,8 +30,6 @@ pub fn get_macro_debug_level() -> usize {
     *MACRO_DEBUG_LEVEL
 }
 
-pub static LAST_FILENAME: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
-
 /// A list of filenames (not full paths) to allow debug messages from.
 /// If this list is empty, all files are allowed (respecting `MACRO_DEBUG_LEVEL`).
 /// Example: `&["parser.rs", "constraint.rs"]`
@@ -47,7 +45,9 @@ pub fn is_debug_level_enabled(level: usize) -> bool {
     level <= get_macro_debug_level()
 }
 
-/// Internal implementation detail for the `debug!` macro.
+pub(crate) static LAST_FILENAME: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+
+/// Internal implementation detail for the `debug_line!` macro.
 /// This macro contains the shared logic and configuration to avoid duplication.
 /// It should not be used directly.
 #[doc(hidden)]
@@ -86,32 +86,59 @@ macro_rules! __debug_line_impl {
     }};
 }
 
+/// Internal implementation detail for the `debug!` macro.
+/// This macro contains the shared logic and configuration to avoid duplication.
+/// It should not be used directly.
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __debug_path_impl {
+macro_rules! __debug_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         // Runtime check against the message's level and file path
         if $level <= $crate::r#macro::get_macro_debug_level() {
-            let current_file_path_str = file!();
-            let current_file_path = std::path::Path::new(current_file_path_str);
+            let current_file_path = std::path::Path::new(file!());
             // Extract the filename, default to empty string if extraction fails
-            let current_filename = current_file_path.file_name()
+            let current_filename = current_file_path
+                .file_name()
                 .map_or("", |os_str| os_str.to_str().unwrap_or(""));
 
             // Allow if ALLOWED_FILES is empty (no filter) or if the current file is in the list
-            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
-                let mut last_filename_guard = $crate::r#macro::LAST_FILENAME.lock().unwrap();
-                if last_filename_guard.as_deref() != Some(current_file_path_str) {
-                    println!("[{}]", current_file_path_str);
-                    *last_filename_guard = Some(current_file_path_str.to_string());
+            if $crate::r#macro::ALLOWED_FILES.is_empty()
+                || $crate::r#macro::ALLOWED_FILES.contains(&current_filename)
+            {
+                {
+                    let mut last_filename_guard = $crate::r#macro::LAST_FILENAME.lock().unwrap();
+                    let current_file_str = file!();
+
+                    if *last_filename_guard != current_file_str {
+                        println!("[{}]", current_file_str);
+                        *last_filename_guard = current_file_str.to_string();
+                    }
+
+                    println!(
+                        concat!("  {:>4}  ", $user_fmt),
+                        line!(),
+                        $($user_args)*
+                    );
                 }
-                println!(
-                    $user_fmt,
-                    $($user_args)*
-                );
             }
         }
     }};
+}
+
+#[macro_export]
+macro_rules! debug_line {
+    // Arm for format literals, e.g., debug!(1, "value is {}", 42)
+    ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+        // Delegate to the internal implementation, passing the user's format string and arguments.
+        $crate::__debug_line_impl!($level, $fmt, $($($arg)*)?);
+    };
+
+    // Arm for single expressions, e.g., debug!(1, my_variable)
+    ($level:expr, $msg:expr) => {
+        // Delegate to the internal implementation, providing a debug format specifier "{:?}"
+        // and the user's expression as the argument.
+        $crate::__debug_line_impl!($level, "{:?}", $msg);
+    };
 }
 
 #[macro_export]
@@ -119,29 +146,13 @@ macro_rules! debug {
     // Arm for format literals, e.g., debug!(1, "value is {}", 42)
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
         // Delegate to the internal implementation, passing the user's format string and arguments.
-        $crate::__debug_path_impl!($level, $fmt, $($($arg)*)?);
+        $crate::__debug_impl!($level, $fmt, $($($arg)*)?);
     };
 
     // Arm for single expressions, e.g., debug!(1, my_variable)
     ($level:expr, $msg:expr) => {
         // Delegate to the internal implementation, providing a debug format specifier "{:?}"
         // and the user's expression as the argument.
-        $crate::__debug_path_impl!($level, "{:?}", $msg);
-    };
-}
-
-#[macro_export]
-macro_rules! debug_line {
-    // Arm for format literals, e.g., debug_line!(1, "value is {}", 42)
-    ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-        // Delegate to the internal implementation, passing the user's format string and arguments.
-        $crate::__debug_line_impl!($level, $fmt, $($($arg)*)?);
-    };
-
-    // Arm for single expressions, e.g., debug_line!(1, my_variable)
-    ($level:expr, $msg:expr) => {
-        // Delegate to the internal implementation, providing a debug format specifier "{:?}"
-        // and the user's expression as the argument.
-        $crate::__debug_line_impl!($level, "{:?}", $msg);
+        $crate::__debug_impl!($level, "{:?}", $msg);
     };
 }

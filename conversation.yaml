@@ -139,8 +139,6 @@ local_system:
           *MACRO_DEBUG_LEVEL
       }
 
-      pub static LAST_FILENAME: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
-
       /// A list of filenames (not full paths) to allow debug messages from.
       /// If this list is empty, all files are allowed (respecting `MACRO_DEBUG_LEVEL`).
       /// Example: `&["parser.rs", "constraint.rs"]`
@@ -156,7 +154,9 @@ local_system:
           level <= get_macro_debug_level()
       }
 
-      /// Internal implementation detail for the `debug!` macro.
+      static LAST_FILENAME: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+
+      /// Internal implementation detail for the `debug_line!` macro.
       /// This macro contains the shared logic and configuration to avoid duplication.
       /// It should not be used directly.
       #[doc(hidden)]
@@ -195,32 +195,59 @@ local_system:
           }};
       }
 
+      /// Internal implementation detail for the `debug!` macro.
+      /// This macro contains the shared logic and configuration to avoid duplication.
+      /// It should not be used directly.
       #[doc(hidden)]
       #[macro_export]
-      macro_rules! __debug_path_impl {
+      macro_rules! __debug_impl {
           ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
               // Runtime check against the message's level and file path
               if $level <= $crate::r#macro::get_macro_debug_level() {
-                  let current_file_path_str = file!();
-                  let current_file_path = std::path::Path::new(current_file_path_str);
+                  let current_file_path = std::path::Path::new(file!());
                   // Extract the filename, default to empty string if extraction fails
-                  let current_filename = current_file_path.file_name()
+                  let current_filename = current_file_path
+                      .file_name()
                       .map_or("", |os_str| os_str.to_str().unwrap_or(""));
 
                   // Allow if ALLOWED_FILES is empty (no filter) or if the current file is in the list
-                  if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
-                      let mut last_filename_guard = $crate::r#macro::LAST_FILENAME.lock().unwrap();
-                      if last_filename_guard.as_deref() != Some(current_file_path_str) {
-                          println!("[{}]", current_file_path_str);
-                          *last_filename_guard = Some(current_file_path_str.to_string());
+                  if $crate::r#macro::ALLOWED_FILES.is_empty()
+                      || $crate::r#macro::ALLOWED_FILES.contains(&current_filename)
+                  {
+                      {
+                          let mut last_filename_guard = $crate::r#macro::LAST_FILENAME.lock().unwrap();
+                          let current_file_str = file!();
+
+                          if *last_filename_guard != current_file_str {
+                              println!("[{}]", current_file_str);
+                              *last_filename_guard = current_file_str.to_string();
+                          }
+
+                          println!(
+                              concat!("  {:>4}  ", $user_fmt),
+                              line!(),
+                              $($user_args)*
+                          );
                       }
-                      println!(
-                          $user_fmt,
-                          $($user_args)*
-                      );
                   }
               }
           }};
+      }
+
+      #[macro_export]
+      macro_rules! debug_line {
+          // Arm for format literals, e.g., debug!(1, "value is {}", 42)
+          ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+              // Delegate to the internal implementation, passing the user's format string and arguments.
+              $crate::__debug_line_impl!($level, $fmt, $($($arg)*)?);
+          };
+
+          // Arm for single expressions, e.g., debug!(1, my_variable)
+          ($level:expr, $msg:expr) => {
+              // Delegate to the internal implementation, providing a debug format specifier "{:?}"
+              // and the user's expression as the argument.
+              $crate::__debug_line_impl!($level, "{:?}", $msg);
+          };
       }
 
       #[macro_export]
@@ -228,30 +255,14 @@ local_system:
           // Arm for format literals, e.g., debug!(1, "value is {}", 42)
           ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
               // Delegate to the internal implementation, passing the user's format string and arguments.
-              $crate::__debug_path_impl!($level, $fmt, $($($arg)*)?);
+              $crate::__debug_impl!($level, $fmt, $($($arg)*)?);
           };
 
           // Arm for single expressions, e.g., debug!(1, my_variable)
           ($level:expr, $msg:expr) => {
               // Delegate to the internal implementation, providing a debug format specifier "{:?}"
               // and the user's expression as the argument.
-              $crate::__debug_path_impl!($level, "{:?}", $msg);
-          };
-      }
-
-      #[macro_export]
-      macro_rules! debug_line {
-          // Arm for format literals, e.g., debug_line!(1, "value is {}", 42)
-          ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-              // Delegate to the internal implementation, passing the user's format string and arguments.
-              $crate::__debug_line_impl!($level, $fmt, $($($arg)*)?);
-          };
-
-          // Arm for single expressions, e.g., debug_line!(1, my_variable)
-          ($level:expr, $msg:expr) => {
-              // Delegate to the internal implementation, providing a debug format specifier "{:?}"
-              // and the user's expression as the argument.
-              $crate::__debug_line_impl!($level, "{:?}", $msg);
+              $crate::__debug_impl!($level, "{:?}", $msg);
           };
       }
   diffs_applied_this_send: true
@@ -418,25 +429,26 @@ messages:
       ```
       I want to change the way the debug macro output looks.
       We have a lot of repetition here. The `[DEBUG] 2]` part -- well, that's just unnecessary. We don't need to know what debug level it was. And the filename `src/interface/interface.rs` doesn't need to be repeated. And the line number isn't really useful; I've never used it. Any time I wanna know the line number, I just do a 'find in all files' for the message. So get rid of those things.
+      Actually, let's keep line numbers. But just at the start of the line.
       As for the filename, let's do this: Print it on a line of its own, and only print it when the filename changes. Here's an example of what the output should look like now:
-      ```
-      Constructing GrammarConstraint...
-      [src/interface/interface.rs]
-      Building tokenizer from definition
-      [src/finite_automata.rs]
-      Memory usage at 'Start of Regex build': Physical: 43 MB, Virtual: 425109 MB
-      Building NFA...
-      Done!
-      [src/interface/interface.rs]
-      Building GLR parser from definition
-      [src/glr/table.rs]
-      Number of productions: 20984
-      Memory usage at 'Start of parser generation': Physical: 161 MB, Virtual: 425116 MB
-      Validating initial grammar
-      [src/glr/automaton.rs]
-      Computing nullable non-terminals
-      Computed nullable non-terminals in 20.66ms
-      Computing nullable non-terminals
+      ```  
+      Constructing GrammarConstraint...  
+      [src/interface/interface.rs]  
+        1127  Building tokenizer from definition  
+      [src/finite_automata.rs]  
+         777  Memory usage at 'Start of Regex build': Physical: 43 MB, Virtual: 425109 MB  
+         786  Building NFA...  
+         801  Done!  
+      [src/interface/interface.rs]  
+        1132  Building GLR parser from definition  
+      [src/glr/table.rs]  
+         866  Number of productions: 20984  
+         852  Memory usage at 'Start of parser generation': Physical: 161 MB, Virtual: 425116 MB  
+         869  Validating initial grammar  
+      [src/glr/automaton.rs]  
+         187  Computing nullable non-terminals  
+         195  Computed nullable non-terminals in 20.66ms  
+         187  Computing nullable non-terminals  
       ```
       Make it still possible to use the existing debug macro behaviour, but via another command name like `debug_line!`.
     metadata:
@@ -458,35 +470,122 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course! I can help you with that. You want to change the `debug!` macro to produce a cleaner output, printing the filename only when it changes, and move the old behavior to a new `debug_line!` macro.
+      Of course. I'll help you modify your debug macro to produce the new output format, while preserving the old behavior under a new name, `debug_line!`.
 
-      Here are the step-by-step instructions to achieve this, followed by the corresponding git diff.
+      Here are the step-by-step instructions to update your logging utility.
 
-      ### Step-by-Step Instructions
+      ### Step-by-step Instructions
 
-      #### File: `src/macro.rs`
+      1.  **Open `src/macro.rs`**.
 
-      1.  **Add Dependencies and State Management:**
-          *   First, add `use std::sync::Mutex;` at the top of the file with the other `use` statements. This is needed for thread-safe access to the last printed filename.
-          *   Next, right after the `get_macro_debug_level` function, define a new `pub static` variable named `LAST_FILENAME`. This will use `once_cell::sync::Lazy` and `std::sync::Mutex` to safely store the path of the file from the last debug message across macro invocations.
+      2.  **Import `Mutex`**: Add `use std::sync::Mutex;` near the top of the file with the other `use` statements. This is needed for thread-safe access to the shared state that will track the last printed filename.
 
-      2.  **Refactor the Existing Debug Implementation:**
-          *   Find the `__debug_impl!` macro and rename it to `__debug_line_impl!`. Its internal logic will remain the same, as it will now serve the new `debug_line!` macro.
+          ```rust
+          use once_cell::sync::Lazy;
+          use std::env;
+          use std::sync::Mutex;
+          ```
 
-      3.  **Implement the New Debug Behavior:**
-          *   Create a new hidden implementation macro called `__debug_path_impl!`. This macro will contain the logic for your desired new format. It will:
-              *   Perform the same debug level and file filter checks as before.
-              *   Lock the `LAST_FILENAME` static variable.
-              *   If the current filename (`file!()`) is different from the stored one, it will print the new filename (e.g., `[src/interface.rs]`) and update the stored value.
-              *   Finally, it will print the user's debug message on a new line without any prefix.
+      3.  **Add State for Filename Tracking**: After the `is_debug_level_enabled` function, define a new `static` variable. This will hold the last filename printed by the `debug!` macro, so we can avoid printing it again if it hasn't changed.
 
-      4.  **Update Public-Facing Macros:**
-          *   Modify the existing `debug!` macro to delegate its calls to the new `__debug_path_impl!`.
-          *   Create a new `#[macro_export]` macro named `debug_line!`. This macro will be a copy of the old `debug!` macro's structure, but it will call `__debug_line_impl!` to provide the original, more verbose output.
+          ```rust
+          // ... after is_debug_level_enabled()
+          pub fn is_debug_level_enabled(level: usize) -> bool {
+              level <= get_macro_debug_level()
+          }
+
+          static LAST_FILENAME: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+          ```
+
+      4.  **Rename the Original Debug Implementation**: To keep the old functionality, find the `__debug_impl!` macro and rename it to `__debug_line_impl!`. Also, update its documentation to reflect the new name.
+
+          *   Change `macro_rules! __debug_impl` to `macro_rules! __debug_line_impl`.
+          *   Update its doc comment from `/// Internal implementation detail for the \`debug!\` macro.` to `/// Internal implementation detail for the \`debug_line!\` macro.`.
+
+      5.  **Add the New Debug Implementation**: After the `__debug_line_impl!` macro you just renamed, insert the new implementation for `__debug_impl!`. This version contains the logic for the new output format.
+
+          ```rust
+          /// Internal implementation detail for the `debug!` macro.
+          /// This macro contains the shared logic and configuration to avoid duplication.
+          /// It should not be used directly.
+          #[doc(hidden)]
+          #[macro_export]
+          macro_rules! __debug_impl {
+              ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
+                  // Runtime check against the message's level and file path
+                  if $level <= $crate::r#macro::get_macro_debug_level() {
+                      let current_file_path = std::path::Path::new(file!());
+                      // Extract the filename, default to empty string if extraction fails
+                      let current_filename = current_file_path
+                          .file_name()
+                          .map_or("", |os_str| os_str.to_str().unwrap_or(""));
+
+                      // Allow if ALLOWED_FILES is empty (no filter) or if the current file is in the list
+                      if $crate::r#macro::ALLOWED_FILES.is_empty()
+                          || $crate::r#macro::ALLOWED_FILES.contains(&current_filename)
+                      {
+                          {
+                              let mut last_filename_guard = $crate::r#macro::LAST_FILENAME.lock().unwrap();
+                              let current_file_str = file!();
+
+                              if *last_filename_guard != current_file_str {
+                                  println!("[{}]", current_file_str);
+                                  *last_filename_guard = current_file_str.to_string();
+                              }
+
+                              println!(
+                                  concat!("  {:>4}  ", $user_fmt),
+                                  line!(),
+                                  $($user_args)*
+                              );
+                          }
+                      }
+                  }
+              }};
+          }
+          ```
+
+      6.  **Create `debug_line!` and the new `debug!`**: Finally, replace the existing `debug!` macro definition at the end of the file with two new macro definitions: `debug_line!` for the old behavior and `debug!` for the new behavior.
+
+          ```rust
+          // Replace the existing debug! macro with these two:
+
+          #[macro_export]
+          macro_rules! debug_line {
+              // Arm for format literals, e.g., debug!(1, "value is {}", 42)
+              ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+                  // Delegate to the internal implementation, passing the user's format string and arguments.
+                  $crate::__debug_line_impl!($level, $fmt, $($($arg)*)?);
+              };
+
+              // Arm for single expressions, e.g., debug!(1, my_variable)
+              ($level:expr, $msg:expr) => {
+                  // Delegate to the internal implementation, providing a debug format specifier "{:?}"
+                  // and the user's expression as the argument.
+                  $crate::__debug_line_impl!($level, "{:?}", $msg);
+              };
+          }
+
+          #[macro_export]
+          macro_rules! debug {
+              // Arm for format literals, e.g., debug!(1, "value is {}", 42)
+              ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+                  // Delegate to the internal implementation, passing the user's format string and arguments.
+                  $crate::__debug_impl!($level, $fmt, $($($arg)*)?);
+              };
+
+              // Arm for single expressions, e.g., debug!(1, my_variable)
+              ($level:expr, $msg:expr) => {
+                  // Delegate to the internal implementation, providing a debug format specifier "{:?}"
+                  // and the user's expression as the argument.
+                  $crate::__debug_impl!($level, "{:?}", $msg);
+              };
+          }
+          ```
 
       ### Git Diff
 
-      Here is the git diff to apply these changes to `src/macro.rs`.
+      Here is the git diff to apply these changes directly.
 
       ```diff
       --- a/src/macro.rs
@@ -499,16 +598,14 @@ messages:
        
        // Import the Local timezone functionality
        
-      @@ -24,6 +25,8 @@
-               Lazy::new(|| env::var("MACRO_DEBUG_LEVEL").ok().and_then(|s| s.parse().ok()).unwrap_or(5));
-           *MACRO_DEBUG_LEVEL
+      @@ -43,12 +44,15 @@
+           level <= get_macro_debug_level()
        }
-      +
-      +pub static LAST_FILENAME: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
        
-       /// A list of filenames (not full paths) to allow debug messages from.
-       /// If this list is empty, all files are allowed (respecting `MACRO_DEBUG_LEVEL`).
-      @@ -43,9 +46,9 @@
+      -/// Internal implementation detail for the `debug!` macro.
+      +static LAST_FILENAME: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+      +
+      +/// Internal implementation detail for the `debug_line!` macro.
        /// This macro contains the shared logic and configuration to avoid duplication.
        /// It should not be used directly.
        #[doc(hidden)]
@@ -518,45 +615,57 @@ messages:
            ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
                // Runtime check against the message's level and file path
                if $level <= $crate::r#macro::get_macro_debug_level() {
-      @@ -78,21 +81,61 @@
+      @@ -81,22 +85,63 @@
            }};
        }
        
+      +/// Internal implementation detail for the `debug!` macro.
+      +/// This macro contains the shared logic and configuration to avoid duplication.
+      +/// It should not be used directly.
       +#[doc(hidden)]
-      +#[macro_export]
-      +macro_rules! __debug_path_impl {
+       #[macro_export]
+      -macro_rules! debug {
+      +macro_rules! __debug_impl {
       +    ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
       +        // Runtime check against the message's level and file path
       +        if $level <= $crate::r#macro::get_macro_debug_level() {
-      +            let current_file_path_str = file!();
-      +            let current_file_path = std::path::Path::new(current_file_path_str);
+      +            let current_file_path = std::path::Path::new(file!());
       +            // Extract the filename, default to empty string if extraction fails
-      +            let current_filename = current_file_path.file_name()
+      +            let current_filename = current_file_path
+      +                .file_name()
       +                .map_or("", |os_str| os_str.to_str().unwrap_or(""));
       +
       +            // Allow if ALLOWED_FILES is empty (no filter) or if the current file is in the list
-      +            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
-      +                let mut last_filename_guard = $crate::r#macro::LAST_FILENAME.lock().unwrap();
-      +                if last_filename_guard.as_deref() != Some(current_file_path_str) {
-      +                    println!("[{}]", current_file_path_str);
-      +                    *last_filename_guard = Some(current_file_path_str.to_string());
+      +            if $crate::r#macro::ALLOWED_FILES.is_empty()
+      +                || $crate::r#macro::ALLOWED_FILES.contains(&current_filename)
+      +            {
+      +                {
+      +                    let mut last_filename_guard = $crate::r#macro::LAST_FILENAME.lock().unwrap();
+      +                    let current_file_str = file!();
+      +
+      +                    if *last_filename_guard != current_file_str {
+      +                        println!("[{}]", current_file_str);
+      +                        *last_filename_guard = current_file_str.to_string();
+      +                    }
+      +
+      +                    println!(
+      +                        concat!("  {:>4}  ", $user_fmt),
+      +                        line!(),
+      +                        $($user_args)*
+      +                    );
       +                }
-      +                println!(
-      +                    $user_fmt,
-      +                    $($user_args)*
-      +                );
       +            }
       +        }
       +    }};
       +}
       +
-       #[macro_export]
-       macro_rules! debug {
+      +#[macro_export]
+      +macro_rules! debug_line {
            // Arm for format literals, e.g., debug!(1, "value is {}", 42)
            ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
                // Delegate to the internal implementation, passing the user's format string and arguments.
       -        $crate::__debug_impl!($level, $fmt, $($($arg)*)?);
-      +        $crate::__debug_path_impl!($level, $fmt, $($($arg)*)?);
+      +        $crate::__debug_line_impl!($level, $fmt, $($($arg)*)?);
            };
        
            // Arm for single expressions, e.g., debug!(1, my_variable)
@@ -564,23 +673,23 @@ messages:
                // Delegate to the internal implementation, providing a debug format specifier "{:?}"
                // and the user's expression as the argument.
       -        $crate::__debug_impl!($level, "{:?}", $msg);
-      +        $crate::__debug_path_impl!($level, "{:?}", $msg);
+      +        $crate::__debug_line_impl!($level, "{:?}", $msg);
            };
        }
       +
       +#[macro_export]
-      +macro_rules! debug_line {
-      +    // Arm for format literals, e.g., debug_line!(1, "value is {}", 42)
+      +macro_rules! debug {
+      +    // Arm for format literals, e.g., debug!(1, "value is {}", 42)
       +    ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
       +        // Delegate to the internal implementation, passing the user's format string and arguments.
-      +        $crate::__debug_line_impl!($level, $fmt, $($($arg)*)?);
+      +        $crate::__debug_impl!($level, $fmt, $($($arg)*)?);
       +    };
       +
-      +    // Arm for single expressions, e.g., debug_line!(1, my_variable)
+      +    // Arm for single expressions, e.g., debug!(1, my_variable)
       +    ($level:expr, $msg:expr) => {
       +        // Delegate to the internal implementation, providing a debug format specifier "{:?}"
       +        // and the user's expression as the argument.
-      +        $crate::__debug_line_impl!($level, "{:?}", $msg);
+      +        $crate::__debug_impl!($level, "{:?}", $msg);
       +    };
       +}
 
@@ -595,7 +704,7 @@ messages:
       Applying patch to 'src/macro.rs' using custom patcher...
       Successfully applied patch and wrote to src/macro.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor debug macros: Introduce `debug_line!`
-      for old behavior and update `debug!` for cleaner, path-grouped output"'
+  - user: 'Changes committed with message: "Refactor debug macros to introduce new
+      structured output format for `debug!` and alias old behavior to `debug_line!`"'
     metadata:
 ...
