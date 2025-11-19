@@ -270,6 +270,12 @@ impl JSONConvertible for Reduce {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Stage7Row {
+    pub shifts_and_reduces_full: ShiftsAndReducesFull,
+    pub gotos: BTreeMap<NonTerminalID, Goto>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     shifts_and_reduces_full: ShiftsAndReducesFull,
