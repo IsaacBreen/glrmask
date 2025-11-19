@@ -45,6 +45,16 @@ pub const ALLOWED_FILES: &[&str] = &[
     // "constraint.rs",
 ];
 
+/// Formats a duration as seconds if >= 1000ms, otherwise milliseconds.
+pub fn format_duration(d: std::time::Duration) -> String {
+    let millis = d.as_millis();
+    if millis >= 1000 {
+        format!("{:.2}s", millis as f64 / 1000.0)
+    } else {
+        format!("{}ms", millis)
+    }
+}
+
 /// Internal implementation for the new grouped format (debug!).
 /// Uses ANSI colors: Bold Cyan for files, Dark Gray for line numbers.
 #[doc(hidden)]
@@ -70,7 +80,7 @@ macro_rules! __debug_grouped_impl {
                 let elapsed_suffix = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                        format!(" \x1b[35m+{}\x1b[0m", $crate::r#macro::format_duration(diff))
                     } else {
                         String::new()
                     }
@@ -126,7 +136,7 @@ macro_rules! __debug_start_impl {
                 let elapsed_suffix = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                        format!(" \x1b[35m+{}\x1b[0m", $crate::r#macro::format_duration(diff))
                     } else {
                         String::new()
                     }
@@ -209,7 +219,7 @@ macro_rules! __debug_timer_end_impl {
                 let elapsed_suffix = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                        format!(" \x1b[35m+{}\x1b[0m", $crate::r#macro::format_duration(diff))
                     } else {
                         String::new()
                     }
@@ -225,11 +235,11 @@ macro_rules! __debug_timer_end_impl {
                 }
 
                 println!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}ms\x1b[0m){}"),
+                    concat!("\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}\x1b[0m){}"),
                     start_line,
                     start_msg,
                     format!($user_fmt, $($user_args)*),
-                    elapsed.as_millis(),
+                    $crate::r#macro::format_duration(elapsed),
                     elapsed_suffix
                 );
             }
