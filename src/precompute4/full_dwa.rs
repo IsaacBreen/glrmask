@@ -111,13 +111,15 @@ pub fn precompute4(
         let actual_start_state = nwa.states.add_state();
         nwa.add_transition(actual_start_state, sid.0 as i16, start_state, Weight::all()).unwrap();
         nwa.body.start_state = actual_start_state;
+        crate::debug!(4, "Minimizing NWA...");
         nwa.minimize_with_rustfst();
-        nwa = NWA::from_dwa(&nwa.determinize_to_dwa_with_rustfst());
+        crate::debug!(4, "Determinizing NWA...");
+        nwa = NWA::from_dwa(&nwa.determinize());
         crate::debug!(4, "Built NWA with {} states, {} transitions, and {} epsilon transitions.", nwa.states.len(), nwa.num_transitions(), nwa.num_epsilons());
         nwabig.union(&nwa);
     }
     nwabig.simplify();
-    let mut dwa = nwabig.determinize_to_dwa_with_rustfst();
+    let mut dwa = nwabig.determinize();
     dwa.minimize_with_rustfst();
     crate::debug!(
         4,
