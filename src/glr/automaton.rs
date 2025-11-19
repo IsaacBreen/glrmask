@@ -1,4 +1,5 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{CompactProduction, CompactSymbol, NonTerminalID, TerminalID};
 use crate::glr::items::Item;
 use profiler_macro::time_it;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -418,7 +419,51 @@ pub fn compute_closure(
     closure
 }
 
+#[time_it]
+pub fn compute_closure_compact(
+    items: &BTreeSet<Item>,
+    prods_by_lhs: &[Vec<usize>],
+    productions: &[CompactProduction],
+) -> BTreeSet<Item> {
+    let mut closure = items.clone();
+    let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
+
+    while let Some(item) = worklist.pop_front() {
+        let prod = &productions[item.production_id];
+        if let Some(CompactSymbol::NonTerminal(nt_id)) = prod.rhs.get(item.dot_position) {
+            // Direct array access using ID
+            for &prod_idx in &prods_by_lhs[nt_id.0] {
+                let new_item = Item {
+                    production_id: prod_idx,
+                    dot_position: 0,
+                };
+                if closure.insert(new_item) {
+                    worklist.push_back(new_item);
+                }
+            }
+        }
+    }
+    closure
+}
+
 pub fn compute_goto(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let prod = &productions[item.production_id];
+            if item.dot_position < prod.rhs.len() {
+                Some(Item {
+                    production_id: item.production_id,
+                    dot_position: item.dot_position + 1,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub fn compute_goto_compact(items: &BTreeSet<Item>, productions: &[CompactProduction]) -> BTreeSet<Item> {
     items
         .iter()
         .filter_map(|item| {
@@ -446,4 +491,144 @@ pub fn split_on_dot(
         result.entry(key).or_default().insert(item.clone());
     }
     result
+}
+
+pub fn split_on_dot_compact(
+    items: &BTreeSet<Item>,
+    productions: &[CompactProduction],
+) -> BTreeMap<Option<CompactSymbol>, BTreeSet<Item>> {
+    let mut result: BTreeMap<Option<CompactSymbol>, BTreeSet<Item>> = BTreeMap::new();
+    for item in items {
+        let prod = &productions[item.production_id];
+        let key = prod.rhs.get(item.dot_position).cloned();
+        result.entry(key).or_default().insert(item.clone());
+    }
+    result
+}
+
+pub fn compute_nullable_nonterminals_compact(
+    productions: &[CompactProduction],
+    num_non_terminals: usize,
+) -> Vec<bool> {
+    let mut nullable = vec![false; num_non_terminals];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for p in productions {
+            if !nullable[p.lhs.0] {
+                let all_rhs_nullable = p.rhs.iter().all(|s| match s {
+                    CompactSymbol::Terminal(_) => false,
+                    CompactSymbol::NonTerminal(nt) => nullable[nt.0],
+                });
+                if all_rhs_nullable {
+                    nullable[p.lhs.0] = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+    nullable
+}
+
+pub fn compute_first_sets_compact(
+    productions: &[CompactProduction],
+    nullable: &[bool],
+    num_non_terminals: usize,
+) -> Vec<BTreeSet<TerminalID>> {
+    let mut first_sets = vec![BTreeSet::new(); num_non_terminals];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for p in productions {
+            let lhs_id = p.lhs.0;
+            let mut rhs_nullable = true;
+            for s in &p.rhs {
+                if !rhs_nullable {
+                    break;
+                }
+                match s {
+                    CompactSymbol::Terminal(t) => {
+                        if first_sets[lhs_id].insert(*t) {
+                            changed = true;
+                        }
+                        rhs_nullable = false;
+                    }
+                    CompactSymbol::NonTerminal(nt) => {
+                        let nt_id = nt.0;
+                        // We can't borrow first_sets[lhs_id] mutably and first_sets[nt_id] immutably at same time easily in loop
+                        // So we clone the set to add
+                        let to_add: Vec<TerminalID> = first_sets[nt_id].iter().cloned().collect();
+                        for t in to_add {
+                            if first_sets[lhs_id].insert(t) {
+                                changed = true;
+                            }
+                        }
+                        if !nullable[nt_id] {
+                            rhs_nullable = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    first_sets
+}
+
+pub fn compute_follow_sets_compact(
+    productions: &[CompactProduction],
+    first_sets: &[BTreeSet<TerminalID>],
+    nullable: &[bool],
+    num_non_terminals: usize,
+) -> Vec<BTreeSet<Option<TerminalID>>> {
+    let mut follow_sets = vec![BTreeSet::new(); num_non_terminals];
+    if productions.is_empty() {
+        return follow_sets;
+    }
+    // Rule 1: Start symbol gets EOF (None)
+    follow_sets[productions[0].lhs.0].insert(None);
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for p in productions {
+            let lhs_id = p.lhs.0;
+            for i in 0..p.rhs.len() {
+                if let CompactSymbol::NonTerminal(b_nt) = p.rhs[i] {
+                    let b_id = b_nt.0;
+                    let mut suffix_nullable = true;
+                    let mut suffix_first = BTreeSet::new();
+
+                    for j in (i + 1)..p.rhs.len() {
+                        match &p.rhs[j] {
+                            CompactSymbol::Terminal(t) => {
+                                suffix_first.insert(*t);
+                                suffix_nullable = false;
+                                break;
+                            }
+                            CompactSymbol::NonTerminal(g_nt) => {
+                                suffix_first.extend(first_sets[g_nt.0].iter().cloned());
+                                if !nullable[g_nt.0] {
+                                    suffix_nullable = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    let old_len = follow_sets[b_id].len();
+                    for t in suffix_first {
+                        follow_sets[b_id].insert(Some(t));
+                    }
+                    if suffix_nullable {
+                        let lhs_follow: Vec<_> = follow_sets[lhs_id].iter().cloned().collect();
+                        follow_sets[b_id].extend(lhs_follow);
+                    }
+                    if follow_sets[b_id].len() != old_len {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    follow_sets
 }
