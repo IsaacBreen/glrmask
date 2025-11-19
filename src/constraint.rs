@@ -1382,6 +1382,8 @@ impl GrammarConstraint {
                     *llm_token_bv = new_bv;
                 }
             }
+
+            crate::debug!(2, "Done");
         }
 
         // Remap per-token maps to the final vocab as well, if needed.
