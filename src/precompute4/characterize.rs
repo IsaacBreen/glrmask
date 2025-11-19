@@ -124,7 +124,7 @@ fn collect_initial_actions(
     let mut initial_shifts = BTreeSet::new();
     let mut initial_reduces = BTreeSet::new();
 
-    for (initial_state, row) in iter_rows(&parser.table) {
+    for (&initial_state, row) in iter_rows(&parser.table) {
         if let Some(action) = row.get_shifts_and_reduces_for_terminal(&terminal_id) {
             match action {
                 Shift(shift_state) => {
@@ -164,7 +164,7 @@ fn collect_reduce_characterizations(
         for (&nt_id, goto) in &row.gotos {
             if let Some(goto_state) = goto.state_id {
                 let reduce_char = result.entry(nt_id).or_insert_with(|| ReduceCharacterization::new(terminal_id, nt_id));
-                explore_from_goto(parser, terminal_id, revealed_state, goto_state, reduce_char);
+                explore_from_goto(parser, terminal_id, *revealed_state, goto_state, reduce_char);
             }
         }
     }
