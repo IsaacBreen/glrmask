@@ -1,3 +1,124 @@
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::{self, Display, Formatter};
+
+use crate::constraint::{PrecomputeNode1Index, Precomputed, Trie1GodWrapper};
+use crate::glr::parser::GLRParser;
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::precompute4::weighted_automata::{DWA, NWA, StateID, Weight};
+use crate::tokenizer::TokenizerStateID;
+
+#[derive(Debug, Clone)]
+pub struct Precomputed4 {
+    pub dwas: Vec<DWA>,
+    pub state_to_dwa: BTreeMap<TokenizerStateID, usize>,
+}
+
+impl Display for Precomputed4 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "Precomputed4 ({} unique DWAs, {} mapped states)",
+            self.dwas.len(),
+            self.state_to_dwa.len()
+        )?;
+        for (i, dwa) in self.dwas.iter().enumerate() {
+            writeln!(f, "DWA #{}: {}", i, dwa.stats())?;
+        }
+        Ok(())
+    }
+}
+
+impl JSONConvertible for Precomputed4 {
+    fn to_json(&self) -> JSONNode {
+        JSONNode::Null
+    }
+
+    fn from_json(_node: JSONNode) -> Result<Self, String> {
+        Ok(Precomputed4 {
+            dwas: Vec::new(),
+            state_to_dwa: BTreeMap::new(),
+        })
+    }
+}
+
+pub fn precompute4(
+    _parser: &GLRParser,
+    precomputed1: &Precomputed,
+    trie1_god: &Trie1GodWrapper,
+) -> Precomputed4 {
+    let mut dwas = Vec::new();
+    let mut state_to_dwa = BTreeMap::new();
+    let mut root_to_dwa_index: HashMap<PrecomputeNode1Index, usize> = HashMap::new();
+
+    for (sid, root_idx) in precomputed1 {
+        if let Some(&idx) = root_to_dwa_index.get(root_idx) {
+            state_to_dwa.insert(*sid, idx);
+            continue;
+        }
+
+        // Build NWA from the Trie node
+        let mut nwa = NWA::new();
+        nwa.states.0.clear(); // Clear default start state
+        let mut node_cache = HashMap::new();
+        let start_state = convert_node_to_nwa(*root_idx, trie1_god, &mut nwa, &mut node_cache);
+        nwa.body.start_state = start_state;
+
+        // Determinize to DWA
+        let mut dwa = nwa.determinize_to_dwa2();
+
+        // Simplify (minimize) the DWA
+        dwa.simplify();
+
+        let idx = dwas.len();
+        dwas.push(dwa);
+        root_to_dwa_index.insert(*root_idx, idx);
+        state_to_dwa.insert(*sid, idx);
+    }
+
+    Precomputed4 { dwas, state_to_dwa }
+}
+
+fn convert_node_to_nwa(
+    node_idx: PrecomputeNode1Index,
+    god: &Trie1GodWrapper,
+    nwa: &mut NWA,
+    cache: &mut HashMap<PrecomputeNode1Index, StateID>,
+) -> StateID {
+    if let Some(&sid) = cache.get(&node_idx) {
+        return sid;
+    }
+
+    let sid = nwa.add_state();
+    cache.insert(node_idx, sid);
+
+    let guard = node_idx.read(god).unwrap();
+
+    // Map live_tokens to final_weight (representing valid tokens at this state)
+    let mut weight = Weight::zeros();
+    for token in guard.value.live_tokens.iter() {
+        weight.insert(token);
+    }
+    nwa.states[sid].final_weight = Some(weight);
+
+    let children = guard.children().clone();
+    drop(guard);
+
+    for (edge_key, child_map) in children {
+        let label = edge_key.map(|tid| tid.0 as i16).unwrap_or(-1);
+        for (child_idx, edge_bv) in child_map {
+            let child_sid = convert_node_to_nwa(child_idx, god, nwa, cache);
+            
+            let mut trans_w = Weight::zeros();
+            for t in edge_bv.iter() {
+                trans_w.insert(t);
+            }
+            
+            // Add transition (NWA allows multiple transitions for same label)
+            nwa.add_transition(sid, label, child_sid, trans_w).unwrap();
+        }
+    }
+    sid
+}
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
