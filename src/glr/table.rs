@@ -67,6 +67,7 @@ impl BitSet {
 
     #[inline]
     fn insert(&mut self, idx: usize) -> bool {
+        if idx >= self.size { return false; }
         let word = idx / 64;
         let bit = idx % 64;
         let mask = 1 << bit;
@@ -80,6 +81,7 @@ impl BitSet {
 
     #[inline]
     fn contains(&self, idx: usize) -> bool {
+        if idx >= self.size { return false; }
         let word = idx / 64;
         let bit = idx % 64;
         (self.data[word] & (1 << bit)) != 0
@@ -87,6 +89,44 @@ impl BitSet {
 
     fn clear(&mut self) {
         self.data.fill(0);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.data.iter().all(|&x| x == 0)
+    }
+
+    fn iter(&self) -> BitSetIter {
+        BitSetIter {
+            data: &self.data,
+            word_idx: 0,
+            current_word: if self.data.is_empty() { 0 } else { self.data[0] },
+        }
+    }
+}
+
+struct BitSetIter<'a> {
+    data: &'a [u64],
+    word_idx: usize,
+    current_word: u64,
+}
+
+impl<'a> Iterator for BitSetIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current_word != 0 {
+                let trailing = self.current_word.trailing_zeros();
+                self.current_word &= !(1 << trailing);
+                return Some(self.word_idx * 64 + trailing as usize);
+            }
+            
+            self.word_idx += 1;
+            if self.word_idx >= self.data.len() {
+                return None;
+            }
+            self.current_word = self.data[self.word_idx];
+        }
     }
 }
 
@@ -469,10 +509,6 @@ fn stage_1(
     next_state_id += 1;
     worklist.push_back(initial_item_set);
 
-    let total_symbols = num_terminals + num_nonterminals;
-    let mut buckets: Vec<Vec<Item>> = vec![Vec::new(); total_symbols];
-    let mut bucket_none: Vec<Item> = Vec::new();
-    let mut active_symbols: Vec<usize> = Vec::with_capacity(128);
     let mut processed_nts = BitSet::new(num_nonterminals);
     let mut touched_nts: Vec<usize> = Vec::with_capacity(128);
 
@@ -488,6 +524,7 @@ fn stage_1(
     // Reusable buffer for goto sets
     let mut scratch_goto_set: Vec<Item> = Vec::with_capacity(128);
     let mut indices_to_clear: Vec<usize> = Vec::with_capacity(128);
+    let mut pending_items: Vec<(Option<usize>, Item)> = Vec::with_capacity(2048);
 
     while let Some(item_set) = worklist.pop_front() {
         let state_id = *item_set_map_fast.get(&item_set).unwrap();
@@ -496,100 +533,99 @@ fn stage_1(
             table.resize(state_id.0 + 1, BTreeMap::new());
         }
 
-        // Clear buckets and tracking structures
-        for &sym in &active_symbols {
-            buckets[sym].clear();
-        }
-        active_symbols.clear();
-        bucket_none.clear();
-        
-        // Clear processed_nts using touched list
+        // Clear tracking structures
         for &nt in &touched_nts {
-            // Manually clear bit since we know the index
             let word = nt / 64;
             let bit = nt % 64;
             processed_nts.data[word] &= !(1 << bit);
         }
         touched_nts.clear();
+        pending_items.clear();
 
+        // 1. Collect all items (kernel + closure)
         for item in &item_set {
             let sym_opt = light_productions[item.production_id].get(item.dot_position).copied();
+            pending_items.push((sym_opt, *item));
             
-            match sym_opt {
-                Some(sym_id) => {
-                    if buckets[sym_id].is_empty() {
-                        active_symbols.push(sym_id);
-                    }
-                    buckets[sym_id].push(*item);
-
-                    if sym_id >= num_terminals {
-                        let nt_id = sym_id - num_terminals;
-                        if processed_nts.insert(nt_id) {
-                            touched_nts.push(nt_id);
-                            
-                            for (first_sym, items) in &closure_cache_grouped[nt_id] {
-                                match first_sym {
-                                    Some(fs) => {
-                                        if buckets[*fs].is_empty() {
-                                            active_symbols.push(*fs);
-                                        }
-                                        buckets[*fs].extend(items);
-                                    }
-                                    None => {
-                                        bucket_none.extend(items);
-                                    }
-                                }
+            if let Some(sym) = sym_opt {
+                if sym >= num_terminals {
+                    let nt = sym - num_terminals;
+                    if processed_nts.insert(nt) {
+                        touched_nts.push(nt);
+                        // Add closure items
+                        for (c_sym, c_items) in &closure_cache_grouped[nt] {
+                            for &c_item in c_items {
+                                pending_items.push((*c_sym, c_item));
                             }
                         }
                     }
                 }
-                None => {
-                    bucket_none.push(*item);
-                }
             }
         }
 
-        let mut row: Stage1Row = BTreeMap::new();
-        
-        // Process active buckets
-        for &sym_id in &active_symbols {
-            let items_in_split_vec = &buckets[sym_id];
-            
-            scratch_goto_set.clear();
-            indices_to_clear.clear();
+        // 2. Sort by symbol to group them
+        pending_items.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
-            for item in items_in_split_vec {
-                let next_dot = item.dot_position + 1;
-                let index = (item.production_id << item_index_shift) | next_dot;
-                
-                if seen_items_bitset.insert(index) {
-                    indices_to_clear.push(index);
-                    scratch_goto_set.push(Item { production_id: item.production_id, dot_position: next_dot });
+        let mut row: Stage1Row = BTreeMap::new();
+        let mut bucket_none: Vec<Item> = Vec::new();
+
+        // 3. Iterate and process groups
+        let mut i = 0;
+        while i < pending_items.len() {
+            let (sym_opt, _) = pending_items[i];
+            let start = i;
+            
+            // Find end of group
+            i += 1;
+            while i < pending_items.len() && pending_items[i].0 == sym_opt {
+                i += 1;
+            }
+            let group = &pending_items[start..i];
+
+            match sym_opt {
+                Some(sym_id) => {
+                    scratch_goto_set.clear();
+                    indices_to_clear.clear();
+
+                    for &(_, item) in group {
+                        let next_dot = item.dot_position + 1;
+                        let index = (item.production_id << item_index_shift) | next_dot;
+                        
+                        if seen_items_bitset.insert(index) {
+                            indices_to_clear.push(index);
+                            scratch_goto_set.push(Item { production_id: item.production_id, dot_position: next_dot });
+                        }
+                    }
+
+                    // Cleanup bitset
+                    for &index in &indices_to_clear {
+                        let word = index / 64;
+                        let bit = index % 64;
+                        seen_items_bitset.data[word] &= !(1 << bit);
+                    }
+
+                    // Sort for canonical key
+                    scratch_goto_set.sort_unstable();
+
+                    let goto_id = if let Some(id) = item_set_map_fast.get(&scratch_goto_set) {
+                        *id
+                    } else {
+                        let new_id = StateID(next_state_id);
+                        next_state_id += 1;
+                        let new_set = scratch_goto_set.clone();
+                        item_set_map_fast.insert(new_set.clone(), new_id);
+                        worklist.push_back(new_set);
+                        new_id
+                    };
+
+                    row.insert(Some(sym_id), Stage1Entry { kernel: Vec::new(), goto_id: Some(goto_id) });
+                }
+                None => {
+                    for &(_, item) in group {
+                        bucket_none.push(item);
+                    }
                 }
             }
-
-            // Cleanup bitset
-            for &index in &indices_to_clear {
-                let word = index / 64;
-                let bit = index % 64;
-                seen_items_bitset.data[word] &= !(1 << bit);
-            }
-
-            // Sort for canonical key
-            scratch_goto_set.sort_unstable();
-
-            let goto_id = if let Some(id) = item_set_map_fast.get(&scratch_goto_set) {
-                *id
-            } else {
-                let new_id = StateID(next_state_id);
-                next_state_id += 1;
-                let new_set = scratch_goto_set.clone();
-                item_set_map_fast.insert(new_set.clone(), new_id);
-                worklist.push_back(new_set);
-                new_id
-            };
-
-            row.insert(Some(sym_id), Stage1Entry { kernel: Vec::new(), goto_id: Some(goto_id) });
         }
 
         if !bucket_none.is_empty() {
@@ -636,17 +672,18 @@ fn compute_final_table(
 
     // Reusable dense structures
     let mut dense_shifts: Vec<Option<StateID>> = vec![None; num_terminals];
-    let mut dense_reduces: Vec<Vec<ProductionID>> = vec![Vec::new(); num_terminals];
-    let mut active_terminals_indices: Vec<usize> = Vec::with_capacity(num_terminals);
+    // Use BitSet for reduces to avoid allocation and sorting overhead
+    let mut dense_reduces: Vec<BitSet> = (0..num_terminals).map(|_| BitSet::new(productions.len())).collect();
+    let mut active_terminals_bitset = BitSet::new(num_terminals);
     let mut eof_reduces: Vec<ProductionID> = Vec::new();
 
     for (state_idx, row) in stage_1_table.into_iter().enumerate() {
         // Clear reusable structures
-        for &idx in &active_terminals_indices {
-            dense_shifts[idx] = None;
-            dense_reduces[idx].clear();
+        for t_idx in active_terminals_bitset.iter() {
+            dense_shifts[t_idx] = None;
+            dense_reduces[t_idx].clear();
         }
-        active_terminals_indices.clear();
+        active_terminals_bitset.clear();
         eof_reduces.clear();
         
         let mut gotos: BTreeMap<NonTerminalID, Goto> = BTreeMap::new();
@@ -657,9 +694,7 @@ fn compute_final_table(
                 // Shift or Goto
                 if let Some(sym_id) = key {
                     if sym_id < num_terminals {
-                        if dense_shifts[sym_id].is_none() && dense_reduces[sym_id].is_empty() {
-                            active_terminals_indices.push(sym_id);
-                        }
+                        active_terminals_bitset.insert(sym_id);
                         dense_shifts[sym_id] = Some(goto_id);
                     } else {
                         let nt_id = NonTerminalID(sym_id - num_terminals);
@@ -672,15 +707,12 @@ fn compute_final_table(
                     let prod_id = item.production_id;
                     let lhs = lhs_ids[prod_id];
                     let follow = &flat_follow_sets[lhs];
-                    
                     for lookahead in follow {
                         match lookahead {
                             Some(t) => {
                                 let t_idx = t.0;
-                                if dense_shifts[t_idx].is_none() && dense_reduces[t_idx].is_empty() {
-                                    active_terminals_indices.push(t_idx);
-                                }
-                                dense_reduces[t_idx].push(ProductionID(prod_id));
+                                active_terminals_bitset.insert(t_idx);
+                                dense_reduces[t_idx].insert(prod_id);
                             },
                             None => eof_reduces.push(ProductionID(prod_id)),
                         }
@@ -693,16 +725,16 @@ fn compute_final_table(
         let default_reduce = if !eof_reduces.is_empty() {
             eof_reduces.sort_unstable();
             eof_reduces.dedup();
-            
+
             let mut reduces_grouped: BTreeMap<usize, BTreeMap<NonTerminalID, Vec<ProductionID>>> = BTreeMap::new();
             for pid in &eof_reduces {
                 let (len, nt) = prod_meta[pid.0];
                 reduces_grouped.entry(len).or_default().entry(nt).or_default().push(*pid);
             }
-            
-            let mut val = Stage7ShiftsAndReducesLookaheadValue::Split { 
-                shift: None, 
-                reduces: reduces_grouped 
+
+            let mut val = Stage7ShiftsAndReducesLookaheadValue::Split {
+                shift: None,
+                reduces: reduces_grouped
             };
             val.simplify();
             Some(val)
@@ -712,15 +744,16 @@ fn compute_final_table(
 
         // 3. Construct Final Row
         let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
-        
-        // Sort active indices to ensure deterministic iteration order
-        active_terminals_indices.sort_unstable();
 
-        for &t_idx in &active_terminals_indices {
+        // Iterate active terminals
+        for t_idx in active_terminals_bitset.iter() {
             let t = TerminalID(t_idx);
             let shift_opt = dense_shifts[t_idx];
-            let reduc_list = &mut dense_reduces[t_idx];
-            
+            let reduc_bits = &dense_reduces[t_idx];
+
+            // Collect PIDs from bitset
+            let mut pids: Vec<ProductionID> = reduc_bits.iter().map(ProductionID).collect();
+
             // If we have a default reduce, we must merge it into this specific terminal's action
             if let Some(default) = &default_reduce {
                 let default_pids = match default {
@@ -736,28 +769,26 @@ fn compute_final_table(
                     },
                     _ => Vec::new(),
                 };
-                reduc_list.extend(default_pids);
+                // Merge and dedup
+                pids.extend(default_pids);
+                pids.sort_unstable();
+                pids.dedup();
             }
 
-            if shift_opt.is_none() && reduc_list.is_empty() {
+            if shift_opt.is_none() && pids.is_empty() {
                 continue;
-            }
-
-            if !reduc_list.is_empty() {
-                reduc_list.sort_unstable();
-                reduc_list.dedup();
             }
 
             // Group reduces by len and NT (Stage 7 logic)
             let mut reduces_grouped: BTreeMap<usize, BTreeMap<NonTerminalID, Vec<ProductionID>>> = BTreeMap::new();
-            for pid in reduc_list.iter() {
+            for pid in pids.iter() {
                 let (len, nt) = prod_meta[pid.0];
                 reduces_grouped.entry(len).or_default().entry(nt).or_default().push(*pid);
             }
 
-            let mut val = Stage7ShiftsAndReducesLookaheadValue::Split { 
-                shift: shift_opt, 
-                reduces: reduces_grouped 
+            let mut val = Stage7ShiftsAndReducesLookaheadValue::Split {
+                shift: shift_opt,
+                reduces: reduces_grouped
             };
             val.simplify();
             shifts_and_reduces_full.insert(t, val);
