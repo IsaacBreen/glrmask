@@ -855,14 +855,18 @@ pub fn generate_glr_parser_with_maps(
     crate::debug!(2, "Number of productions: {}", productions.len());
 
     crate::debug!(2, "Validating initial grammar");
+    let start = std::time::Instant::now();
     validate(productions).expect("Initial grammar validation failed");
+    crate::debug!(2, "Validated grammar in {:.2?}", start.elapsed());
 
     let _original_productions = productions.to_vec();
     let start_production_id = 0;
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
+    let start = std::time::Instant::now();
     let mut productions =
         remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+    crate::debug!(2, "Removed undefined productions in {:.2?}", start.elapsed());
 
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
@@ -888,18 +892,31 @@ pub fn generate_glr_parser_with_maps(
     crate::debug!(2, "Number of productions: {}", productions.len());
 
     crate::debug!(2, "Stage 1");
+    let start = std::time::Instant::now();
     let (stage_1_table, item_set_map) = stage_1(&productions);
+    crate::debug!(2, "Stage 1 done in {:.2?}", start.elapsed());
     crate::debug!(2, "Stage 2");
+    let start = std::time::Instant::now();
     let stage_2_table = stage_2(stage_1_table, &productions);
+    crate::debug!(2, "Stage 2 done in {:.2?}", start.elapsed());
     crate::debug!(2, "Stage 3");
+    let start = std::time::Instant::now();
     let stage_3_table = stage_3(stage_2_table, &productions);
+    crate::debug!(2, "Stage 3 done in {:.2?}", start.elapsed());
     crate::debug!(2, "Stage 4");
+    let start = std::time::Instant::now();
     let stage_4_table = stage_4(stage_3_table);
+    crate::debug!(2, "Stage 4 done in {:.2?}", start.elapsed());
     crate::debug!(2, "Stage 5");
+    let start = std::time::Instant::now();
     let stage_5_table = stage_5(stage_4_table, &terminal_map);
+    crate::debug!(2, "Stage 5 done in {:.2?}", start.elapsed());
     crate::debug!(2, "Stage 6");
+    let start = std::time::Instant::now();
     let stage_6_table = stage_6(stage_5_table);
+    crate::debug!(2, "Stage 6 done in {:.2?}", start.elapsed());
     crate::debug!(2, "Stage 7");
+    let start = std::time::Instant::now();
     let (stage_7_table, start_state_id, everything_state_id) = stage_7(
         stage_6_table,
         &item_set_map,
@@ -907,14 +924,21 @@ pub fn generate_glr_parser_with_maps(
         &terminal_map,
         &non_terminal_map,
     );
+    crate::debug!(2, "Stage 7 done in {:.2?}", start.elapsed());
     crate::debug!(2, "Stage 8");
+    let start = std::time::Instant::now();
     let final_table = stage_8(stage_7_table);
+    crate::debug!(2, "Stage 8 done in {:.2?}", start.elapsed());
 
     crate::debug!(2, "Stage 9: Precomputing substring gotos");
+    let start = std::time::Instant::now();
     let substring_gotos = stage_9(&final_table, &non_terminal_map);
+    crate::debug!(2, "Stage 9 done in {:.2?}", start.elapsed());
 
     crate::debug!(2, "Stage 10: Precomputing reduce goto map");
+    let start = std::time::Instant::now();
     let reduce_goto_map = stage_10(&final_table);
+    crate::debug!(2, "Stage 10 done in {:.2?}", start.elapsed());
 
     crate::debug!(2, "Done generating GLR parser");
     print_summary();
