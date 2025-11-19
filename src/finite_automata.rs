@@ -980,9 +980,9 @@ impl NFA {
         self.epsilon_closure_set(std::iter::once(state))
     }
 
-    fn compute_epsilon_closures(&self) -> Vec<BTreeSet<usize>> {
+    fn compute_epsilon_closures(&self) -> Vec<Vec<usize>> {
         (0..self.states.len())
-            .map(|state| self.epsilon_closure(state))
+            .map(|state| self.epsilon_closure(state).into_iter().collect())
             .collect()
     }
 
@@ -991,8 +991,10 @@ impl NFA {
         let mut dfa_state_map: BTreeMap<FrozenSet<usize>, usize> = BTreeMap::new();
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
+        let epsilon_closures = self.compute_epsilon_closures();
+
         // Compute epsilon-closure of the NFA start state and use it as the DFA start state.
-        let start_closure = self.epsilon_closure_set(std::iter::once(self.start_state));
+        let start_closure = &epsilon_closures[self.start_state];
         let start_state_set = FrozenSet::from_iter(start_closure.iter().cloned());
         worklist.push(start_state_set.clone());
         dfa_state_map.insert(start_state_set.clone(), 0);
@@ -1035,8 +1037,13 @@ impl NFA {
                 }
 
                 // epsilon-closure(move(S, input_u8))
-                let closure = self.epsilon_closure_set(next_states.iter().cloned());
-                let frozen_closure = FrozenSet::from_iter(closure.iter().cloned());
+                let mut closure = BTreeSet::new();
+                for &next_state in next_states {
+                    for &s in &epsilon_closures[next_state] {
+                        closure.insert(s);
+                    }
+                }
+                let frozen_closure = FrozenSet::from_iter(closure);
 
                 // If this set of states is new, add it as a new DFA state.
                 let next_dfa_state = if let Some(&existing_state) = dfa_state_map.get(&frozen_closure)
@@ -1247,10 +1254,10 @@ impl DFA {
 
                 // Split this partition based on transition signatures.
                 // A signature maps a character to the partition index of the target state.
-                let mut refined_partitions: BTreeMap<BTreeMap<u8, usize>, BTreeSet<usize>> =
+                let mut refined_partitions: BTreeMap<Vec<(u8, usize)>, BTreeSet<usize>> =
                     BTreeMap::new();
                 for &state_idx in partition {
-                    let signature: BTreeMap<u8, usize> = self.states[state_idx]
+                    let signature: Vec<(u8, usize)> = self.states[state_idx]
                         .transitions
                         .iter()
                         .map(|(input, &next_state)| (input, state_to_partition[next_state]))
