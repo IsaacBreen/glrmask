@@ -139,7 +139,7 @@ fn convert_dwa_state_to_trie_node(
     }
 
 
-    let contents = PrecomputedNodeContents { end: false, live_tokens: LLMTokenBV::zeros() };
+    let contents = PrecomputedNodeContents { end: false, live_tokens: LLMTokenBV::ones(max_llm_token_id + 1) };
     let node = PrecomputeNode1::new(contents);
     let idx = PrecomputeNode1Index::new(god.insert(node));
     cache.insert(state_id, idx);
