@@ -49,10 +49,8 @@ use rayon::prelude::*;
 use im::HashSet;
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
-use crate::datastructures::trie::Index;
 use crate::glr::parser::{ParseState, ParseStateEdgeContent};
 use crate::glr::table::StateID;
-
 // ---------------------------------------------------------------------------
 // Basic aliases
 // ---------------------------------------------------------------------------
@@ -1751,7 +1749,6 @@ impl GrammarConstraint {
                 state_mapping.insert(TokenizerStateID(s), rep);
             }
         }
-        crate::debug!(2, "Reduced {} tokenizer states to {} equivalence classes", states.len(), representative_states.len());
 
         let mut helper = Precomputer1::new(
             tokenizer,
@@ -2446,23 +2443,30 @@ impl<'r> Precomputer1<'r> {
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut work_queue: BTreeMap<
                 usize,
-                Vec<Option<Vec<(TempPrecomputeNode1Index, RangeSetBlaze<usize>)>>>,
+                BTreeMap<
+                    TokenizerStateID,
+                    HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
+                >,
             > = BTreeMap::new();
-            
-            // Convert initial assoc to dense vector format for faster iteration
-            let max_state_id = assoc_by_state.keys().map(|k| k.0).max().unwrap_or(0);
-            let mut initial_vec = vec![None; max_state_id + 1];
-            for (sid, map) in assoc_by_state.iter() {
-                initial_vec[sid.0] = Some(map.iter().map(|(k, v)| (*k, v.clone())).collect());
-            }
-            work_queue.insert(0, initial_vec);
+            work_queue.insert(0, assoc_by_state.clone());
 
             let mut next_level_assoc: BTreeMap<_, HashMap<_, _>> = BTreeMap::new();
 
             let mut node_cache: HashMap<
                 TempPrecomputeNode1Index,
-                (RangeSetBlaze<usize>, bool, Option<Vec<TempPrecomputeNode1Index>>),
+                (RangeSetBlaze<usize>, bool),
             > = HashMap::new();
+            let get_node_data = |cache: &mut HashMap<_, _>,
+                                 idx: TempPrecomputeNode1Index,
+                                 god: &TempTrie1GodWrapper| {
+                cache
+                    .entry(idx)
+                    .or_insert_with(|| {
+                        let guard = idx.read(god).unwrap();
+                        (guard.value.live_tokens.clone(), guard.value.end)
+                    })
+                    .clone()
+            };
 
             let mut pending_edges: Vec<(
                 TempPrecomputeNode1Index,
@@ -2485,44 +2489,25 @@ impl<'r> Precomputer1<'r> {
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 if pos == segment_bytes.len() {
-                    for (sid_usize, nodes_opt) in states_at_pos.into_iter().enumerate() {
-                        if let Some(nodes_with_tokens) = nodes_opt {
-                            let tokenizer_state_id = TokenizerStateID(sid_usize);
-                            let entry =
-                                next_level_assoc.entry(tokenizer_state_id).or_default();
-                            for (node, tokens) in nodes_with_tokens {
-                                entry
-                                    .entry(node)
-                                    .or_insert_with(RangeSetBlaze::new)
-                                    .bitor_assign(&tokens);
-                            }
+                    for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
+                        let entry =
+                            next_level_assoc.entry(tokenizer_state_id).or_default();
+                        for (node, tokens) in nodes_with_tokens {
+                            entry
+                                .entry(node)
+                                .or_insert_with(RangeSetBlaze::new)
+                                .bitor_assign(&tokens);
                         }
                     }
                     continue;
                 }
 
-                for (sid_usize, nodes_opt) in states_at_pos.into_iter().enumerate() {
-                    let precompute_nodes_with_tokens = match nodes_opt {
-                        Some(n) => n,
-                        None => continue,
-                    };
-                    let tokenizer_state_id = TokenizerStateID(sid_usize);
-
+                for (tokenizer_state_id, precompute_nodes_with_tokens) in
+                    states_at_pos
+                {
                     let exec_result = self
                         .tokenizer
                         .execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
-
-                    // Pre-fetch node data for all nodes in this state to avoid repeated locks/lookups
-                    // inside the matches loop.
-                    let node_data_list: Vec<_> = precompute_nodes_with_tokens.iter().map(|(src_node_idx, src_contextual_tokens)| {
-                        let entry = node_cache.entry(*src_node_idx).or_insert_with(|| {
-                            let guard = src_node_idx.read(&self.trie1_god).unwrap();
-                            // Cache children keys as well to avoid locking later
-                            let children: Vec<_> = guard.children().values().flat_map(|m| m.keys().cloned()).collect();
-                            (guard.value.live_tokens.clone(), guard.value.end, Some(children))
-                        });
-                        (*src_node_idx, src_contextual_tokens, entry.0.clone(), entry.1, entry.2.clone())
-                    }).collect();
 
                     let possible_matches_at_end =
                         if let Some(end_state_val) = exec_result.end_state {
@@ -2540,13 +2525,19 @@ impl<'r> Precomputer1<'r> {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
 
-                        for (src_node_idx, src_contextual_tokens, src_live_tokens, _, _) in &node_data_list {
-                            let src_node_idx = *src_node_idx;
+                        for (src_node_wrapper, src_contextual_tokens) in
+                            &precompute_nodes_with_tokens
+                        {
+                            let src_node_idx = *src_node_wrapper;
+
+                            let (src_live_tokens, _) =
+                                get_node_data(&mut node_cache, src_node_idx, &self.trie1_god);
 
                             if next_pos == segment_bytes.len() {
                                 let mut edge_bv = RangeSetBlaze::new();
                                 edge_bv.insert(child_token_id);
-                                let final_edge_bv = &(&edge_bv & *src_contextual_tokens) & src_live_tokens;
+                                let final_edge_bv = &(&edge_bv & src_contextual_tokens)
+                                    & &src_live_tokens;
 
                                 if !final_edge_bv.is_empty() {
                                     let end_idx = self.get_leaf_node();
@@ -2574,7 +2565,8 @@ impl<'r> Precomputer1<'r> {
                                     &edge_bv - matches_for_terminal.inner.as_ref();
                             }
 
-                            let edge_bv_for_inserter = &(&edge_bv & *src_contextual_tokens) & src_live_tokens;
+                            let edge_bv_for_inserter =
+                                &(&edge_bv & src_contextual_tokens) & &src_live_tokens;
                             if edge_bv_for_inserter.is_empty() {
                                 continue;
                             }
@@ -2582,108 +2574,107 @@ impl<'r> Precomputer1<'r> {
                             let next_tokenizer_state =
                                 self.tokenizer.initial_state_id();
                             let next_tokenizer_state = self.state_mapping.get(&next_tokenizer_state).copied().unwrap_or(next_tokenizer_state);
-                            
-                            // Ensure vector is large enough
-                            let queue_vec = work_queue.entry(next_pos).or_default();
-                            if queue_vec.len() <= next_tokenizer_state.0 {
-                                queue_vec.resize(next_tokenizer_state.0 + 1, None);
+                            let dest_nodes_in_queue = work_queue
+                                .entry(next_pos)
+                                .or_default()
+                                .entry(next_tokenizer_state)
+                                .or_default();
+
+                            let mut dest_node_opt = dest_nodes_in_queue
+                                .iter()
+                                .filter_map(
+                                    |(dest_node, dest_contextual_tokens)| {
+                                        let (dest_live_tokens, is_end) =
+                                            get_node_data(
+                                                &mut node_cache,
+                                                *dest_node,
+                                                &self.trie1_god,
+                                            );
+                                        if is_end {
+                                            return None;
+                                        }
+
+                                        let risky_tokens =
+                                            &edge_bv_for_inserter - dest_contextual_tokens;
+                                        if risky_tokens.is_empty()
+                                            || (&risky_tokens
+                                                & &dest_live_tokens)
+                                                .is_empty()
+                                        {
+                                            Some(*dest_node)
+                                        } else {
+                                            None
+                                        }
+                                    },
+                                )
+                                .next();
+
+                            if dest_node_opt.is_none() {
+                                let children_of_src: Vec<
+                                    TempPrecomputeNode1Index,
+                                > = {
+                                    let guard =
+                                        src_node_idx.read(&self.trie1_god).unwrap();
+                                    guard
+                                        .children()
+                                        .values()
+                                        .flat_map(|m| m.keys().cloned())
+                                        .collect()
+                                };
+
+                                dest_node_opt = children_of_src
+                                    .iter()
+                                    .filter(|child_arc| {
+                                        let (child_live_tokens, is_end) =
+                                            get_node_data(
+                                                &mut node_cache,
+                                                **child_arc,
+                                                &self.trie1_god,
+                                            );
+                                        !is_end
+                                            && (&child_live_tokens
+                                                & &edge_bv_for_inserter)
+                                                .is_empty()
+                                    })
+                                    .copied()
+                                    .next();
                             }
-                            let dest_nodes_in_queue = queue_vec[next_tokenizer_state.0].get_or_insert_with(Vec::new);
 
-                            // Optimization: Linear scan over dest_nodes_in_queue is faster than map lookup for small N,
-                            // but we need to be careful. The original code used a map here implicitly via `entry`.
-                            // Since we switched to Vec<(Node, Tokens)>, we scan.
-                            
-                            let mut found_existing = false;
-                            let mut dest_node_idx = TempPrecomputeNode1Index::new(Index::from(0));
+                            let result_node = dest_node_opt.unwrap_or_else(|| {
+                                let new_node = TempPrecomputeNode1::new(
+                                    TempPrecomputedNodeContents::internal(),
+                                );
+                                let idx = TempPrecomputeNode1Index::new(
+                                    self.trie1_god.insert(new_node),
+                                );
+                                node_cache.insert(
+                                    idx,
+                                    (RangeSetBlaze::new(), false),
+                                );
+                                idx
+                            });
 
-                            for (dest_node, dest_contextual_tokens) in dest_nodes_in_queue.iter() {
-                                // Check compatibility
-                                let entry = node_cache.get(dest_node).expect("Node should be in cache if in queue");
-                                let (dest_live_tokens, is_end, _) = entry;
-                                
-                                if *is_end { continue; }
-
-                                let risky_tokens = &edge_bv_for_inserter - dest_contextual_tokens;
-                                if risky_tokens.is_empty() || (&risky_tokens & dest_live_tokens).is_empty() {
-                                    dest_node_idx = *dest_node;
-                                    found_existing = true;
-                                    break;
-                                }
-                            }
-
-                            if !found_existing {
-                                // Try children of src
-                                // Use cached children!
-                                let children_of_src = node_cache.get(&src_node_idx).unwrap().2.as_ref().unwrap().clone();
-                                
-                                let mut compatible_child = None;
-                                for child_idx in &children_of_src {
-                                    let entry = node_cache.entry(*child_idx).or_insert_with(|| {
-                                        let guard = child_idx.read(&self.trie1_god).unwrap();
-                                        let children: Vec<_> = guard.children().values().flat_map(|m| m.keys().cloned()).collect();
-                                        (guard.value.live_tokens.clone(), guard.value.end, Some(children))
-                                    });
-                                    
-                                    if !entry.1 && (&entry.0 & &edge_bv_for_inserter).is_empty() {
-                                        compatible_child = Some(*child_idx);
-                                        break;
-                                    }
-                                }
-                                
-                                if let Some(child) = compatible_child {
-                                    dest_node_idx = child;
-                                } else {
-                                    // Create new
-                                    let new_node = TempPrecomputeNode1::new(
-                                        TempPrecomputedNodeContents::internal(),
-                                    );
-                                    let idx = TempPrecomputeNode1Index::new(
-                                        self.trie1_god.insert(new_node),
-                                    );
-                                    node_cache.insert(
-                                        idx,
-                                        (RangeSetBlaze::new(), false, Some(Vec::new())),
-                                    );
-                                    dest_node_idx = idx;
-                                }
-                            }
-
-                            // Add edge
                             pending_edges.push((
                                 src_node_idx,
-                                dest_node_idx,
+                                result_node,
                                 Some(terminal_id),
                                 edge_bv_for_inserter.clone(),
                             ));
-                            
-                            // Update live tokens
                             pending_live_token_updates
-                                .entry(dest_node_idx)
+                                .entry(result_node)
                                 .or_insert_with(RangeSetBlaze::new)
                                 .bitor_assign(&edge_bv_for_inserter);
 
-                            // Update cache
-                            if let Some(entry) = node_cache.get_mut(&dest_node_idx) {
-                                entry.0 |= &edge_bv_for_inserter;
-                            }
+                            node_cache
+                                .entry(result_node)
+                                .and_modify(|(live, _)| {
+                                    *live |= &edge_bv_for_inserter
+                                });
 
-                            // Add to queue
-                            // We need to find the index in the vec to update the tokens, or push new
-                            let queue_vec = work_queue.get_mut(&next_pos).unwrap();
-                            let dest_list = queue_vec[next_tokenizer_state.0].as_mut().unwrap();
-                            
-                            let mut found_in_list = false;
-                            for (n, t) in dest_list.iter_mut() {
-                                if *n == dest_node_idx {
-                                    *t |= &edge_bv_for_inserter;
-                                    found_in_list = true;
-                                    break;
-                                }
-                            }
-                            if !found_in_list {
-                                dest_list.push((dest_node_idx, edge_bv_for_inserter));
-                            }
+                            dest_nodes_in_queue
+                                .entry(result_node)
+                                .or_insert_with(RangeSetBlaze::new)
+                                .bitor_assign(&edge_bv_for_inserter);
                         }
                     }
 
@@ -2695,16 +2686,22 @@ impl<'r> Precomputer1<'r> {
                             .tokenizer
                             .tokens_accessible_from_state(final_tokenizer_state);
 
-                        for (src_node_idx, src_contextual_tokens, src_live_tokens, _, _) in &node_data_list {
-                            let src_node_idx = *src_node_idx;
-                            
+                        for (src_node_wrapper, src_contextual_tokens) in
+                            &precompute_nodes_with_tokens
+                        {
                             let mut edge_bv = RangeSetBlaze::new();
                             edge_bv.insert(child_token_id);
-                            let edge_bv_for_inserter = &edge_bv & *src_contextual_tokens;
-                            
-                            if edge_bv_for_inserter.is_empty() { continue; }
+                            let edge_bv_for_inserter =
+                                &edge_bv & src_contextual_tokens;
+                            if edge_bv_for_inserter.is_empty() {
+                                continue;
+                            }
 
-                            let final_edge_bv = &edge_bv_for_inserter & src_live_tokens;
+                            let src_node_idx = *src_node_wrapper;
+                            let (src_live_tokens, _) =
+                                get_node_data(&mut node_cache, src_node_idx, &self.trie1_god);
+                            let final_edge_bv =
+                                &edge_bv_for_inserter & &src_live_tokens;
 
                             if !final_edge_bv.is_empty() {
                                 let end_idx = self.get_leaf_node();
@@ -2725,11 +2722,11 @@ impl<'r> Precomputer1<'r> {
 
                         let entry =
                             next_level_assoc.entry(final_tokenizer_state).or_default();
-                        for (node, tokens, _, _, _) in node_data_list {
+                        for (node, tokens) in precompute_nodes_with_tokens {
                             entry
                                 .entry(node)
                                 .or_default()
-                                .bitor_assign(tokens);
+                                .bitor_assign(&tokens);
                         }
                     }
                 }
