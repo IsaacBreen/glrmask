@@ -68,7 +68,6 @@ fn convert_node_to_nwa(
     drop(guard);
 
     for (edge_key, child_map) in children {
-        let label = edge_key.map(|tid| tid.0 as i16).unwrap_or(-1);
         for (child_idx, edge_bv) in child_map {
             let child_sid = convert_node_to_nwa(child_idx, god, nwa, cache);
 
@@ -78,7 +77,11 @@ fn convert_node_to_nwa(
             }
 
             // Add transition (NWA allows multiple transitions for same label)
-            nwa.add_transition(sid, label, child_sid, trans_w).unwrap();
+            if let Some(label) = edge_key {
+                nwa.add_transition(sid, label.0 as i16, child_sid, trans_w).unwrap();
+            } else {
+                nwa.add_epsilon(sid, child_sid, trans_w);
+            }
         }
     }
     sid
