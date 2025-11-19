@@ -2615,10 +2615,10 @@ impl<'r> Precomputer1<'r> {
                             if !found_existing {
                                 // Try children of src
                                 // Use cached children!
-                                let children_of_src = node_cache.get(&src_node_idx).unwrap().2.as_ref().unwrap();
+                                let children_of_src = node_cache.get(&src_node_idx).unwrap().2.as_ref().unwrap().clone();
                                 
                                 let mut compatible_child = None;
-                                for child_idx in children_of_src {
+                                for child_idx in &children_of_src {
                                     let entry = node_cache.entry(*child_idx).or_insert_with(|| {
                                         let guard = child_idx.read(&self.trie1_god).unwrap();
                                         let children: Vec<_> = guard.children().values().flat_map(|m| m.keys().cloned()).collect();
