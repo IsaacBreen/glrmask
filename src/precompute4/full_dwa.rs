@@ -14,7 +14,7 @@ use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_
 use crate::precompute4::template_nwa::{build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas};
 use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight, StateID};
 use crate::r#macro::is_debug_level_enabled;
-use crate::types::TerminalID as GrammarTokenID;
+use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::tokenizer::TokenizerStateID;
 
 struct SimplifyRustfstConfig {
@@ -107,6 +107,7 @@ fn convert_precompute1_to_nwa(
 
 fn convert_dwa_to_precompute1(
     dwa: &DWA,
+    max_llm_token_id: usize,
 ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
     let god = Trie1GodWrapper::new();
     let mut result = BTreeMap::new();
@@ -120,7 +121,7 @@ fn convert_dwa_to_precompute1(
     let start_node = &dwa.states[start_state];
     for (label, target) in &start_node.transitions {
         let sid = TokenizerStateID(*label as usize);
-        let root_idx = convert_dwa_state_to_trie_node(*target, dwa, &god, &mut state_cache);
+        let root_idx = convert_dwa_state_to_trie_node(*target, dwa, &god, &mut state_cache, max_llm_token_id);
         result.insert(sid, root_idx);
     }
 
@@ -132,6 +133,7 @@ fn convert_dwa_state_to_trie_node(
     dwa: &DWA,
     god: &Trie1GodWrapper,
     cache: &mut HashMap<StateID, PrecomputeNode1Index>,
+    max_llm_token_id: usize,
 ) -> PrecomputeNode1Index {
     if let Some(&idx) = cache.get(&state_id) {
         return idx;
@@ -140,7 +142,7 @@ fn convert_dwa_state_to_trie_node(
     let state = &dwa.states[state_id];
     let mut live_tokens = LLMTokenBV::zeros();
     if let Some(fw) = &state.final_weight {
-        for t in fw.iter() {
+        for t in fw.iter_up_to(max_llm_token_id) {
             live_tokens.insert(t);
         }
     }
@@ -151,10 +153,10 @@ fn convert_dwa_state_to_trie_node(
     cache.insert(state_id, idx);
 
     for (label, target) in &state.transitions {
-        let target_idx = convert_dwa_state_to_trie_node(*target, dwa, god, cache);
+        let target_idx = convert_dwa_state_to_trie_node(*target, dwa, god, cache, max_llm_token_id);
         let weight = state.trans_weights.get(label).cloned().unwrap_or_else(Weight::all);
         let mut edge_bv = LLMTokenBV::zeros();
-        for t in weight.iter() {
+        for t in weight.iter_up_to(max_llm_token_id) {
             edge_bv.insert(t);
         }
         let term_id = GrammarTokenID(*label as u32);
@@ -169,6 +171,7 @@ pub fn precompute4(
     parser: &GLRParser,
     precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
+    max_llm_token_id: usize,
 ) -> DWA {
     crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion...");
     let mut nwa = convert_precompute1_to_nwa(precomputed1, trie1_god);
@@ -182,7 +185,7 @@ pub fn precompute4(
         dwa.num_transitions(),
     );
 
-    let (optimized_precomputed1, optimized_trie1_god) = convert_dwa_to_precompute1(&dwa);
+    let (optimized_precomputed1, optimized_trie1_god) = convert_dwa_to_precompute1(&dwa, max_llm_token_id);
     let precomputed1 = &optimized_precomputed1;
     let trie1_god = &optimized_trie1_god;
 
