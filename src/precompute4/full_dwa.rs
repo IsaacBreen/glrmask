@@ -58,10 +58,7 @@ fn convert_node_to_nwa(
     let guard = node_idx.read(god).unwrap();
 
     // Map live_tokens to final_weight (representing valid tokens at this state)
-    let mut weight = Weight::zeros();
-    for token in guard.value.live_tokens.iter() {
-        weight.insert(token);
-    }
+    let mut weight = Weight::all();
     nwa.states[sid].final_weight = Some(weight);
 
     let children = guard.children().clone();
@@ -112,6 +109,9 @@ fn convert_dwa_to_precompute1(
     let god = Trie1GodWrapper::new();
     let mut result = BTreeMap::new();
     let mut state_cache = HashMap::new();
+    let end_node_contents = PrecomputedNodeContents { end: true, live_tokens: LLMTokenBV::max_ones() };
+    let end_node = PrecomputeNode1::new(end_node_contents);
+    let end_node_idx = PrecomputeNode1Index::new(god.insert(end_node));
 
     let start_state = dwa.body.start_state;
     if start_state >= dwa.states.len() {
@@ -121,7 +121,7 @@ fn convert_dwa_to_precompute1(
     let start_node = &dwa.states[start_state];
     for (label, target) in &start_node.transitions {
         let sid = TokenizerStateID(*label as usize);
-        let root_idx = convert_dwa_state_to_trie_node(*target, dwa, &god, &mut state_cache, max_llm_token_id);
+        let root_idx = convert_dwa_state_to_trie_node(*target, dwa, &god, &mut state_cache, max_llm_token_id, end_node_idx);
         result.insert(sid, root_idx);
     }
 
@@ -134,26 +134,25 @@ fn convert_dwa_state_to_trie_node(
     god: &Trie1GodWrapper,
     cache: &mut HashMap<StateID, PrecomputeNode1Index>,
     max_llm_token_id: usize,
+    end_node_idx: PrecomputeNode1Index,
 ) -> PrecomputeNode1Index {
     if let Some(&idx) = cache.get(&state_id) {
         return idx;
     }
 
-    let state = &dwa.states[state_id];
-    let mut live_tokens = LLMTokenBV::zeros();
-    if let Some(fw) = &state.final_weight {
-        for t in fw.iter_up_to(max_llm_token_id) {
-            live_tokens.insert(t);
-        }
-    }
 
-    let contents = PrecomputedNodeContents { end: false, live_tokens };
+    let contents = PrecomputedNodeContents { end: false, live_tokens: LLMTokenBV::zeros() };
     let node = PrecomputeNode1::new(contents);
     let idx = PrecomputeNode1Index::new(god.insert(node));
     cache.insert(state_id, idx);
 
+    let state = &dwa.states[state_id];
+    if let Some(fw) = &state.final_weight {
+        god.insert_edge_simple(idx, end_node_idx, None, fw.clone().into());
+    }
+
     for (label, target) in &state.transitions {
-        let target_idx = convert_dwa_state_to_trie_node(*target, dwa, god, cache, max_llm_token_id);
+        let target_idx = convert_dwa_state_to_trie_node(*target, dwa, god, cache, max_llm_token_id, end_node_idx);
         let weight = state.trans_weights.get(label).cloned().unwrap_or_else(Weight::all);
         let mut edge_bv = LLMTokenBV::zeros();
         for t in weight.iter_up_to(max_llm_token_id) {

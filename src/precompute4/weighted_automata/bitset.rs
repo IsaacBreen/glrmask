@@ -14,6 +14,7 @@ use std::iter::FromIterator;
 use std::num::NonZeroUsize;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Not, Sub, SubAssign};
 use std::sync::{Arc, Mutex};
+use crate::datastructures::hybrid_bitset::HybridBitset;
 
 /// Thin wrapper around `RangeSetBlaze<usize>` with cached fingerprint and `is_all` flag.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -262,6 +263,18 @@ impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
     fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
         intern(RangeSetBlaze::from_iter(iter))
     }
+}
+
+impl From<RangeSetBlaze<usize>> for SimpleBitset {
+    fn from(rsb: RangeSetBlaze<usize>) -> Self { intern(rsb) }
+}
+
+impl From<HybridBitset> for SimpleBitset {
+    fn from(hb: HybridBitset) -> Self { intern(hb.inner.as_ref().clone()) }
+}
+
+impl From<SimpleBitset> for HybridBitset {
+    fn from(sb: SimpleBitset) -> Self { HybridBitset::from(sb.rsb.clone()) }
 }
 
 impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
