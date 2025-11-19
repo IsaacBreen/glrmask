@@ -217,7 +217,7 @@ impl HybridBitset {
     }
 
     /// Inserts an index into the set. Returns true if the index was not already present.
-    pub fn insert(&mut self, index: usize) -> bool {
+    pub fn insert_with_intern(&mut self, index: usize) -> bool {
         if self.inner.contains(index) {
             return false;
         }
@@ -227,8 +227,15 @@ impl HybridBitset {
         result
     }
 
+    pub fn insert(&mut self, index: usize) -> bool {
+        if self.inner.contains(index) {
+            return false;
+        }
+        Arc::make_mut(&mut self.inner).insert(index)
+    }
+
     /// Sets or clears an index.
-    pub fn set(&mut self, index: usize, value: bool) {
+    pub fn set_with_intern(&mut self, index: usize, value: bool) {
         let mut new_inner = (*self.inner).clone();
         if value {
             new_inner.insert(index);
@@ -238,14 +245,32 @@ impl HybridBitset {
         self.inner = cache::intern_l1(new_inner);
     }
 
+    pub fn set(&mut self, index: usize, value: bool) {
+        let mut new_inner = (*self.inner).clone();
+        if value {
+            new_inner.insert(index);
+        } else {
+            new_inner.remove(index);
+        }
+        self.inner = Arc::new(new_inner);
+    }
+
     /// Removes an index from the set. Returns true if the index was present.
-    pub fn remove(&mut self, index: usize) -> bool {
+    pub fn remove_with_intern(&mut self, index: usize) -> bool {
         if !self.inner.contains(index) {
             return false;
         }
         let result = Arc::make_mut(&mut self.inner).remove(index);
         self.inner = cache::intern_l1(Arc::unwrap_or_clone(std::mem::take(&mut self.inner)));
         result
+    }
+
+    pub fn remove(&mut self, index: usize) -> bool {
+        self.remove_with_intern(index)
+    }
+
+    pub fn ensure_interned(&mut self) {
+        self.inner = cache::intern_l1(Arc::unwrap_or_clone(std::mem::take(&mut self.inner)));
     }
 
     /// Removes all elements from the set.
